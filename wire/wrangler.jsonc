@@ -1,0 +1,17 @@
+// Loom's live wire: one Durable Object per run, blobs in R2. docs/protocol.md is the contract.
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "loom-wire",
+    "main": "source/Worker.ts",
+    "account_id": "8863664b1d7b406f63020b58b45764c5",
+    "compatibility_date": "2026-10-01",
+    "workers_dev": true,
+    "preview_urls": false,
+    "observability": { "enabled": true },
+    "durable_objects": {
+        "bindings": [{ "name": "Runs", "class_name": "RunObject" }]
+    },
+    "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RunObject"] }],
+    "r2_buckets": [{ "binding": "Store", "bucket_name": "loom-store" }]
+    // LOOM_TOKEN_SECRET is a secret: wrangler secret put LOOM_TOKEN_SECRET
+}
