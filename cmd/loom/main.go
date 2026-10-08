@@ -45,6 +45,9 @@ const usage = `usage:
   loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
   loom board [--days <n>] [--wire <url>]
   loom pool status [--wire <url>] <name>
+  loom pool token <pool> [--hours N]
+  loom pool publish-runner
+  loom pool prompt <pool> --runner <sha256> [--until 55m]
   loom gate-lines [--once] [--interval <duration>] [--wire <url>]
   loom top [--once] [--wire <url>]
 `
@@ -124,9 +127,12 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		if *slotsPath == "" {
 			*slotsPath = filepath.Join(loomDirectory, "slots")
 		}
-		slots, err = boxSlots(runContext, *slotsPath, *source, version, loomDirectory, rollout, stdout)
-		if err != nil {
-			return fail(err)
+		// --slots none runs on pools alone (--pool), with no box of ours.
+		if *slotsPath != "none" {
+			slots, err = boxSlots(runContext, *slotsPath, *source, version, loomDirectory, rollout, stdout)
+			if err != nil {
+				return fail(err)
+			}
 		}
 	}
 	poolMachines := map[string]bool{}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -61,6 +63,9 @@ type poolStatus struct {
 
 // pool handles `loom pool status <name>`, read with a board token, which watches and changes nothing.
 func pool(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) > 0 && (arguments[0] == "token" || arguments[0] == "publish-runner" || arguments[0] == "prompt") {
+		return poolTools(arguments, stdout, stderr)
+	}
 	if len(arguments) == 0 || arguments[0] != "status" {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -132,4 +137,102 @@ func writePoolStatus(writer io.Writer, name string, status poolStatus, now time.
 		}
 		fmt.Fprintf(writer, "  %s  %d cpus  asked %s  took %s\n", worker.Worker, worker.Cpus, seen, took)
 	}
+}
+
+// poolTools are what starting a pool takes:
+//
+//	loom pool token <pool> [--hours 24]            a pool token for its instances
+//	loom pool publish-runner                       the linux runner, built at this checkout's version, in the public store
+//	loom pool prompt <pool> --runner <sha256> [--until 55m] [--worker-prefix codex]
+//	                                               the turn brief that starts one instance's serve
+func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("pool "+arguments[0], flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	hours := flags.Int("hours", 24, "how long a pool token lasts")
+	runnerHash := flags.String("runner", "", "the runner binary's sha256 in the public store (from publish-runner)")
+	until := flags.String("until", "55m", "how long one serve turn runs before it exits for the next turn")
+	source := flags.String("source", defaultSource(), "this repository's checkout")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		fmt.Fprint(stderr, usage)
+		return 3
+	}
+	home, _ := os.UserHomeDir()
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	switch arguments[0] {
+	case "token":
+		if flags.NArg() != 1 {
+			fmt.Fprint(stderr, usage)
+			return 3
+		}
+		token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopePool, Expires: time.Now().Add(time.Duration(*hours) * time.Hour).Unix()})
+		if err != nil {
+			fmt.Fprintf(stderr, "loom: %v\n", err)
+			return 3
+		}
+		fmt.Fprintln(stdout, token)
+	case "publish-runner":
+		version, err := runnerVersion(*source)
+		if err != nil {
+			fmt.Fprintf(stderr, "loom: %v\n", err)
+			return 3
+		}
+		binary, err := buildRunner(*source, version, "linux/amd64", filepath.Join(home, ".loom"))
+		if err != nil {
+			fmt.Fprintf(stderr, "loom: %v\n", err)
+			return 3
+		}
+		content, err := os.ReadFile(binary)
+		if err != nil {
+			fmt.Fprintf(stderr, "loom: %v\n", err)
+			return 3
+		}
+		sum := sha256.Sum256(content)
+		hash := hex.EncodeToString(sum[:])
+		token, _ := protocol.MintToken(secret, protocol.TokenClaims{Run: "publish-runner", Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Hour).Unix()})
+		request, _ := http.NewRequest(http.MethodPut, strings.TrimSuffix(*wire, "/")+"/public/blobs/"+hash, bytes.NewReader(content))
+		request.Header.Set("Authorization", "Bearer "+token)
+		response, err := (&http.Client{Timeout: 10 * time.Minute}).Do(request)
+		if err != nil {
+			fmt.Fprintf(stderr, "loom: %v\n", err)
+			return 3
+		}
+		response.Body.Close()
+		if response.StatusCode/100 != 2 {
+			fmt.Fprintf(stderr, "loom: the public store answered %s\n", response.Status)
+			return 3
+		}
+		fmt.Fprintf(stdout, "runner %s (%d bytes)\n%s\nhttps://adamic-store.kirkouimet.com/blobs/%s\n", version, len(content), hash, hash)
+	case "prompt":
+		if flags.NArg() != 1 || !protocol.Sha256Pattern.MatchString(*runnerHash) {
+			fmt.Fprint(stderr, "loom: prompt needs a pool name and --runner <sha256>\n")
+			return 3
+		}
+		token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopePool, Expires: time.Now().Add(time.Duration(*hours) * time.Hour).Unix()})
+		if err != nil {
+			fmt.Fprintf(stderr, "loom: %v\n", err)
+			return 3
+		}
+		fmt.Fprint(stdout, servePrompt(*wire, flags.Arg(0), token, *runnerHash, *until))
+	}
+	return 0
+}
+
+// servePrompt is the whole of one instance's turn: fetch the runner by hash, check it, serve until the deadline
+// with every unit's output in a file, and show only serve's one summary line.
+func servePrompt(wire string, pool string, token string, runnerHash string, until string) string {
+	return "This is a compute worker, not a coding task: do not edit, commit or push anything in any repository. " +
+		"Run exactly this in the shell, in the foreground, and wait for it however long it takes. " +
+		"Then reply with only its last line of output, nothing else.\n\n```bash\n" +
+		"set -e\nmkdir -p /tmp/loom-units\n" +
+		"runner=/tmp/loom-runner-" + runnerHash[:12] + "\n" +
+		"if [ ! -x \"$runner\" ]; then curl -fsS -o \"$runner.partial\" https://adamic-store.kirkouimet.com/blobs/" + runnerHash + "; " +
+		"echo \"" + runnerHash + "  $runner.partial\" | sha256sum -c --quiet; chmod 755 \"$runner.partial\"; mv \"$runner.partial\" \"$runner\"; fi\n" +
+		"\"$runner\" serve --pool " + strings.TrimSuffix(wire, "/") + "/pools/" + pool + " --token " + token +
+		" --worker \"$(hostname)\" --until " + until + " --workspace /tmp/loom-units --log /tmp/loom-serve.log 2>> /tmp/loom-serve.err\n" +
+		"```\n"
 }

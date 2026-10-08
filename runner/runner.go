@@ -241,6 +241,10 @@ func (run *unitRun) fail(phase string, err error) {
 }
 
 func (run *unitRun) makeWorkspace() error {
+	// A fresh machine (a Codex instance's first unit) may not have the parent yet.
+	if err := os.MkdirAll(run.options.WorkspaceParent, 0o755); err != nil {
+		return fmt.Errorf("making the workspace: %w", err)
+	}
 	directory, err := os.MkdirTemp(run.options.WorkspaceParent, "loom-unit-")
 	if err != nil {
 		return fmt.Errorf("making the workspace: %w", err)
