@@ -6,8 +6,8 @@
 // The slots come from ~/.loom/slots, one "box class" per line (class B is a box's area slot, S a small one),
 // unless --local runs every unit on this machine. The token secret is ~/.loom/token-secret. For each box
 // the runner is built from this repository's source for the box's platform, named for its version, and
-// installed under the staged-rollout law (~/.loom/rollout.tsv): a version reaches a second box only after
-// a green run on its first.
+// installed under the staged-rollout law (~/.loom/rollout.tsv): a version, which is the whole Go module's
+// commit, so a new coordinator too, reaches a second box only after a green run on its first.
 package main
 
 import (
@@ -136,15 +136,17 @@ func defaultSource() string {
 	return filepath.Join(home, "Projects", "system", "loom")
 }
 
-// runnerVersion names the runner the source would build: its commit, and when the tree has changes, a
-// hash of them, so two different dirty trees never share a name on a box.
+// runnerVersion names the runner the source would build: its commit, and when the Go module has changes, a
+// hash of them, so two different dirty trees never share a name on a box. Any change to the module, the
+// coordinator's included, is a new version, so the staged-rollout law holds the coordinator to one box first
+// just as it holds the runner.
 func runnerVersion(source string) (string, error) {
 	commit, err := exec.Command("git", "-C", source, "rev-parse", "--short=12", "HEAD").Output()
 	if err != nil {
 		return "", fmt.Errorf("reading the runner's commit in %s: %w", source, err)
 	}
 	version := "git-" + strings.TrimSpace(string(commit))
-	changes, err := exec.Command("git", "-C", source, "diff", "HEAD", "--", "runner", "protocol", "poster", "go.mod").Output()
+	changes, err := exec.Command("git", "-C", source, "diff", "HEAD", "--", ".", ":(exclude)wire").Output()
 	if err != nil {
 		return "", err
 	}

@@ -19,6 +19,6 @@ What a run does, in order:
 
 The cache: a unit marked `"cache": true` is looked up by `protocol.CacheKey` before it is placed and written after it passes; `--uncached` skips both. What lands main runs uncached.
 
-The runner: built from this checkout for each box's platform, named for its commit (`git-<sha12>`, plus a hash of any uncommitted change to the runner's code), installed at `~/.loom/bin/loom-runner-<version>` on the box. A version reaches a second box only after a green run on its first (`~/.loom/rollout.tsv`).
+The runner: built from this checkout for each box's platform, named for its commit (`git-<sha12>`, plus a hash of any uncommitted change to the Go module), installed at `~/.loom/bin/loom-runner-<version>` on the box. A version reaches a second box only after a green run on its first (`~/.loom/rollout.tsv`). Since the version is the whole module's, a new coordinator is held to the same law: its first run goes to one box.
 
 `LOOM_SSH_BOX=<box> go test -run SSHMachineOnARealBox ./coordinator/` proves the ssh path on a real box.
