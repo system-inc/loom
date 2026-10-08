@@ -284,6 +284,17 @@ async function handleBoard(request: Request, environment: Env, operation: string
         }
         return forwardToBoard(environment, 'snapshot', request);
     }
+    if (operation === 'gate') {
+        if (request.method !== 'POST') {
+            return methodNotAllowed('POST');
+        }
+        // The gate's lines come from the reader on Kirk's Mac, with a coordinator token like the machines.
+        const claims = await authorize(request, environment, null, { scopes: coordinatorScope, queryScopes: [] });
+        if (claims instanceof Response) {
+            return claims;
+        }
+        return forwardToBoard(environment, 'gate', request);
+    }
     if (operation === 'machines') {
         if (request.method !== 'POST') {
             return methodNotAllowed('POST');

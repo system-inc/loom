@@ -401,3 +401,42 @@ describe('the board page', function () {
         expect((await call('/board', { method: 'POST' })).status).toBe(405);
     });
 });
+
+describe("the gate's lines", function () {
+    const lines = {
+        at: '2026-10-08T21:00:00Z',
+        machines: [
+            { name: 'threadripper', aliases: ['cloud'], cores: 64, lines: [
+                { slot: 1, class: 'B', state: 'gating', kind: 'fast', branch: 'cloud/land-views-slice1', sha: 'c7835cb3f1a0', step: 'tests', since: '2026-10-08T20:54:25Z', star: true, detail: '' },
+                { slot: 2, class: 'S', state: 'idle', kind: '', branch: '', sha: '', step: '', since: null, star: false, detail: '' },
+            ] },
+        ],
+    };
+
+    it('takes the reader\'s lines from a coordinator token and serves them in the snapshot', async function () {
+        const coordinator = await token(freshRun(), 'coordinator');
+        const posted = await call('/board/gate', { method: 'POST', bearer: coordinator, body: JSON.stringify(lines) });
+        expect(posted.status, await posted.clone().text()).toBe(200);
+        const snapshot = (await (await call('/board/snapshot', { bearer: await boardToken() })).json()) as { gate: typeof lines };
+        expect(snapshot.gate).toEqual(lines);
+    });
+
+    it('refuses other scopes and malformed lines', async function () {
+        const run = freshRun();
+        expect((await call('/board/gate', { method: 'POST', bearer: await token(run, 'runner'), body: JSON.stringify(lines) })).status).toBe(403);
+        expect((await call('/board/gate', { method: 'POST', bearer: await boardToken(), body: JSON.stringify(lines) })).status).toBe(403);
+        const coordinator = await token(run, 'coordinator');
+        const line = lines.machines[0]?.lines[0];
+        for (const broken of [
+            {},
+            { at: 'x', machines: {} },
+            { at: 'x', machines: [{ name: '', aliases: [], cores: 1, lines: [] }] },
+            { at: 'x', machines: [{ name: 'a', aliases: [], cores: 1, lines: [{ ...line, state: 'fine' }] }] },
+            { at: 'x', machines: [{ name: 'a', aliases: [], cores: 1, lines: [{ ...line, star: 'yes' }] }] },
+            { at: 'x', machines: [{ name: 'a', aliases: [], cores: 1, lines: [{ ...line, branch: 3 }] }] },
+        ]) {
+            const response = await call('/board/gate', { method: 'POST', bearer: coordinator, body: JSON.stringify(broken) });
+            expect(response.status, JSON.stringify(broken)).toBe(400);
+        }
+    });
+});

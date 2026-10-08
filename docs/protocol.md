@@ -154,6 +154,18 @@ A machine, as the coordinator posts it and the board adds to: `{"name": "home", 
 
 The stream (`GET /board/stream`, WebSocket) sends `{"kind": "snapshot", "runs": [...], "machines": [...], "pulse": {...}}` first, then `{"kind": "run", "run": {...}}` and `{"kind": "machines", "machines": [...]}` as they change, then one `{"kind": "pulse", "running", "finishedLastMinute", "queued", "longest"}` after each batch of changes: units running now, units finished in the last minute, units queued, and the longest-running unit (`{"unit", "run", "machine", "since"}`, or null). A run with its verdict counts toward no pulse or machine. `passed` includes cached units, so queued, running, passed, failed and broken add up to `units`. The page passes its token as the WebSocket subprotocol `token.<token>` beside `loom`, so the token is never in a URL; the page's own address carries it after `#`, which a browser never sends.
 
+## The gate's lines
+
+The board also shows Adamic's fast gate and whole gate, machine by machine and slot by slot, read from their own files only by `loom gate-lines` on Kirk's Mac (package `gatelines`): the watcher's `slots`, `running/`, `running-started/` and `front` in ~/.adamic-fast-gate-watch, and over ssh each running gate's `status.txt` and `box.txt` on its box (and the whole gate's newest run on Home). It is read-only on the gate's state and posts the whole picture to `POST /board/gate` (a coordinator token of any run) every 3 s when it changed, and every 30 s regardless. The board keeps the latest, includes it in the snapshot as `gate`, and streams `{"kind": "gate", "gate": {...}}` when it changes.
+
+```json
+{"at": "2026-10-08T21:07:43Z", "machines": [{"name": "threadripper", "aliases": ["cloud"], "cores": 64, "lines": [
+  {"slot": 3, "class": "B", "state": "gating", "kind": "fast", "branch": "cloud/land-stack-s1-views-slice1", "sha": "6fbfdbf74194",
+   "step": "tests", "since": "2026-10-08T21:00:22Z", "star": true, "detail": ""}]}]}
+```
+
+`state` is `gating`, `green`, `red` (red the moment status.txt says so, while the gate still runs for triage), `crash` (void: a box or tool failure, or a gate stopped before its verdict) or `idle`. `step` is the step whose log the gate wrote last. `star` says the branch matches a glob in the watcher's `front` file. A slot whose gate just ended shows that gate's own final status for 90 s, then goes idle. A machine with no gate slots has one idle line.
+
 ## The wire's endpoints
 
 All on the Worker (`wire/`). A token goes in `Authorization: Bearer <token>`, or `?token=` where a browser can't set headers (the page and its WebSocket).
@@ -170,6 +182,7 @@ All on the Worker (`wire/`). A token goes in `Authorization: Bearer <token>`, or
 | `PUT /runs/<run>/blobs/<sha256>` | runner or coordinator | Stores the body if its sha256 matches (201); an existing blob is left as is (200). Either way the hash is recorded as uploaded by the run. Needs `Content-Length`; up to 100 MiB. |
 | `GET /board/stream` | board | WebSocket: the board's snapshot, then every change (see The board). The token comes as the subprotocol `token.<token>`. |
 | `GET /board/snapshot` | board | The same snapshot as JSON. |
+| `POST /board/gate` | coordinator (any run) | The gate's lines, posted whole (see The gate's lines). |
 | `POST /board/machines` | coordinator (any run) | `{"machines": [{"name", "cores", "slots"}]}`: the machines this coordinator places units on. Each replaces the board's entry of that name. |
 | `POST /board/runs/<run>/viewer` | board | `{"token": "<viewer token for that run>"}`, expiring with the board token. |
 | `GET /cache/<key>` | coordinator (any run) | The `protocol.CacheEntry` for that key, or 404. |

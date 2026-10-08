@@ -30,6 +30,9 @@ export function renderBoardPage(nonce: string): string {
     --failed-soft: #fcebea;
     --void: #8a5a00;
     --void-soft: #f8efdc;
+    --loom: #7c4dff;
+    --loom-soft: #efe9ff;
+    --shimmer: rgba(47, 107, 237, 0.16);
     --monospace: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     --radius: 12px;
 }
@@ -51,6 +54,9 @@ export function renderBoardPage(nonce: string): string {
         --failed-soft: #341818;
         --void: #f0b34e;
         --void-soft: #33270f;
+        --loom: #b69cff;
+        --loom-soft: #231b3d;
+        --shimmer: rgba(121, 166, 255, 0.16);
     }
 }
 * { box-sizing: border-box; }
@@ -79,16 +85,6 @@ main { max-width: 1180px; margin: 0 auto; padding: 18px 16px 56px; }
 .stat.running .value { color: var(--running); }
 
 h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin: 22px 0 10px; }
-.machines { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
-.machine { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
-.machine .name { font: 600 14px/1.3 var(--monospace); display: flex; justify-content: space-between; gap: 8px; }
-.machine .cores { font: 12px var(--monospace); color: var(--text-faint); font-weight: 400; }
-.slots { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
-.slot { width: 22px; height: 22px; border-radius: 6px; border: 1.5px dashed var(--queued); }
-.slot.busy { border: 0; background: var(--running); position: relative; overflow: hidden; }
-.slot.busy::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,0.45), transparent); transform: translateX(-100%); animation: weave 1.6s ease-in-out infinite; }
-.machine .caption { font-size: 12px; color: var(--text-muted); margin-top: 8px; }
-
 .runs { display: grid; gap: 12px; }
 .run { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; border-left-width: 4px; }
 .run[data-state="running"] { border-left-color: var(--running); }
@@ -140,7 +136,55 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
 .empty { color: var(--text-muted); background: var(--surface); border: 1px dashed var(--border); border-radius: var(--radius); padding: 22px; text-align: center; }
 .empty code { font-family: var(--monospace); }
 
-@keyframes weave { to { transform: translateX(100%); } }
+/* The machines: one block each, one line per slot, the way the gate itself is laid out. */
+.fabric { display: grid; gap: 10px; }
+.box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 0 8px; }
+.box-head { display: flex; align-items: baseline; gap: 10px; padding: 6px 14px 4px; flex-wrap: wrap; }
+.box-name { font: 650 15px/1.3 var(--monospace); text-transform: capitalize; }
+.box-meta { font: 12px var(--monospace); color: var(--text-faint); }
+.box-busy { margin-left: auto; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.line { position: relative; display: grid; grid-template-columns: 22px 76px minmax(0, 1fr) auto; align-items: center; gap: 10px; margin: 3px 10px 0 22px; padding: 7px 10px; border-radius: 9px; overflow: hidden; font-size: 13px; isolation: isolate; }
+.line .glyph { font-weight: 700; text-align: center; }
+.line .slot-label { font: 12px var(--monospace); color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.line .what { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.line .what b { font-weight: 600; }
+.line .what .sha, .line .what .step { font-family: var(--monospace); font-size: 12px; color: var(--text-muted); }
+.line .detail { display: block; font: 12px/1.4 var(--monospace); color: var(--text-muted); white-space: normal; overflow-wrap: anywhere; margin-top: 2px; }
+.line .time { font: 600 13px var(--monospace); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.line[data-state="idle"] { opacity: 0.42; }
+.line[data-state="idle"] .glyph { color: var(--text-faint); }
+.line[data-state="gating"] { background: var(--running-soft); }
+.line[data-state="gating"] .glyph, .line[data-state="gating"] .time { color: var(--running); }
+.line[data-state="loom"] { background: var(--loom-soft); }
+.line[data-state="loom"] .glyph, .line[data-state="loom"] .time { color: var(--loom); }
+.line[data-state="green"] { background: var(--passed-soft); }
+.line[data-state="green"] .glyph { color: var(--passed); }
+.line[data-state="red"] { background: var(--failed-soft); box-shadow: inset 3px 0 0 var(--failed); }
+.line[data-state="red"] .glyph, .line[data-state="red"] .time { color: var(--failed); }
+.line[data-state="crash"] { background: var(--void-soft); box-shadow: inset 3px 0 0 var(--void); }
+.line[data-state="crash"] .glyph { color: var(--void); }
+/* Busy lines move: a light that runs along them, slower for the whole gate. */
+.line[data-state="gating"]::before, .line[data-state="loom"]::before, .line[data-state="red"][data-live="yes"]::before {
+    content: ""; position: absolute; inset: 0; z-index: -1;
+    background: linear-gradient(90deg, transparent 0%, var(--shimmer) 50%, transparent 100%);
+    background-size: 40% 100%; background-repeat: no-repeat; animation: run 2.4s linear infinite;
+}
+.line[data-kind="full"]::before { animation-duration: 5s; }
+.line[data-state="red"][data-live="yes"] { animation: alarm 2s ease-in-out infinite; }
+/* The star wears the waterfall's rainbow ring. */
+.line[data-star="yes"]::after {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 2px; pointer-events: none;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6, #ec4899, #f97316); background-size: 300% 300%;
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0); -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box exclude, linear-gradient(#fff 0 0);
+    animation: rainbow-flow 4s ease-in-out infinite alternate;
+}
+@keyframes run { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+@keyframes alarm { 50% { box-shadow: inset 3px 0 0 var(--failed), 0 0 0 2px var(--failed-soft); } }
+@keyframes rainbow-flow { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: var(--text-muted); margin: -2px 0 10px; }
+.legend span b { font-weight: 700; margin-right: 4px; }
+.freshness { font-size: 12px; color: var(--text-faint); margin-left: 8px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 @keyframes drift { to { background-position: 16px 0; } }
 @keyframes flare { from { box-shadow: 0 0 0 3px var(--failed); } to { box-shadow: 0 0 0 0 transparent; } }
 @media (prefers-reduced-motion: reduce) { *, *::after { animation: none !important; transition: none !important; } }
@@ -149,6 +193,8 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
     .stat .value { font-size: 22px; }
     .run { padding: 12px; }
     .run .open { width: 100%; margin-top: 4px; }
+    .line { grid-template-columns: 18px minmax(0, 1fr) auto; margin-left: 10px; gap: 8px; }
+    .line .slot-label { display: none; }
 }
 </style>
 </head>
@@ -159,8 +205,9 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
     <span class="connection" id="connection" data-state="connecting">connecting</span>
 </div>
 <section class="pulse" id="pulse" aria-label="Right now"></section>
-<h2>Machines</h2>
-<section class="machines" id="machines"></section>
+<h2>Machines<span class="freshness" id="freshness"></span></h2>
+<div class="legend"><span><b>\u25B6</b>gating</span><span><b>\u2713</b>green</span><span><b>\u2715</b>red</span><span><b>\u26A0</b>tool crash</span><span><b>\u00B7</b>idle</span><span><b>\u25C6</b>Loom unit</span><span>rainbow: the star</span></div>
+<section class="fabric" id="fabric"></section>
 <h2>Runs</h2>
 <section class="runs" id="runs"></section>
 <h2 id="history-title" hidden>Finished</h2>
@@ -172,6 +219,7 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
     var token = decodeURIComponent(location.hash.slice(1));
     var runs = new Map();
     var machines = [];
+    var gate = null;
     var pulse = null;
     var seenFailures = new Set();
     var firstPaint = true;
@@ -235,28 +283,81 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
         });
     }
 
-    function renderMachines() {
-        var section = document.getElementById('machines');
+    var glyphs = { gating: '\u25B6', green: '\u2713', red: '\u2715', crash: '\u26A0', idle: '\u00B7', loom: '\u25C6' };
+
+    // Every machine the gate names, one line per slot, and every Loom unit running on a machine, merged by name.
+    function renderFabric() {
+        var section = document.getElementById('fabric');
         section.replaceChildren();
-        if (machines.length === 0) {
-            section.appendChild(element('div', 'empty', 'No machines yet. A coordinator names its machines when it starts a run.'));
+        var boxes = (gate && gate.machines ? gate.machines : []).map(function (machine) {
+            return { name: machine.name, aliases: machine.aliases || [], cores: machine.cores, lines: machine.lines.slice() };
+        });
+        function boxFor(name) {
+            var lower = name.toLowerCase();
+            var found = boxes.find(function (box) {
+                return box.name.toLowerCase() === lower || box.aliases.some(function (alias) { return alias.toLowerCase() === lower; });
+            });
+            if (!found) {
+                var posted = machines.find(function (machine) { return machine.name.toLowerCase() === lower; });
+                found = { name: name, aliases: [], cores: posted ? posted.cores : 0, lines: [] };
+                boxes.push(found);
+            }
+            return found;
+        }
+        runs.forEach(function (run) {
+            if (run.verdict) { return; }
+            (run.active || []).forEach(function (active) {
+                var box = boxFor(active.machine);
+                // A Loom unit takes the machine's idle line if it has one, so the line count stays the slot count.
+                box.lines = box.lines.filter(function (line) { return !(line.slot === 0 && line.state === 'idle'); });
+                box.lines.push({ slot: -1, class: 'loom', state: 'loom', kind: 'loom', branch: run.job, sha: active.unit, step: run.run, since: active.since, star: false, detail: '' });
+            });
+        });
+        if (boxes.length === 0) {
+            section.appendChild(element('div', 'empty', 'Waiting for the gate lines. They come from loom gate-lines on Kirk\\u2019s Mac.'));
             return;
         }
-        machines.forEach(function (machine) {
-            var node = element('div', 'machine');
-            var name = element('div', 'name', machine.name);
-            name.appendChild(element('span', 'cores', machine.cores + ' cores'));
-            node.appendChild(name);
-            var slots = element('div', 'slots');
-            var total = Math.max(machine.slots, machine.running);
-            for (var index = 0; index < total; index++) {
-                var slot = element('span', 'slot' + (index < machine.running ? ' busy' : ''));
-                slot.title = index < machine.running ? 'busy' : 'idle';
-                slots.appendChild(slot);
-            }
-            node.appendChild(slots);
-            var idle = Math.max(0, machine.slots - machine.running);
-            node.appendChild(element('div', 'caption', machine.running + ' busy, ' + idle + ' idle'));
+        var freshness = document.getElementById('freshness');
+        freshness.dataset.from = gate ? gate.at : '';
+        boxes.forEach(function (box) {
+            var node = element('div', 'box');
+            var head = element('div', 'box-head');
+            head.appendChild(element('span', 'box-name', box.name));
+            var meta = (box.cores ? box.cores + ' cores' : '') + (box.aliases.length ? '  also ' + box.aliases.join(', ') : '');
+            head.appendChild(element('span', 'box-meta', meta));
+            var busy = box.lines.filter(function (line) { return line.state !== 'idle'; }).length;
+            var slots = box.lines.filter(function (line) { return line.slot !== 0; }).length;
+            head.appendChild(element('span', 'box-busy', slots ? busy + ' of ' + slots + ' busy' : 'idle'));
+            node.appendChild(head);
+            box.lines.forEach(function (line) {
+                var row = element('div', 'line');
+                row.dataset.state = line.state;
+                row.dataset.kind = line.kind || '';
+                row.dataset.star = line.star ? 'yes' : 'no';
+                row.dataset.live = line.since ? 'yes' : 'no';
+                row.appendChild(element('span', 'glyph', glyphs[line.state] || '?'));
+                var label = line.slot > 0 ? 'slot ' + line.slot + (line.class ? ' \u00B7 ' + line.class : '') : (line.slot < 0 ? 'loom' : '');
+                row.appendChild(element('span', 'slot-label', label));
+                var what = element('span', 'what');
+                what.title = line.state;
+                if (line.state === 'idle' && !line.branch) {
+                    what.appendChild(document.createTextNode(line.detail || 'idle'));
+                }
+                else {
+                    what.appendChild(element('b', null, line.branch));
+                    what.appendChild(document.createTextNode(' '));
+                    what.appendChild(element('span', 'sha', line.sha));
+                    what.appendChild(document.createTextNode(' '));
+                    var step = line.kind === 'loom' ? line.step : (line.class ? line.class + ' \u00B7 ' : '') + line.step;
+                    what.appendChild(element('span', 'step', '\u00B7 ' + step + ' \u00B7 ' + line.state));
+                    if (line.detail && line.state !== 'gating') { what.appendChild(element('span', 'detail', line.detail)); }
+                }
+                row.appendChild(what);
+                var time = element('span', 'time', '');
+                if (line.since) { time.dataset.from = line.since; }
+                row.appendChild(time);
+                node.appendChild(row);
+            });
             section.appendChild(node);
         });
     }
@@ -398,7 +499,7 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
     function render() {
         frameRequested = false;
         renderPulse();
-        renderMachines();
+        renderFabric();
         renderRuns();
         tick();
         firstPaint = false;
@@ -472,7 +573,9 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
             (frame.runs || []).forEach(function (run) { runs.set(run.run, run); });
             machines = frame.machines || [];
             pulse = frame.pulse || null;
+            gate = frame.gate || null;
         }
+        else if (frame.kind === 'gate') { gate = frame.gate; }
         else if (frame.kind === 'run' && frame.run) { runs.set(frame.run.run, frame.run); }
         else if (frame.kind === 'machines') { machines = frame.machines || []; }
         else if (frame.kind === 'pulse') { pulse = frame; }

@@ -79,6 +79,66 @@ export interface Snapshot {
     runs: RunSummary[];
     machines: BoardMachine[];
     pulse: Pulse;
+    gate: GateLines | null;
+}
+
+// The gate's lines (docs/protocol.md, "The gate's lines"): one per machine, one per slot under it, read from the
+// fast gate's own files on Kirk's Mac by `loom gate-lines` and posted whole. The board keeps the latest.
+export interface GateLines {
+    at: string;
+    machines: { name: string; aliases: string[]; cores: number; lines: GateLine[] }[];
+}
+
+export interface GateLine {
+    slot: number;
+    class: string;
+    state: string;
+    kind: string;
+    branch: string;
+    sha: string;
+    step: string;
+    since: string | null;
+    star: boolean;
+    detail: string;
+}
+
+export const MaximumGateBytes = 512 * 1024;
+const gateStates = ['gating', 'green', 'red', 'crash', 'idle', 'loom'];
+
+// Checks the gate's lines strictly enough that a page can trust their shape; their meaning is the reader's.
+export function checkGate(body: string): GateLines | string {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(body);
+    }
+    catch {
+        return 'the gate lines are not JSON';
+    }
+    const record = parsed as Record<string, unknown>;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed) || typeof record.at !== 'string' || !Array.isArray(record.machines)) {
+        return 'the gate lines are {"at", "machines": [...]}';
+    }
+    for (const machine of record.machines as unknown[]) {
+        const fields = machine as Record<string, unknown>;
+        if (typeof machine !== 'object' || machine === null || typeof fields.name !== 'string' || fields.name === ''
+            || !Array.isArray(fields.aliases) || !isCount(fields.cores) || !Array.isArray(fields.lines)) {
+            return 'each machine has a name, aliases, cores and lines';
+        }
+        for (const line of fields.lines as unknown[]) {
+            const lineFields = line as Record<string, unknown>;
+            if (typeof line !== 'object' || line === null || !isCount(lineFields.slot) || typeof lineFields.state !== 'string'
+                || !gateStates.includes(lineFields.state) || typeof lineFields.star !== 'boolean'
+                || !(lineFields.since === null || typeof lineFields.since === 'string')) {
+                return `machine ${fields.name} has a malformed line`;
+            }
+            for (const key of ['class', 'kind', 'branch', 'sha', 'step', 'detail']) {
+                if (typeof lineFields[key] !== 'string') {
+                    return `machine ${fields.name} has a line whose ${key} isn't a string`;
+                }
+            }
+        }
+    }
+    return parsed as GateLines;
 }
 
 // The run id without its time and random suffix, or the whole id when it has none.
@@ -244,6 +304,19 @@ export class Board extends DurableObject<Env> {
         if (operation === '/machines' && request.method === 'POST') {
             return this.acceptMachines(request);
         }
+        if (operation === '/gate' && request.method === 'POST') {
+            const body = await readBodyText(request, MaximumGateBytes);
+            if (body === null) {
+                return jsonResponse(413, { error: `the gate lines are at most ${MaximumGateBytes} bytes` });
+            }
+            const gate = checkGate(body);
+            if (typeof gate === 'string') {
+                return jsonResponse(400, { error: gate });
+            }
+            this.setFact('gate', JSON.stringify(gate));
+            await this.scheduleFlush();
+            return jsonResponse(200, { machines: gate.machines.length });
+        }
         if (operation === '/snapshot' && request.method === 'GET') {
             return jsonResponse(200, this.snapshot());
         }
@@ -360,7 +433,13 @@ export class Board extends DurableObject<Env> {
             runs: summaries,
             machines: this.machines(summaries),
             pulse: pulseOf(summaries, this.finishedLastMinute()),
+            gate: this.gate(),
         };
+    }
+
+    private gate(): GateLines | null {
+        const text = this.fact('gate');
+        return text === null ? null : (JSON.parse(text) as GateLines);
     }
 
     // ---------- Stream ----------
@@ -431,6 +510,11 @@ export class Board extends DurableObject<Env> {
         if (machinesText !== this.fact('machinesSent')) {
             this.setFact('machinesSent', machinesText);
             frames.push(`{"kind":"machines","machines":${machinesText}}`);
+        }
+        const gateText = this.fact('gate');
+        if (gateText !== null && gateText !== this.fact('gateSent')) {
+            this.setFact('gateSent', gateText);
+            frames.push(`{"kind":"gate","gate":${gateText}}`);
         }
         if (frames.length === 0) {
             return;

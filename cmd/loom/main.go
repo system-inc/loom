@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -29,12 +30,14 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/coordinator"
+	"github.com/system-inc/loom/gatelines"
 	"github.com/system-inc/loom/protocol"
 )
 
 const usage = `usage:
   loom run [--uncached] [--local <slots> | --slots <file>] [--record <file>] [--wire <url>] <job.json>
   loom board [--days <n>] [--wire <url>]
+  loom gate-lines [--once] [--interval <duration>] [--wire <url>]
 `
 
 func main() {
@@ -44,6 +47,9 @@ func main() {
 func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "board" {
 		return board(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "gate-lines" {
+		return gateLines(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) == 0 || arguments[0] != "run" {
 		fmt.Fprint(stderr, usage)
@@ -129,6 +135,65 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	default:
 		return 2
 	}
+}
+
+// gateLines reads what the gate is doing from its own files and posts it to the board as the gate's lines,
+// every interval, until stopped. --once prints one reading as JSON and posts nothing.
+func gateLines(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("gate-lines", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	once := flags.Bool("once", false, "print one reading as JSON and post nothing")
+	interval := flags.Duration("interval", 3*time.Second, "how often to read and post")
+	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
+		fmt.Fprint(stderr, usage)
+		return 3
+	}
+	home, _ := os.UserHomeDir()
+	reader := gatelines.NewReader(filepath.Join(home, ".adamic-fast-gate-watch"), filepath.Join(home, ".adamic-full-gate"))
+	runContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if *once {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		encoder.Encode(reader.Read(runContext))
+		return 0
+	}
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	client := &http.Client{Timeout: 15 * time.Second}
+	last := ""
+	lastPosted := time.Time{}
+	for runContext.Err() == nil {
+		started := time.Now()
+		lines := reader.Read(runContext)
+		body, _ := json.Marshal(lines)
+		// The time changes every reading; post when anything else did, and at least every 30 s as a heartbeat.
+		withoutTime := strings.Replace(string(body), lines.At, "", 1)
+		if withoutTime != last || time.Since(lastPosted) > 30*time.Second {
+			token, _ := protocol.MintToken(secret, protocol.TokenClaims{Run: "gate-lines", Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Hour).Unix()})
+			request, _ := http.NewRequestWithContext(runContext, http.MethodPost, strings.TrimSuffix(*wire, "/")+"/board/gate", strings.NewReader(string(body)))
+			request.Header.Set("Authorization", "Bearer "+token)
+			request.Header.Set("Content-Type", "application/json")
+			if response, err := client.Do(request); err != nil {
+				fmt.Fprintf(stderr, "loom gate-lines: posting: %v\n", err)
+			} else {
+				if response.StatusCode != http.StatusOK {
+					fmt.Fprintf(stderr, "loom gate-lines: posting: %s\n", response.Status)
+				}
+				response.Body.Close()
+				last, lastPosted = withoutTime, time.Now()
+			}
+		}
+		select {
+		case <-runContext.Done():
+		case <-time.After(max(0, *interval-time.Since(started))):
+		}
+	}
+	return 0
 }
 
 // board prints the board's address with a fresh board token after the #, which a browser never sends.
