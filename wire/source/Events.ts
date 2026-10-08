@@ -21,8 +21,15 @@ const sha256Pattern = /^[0-9a-f]{64}$/;
 const utcTimePattern = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?Z$/;
 export const MaximumUnitIdLength = 256;
 
+// protocol.RunIdPattern: safe in a URL path and an R2 key. MintToken and CheckUnit hold run ids to it too.
+export const RunIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
 function isString(value: unknown): boolean {
     return typeof value === 'string';
+}
+
+function isNonEmptyString(value: unknown): boolean {
+    return typeof value === 'string' && value !== '';
 }
 
 function isBoolean(value: unknown): boolean {
@@ -103,8 +110,13 @@ const typeFields: Record<string, Record<string, { check: FieldCheck; required: b
         bytes: { check: isCount, required: false },
     },
     error: {
-        phase: { check: isOneOf('fetch', 'start', 'run', 'upload', 'wire'), required: true },
+        phase: { check: isOneOf('fetch', 'start', 'run', 'upload', 'wire', 'place'), required: true },
         message: { check: isString, required: false },
+    },
+    cached: {
+        key: { check: isSha256, required: true },
+        fromRun: { check: isNonEmptyString, required: true },
+        events: { check: isSha256, required: true },
     },
     finished: {
         status: { check: isOneOf('passed', 'failed', 'broken'), required: true },

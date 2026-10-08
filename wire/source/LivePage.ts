@@ -244,6 +244,9 @@ h1 { font: 600 18px/1.3 var(--monospace); margin: 0; overflow-wrap: anywhere; }
         else if (event.type === 'error') {
             unit.lines.push({ kind: 'error', text: event.phase + ' error: ' + (event.message || '') });
         }
+        else if (event.type === 'cached') {
+            unit.lines.push({ kind: 'meta', text: 'from the cache (run ' + event.fromRun + ')' });
+        }
         else if (event.type === 'finished') {
             unit.status = event.status;
             unit.endedAt = time;
@@ -424,6 +427,7 @@ h1 { font: 600 18px/1.3 var(--monospace); margin: 0; overflow-wrap: anywhere; }
         }
         list('Failed', verdict.failed);
         list('Problems', verdict.problems);
+        list('Served from the cache', verdict.cached);
         document.title = verdict.status + ' · ' + runId + ' · Loom';
     }
 

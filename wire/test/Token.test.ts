@@ -105,7 +105,7 @@ describe('the Worker checks every token', function () {
         const plan = await call(`/runs/${run}/plan`, {
             method: 'POST',
             bearer: await token(run, 'runner'),
-            body: '{"units":["a"]}',
+            body: '{"units":["a"],"inputs":[]}',
         });
         expect(plan.status).toBe(403);
         // A token in the query string only counts for the page and its stream.
@@ -127,6 +127,7 @@ describe('the Worker checks every token', function () {
             expect(html).toContain('prefers-color-scheme: dark');
             expect(html).not.toContain(run); // the run id is read by the script, never written into the HTML
             expect(html).not.toContain('—'); // no em-dashes in the copy
+            expect(html).toContain('Served from the cache');
         }
         expect((await call(`/runs/${run}`)).status).toBe(401);
     });

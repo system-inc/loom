@@ -1,4 +1,4 @@
-// Shared test helpers: tokens signed with the pinned test secret, calls into the Worker, and event lines.
+// Shared test helpers: tokens signed with the pinned test secret, calls into the Worker, event lines and blobs.
 
 import { exports } from 'cloudflare:workers';
 import { mintToken, type TokenScope } from '../source/Token';
@@ -57,8 +57,43 @@ export async function postEvents(run: string, bearer: string, events: Record<str
     return call(`/runs/${run}/events`, { method: 'POST', bearer: bearer, body: jsonLines(events) });
 }
 
-export async function postPlan(run: string, bearer: string, units: string[]): Promise<Response> {
-    return call(`/runs/${run}/plan`, { method: 'POST', bearer: bearer, body: JSON.stringify({ units: units }) });
+export async function postPlan(run: string, bearer: string, units: string[], inputs: string[] = []): Promise<Response> {
+    return call(`/runs/${run}/plan`, { method: 'POST', bearer: bearer, body: JSON.stringify({ units: units, inputs: inputs }) });
+}
+
+export function verdictBody(status: string, failed: string[] = [], problems: string[] = [], cached: string[] = []): string {
+    return JSON.stringify({ status: status, failed: failed, problems: problems, cached: cached });
+}
+
+export function postVerdict(run: string, bearer: string, body: string): Promise<Response> {
+    return call(`/runs/${run}/verdict`, { method: 'POST', bearer: bearer, body: body });
+}
+
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest), function (byte) {
+        return byte.toString(16).padStart(2, '0');
+    }).join('');
+}
+
+export function randomBytes(length: number): Uint8Array {
+    const bytes = new Uint8Array(length);
+    for (let offset = 0; offset < length; offset += 65536) {
+        crypto.getRandomValues(bytes.subarray(offset, Math.min(length, offset + 65536)));
+    }
+    return bytes;
+}
+
+export function blobPath(run: string, sha256: string): string {
+    return `/runs/${run}/blobs/${sha256}`;
+}
+
+// PUTs bytes through a run's blob endpoint and returns their hash with the answer.
+export async function upload(run: string, bearer: string, bytes: Uint8Array): Promise<{ sha256: string; status: number }> {
+    const sha256 = await sha256Hex(bytes);
+    const response = await call(blobPath(run, sha256), { method: 'PUT', bearer: bearer, body: bytes });
+    await response.body?.cancel();
+    return { sha256: sha256, status: response.status };
 }
 
 export interface Viewer {
