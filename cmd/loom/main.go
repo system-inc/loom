@@ -1,7 +1,7 @@
 // Command loom is the coordinator: it runs a job file on Loom's slots and prints the verdict. It exits 0 when
 // the run is green, 1 when red, 2 when void, and 3 when the run couldn't be set up.
 //
-//	loom run [--uncached] [--local <slots> | --slots <file>] [--wire <url>] <job.json>
+//	loom run [--uncached] [--local <slots> | --slots <file>] [--record <file>] [--wire <url>] <job.json>
 //	loom board [--days <n>]   prints the board's address with a board token
 //
 // The slots come from ~/.loom/slots, one "box class" per line (class B is a box's area slot, S a small one),
@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -32,7 +33,7 @@ import (
 )
 
 const usage = `usage:
-  loom run [--uncached] [--local <slots> | --slots <file>] [--wire <url>] <job.json>
+  loom run [--uncached] [--local <slots> | --slots <file>] [--record <file>] [--wire <url>] <job.json>
   loom board [--days <n>] [--wire <url>]
 `
 
@@ -55,6 +56,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
 	source := flags.String("source", defaultSource(), "this repository's checkout, to build the runner from")
 	slotsPath := flags.String("slots", "", "the slot allowance, one \"box class\" per line (default ~/.loom/slots)")
+	recordPath := flags.String("record", "", "write the run's record, every event as a JSON line, to this file")
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 1 {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -109,6 +111,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	if *recordPath != "" {
+		if err := writeRecord(*recordPath, result); err != nil {
+			fmt.Fprintf(stderr, "loom: writing the record: %v\n", err)
+		}
+	}
 	switch result.Verdict.Status {
 	case "green":
 		if version != "" {
@@ -150,6 +157,20 @@ func board(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "%s/board#%s\n", origin, token)
 	fmt.Fprintf(stdout, "snapshot: curl -s -H 'Authorization: Bearer %s' %s/board/snapshot\n", token, origin)
 	return 0
+}
+
+// writeRecord keeps a run's record on this machine: a first line naming the run, then every event.
+func writeRecord(path string, result coordinator.Result) error {
+	var text strings.Builder
+	header, _ := json.Marshal(map[string]any{"run": result.Run, "verdict": result.Verdict})
+	text.Write(header)
+	text.WriteByte('\n')
+	for _, event := range result.Events {
+		line, _ := json.Marshal(event)
+		text.Write(line)
+		text.WriteByte('\n')
+	}
+	return os.WriteFile(path, []byte(text.String()), 0o644)
 }
 
 func readJob(path string) (protocol.Job, error) {

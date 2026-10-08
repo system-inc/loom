@@ -65,6 +65,8 @@ type Result struct {
 	Page    string // the live page, with a viewer token in it
 	// Machines names every machine a unit ran on, for the rollout ledger.
 	Machines []string
+	// Events is the run's record, every event the verdict was decided from.
+	Events []protocol.Event
 }
 
 // unitState is where one planned unit stands.
@@ -139,7 +141,8 @@ func Run(runContext context.Context, config Config, job protocol.Job) (Result, e
 	if err := relay.Drain(time.Now().Add(2 * time.Minute)); err != nil {
 		fmt.Fprintf(config.Log, "wire: not every event reached the wire (the verdict stands on the coordinator's record): %v\n", err)
 	}
-	result.Verdict = protocol.Decide(run, body.Units, coordinator.record.snapshot())
+	result.Events = coordinator.record.snapshot()
+	result.Verdict = protocol.Decide(run, body.Units, result.Events)
 	for name := range coordinator.machines {
 		result.Machines = append(result.Machines, name)
 	}
