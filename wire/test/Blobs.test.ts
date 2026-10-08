@@ -244,3 +244,23 @@ describe('who reaches a blob', function () {
         ]);
     });
 });
+
+describe('the public store', function () {
+    it('takes writes from a coordinator only, checks the hash, and serves no reads through the Worker', async function () {
+        const run = freshRun();
+        const coordinator = await token(run, 'coordinator');
+        const body = randomBytes(2048);
+        const sha256 = await sha256Hex(body);
+        const path = `/public/blobs/${sha256}`;
+        expect((await call(path, { method: 'PUT', bearer: await token(run, 'runner'), body: body })).status).toBe(403);
+        expect((await call(path, { method: 'PUT', bearer: await token(run, 'viewer'), body: body })).status).toBe(403);
+        expect((await call(`/public/blobs/${await sha256Hex(randomBytes(8))}`, { method: 'PUT', bearer: coordinator, body: body })).status).toBe(400);
+        expect((await call(path, { method: 'HEAD', bearer: coordinator })).status).toBe(404);
+        expect((await call(path, { method: 'PUT', bearer: coordinator, body: body })).status).toBe(201);
+        expect((await call(path, { method: 'HEAD', bearer: coordinator })).status).toBe(200);
+        expect((await call(path, { bearer: coordinator })).status).toBe(405);
+        expect(await env.PublicStore.head(`blobs/${sha256}`)).not.toBeNull();
+        // The private store never saw it.
+        expect(await env.Store.head(`blobs/${sha256}`)).toBeNull();
+    });
+});

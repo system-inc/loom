@@ -328,6 +328,23 @@ async function handleBoardViewer(request: Request, environment: Env, run: string
 }
 
 // The cache belongs to no one run, so any run's coordinator token reaches it.
+// The public store (adamic-public): anyone reads it direct at adamic-store.kirkouimet.com/blobs/<sha256>, so a
+// hundred instances fetch from Cloudflare's edge, never through this Worker. Only a coordinator token of any
+// run writes it, and a write is held to the same sha256 check as every blob, so nobody can poison or fill it.
+async function handlePublicBlob(request: Request, environment: Env, sha256: string): Promise<Response> {
+    if (request.method !== 'HEAD' && request.method !== 'PUT') {
+        return methodNotAllowed('HEAD, PUT');
+    }
+    const claims = await authorize(request, environment, null, { scopes: coordinatorScope, queryScopes: [] });
+    if (claims instanceof Response) {
+        return claims;
+    }
+    if (request.method === 'HEAD') {
+        return headBlob(environment.PublicStore, sha256);
+    }
+    return (await putBlob(environment.PublicStore, sha256, request)).response;
+}
+
 async function handleCache(request: Request, environment: Env, key: string): Promise<Response> {
     if (request.method !== 'GET' && request.method !== 'PUT') {
         return methodNotAllowed('GET, PUT');
@@ -345,6 +362,14 @@ async function handleCache(request: Request, environment: Env, key: string): Pro
 export default {
     async fetch(request: Request, environment: Env): Promise<Response> {
         const path = new URL(request.url).pathname;
+        const publicMatch = /^\/public\/blobs\/([^/]+)$/.exec(path);
+        if (publicMatch !== null) {
+            const sha256 = publicMatch[1] ?? '';
+            if (!Sha256Pattern.test(sha256)) {
+                return jsonResponse(400, { error: 'a blob is addressed by 64 lowercase hex digits' });
+            }
+            return handlePublicBlob(request, environment, sha256);
+        }
         const blobMatch = /^\/runs\/([^/]+)\/blobs\/([^/]+)$/.exec(path);
         if (blobMatch !== null) {
             const run = blobMatch[1] ?? '';

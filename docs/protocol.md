@@ -114,6 +114,10 @@ This is the run-scoped access the store promised, and it is better than an S3 pr
 - Up to 100 MiB (104,857,600 bytes) per blob; more is 413. A bigger input is split into several, one per file.
 - The coordinator's machines upload inputs through the same endpoint with a coordinator token; nothing holds an R2 key but the Worker.
 
+### The public store
+
+Open-source projects (Adamic, cohere) keep their build products and test inputs in a public bucket instead, by Kirk's call (Oct 8): `adamic-public`, read by anyone direct at `https://adamic-store.kirkouimet.com/blobs/<sha256>`, so a hundred instances fetch from Cloudflare's edge and never through the Worker. Every reader verifies the sha256 it asked for, so a public read can't be poisoned. Writes stay authenticated: `PUT /public/blobs/<sha256>` on the Worker, a coordinator token of any run, the same hash check, and `HEAD` to skip a blob already held; there is no public write. Uploads come from a machine with a fast uplink (Workshop's fiber, or a Codex instance while the star owns Workshop), never from Kirk's home connection. `loom-store` and its run-scoped access are unchanged for every other project.
+
 ## Cache
 
 A unit that passed may stand in for a later unit with the same **cache key**: `protocol.CacheKey(unit, runnerVersion, platform)`, the sha256 of a canonical encoding of the unit's argv, environment, directory, every input (path, sha256, mode, archive), outputs and timeout, plus the runner version and the platform (`linux/amd64`, `darwin/arm64`). The run id, unit id, resources, store, wire and token are left out: they say where a unit ran, not what it computed. Every part of the key has a test that changes it and must turn a hit into a miss, and a mutant that drops the part and must fail that test.
@@ -185,6 +189,7 @@ All on the Worker (`wire/`). A token goes in `Authorization: Bearer <token>`, or
 | `POST /board/gate` | coordinator (any run) | The gate's lines, posted whole (see The gate's lines). |
 | `POST /board/machines` | coordinator (any run) | `{"machines": [{"name", "cores", "slots"}]}`: the machines this coordinator places units on. Each replaces the board's entry of that name. |
 | `POST /board/runs/<run>/viewer` | board | `{"token": "<viewer token for that run>"}`, expiring with the board token. |
+| `HEAD`, `PUT /public/blobs/<sha256>` | coordinator (any run) | The public store's write side (see The public store). Reads go direct to adamic-store.kirkouimet.com, never here. |
 | `GET /cache/<key>` | coordinator (any run) | The `protocol.CacheEntry` for that key, or 404. |
 | `PUT /cache/<key>` | coordinator (any run) | Writes the entry once (201); an existing one is left as is (200). Refused when its `key` isn't the path's, or its outputs or event log aren't in the store. |
 

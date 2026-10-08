@@ -20,6 +20,11 @@
         { "tag": "v1", "new_sqlite_classes": ["RunObject"] },
         { "tag": "v2", "new_sqlite_classes": ["Board"] }
     ],
-    "r2_buckets": [{ "binding": "Store", "bucket_name": "loom-store" }]
+    "r2_buckets": [
+        { "binding": "Store", "bucket_name": "loom-store" },
+        // Adamic's open-source build products and test inputs: read by anyone at adamic-store.kirkouimet.com
+        // (every reader verifies the hash it asked for), written only through this Worker by a coordinator.
+        { "binding": "PublicStore", "bucket_name": "adamic-public" }
+    ]
     // LOOM_TOKEN_SECRET is a secret: wrangler secret put LOOM_TOKEN_SECRET
 }
