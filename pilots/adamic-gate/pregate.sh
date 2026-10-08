@@ -80,7 +80,7 @@ pregate() {
 			head -c 12000 "${report}" | tail -n +2
 			[ "$(wc -c < "${report}")" -gt 12000 ] && echo "... cut at 12 KB; the full list is ${report}"
 		} > "${work}/${sha}.message"
-		(cd /Users/kirkouimet/Projects/ahra && ahra os send system_adamic_integration --body-file "${work}/${sha}.message" > /dev/null 2>&1 || true)
+		(cd /Users/kirkouimet/Projects/ahra && ./node_modules/.bin/ahra os send system_adamic_integration --body-file "${work}/${sha}.message" > /dev/null 2>&1 || true)
 	fi
 }
 
