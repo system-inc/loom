@@ -1,0 +1,8 @@
+{
+  "run": "r-example",
+  "unit": "echo",
+  "argv": ["sh", "-c", "echo hello; echo oops >&2; exit 3"],
+  "environment": {"GREETING": "hello"},
+  "timeoutSeconds": 30,
+  "resources": {"cpus": 1, "memoryMegabytes": 256}
+}

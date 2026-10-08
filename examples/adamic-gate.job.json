@@ -1,0 +1,25 @@
+{
+  "name": "adamic-gate",
+  "units": [
+    {
+      "id": "build",
+      "argv": ["bash", "loom/build-test-binaries.sh"],
+      "directory": "tree",
+      "inputs": [{"path": "tree", "sha256": "0000000000000000000000000000000000000000000000000000000000000001", "archive": "tar"}],
+      "outputs": [{"glob": "tree/loom-out/binaries/*.test"}, {"glob": "tree/loom-out/plan.json"}],
+      "timeoutSeconds": 900,
+      "resources": {"cpus": 64, "memoryMegabytes": 65536}
+    },
+    {
+      "id": "tests",
+      "needs": ["build"],
+      "matrix": {"shard": ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]},
+      "argv": ["bash", "loom/run-shard.sh", "${matrix.shard}"],
+      "directory": "tree",
+      "environment": {"ADAMIC_GATE_UNCACHED": "1"},
+      "outputs": [{"glob": "loom-out/shard-${matrix.shard}/test.jsonl"}],
+      "timeoutSeconds": 600,
+      "resources": {"cpus": 4, "memoryMegabytes": 16384}
+    }
+  ]
+}
