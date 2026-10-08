@@ -1,7 +1,8 @@
 // The event schema from docs/protocol.md and protocol.Event. Every event carries run, unit, sequence, time and
 // type; the other fields depend on the type. Unknown fields are refused, as everywhere in the protocol.
-// Fields the Go side writes with omitempty may be missing (an empty output line has no text, exit code 0
-// still has its code), so they are optional here, but a field that is present must have the right shape.
+// The Go side writes a type's fields with omitempty, so a zero is left out (an empty output line has no text,
+// a zero-byte upload no bytes); a field the type allows but the line lacks reads as its zero. Exit code 0 is
+// still written. So those fields are optional here, but a field that is present must have the right shape.
 
 export interface LoomEvent {
     run: string;
@@ -102,7 +103,7 @@ const typeFields: Record<string, Record<string, { check: FieldCheck; required: b
         bytes: { check: isCount, required: false },
     },
     error: {
-        phase: { check: isOneOf('fetch', 'start', 'run', 'upload'), required: true },
+        phase: { check: isOneOf('fetch', 'start', 'run', 'upload', 'wire'), required: true },
         message: { check: isString, required: false },
     },
     finished: {

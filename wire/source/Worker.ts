@@ -9,7 +9,7 @@ import { verifyToken, type TokenClaims, type TokenScope } from './Token';
 
 export { RunObject } from './RunObject';
 
-// Run ids are not constrained by the protocol yet; these characters are safe in a URL path and an R2 key.
+// protocol.RunIdPattern: safe in a URL path and an R2 key. MintToken and CheckUnit hold run ids to it too.
 export const RunIdPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 const anyScope: TokenScope[] = ['runner', 'viewer', 'coordinator'];

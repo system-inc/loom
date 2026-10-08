@@ -130,9 +130,19 @@ describe('events', function () {
         await postPlan(run, coordinator, ['a', 'b']);
         await postEvents(run, runner, [...unitEvents(run, 'b'), ...unitEvents(run, 'a')]);
         expect((await call(`/runs/${run}/verdict`, { method: 'POST', bearer: runner, body: JSON.stringify(verdict) })).status).toBe(403);
-        // Go marshals protocol.Verdict without JSON tags; that spelling is accepted too.
-        const goSpelling = JSON.stringify({ Status: 'green', Failed: null, Problems: null });
-        expect((await call(`/runs/${run}/verdict`, { method: 'POST', bearer: coordinator, body: goSpelling })).status).toBe(201);
+        // Exactly the lowercase keys protocol.Verdict marshals, with [] for an empty list.
+        for (const body of [
+            { Status: 'green', Failed: [], Problems: [] },
+            { status: 'green', failed: null, problems: null },
+            { status: 'green', failed: [] },
+            { status: 'green', failed: [], problems: [], extra: 1 },
+            { status: 'fine', failed: [], problems: [] },
+            { status: 'red', failed: [1], problems: [] },
+        ]) {
+            const response = await call(`/runs/${run}/verdict`, { method: 'POST', bearer: coordinator, body: JSON.stringify(body) });
+            expect(response.status, JSON.stringify(body)).toBe(400);
+        }
+        expect((await call(`/runs/${run}/verdict`, { method: 'POST', bearer: coordinator, body: JSON.stringify(verdict) })).status).toBe(201);
         expect((await call(`/runs/${run}/verdict`, { method: 'POST', bearer: coordinator, body: JSON.stringify(verdict) })).status).toBe(200);
         const different = { status: 'void', failed: [], problems: ['x'] };
         expect((await call(`/runs/${run}/verdict`, { method: 'POST', bearer: coordinator, body: JSON.stringify(different) })).status).toBe(409);

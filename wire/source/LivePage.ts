@@ -233,14 +233,13 @@ h1 { font: 600 18px/1.3 var(--monospace); margin: 0; overflow-wrap: anywhere; }
             unit.lines.push({ kind: event.stream === 'stderr' ? 'stderr' : 'stdout', text: text });
         }
         else if (event.type === 'exit') {
-            if (typeof event.wallSeconds === 'number') {
-                unit.wallSeconds = event.wallSeconds;
-            }
+            // A zero is left off the line (docs/protocol.md): a missing wallSeconds is an instant exit.
+            unit.wallSeconds = event.wallSeconds || 0;
             var how = event.timedOut ? 'timed out' : event.signal ? 'killed by ' + event.signal : 'exited ' + (event.code === undefined ? '?' : event.code);
-            unit.lines.push({ kind: 'meta', text: how + (event.wallSeconds !== undefined ? ' after ' + formatSeconds(event.wallSeconds) : '') });
+            unit.lines.push({ kind: 'meta', text: how + ' after ' + formatSeconds(unit.wallSeconds) });
         }
         else if (event.type === 'uploaded') {
-            unit.lines.push({ kind: 'meta', text: 'uploaded ' + event.path + (event.bytes !== undefined ? ' (' + event.bytes + ' bytes)' : '') });
+            unit.lines.push({ kind: 'meta', text: 'uploaded ' + event.path + ' (' + (event.bytes || 0) + ' bytes)' });
         }
         else if (event.type === 'error') {
             unit.lines.push({ kind: 'error', text: event.phase + ' error: ' + (event.message || '') });

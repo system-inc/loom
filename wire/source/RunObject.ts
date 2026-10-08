@@ -450,8 +450,8 @@ export function checkPlan(body: string): string[] | string {
     return units as string[];
 }
 
-// The verdict is protocol.Verdict. That struct has no JSON tags, so Go writes Status, Failed and Problems
-// (and null for an empty list); Go's decoder matches keys without regard to case, and so does this check.
+// The verdict is protocol.Verdict as Go marshals it: exactly status, failed and problems, in lowercase, with an
+// empty list written as [].
 export function checkVerdict(body: string): Verdict | string {
     let parsed: unknown;
     try {
@@ -463,34 +463,25 @@ export function checkVerdict(body: string): Verdict | string {
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
         return 'the verdict is not a JSON object';
     }
-    const fields: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(parsed)) {
-        const name = key.toLowerCase();
-        if (name !== 'status' && name !== 'failed' && name !== 'problems') {
-            return `unknown verdict field ${JSON.stringify(key)}`;
-        }
-        if (name in fields) {
-            return `the verdict names ${name} twice`;
-        }
-        fields[name] = value;
+    const keys = Object.keys(parsed).sort();
+    if (keys.length !== 3 || keys[0] !== 'failed' || keys[1] !== 'problems' || keys[2] !== 'status') {
+        return 'the verdict has exactly status, failed and problems';
     }
+    const fields = parsed as Record<string, unknown>;
     if (fields.status !== 'green' && fields.status !== 'red' && fields.status !== 'void') {
         return 'status is green, red or void';
     }
-    const failed = checkStringList(fields.failed);
-    const problems = checkStringList(fields.problems);
-    if (failed === null || problems === null) {
-        return 'failed and problems are lists of strings';
+    if (!isStringList(fields.failed) || !isStringList(fields.problems)) {
+        return 'failed and problems are lists of strings, [] when empty';
     }
-    return { status: fields.status, failed: failed, problems: problems };
+    return { status: fields.status, failed: fields.failed, problems: fields.problems };
 }
 
-function checkStringList(value: unknown): string[] | null {
-    if (value === undefined || value === null) {
-        return [];
-    }
-    if (!Array.isArray(value) || !value.every(function (item) { return typeof item === 'string'; })) {
-        return null;
-    }
-    return value as string[];
+function isStringList(value: unknown): value is string[] {
+    return (
+        Array.isArray(value) &&
+        value.every(function (item) {
+            return typeof item === 'string';
+        })
+    );
 }

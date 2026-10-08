@@ -39,7 +39,7 @@ export async function putBlob(store: R2Bucket, sha256: string, request: Request)
     }
     const length = Number(lengthText);
     if (length > MaximumBlobBytes) {
-        return jsonResponse(413, { error: `a blob is at most ${MaximumBlobBytes} bytes in v0` });
+        return jsonResponse(413, { error: `a blob is at most 100 MiB (${MaximumBlobBytes} bytes)` });
     }
     const existing = await store.head(blobKey(sha256));
     if (existing !== null) {
