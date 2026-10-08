@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/system-inc/loom/protocol"
@@ -25,11 +26,13 @@ type SSHMachine struct {
 	Runner     string
 	Version    string
 	GoPlatform string // "linux/amd64", from Probe
+	CoreCount  int    // the box's whole CPU count, from Probe
 }
 
 func (machine SSHMachine) Name() string          { return machine.Box }
 func (machine SSHMachine) RunnerVersion() string { return machine.Version }
 func (machine SSHMachine) Platform() string      { return machine.GoPlatform }
+func (machine SSHMachine) Cores() int            { return machine.CoreCount }
 
 // slotScript takes a free gate slot of the class, waiting for one, and runs the runner pinned to its CPUs
 // with the unit on stdin. The lock is fd 9, which exec hands to the runner, so it holds while the unit runs.
@@ -61,7 +64,8 @@ case ${slot} in
   *) first=$((area + 2 * small)) share=$((cpus - area - 2 * small)) ;;
 esac
 echo "loom: $(hostname) slot ${slot}, cpus ${first}-$((first + share - 1))" >&2
-exec taskset -c "${first}-$((first + share - 1))" "${runner}" run --workspace ~/loom-units -
+export LOOM_SLOT=${slot} LOOM_SLOT_CPUS=${first}-$((first + share - 1))
+exec taskset -c "${LOOM_SLOT_CPUS}" "${runner}" run --workspace ~/loom-units -
 `
 
 func (machine SSHMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {
@@ -96,22 +100,26 @@ func shellQuote(word string) string {
 	return "'" + strings.ReplaceAll(word, "'", `'\''`) + "'"
 }
 
-// Probe asks a box its platform, as Go spells it ("linux/amd64").
-func Probe(probeContext context.Context, box string) (string, error) {
-	output, err := exec.CommandContext(probeContext, "ssh", "-o", "BatchMode=yes", box, "uname -sm").Output()
+// Probe asks a box its platform, as Go spells it ("linux/amd64"), and its whole CPU count.
+func Probe(probeContext context.Context, box string) (string, int, error) {
+	output, err := exec.CommandContext(probeContext, "ssh", "-o", "BatchMode=yes", box, "uname -sm; nproc --all").Output()
 	if err != nil {
-		return "", fmt.Errorf("ssh %s uname: %w", box, err)
+		return "", 0, fmt.Errorf("ssh %s uname: %w", box, err)
 	}
 	fields := strings.Fields(string(output))
-	if len(fields) != 2 {
-		return "", fmt.Errorf("%s says it is %q", box, output)
+	if len(fields) != 3 {
+		return "", 0, fmt.Errorf("%s says it is %q", box, output)
+	}
+	cores, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return "", 0, fmt.Errorf("%s says it has %q CPUs", box, fields[2])
 	}
 	system := strings.ToLower(fields[0])
 	architecture := map[string]string{"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[fields[1]]
 	if architecture == "" {
-		return "", fmt.Errorf("%s has an architecture Loom doesn't build for: %s", box, fields[1])
+		return "", 0, fmt.Errorf("%s has an architecture Loom doesn't build for: %s", box, fields[1])
 	}
-	return system + "/" + architecture, nil
+	return system + "/" + architecture, cores, nil
 }
 
 // Install puts a runner binary on a box at remotePath (relative to the login's home) unless it is already

@@ -29,6 +29,8 @@ func (machine LocalMachine) RunnerVersion() string { return runner.Version }
 
 func (machine LocalMachine) Platform() string { return runtime.GOOS + "/" + runtime.GOARCH }
 
+func (machine LocalMachine) Cores() int { return runtime.NumCPU() }
+
 func (machine LocalMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {
 	runner.Run(runContext, unit, runner.Options{WorkspaceParent: machine.WorkspaceParent, Events: events})
 	return nil

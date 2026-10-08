@@ -2,6 +2,7 @@
 // the run is green, 1 when red, 2 when void, and 3 when the run couldn't be set up.
 //
 //	loom run [--uncached] [--local <slots> | --slots <file>] [--wire <url>] <job.json>
+//	loom board [--days <n>]   prints the board's address with a board token
 //
 // The slots come from ~/.loom/slots, one "box class" per line (class B is a box's area slot, S a small one),
 // unless --local runs every unit on this machine. The token secret is ~/.loom/token-secret. For each box
@@ -24,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/system-inc/loom/coordinator"
 	"github.com/system-inc/loom/protocol"
@@ -31,6 +33,7 @@ import (
 
 const usage = `usage:
   loom run [--uncached] [--local <slots> | --slots <file>] [--wire <url>] <job.json>
+  loom board [--days <n>] [--wire <url>]
 `
 
 func main() {
@@ -38,6 +41,9 @@ func main() {
 }
 
 func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) > 0 && arguments[0] == "board" {
+		return board(arguments[1:], stdout, stderr)
+	}
 	if len(arguments) == 0 || arguments[0] != "run" {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -118,6 +124,34 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 }
 
+// board prints the board's address with a fresh board token after the #, which a browser never sends.
+func board(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("board", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	days := flags.Int("days", 30, "how long the token lasts")
+	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
+		fmt.Fprint(stderr, usage)
+		return 3
+	}
+	home, _ := os.UserHomeDir()
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: protocol.BoardRun, Scope: protocol.ScopeBoard,
+		Expires: time.Now().Add(time.Duration(*days) * 24 * time.Hour).Unix()})
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	origin := strings.TrimSuffix(*wire, "/")
+	fmt.Fprintf(stdout, "%s/board#%s\n", origin, token)
+	fmt.Fprintf(stdout, "snapshot: curl -s -H 'Authorization: Bearer %s' %s/board/snapshot\n", token, origin)
+	return 0
+}
+
 func readJob(path string) (protocol.Job, error) {
 	var job protocol.Job
 	file, err := os.Open(path)
@@ -187,7 +221,7 @@ func boxSlots(setupContext context.Context, path string, source string, version 
 				refused[box] = true
 				continue
 			}
-			platform, err := coordinator.Probe(setupContext, box)
+			platform, cores, err := coordinator.Probe(setupContext, box)
 			if err != nil {
 				return nil, err
 			}
@@ -204,7 +238,7 @@ func boxSlots(setupContext context.Context, path string, source string, version 
 			if installed {
 				fmt.Fprintf(log, "%s: installed runner %s\n", box, version)
 			}
-			machine = &coordinator.SSHMachine{Box: box, Runner: remote, Version: version, GoPlatform: platform}
+			machine = &coordinator.SSHMachine{Box: box, Runner: remote, Version: version, GoPlatform: platform, CoreCount: cores}
 			ready[box] = machine
 		}
 		slot := *machine

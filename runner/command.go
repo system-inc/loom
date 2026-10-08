@@ -18,7 +18,10 @@ import (
 )
 
 // baseEnvironment is all a unit inherits from the runner's environment; the unit's own variables go on top.
-var baseEnvironment = []string{"PATH", "HOME", "TMPDIR", "LANG"}
+// LOOM_SLOT and LOOM_SLOT_CPUS are the machine's facts, set by whatever started the runner (the coordinator's
+// slot script): which of the box's slots the unit holds and its CPUs, so a unit may use that slot's own warm
+// checkout. A unit that reads them depends on its machine, so it isn't cacheable.
+var baseEnvironment = []string{"PATH", "HOME", "TMPDIR", "LANG", "LOOM_SLOT", "LOOM_SLOT_CPUS"}
 
 // An exitOutcome is how the command ended, as the exit event reports it.
 type exitOutcome struct {

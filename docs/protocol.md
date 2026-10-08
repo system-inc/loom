@@ -37,7 +37,7 @@ What one runner receives. The coordinator fills in the store and wire addresses 
 |---|---|
 | `run`, `unit` | The run id and the unit's planned id. A run id is a letter or digit, then up to 127 letters, digits, `.`, `-` and `_` (`protocol.RunIdPattern`, the same the wire takes); a unit id is 1 to 256 bytes. |
 | `argv` | The command. No shell unless argv names one. |
-| `environment` | Variables set for the command, on top of a minimal base (`PATH`, `HOME`, `TMPDIR`, `LANG`). Nothing else from the runner's environment leaks in. |
+| `environment` | Variables set for the command, on top of a minimal base (`PATH`, `HOME`, `TMPDIR`, `LANG`, and the machine's facts `LOOM_SLOT` and `LOOM_SLOT_CPUS` when whatever started the runner set them). Nothing else from the runner's environment leaks in. |
 | `directory` | Working directory, relative to the unit's workspace. |
 | `inputs` | Files placed before the command starts: `path`, `sha256`, optional `mode` (octal string) and `archive` (`"tar"` unpacks at `path`). Every byte is verified against its hash; a mismatch refuses the unit. |
 | `outputs` | Globs, relative to the workspace, hashed and uploaded after the command exits. |
@@ -126,12 +126,33 @@ The coordinator keeps the cache. After a unit passes it writes a `protocol.Cache
 
 ## Tokens
 
-`<base64url(claims JSON)>.<base64url(HMAC-SHA256(secret, first part))>`, base64url without padding. Claims: `run`, `scope` (`runner`, `viewer` or `coordinator`) and `expires` (Unix seconds). The coordinator mints them (`protocol.MintToken`, which refuses a run id the wire wouldn't take); the Worker verifies them with the same secret (Worker secret `LOOM_TOKEN_SECRET`; on the coordinator's machine `~/.loom/token-secret`, mode 600).
+`<base64url(claims JSON)>.<base64url(HMAC-SHA256(secret, first part))>`, base64url without padding. Claims: `run`, `scope` (`runner`, `viewer`, `coordinator` or `board`) and `expires` (Unix seconds). The coordinator mints them (`protocol.MintToken`, which refuses a run id the wire wouldn't take); the Worker verifies them with the same secret (Worker secret `LOOM_TOKEN_SECRET`; on the coordinator's machine `~/.loom/token-secret`, mode 600).
 
 The HMAC key is the secret's **text as it stands**, surrounding whitespace trimmed: the file holds hex digits, and those digits are signed as UTF-8 text, never decoded to bytes. `protocol.ReadTokenSecret` reads it that way. Both sides verify alike (`protocol.VerifyToken`, the Worker's `verifyToken`): the signature first, then claims with exactly the keys `run`, `scope` and `expires` in that exact case and nothing else, a non-empty run, a known scope, a positive expiry, and not expired. `TestTokenVector` pins one token so the Go and TypeScript sides sign the same bytes:
 
 - secret `loom-test-secret`, claims `{"run":"r-vector","scope":"runner","expires":4102444800}`
 - token `eyJydW4iOiJyLXZlY3RvciIsInNjb3BlIjoicnVubmVyIiwiZXhwaXJlcyI6NDEwMjQ0NDgwMH0.5yFFC9AOwC9L6zqwWz8V0aCJNrLwusF5LjbOv_hoDWY`
+
+## The board
+
+One live view of every run on every machine. A single board object (a Durable Object named `board`) holds a summary of each run and each machine and streams changes to its viewers. Each run's own object feeds it, at most twice a second per run, so a run whose runners post straight to the wire appears too. The coordinator adds what only it knows: each machine's cores and slots, so an idle slot shows as idle.
+
+A **board token** (scope `board`, run `board`) watches the board and nothing else: no run endpoint takes it. It can ask the board for a viewer token to any one run, to open that run's live page and stream.
+
+A run's summary, as the board holds it:
+
+```json
+{"run": "adamic-gate-20261008T200212-20fe227d", "job": "adamic-gate", "plannedAt": "...", "updatedAt": "...",
+ "units": 11, "queued": 3, "running": 6, "passed": 1, "failed": 1, "broken": 0, "cached": 0, "verdict": null,
+ "active": [{"unit": "tests[shard=3]", "machine": "home", "since": "..."}],
+ "failures": [{"unit": "tests[shard=1]", "at": "...", "status": "failed", "lines": ["last", "five", "output", "lines"]}]}
+```
+
+`job` is the run id without its time and random suffix. `queued` counts planned units that haven't started; `running` those started and not finished; `verdict` is null until the run has one, then green, red or void. `active` lists every running unit; `failures` the last 20 units that finished failed or broken, newest first, each with its last five output lines. Runs leave the board 24 hours after their verdict, and a run that has seen no event for 24 hours leaves too.
+
+A machine, as the coordinator posts it and the board adds to: `{"name": "home", "cores": 64, "slots": 3}`, plus `running`, the number of active units on it across every run.
+
+The stream (`GET /board/stream`, WebSocket) sends `{"kind": "snapshot", "runs": [...], "machines": [...], "pulse": {...}}` first, then `{"kind": "run", "run": {...}}` and `{"kind": "machines", "machines": [...]}` as they change, each followed by `{"kind": "pulse", ...}`: units running now, units finished in the last minute, units queued, and the longest-running unit (`unit`, `run`, `machine`, `since`). The page passes its token as the WebSocket subprotocol `token.<token>` beside `loom`, so the token is never in a URL; the page's own address carries it after `#`, which a browser never sends.
 
 ## The wire's endpoints
 
@@ -147,6 +168,10 @@ All on the Worker (`wire/`). A token goes in `Authorization: Bearer <token>`, or
 | `GET /runs/<run>/blobs/<sha256>` | as Store says | The blob's bytes from R2. A hash the token may not read is 403; one not in the store is 404. A viewer token may come as `?token=`. |
 | `HEAD /runs/<run>/blobs/<sha256>` | as `GET` | 200 with `Content-Length` when the blob is in the store, 404 when not. The coordinator asks before uploading an input, so a blob already held costs no bytes. It records nothing: only a `PUT`, which proves the bytes, counts as the run's upload. |
 | `PUT /runs/<run>/blobs/<sha256>` | runner or coordinator | Stores the body if its sha256 matches (201); an existing blob is left as is (200). Either way the hash is recorded as uploaded by the run. Needs `Content-Length`; up to 100 MiB. |
+| `GET /board/stream` | board | WebSocket: the board's snapshot, then every change (see The board). The token comes as the subprotocol `token.<token>`. |
+| `GET /board/snapshot` | board | The same snapshot as JSON. |
+| `POST /board/machines` | coordinator (any run) | `{"machines": [{"name", "cores", "slots"}]}`: the machines this coordinator places units on. Each replaces the board's entry of that name. |
+| `POST /board/runs/<run>/viewer` | board | `{"token": "<viewer token for that run>"}`, expiring with the board token. |
 | `GET /cache/<key>` | coordinator (any run) | The `protocol.CacheEntry` for that key, or 404. |
 | `PUT /cache/<key>` | coordinator (any run) | Writes the entry once (201); an existing one is left as is (200). Refused when its `key` isn't the path's, or its outputs or event log aren't in the store. |
 

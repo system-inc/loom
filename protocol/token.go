@@ -13,12 +13,17 @@ import (
 )
 
 // Token scopes. A runner token posts its run's events and reads and writes blobs; a viewer token only
-// watches its run; a coordinator token also posts the run's plan and its verdict.
+// watches its run; a coordinator token also posts the run's plan and its verdict. A board token (run
+// BoardRun) watches the board of every run and nothing else.
 const (
 	ScopeRunner      = "runner"
 	ScopeViewer      = "viewer"
 	ScopeCoordinator = "coordinator"
+	ScopeBoard       = "board"
 )
+
+// BoardRun is the run a board token names.
+const BoardRun = "board"
 
 // TokenClaims is what a token says: one run, one scope, an expiry in Unix seconds.
 type TokenClaims struct {
@@ -49,7 +54,7 @@ func MintToken(secret []byte, claims TokenClaims) (string, error) {
 }
 
 func knownScope(scope string) bool {
-	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator
+	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard
 }
 
 // ReadTokenSecret reads the HMAC key from a file such as ~/.loom/token-secret. The key is the file's text

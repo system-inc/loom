@@ -33,6 +33,8 @@ type Machine interface {
 	// RunnerVersion and Platform ("linux/amd64") are part of a unit's cache key on this machine.
 	RunnerVersion() string
 	Platform() string
+	// Cores is the machine's whole CPU count, for the board.
+	Cores() int
 	Run(runContext context.Context, unit protocol.Unit, events io.Writer) error
 }
 
@@ -123,6 +125,8 @@ func Run(runContext context.Context, config Config, job protocol.Job) (Result, e
 	}
 	fmt.Fprintf(config.Log, "run %s: %d units on %d slots%s\n  %s\n", run, len(plan), len(config.Slots), map[bool]string{true: ", uncached", false: ""}[config.Uncached], result.Page)
 
+	tellBoard(runContext, wire, coordinatorToken, config)
+
 	relay := poster.New(strings.TrimSuffix(config.Wire, "/")+"/runs/"+run+"/events", coordinatorToken, config.Client, 250*time.Millisecond)
 	relay.Report = func(message string) { fmt.Fprintf(config.Log, "wire: %s\n", message) }
 	go relay.Loop()
@@ -145,6 +149,25 @@ func Run(runContext context.Context, config Config, job protocol.Job) (Result, e
 	}
 	fmt.Fprintf(config.Log, "run %s: %s\n", run, describe(result.Verdict))
 	return result, nil
+}
+
+// tellBoard tells the board each machine's cores and how many of its slots this coordinator
+// holds, so an idle slot shows as idle. The board is a view, so a failure is only logged.
+func tellBoard(runContext context.Context, wire *wireClient, token string, config Config) {
+	slots := map[string]int{}
+	var machines []BoardMachine
+	for _, machine := range config.Slots {
+		if slots[machine.Name()] == 0 {
+			machines = append(machines, BoardMachine{Name: machine.Name(), Cores: machine.Cores()})
+		}
+		slots[machine.Name()]++
+	}
+	for index := range machines {
+		machines[index].Slots = slots[machines[index].Name]
+	}
+	if err := wire.postBoardMachines(runContext, token, machines); err != nil {
+		fmt.Fprintf(config.Log, "board: posting the machines: %v\n", err)
+	}
 }
 
 func describe(verdict protocol.Verdict) string {

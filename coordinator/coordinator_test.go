@@ -25,13 +25,14 @@ var testSecret = []byte("loom-test-secret")
 // A fakeWire is the Worker's endpoints, enough to watch what the coordinator posts: the plan, every event
 // line in arrival order, the verdict, blobs and cache entries. Tokens are verified with the test secret.
 type fakeWire struct {
-	mutex   sync.Mutex
-	plans   map[string]protocol.Plan
-	lines   map[string][]protocol.Event
-	verdict map[string]protocol.Verdict
-	blobs   map[string][]byte
-	cache   map[string]protocol.CacheEntry
-	server  *httptest.Server
+	mutex    sync.Mutex
+	plans    map[string]protocol.Plan
+	lines    map[string][]protocol.Event
+	verdict  map[string]protocol.Verdict
+	blobs    map[string][]byte
+	cache    map[string]protocol.CacheEntry
+	machines []BoardMachine
+	server   *httptest.Server
 }
 
 func newFakeWire(t *testing.T) *fakeWire {
@@ -48,6 +49,10 @@ func newFakeWire(t *testing.T) *fakeWire {
 		wire.mutex.Lock()
 		defer wire.mutex.Unlock()
 		switch {
+		case len(parts) == 2 && parts[0] == "board" && parts[1] == "machines":
+			var posted struct{ Machines []BoardMachine }
+			protocol.Decode(bytes.NewReader(body), &posted)
+			wire.machines = posted.Machines
 		case len(parts) == 2 && parts[0] == "cache":
 			if request.Method == http.MethodPut {
 				var entry protocol.CacheEntry
@@ -170,6 +175,15 @@ func TestAGreenRunPostsThePlanEveryEventAndTheVerdict(t *testing.T) {
 	}
 	if !strings.Contains(result.Page, "/runs/"+result.Run+"?token=") {
 		t.Fatalf("page %s", result.Page)
+	}
+	// The board learns each machine once, with the slots this coordinator holds on it.
+	if len(wire.machines) != 2 || wire.machines[0].Name != "box-a" || wire.machines[0].Slots != 1 || wire.machines[0].Cores < 1 {
+		t.Fatalf("machines %+v", wire.machines)
+	}
+	twoSlots := config(wire, LocalMachine{Label: "box-a"}, LocalMachine{Label: "box-a"}, LocalMachine{Label: "box-b"})
+	run(t, twoSlots, shell("a", "true"))
+	if len(wire.machines) != 2 || wire.machines[0].Slots != 2 || wire.machines[1].Slots != 1 {
+		t.Fatalf("machines %+v", wire.machines)
 	}
 }
 

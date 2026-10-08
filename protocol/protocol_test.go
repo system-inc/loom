@@ -213,6 +213,10 @@ func TestTokenVector(t *testing.T) {
 	if _, err := MintToken(secret, TokenClaims{Run: "r", Scope: "admin", Expires: 1}); err == nil {
 		t.Error("unknown scope minted")
 	}
+	board, err := MintToken(secret, TokenClaims{Run: BoardRun, Scope: ScopeBoard, Expires: 4102444800})
+	if claims, verifyError := VerifyToken(secret, board, now); err != nil || verifyError != nil || claims.Scope != ScopeBoard {
+		t.Fatalf("a board token: %v %v %+v", err, verifyError, claims)
+	}
 }
 
 func TestVerdictIsLowercaseWithEmptyListsAsArrays(t *testing.T) {

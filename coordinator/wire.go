@@ -110,6 +110,22 @@ func (wire *wireClient) cacheEntry(callContext context.Context, token string, ke
 	return &entry, nil
 }
 
+// A BoardMachine is what the board shows of one machine before it counts the units running there.
+type BoardMachine struct {
+	Name  string `json:"name"`
+	Cores int    `json:"cores"`
+	Slots int    `json:"slots"`
+}
+
+func (wire *wireClient) postBoardMachines(callContext context.Context, token string, machines []BoardMachine) error {
+	body, err := json.Marshal(map[string][]BoardMachine{"machines": machines})
+	if err != nil {
+		return err
+	}
+	_, err = wire.call(callContext, http.MethodPost, "/board/machines", token, body)
+	return err
+}
+
 func (wire *wireClient) putCacheEntry(callContext context.Context, token string, entry protocol.CacheEntry) error {
 	body, err := json.Marshal(entry)
 	if err != nil {

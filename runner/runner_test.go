@@ -319,6 +319,7 @@ wait`, lines-1, lines-1)
 
 func TestTheEnvironmentDoesNotLeak(t *testing.T) {
 	t.Setenv("LOOM_LEAK_PROBE", "leaked")
+	t.Setenv("LOOM_SLOT", "3")
 	unit := testUnit("env")
 	unit.Environment = map[string]string{"GREETING": "hello"}
 	_, events, _ := runUnit(t, unit, testOptions(t))
@@ -328,7 +329,7 @@ func TestTheEnvironmentDoesNotLeak(t *testing.T) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	allowed := map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "LANG": true, "GREETING": true}
+	allowed := map[string]bool{"PATH": true, "HOME": true, "TMPDIR": true, "LANG": true, "GREETING": true, "LOOM_SLOT": true, "LOOM_SLOT_CPUS": true}
 	for _, name := range names {
 		if !allowed[name] {
 			t.Fatalf("the unit saw %s; its environment was %v", name, names)
@@ -336,6 +337,9 @@ func TestTheEnvironmentDoesNotLeak(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(outputLines(events, "stdout"), "\n"), "GREETING=hello") {
 		t.Fatalf("the unit's own variable is missing: %v", names)
+	}
+	if !strings.Contains(strings.Join(outputLines(events, "stdout"), "\n"), "LOOM_SLOT=3") {
+		t.Fatalf("the machine's slot didn't reach the unit: %v", names)
 	}
 }
 

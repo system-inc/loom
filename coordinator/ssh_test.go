@@ -23,7 +23,7 @@ func TestSSHMachineOnARealBox(t *testing.T) {
 	}
 	setup, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	platform, err := Probe(setup, box)
+	platform, cores, err := Probe(setup, box)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,16 +43,20 @@ func TestSSHMachineOnARealBox(t *testing.T) {
 	if installed, err := Install(setup, box, binary, remote); err != nil || installed {
 		t.Fatalf("a second install should find it there: %v %v", installed, err)
 	}
-	machine := SSHMachine{Box: box, Class: "S", Runner: remote, Version: version, GoPlatform: platform}
+	if cores < 1 {
+		t.Fatalf("%s has %d cores", box, cores)
+	}
+	machine := SSHMachine{Box: box, Class: "S", Runner: remote, Version: version, GoPlatform: platform, CoreCount: cores}
 	unit := protocol.Unit{Run: "r-ssh-test", Unit: "where", TimeoutSeconds: 30,
-		Argv: []string{"sh", "-c", "hostname; taskset -cp $$ | sed 's/.*: //'; exit 4"}}
+		Argv: []string{"sh", "-c", "hostname; taskset -cp $$ | sed 's/.*: //'; echo slot=$LOOM_SLOT cpus=$LOOM_SLOT_CPUS; exit 4"}}
 	var events bytes.Buffer
 	if err := machine.Run(setup, unit, &events); err != nil {
 		t.Fatal(err)
 	}
 	text := events.String()
 	t.Log(text)
-	if !strings.Contains(text, `"runnerVersion":"`+version+`"`) || !strings.Contains(text, `"code":4`) || !strings.Contains(text, `"status":"failed"`) {
+	if !strings.Contains(text, `"runnerVersion":"`+version+`"`) || !strings.Contains(text, `"code":4`) || !strings.Contains(text, `"status":"failed"`) ||
+		!strings.Contains(text, "slot=1 cpus=0-") {
 		t.Fatalf("events:\n%s", text)
 	}
 }
