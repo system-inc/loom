@@ -7,6 +7,7 @@ import { getBlob, headBlob, putBlob, Sha256Pattern } from './Blobs';
 import { getCacheEntry, putCacheEntry } from './Cache';
 import { RunIdPattern } from './Events';
 import { jsonResponse } from './Http';
+import { renderBoardPage } from './BoardPage';
 import { renderLivePage } from './LivePage';
 import { RunHeader, ScopeHeader } from './RunObject';
 import { mintToken, verifyToken, type TokenClaims, type TokenScope } from './Token';
@@ -130,6 +131,28 @@ function askRun(environment: Env, run: string, operation: string, scope: TokenSc
     return runObject(environment, run).fetch(inner);
 }
 
+// A page of ours: inline styles and script under the response's nonce, nothing from elsewhere, and only
+// this origin's own endpoints and WebSocket to talk to.
+function pageResponse(html: string, nonce: string, host: string): Response {
+    return new Response(html, {
+        headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'Referrer-Policy': 'no-referrer',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': [
+                "default-src 'none'",
+                `script-src 'nonce-${nonce}'`,
+                `style-src 'nonce-${nonce}'`,
+                `connect-src 'self' wss://${host} ws://${host}`,
+                "base-uri 'none'",
+                "form-action 'none'",
+                "frame-ancestors 'none'",
+            ].join('; '),
+        },
+    });
+}
+
 function methodNotAllowed(allowed: string): Response {
     return jsonResponse(405, { error: `use ${allowed}` }, { Allow: allowed });
 }
@@ -145,23 +168,7 @@ async function handleRun(request: Request, environment: Env, run: string, operat
         }
         const nonce = crypto.randomUUID().replace(/-/g, '');
         const host = new URL(request.url).host;
-        return new Response(renderLivePage(nonce), {
-            headers: {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Cache-Control': 'no-store',
-                'Referrer-Policy': 'no-referrer',
-                'X-Content-Type-Options': 'nosniff',
-                'Content-Security-Policy': [
-                    "default-src 'none'",
-                    `script-src 'nonce-${nonce}'`,
-                    `style-src 'nonce-${nonce}'`,
-                    `connect-src 'self' wss://${host} ws://${host}`,
-                    "base-uri 'none'",
-                    "form-action 'none'",
-                    "frame-ancestors 'none'",
-                ].join('; '),
-            },
-        });
+        return pageResponse(renderLivePage(nonce), nonce, host);
     }
     if (operation === 'stream') {
         if (request.method !== 'GET') {
@@ -354,6 +361,15 @@ export default {
                 return jsonResponse(400, { error: 'a run id is letters, digits, dot, dash and underscore' });
             }
             return handleBoardViewer(request, environment, run);
+        }
+        if (path === '/board' || path === '/board/') {
+            // The page carries no data and no token: the board token stays after the # and reaches the
+            // stream only as a WebSocket subprotocol.
+            if (request.method !== 'GET') {
+                return methodNotAllowed('GET');
+            }
+            const nonce = crypto.randomUUID().replace(/-/g, '');
+            return pageResponse(renderBoardPage(nonce), nonce, new URL(request.url).host);
         }
         const boardMatch = /^\/board\/([a-z]+)$/.exec(path);
         if (boardMatch !== null) {

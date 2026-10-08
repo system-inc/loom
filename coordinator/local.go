@@ -3,7 +3,9 @@ package coordinator
 import (
 	"context"
 	"io"
+	"os"
 	"runtime"
+	"strings"
 
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/runner"
@@ -12,17 +14,22 @@ import (
 // LocalMachine runs units in this process with the runner package, for tests and for trying a job on the
 // coordinator's own machine.
 type LocalMachine struct {
-	// Label names the machine in the record; empty means "local".
+	// Label names the machine in the record; empty means this computer's short hostname.
 	Label string
 	// WorkspaceParent is where unit workspaces go; empty means the system's temporary directory.
 	WorkspaceParent string
 }
 
+// Name is the label, or this computer's short hostname, which is what its runner reports in started events.
 func (machine LocalMachine) Name() string {
-	if machine.Label == "" {
-		return "local"
+	if machine.Label != "" {
+		return machine.Label
 	}
-	return machine.Label
+	if name, err := os.Hostname(); err == nil && name != "" {
+		short, _, _ := strings.Cut(name, ".")
+		return short
+	}
+	return "local"
 }
 
 func (machine LocalMachine) RunnerVersion() string { return runner.Version }

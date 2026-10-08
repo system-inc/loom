@@ -99,7 +99,8 @@ export function machinesOf(machines: Machine[], summaries: RunSummary[]): BoardM
     const running = new Map<string, number>();
     for (const summary of liveRuns(summaries)) {
         for (const active of summary.active) {
-            running.set(active.machine, (running.get(active.machine) ?? 0) + 1);
+            // A runner names its machine by hostname, the coordinator by ssh host: chonchon and Chonchon are one box.
+            running.set(active.machine.toLowerCase(), (running.get(active.machine.toLowerCase()) ?? 0) + 1);
         }
     }
     return machines.map(function (machine) {
@@ -107,7 +108,7 @@ export function machinesOf(machines: Machine[], summaries: RunSummary[]): BoardM
             name: machine.name,
             cores: machine.cores,
             slots: machine.slots,
-            running: running.get(machine.name) ?? 0,
+            running: running.get(machine.name.toLowerCase()) ?? 0,
         };
     });
 }

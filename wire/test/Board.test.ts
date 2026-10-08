@@ -174,7 +174,8 @@ describe("the board's machines", function () {
         const runner = await token(run, 'runner');
         await postEvents(run, runner, [
             event(run, 'a', 0, 'started', { machine: north }),
-            event(run, 'b', 0, 'started', { machine: north }),
+            // A runner names its machine by hostname, which may differ in case from the coordinator's name for it.
+            event(run, 'b', 0, 'started', { machine: north.toUpperCase() }),
             event(run, 'c', 0, 'started', { machine: south }),
             event(run, 'c', 1, 'finished', { status: 'passed' }),
         ]);
@@ -384,5 +385,19 @@ describe("the board's retention", function () {
             state.storage.sql.exec('UPDATE runs SET touchedAt = ?, verdictAt = ? WHERE run = ?', now - RetentionMilliseconds - 1000, now - 1000, kept);
         });
         expect(runOf(await boardSnapshot(board), kept)).toBeDefined();
+    });
+});
+
+describe('the board page', function () {
+    it('is served without a token, under a nonce, and holds no data of its own', async function () {
+        const response = await call('/board');
+        expect(response.status).toBe(200);
+        const policy = response.headers.get('Content-Security-Policy') ?? '';
+        expect(policy).toContain("default-src 'none'");
+        const html = await response.text();
+        const nonce = /script-src 'nonce-([0-9a-f]+)'/.exec(policy)?.[1] ?? 'missing';
+        expect(html).toContain(`<script nonce="${nonce}">`);
+        expect(html).toContain("['loom', 'token.' + token]");
+        expect((await call('/board', { method: 'POST' })).status).toBe(405);
     });
 });
