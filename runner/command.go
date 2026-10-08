@@ -21,7 +21,11 @@ import (
 // LOOM_SLOT and LOOM_SLOT_CPUS are the machine's facts, set by whatever started the runner (the coordinator's
 // slot script): which of the box's slots the unit holds and its CPUs, so a unit may use that slot's own warm
 // checkout. A unit that reads them depends on its machine, so it isn't cacheable.
-var baseEnvironment = []string{"PATH", "HOME", "TMPDIR", "LANG", "LOOM_SLOT", "LOOM_SLOT_CPUS"}
+var baseEnvironment = []string{"PATH", "HOME", "TMPDIR", "LANG", "LOOM_SLOT", "LOOM_SLOT_CPUS",
+	// How the machine reaches the network: a Codex instance goes through a proxy with its own CA, and a unit
+	// that can't reach github or a package registry proves nothing.
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+	"SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE", "GIT_SSL_CAINFO"}
 
 // An exitOutcome is how the command ended, as the exit event reports it.
 type exitOutcome struct {

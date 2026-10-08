@@ -38,10 +38,10 @@ var exclusions = map[string]string{
 	module + "internal/native TestWASI": "it needs the wasm SDK's clang first, which v1 doesn't set up",
 }
 
-// unitScript runs one unit's tests on the box: the slot's own warm checkout (tree-N, safe because the unit
-// holds that slot's lock), moved to the sha, with the whole gate's environment, half the slot's CPUs running
-// test binaries as the gate does. Its arguments are the sha and one "<package>=<-run pattern>" per package.
-const unitScript = `set -uo pipefail
+// A unit's script is an opening, which readies a tree at the sha with the whole gate's environment, then
+// unitBody. boxOpening uses the slot's own warm checkout on our boxes (tree-N, safe because the unit holds that
+// slot's lock). Its arguments are the sha and one "<package>=<-run pattern>" per package.
+const boxOpening = `set -uo pipefail
 sha=$1; shift
 started=${SECONDS}
 suffix=$([ "${LOOM_SLOT:-1}" = 1 ] && echo "" || echo "-${LOOM_SLOT}")
@@ -53,7 +53,33 @@ export PATH="${ADAMIC_TYPESCRIPT_SOURCE:+${ADAMIC_TYPESCRIPT_SOURCE}/bin:}${HOME
 mkdir -p -m 1777 "${TMPDIR:-/tmp}"
 find "${tree}/.git" -maxdepth 6 -name index.lock -delete 2>/dev/null
 git -C "${tree}" fetch -q origin "${sha}" && git -C "${tree}" switch -q --detach "${sha}" && git -C "${tree}" submodule update -q --init --recursive || { echo "loom-pilot: checkout of ${sha} failed"; exit 2; }
-export ADAMIC_GATE_UNCACHED=1 ADAMIC_TEST_WASI=1 ADAMIC_ORACLE_WASI=1 ADAMIC_GATE_COHERE=1
+`
+
+// codexOpening is the same unit on a Codex cloud instance: a public clone at /tmp/adamic, kept between units
+// and turns, and the gate's own toolchain from cloud/setup.sh, made once per instance under a marker.
+const codexOpening = `set -uo pipefail
+sha=$1; shift
+started=${SECONDS}
+# A Codex instance reaches the internet through a proxy its own environment names; a runner from before the
+# runner passed those through hands the unit none, so take them from the runner, the unit's parent.
+[ -n "${HTTPS_PROXY:-}${https_proxy:-}" ] || eval "$(tr '\0' '\n' < /proc/${PPID}/environ 2>/dev/null | grep -E '^(HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|ALL_PROXY|all_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|REQUESTS_CA_BUNDLE|GIT_SSL_CAINFO)=' | sed -E "s/^([^=]+)=(.*)$/export \\1='\\2'/")"
+tree=/tmp/adamic out=${PWD}/loom-out
+mkdir -p "${out}"
+# Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only.
+git config --global url."https://github.com/".insteadOf git@github.com:
+[ -d "${tree}/.git" ] || git clone -q --filter=blob:none https://github.com/system-inc/adamic.git "${tree}" || { echo "loom-pilot: clone failed"; exit 2; }
+find "${tree}/.git" -maxdepth 6 -name index.lock -delete 2>/dev/null
+git -C "${tree}" fetch -q origin "${sha}" && git -C "${tree}" switch -q --detach "${sha}" && git -C "${tree}" submodule update -q --init --recursive || { echo "loom-pilot: checkout of ${sha} failed"; exit 2; }
+if [ ! -f /tmp/adamic-setup-done ]; then
+  (cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && touch /tmp/adamic-setup-done || { echo "loom-pilot: setup failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
+fi
+for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do [ -f "${environment}" ] && { source "${environment}"; break; }; done
+export PATH="${ADAMIC_TYPESCRIPT_SOURCE:+${ADAMIC_TYPESCRIPT_SOURCE}/bin:}${PATH}"
+mkdir -p -m 1777 "${TMPDIR:-/tmp}"
+`
+
+// unitBody runs a unit's packages on the tree its opening readied, half the CPUs running test binaries.
+const unitBody = `export ADAMIC_GATE_UNCACHED=1 ADAMIC_TEST_WASI=1 ADAMIC_ORACLE_WASI=1 ADAMIC_GATE_COHERE=1
 parallel=$(( $(nproc) / 2 )); [ "${parallel}" -ge 1 ] || parallel=1
 echo "loom-pilot: $(hostname) slot ${LOOM_SLOT:-?} cpus ${LOOM_SLOT_CPUS:-?} tree $(git -C "${tree}" rev-parse HEAD) setup $(( SECONDS - started )) s, ${parallel} packages at a time"
 export tree out
@@ -166,6 +192,7 @@ func plan(arguments []string) error {
 	sha := flags.String("sha", "", "the main commit to test, the reference's own")
 	units := flags.Int("units", 10, "how many units")
 	only := flags.String("only", "", "plan only packages matching this regular expression, for a trial")
+	target := flags.String("target", "box", "where the units run: box (a gate slot's warm tree) or codex (a Codex instance)")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -175,6 +202,12 @@ func plan(arguments []string) error {
 	reference, err := readTestsFile(*referencePath, *only)
 	if err != nil {
 		return err
+	}
+	opening := boxOpening
+	if *target == "codex" {
+		opening = codexOpening
+	} else if *target != "box" {
+		return fmt.Errorf("--target is box or codex")
 	}
 	type test struct {
 		key     string
@@ -214,7 +247,7 @@ func plan(arguments []string) error {
 		if len(packages) == 0 {
 			continue
 		}
-		argv := []string{"bash", "-c", unitScript, "adamic-gate-unit", *sha}
+		argv := []string{"bash", "-c", opening + unitBody, "adamic-gate-unit", *sha}
 		names := make([]string, 0, len(packages))
 		for packageName := range packages {
 			names = append(names, packageName)
