@@ -429,30 +429,78 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
             section.appendChild(empty);
             return;
         }
-        var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-        var socket = new WebSocket(scheme + '//' + location.host + '/board/stream', ['loom', 'token.' + token]);
-        socket.addEventListener('open', function () { attempt = 0; setConnection('live', 'live'); });
+        var opened = false;
+        var socket;
+        try {
+            var scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(scheme + '//' + location.host + '/board/stream', ['loom', 'token.' + token]);
+        }
+        catch (error) {
+            poll('stream refused: ' + error.message);
+            return;
+        }
+        // A browser that never finishes the handshake (one stalled here on Oct 8) falls back to the snapshot.
+        var stalled = setTimeout(function () {
+            if (!opened) {
+                socket.close();
+                poll('stream stalled');
+            }
+        }, 5000);
+        socket.addEventListener('open', function () { opened = true; clearTimeout(stalled); attempt = 0; setConnection('live', 'live'); });
         socket.addEventListener('message', function (message) {
             var frame;
             try { frame = JSON.parse(message.data); } catch (error) { return; }
-            if (frame.kind === 'snapshot') {
-                runs = new Map();
-                (frame.runs || []).forEach(function (run) { runs.set(run.run, run); });
-                machines = frame.machines || [];
-                pulse = frame.pulse || null;
-            }
-            else if (frame.kind === 'run' && frame.run) { runs.set(frame.run.run, frame.run); }
-            else if (frame.kind === 'machines') { machines = frame.machines || []; }
-            else if (frame.kind === 'pulse') { pulse = frame; }
-            schedule();
+            apply(frame);
         });
         socket.addEventListener('close', function () {
+            clearTimeout(stalled);
+            if (!opened || polling) {
+                if (!polling) { poll('stream closed'); }
+                return;
+            }
             attempt++;
             setConnection('reconnecting', 'reconnecting');
             setTimeout(connect, Math.min(15000, 500 * Math.pow(2, attempt)));
         });
         clearInterval(keepAlive);
         keepAlive = setInterval(function () { if (socket.readyState === 1) { socket.send('ping'); } }, 30000);
+    }
+
+    function apply(frame) {
+        if (frame.kind === 'snapshot') {
+            runs = new Map();
+            (frame.runs || []).forEach(function (run) { runs.set(run.run, run); });
+            machines = frame.machines || [];
+            pulse = frame.pulse || null;
+        }
+        else if (frame.kind === 'run' && frame.run) { runs.set(frame.run.run, frame.run); }
+        else if (frame.kind === 'machines') { machines = frame.machines || []; }
+        else if (frame.kind === 'pulse') { pulse = frame; }
+        schedule();
+    }
+
+    // The fallback: the same snapshot over plain HTTPS every two seconds.
+    var polling = false;
+    function poll(why) {
+        if (polling) { return; }
+        polling = true;
+        var failures = 0;
+        function once() {
+            fetch('/board/snapshot', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+                .then(function (response) { return response.ok ? response.json() : Promise.reject(new Error('the snapshot answered ' + response.status)); })
+                .then(function (snapshot) {
+                    failures = 0;
+                    snapshot.kind = 'snapshot';
+                    apply(snapshot);
+                    setConnection('live', 'live, every 2 s (' + why + ')');
+                })
+                .catch(function (error) {
+                    failures++;
+                    setConnection('reconnecting', error.message);
+                })
+                .finally(function () { setTimeout(once, failures > 0 ? Math.min(15000, 2000 * failures) : 2000); });
+        }
+        once();
     }
 
     renderPulse();
