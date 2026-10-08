@@ -67,7 +67,10 @@ type Endpoint struct {
 	Url string `json:"url"`
 }
 
-// An Event is one line of a unit's stream. Fields beyond the common four depend on Type.
+// An Event is one line of a unit's stream. Fields beyond the common five depend on Type. Those fields are
+// written with omitempty, so a zero is left out (an empty output line has no text, a zero-byte upload no
+// bytes, an instant exit no wallSeconds): a field the type allows but the line lacks reads as its zero.
+// code is the exception, a pointer, so exit code 0 is always written and a missing code means a signal.
 type Event struct {
 	Run      string `json:"run"`
 	Unit     string `json:"unit"`
@@ -103,10 +106,22 @@ type Event struct {
 	Status string `json:"status,omitempty"`
 }
 
+// A unit's finished status. passed: exit 0 and every output uploaded. failed: the command's doing (a nonzero
+// exit, a timeout, a signal, or an output it declared but didn't produce). broken: the runner couldn't do its
+// job (a bad unit, a fetch, start or upload that failed, or the runner itself stopped).
 const (
 	StatusPassed = "passed"
 	StatusFailed = "failed"
 	StatusBroken = "broken"
+)
+
+// An error event's phase: where the runner was when it went wrong.
+const (
+	PhaseFetch  = "fetch"  // fetching or verifying an input
+	PhaseStart  = "start"  // checking the unit, making its workspace, starting its command
+	PhaseRun    = "run"    // while the command runs: the runner stopped, output unreadable, a process escaping the group
+	PhaseUpload = "upload" // finding, hashing or uploading a declared output
+	PhaseWire   = "wire"   // posting events to the wire; never changes the status, since stdout holds the stream
 )
 
 // Decode reads exactly one JSON value into value, refusing unknown fields and trailing data.
@@ -128,7 +143,6 @@ func Decode(reader io.Reader, value any) error {
 
 var unitIdPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 var matrixReference = regexp.MustCompile(`\$\{matrix\.([a-zA-Z0-9_]+)\}`)
-var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // A PlannedUnit is a job unit after matrix expansion: its planned id, the base ids it needs, and its fields.
 type PlannedUnit struct {
@@ -171,7 +185,7 @@ func Expand(job Job) ([]PlannedUnit, error) {
 			}
 		}
 		for _, input := range unit.Inputs {
-			if !sha256Pattern.MatchString(input.Sha256) && !matrixReference.MatchString(input.Sha256) {
+			if !Sha256Pattern.MatchString(input.Sha256) && !matrixReference.MatchString(input.Sha256) {
 				return nil, fmt.Errorf("unit %s input %s: sha256 must be 64 lowercase hex digits", unit.Id, input.Path)
 			}
 			if input.Archive != "" && input.Archive != "tar" {
@@ -260,7 +274,7 @@ func substitute(unit JobUnit, combination map[string]string) (JobUnit, error) {
 	for index, input := range unit.Inputs {
 		input.Path = replace(input.Path)
 		input.Sha256 = replace(input.Sha256)
-		if !sha256Pattern.MatchString(input.Sha256) {
+		if !Sha256Pattern.MatchString(input.Sha256) {
 			return JobUnit{}, fmt.Errorf("unit %s input %s: sha256 must be 64 lowercase hex digits after expansion", unit.Id, input.Path)
 		}
 		expanded.Inputs[index] = input
@@ -309,11 +323,37 @@ func acyclic(job Job) error {
 	return nil
 }
 
-// A Verdict is the coordinator's decision on one run.
+// A Verdict is the coordinator's decision on one run, and the body of the wire's verdict endpoint.
 type Verdict struct {
-	Status   string   // "green", "red" or "void"
-	Failed   []string // planned unit ids that finished failed
-	Problems []string // why a run is void, one line each
+	Status   string   `json:"status"`   // "green", "red" or "void"
+	Failed   []string `json:"failed"`   // planned unit ids that finished failed
+	Problems []string `json:"problems"` // why a run is void, one line each
+}
+
+// MarshalJSON writes an empty list as [], never null, so every reader sees the same shape.
+func (verdict Verdict) MarshalJSON() ([]byte, error) {
+	type plain Verdict
+	if verdict.Failed == nil {
+		verdict.Failed = []string{}
+	}
+	if verdict.Problems == nil {
+		verdict.Problems = []string{}
+	}
+	return json.Marshal(plain(verdict))
+}
+
+// A Plan is the body of the wire's plan endpoint: every planned unit id, in plan order.
+type Plan struct {
+	Units []string `json:"units"`
+}
+
+// PlanOf names an expanded job's units in the form the wire takes.
+func PlanOf(plan []PlannedUnit) Plan {
+	units := make([]string, len(plan))
+	for index, unit := range plan {
+		units[index] = unit.Id
+	}
+	return Plan{Units: units}
 }
 
 // Decide reads a run's events against its plan. Green needs every planned unit to have finished passed,

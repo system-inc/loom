@@ -9,11 +9,8 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -145,7 +142,7 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 	if unit.Wire != nil && unit.Wire.Url != "" {
 		run.emitter.wire = newWire(unit.Wire.Url, unit.Token, options.Client, options.WireInterval)
 		run.emitter.wire.report = func(message string) {
-			run.emitter.emit(protocol.Event{Type: "error", Phase: "wire", Message: message})
+			run.emitter.emit(protocol.Event{Type: "error", Phase: protocol.PhaseWire, Message: message})
 		}
 		go run.emitter.wire.loop()
 	}
@@ -176,27 +173,27 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 
 // execute is the unit's life between started and finished, and returns the status finished reports.
 func (run *unitRun) execute(runContext context.Context) string {
-	if err := validate(run.unit); err != nil {
-		run.fail("start", err)
+	if err := protocol.CheckUnit(run.unit); err != nil {
+		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
 	if err := run.makeWorkspace(); err != nil {
-		run.fail("start", err)
+		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
 	if err := run.fetchInputs(runContext); err != nil {
-		run.fail("fetch", err)
+		run.fail(protocol.PhaseFetch, err)
 		return protocol.StatusBroken
 	}
 	outcome, err := run.runCommand(runContext)
 	if err != nil {
-		run.fail("start", err)
+		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
 	status := protocol.StatusPassed
 	switch {
 	case outcome.interrupted:
-		run.fail("run", fmt.Errorf("the runner was stopped before the command finished"))
+		run.fail(protocol.PhaseRun, fmt.Errorf("the runner was stopped before the command finished"))
 		status = protocol.StatusBroken
 	case outcome.readFailed:
 		status = protocol.StatusBroken
@@ -228,7 +225,7 @@ func (run *unitRun) finish(status string) {
 	deadline := time.Now().Add(run.options.WireDrainTimeout)
 	if err := wire.drain(deadline); err != nil {
 		wire.abandon()
-		run.fail("wire", fmt.Errorf("the wire didn't take every event; stdout holds the whole stream: %w", err))
+		run.fail(protocol.PhaseWire, fmt.Errorf("the wire didn't take every event; stdout holds the whole stream: %w", err))
 		run.emitter.emit(protocol.Event{Type: "finished", Status: status})
 		return
 	}
@@ -271,81 +268,4 @@ func removeDirectory(directory string) error {
 		return nil
 	})
 	return os.RemoveAll(directory)
-}
-
-var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-// validate checks what protocol.Decode can't: a unit the runner could only run wrongly is refused whole.
-func validate(unit protocol.Unit) error {
-	if unit.Run == "" || unit.Unit == "" {
-		return fmt.Errorf("the unit needs a run and a unit id")
-	}
-	if len(unit.Argv) == 0 || unit.Argv[0] == "" {
-		return fmt.Errorf("the unit has no argv")
-	}
-	if unit.TimeoutSeconds <= 0 {
-		return fmt.Errorf("the unit needs a positive timeoutSeconds")
-	}
-	if unit.Directory != "" && !filepath.IsLocal(filepath.FromSlash(unit.Directory)) {
-		return fmt.Errorf("directory %q isn't inside the workspace", unit.Directory)
-	}
-	for name := range unit.Environment {
-		if !environmentNamePattern.MatchString(name) {
-			return fmt.Errorf("environment variable name %q isn't a plain name", name)
-		}
-	}
-	for _, input := range unit.Inputs {
-		if !filepath.IsLocal(filepath.FromSlash(input.Path)) {
-			return fmt.Errorf("input path %q isn't inside the workspace", input.Path)
-		}
-		if !sha256Pattern.MatchString(input.Sha256) {
-			return fmt.Errorf("input %s: sha256 must be 64 lowercase hex digits", input.Path)
-		}
-		switch input.Archive {
-		case "":
-			if _, err := parseMode(input.Mode); err != nil {
-				return fmt.Errorf("input %s: %w", input.Path, err)
-			}
-		case "tar":
-			if input.Mode != "" {
-				return fmt.Errorf("input %s: a tar archive's entries carry their own modes, so mode doesn't apply", input.Path)
-			}
-		default:
-			return fmt.Errorf("input %s: archive %q isn't tar", input.Path, input.Archive)
-		}
-	}
-	for _, output := range unit.Outputs {
-		if !fs.ValidPath(output.Glob) || output.Glob == "." {
-			return fmt.Errorf("output glob %q isn't a path inside the workspace", output.Glob)
-		}
-		if _, err := filepath.Match(output.Glob, ""); err != nil {
-			return fmt.Errorf("output glob %q: %w", output.Glob, err)
-		}
-	}
-	if (len(unit.Inputs) > 0 || len(unit.Outputs) > 0) && (unit.Store == nil || unit.Store.Url == "") {
-		return fmt.Errorf("the unit has inputs or outputs but no store")
-	}
-	for _, endpoint := range []*protocol.Endpoint{unit.Store, unit.Wire} {
-		if endpoint == nil {
-			continue
-		}
-		parsed, err := url.Parse(endpoint.Url)
-		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
-			return fmt.Errorf("endpoint %q isn't an http or https url", endpoint.Url)
-		}
-	}
-	return nil
-}
-
-// parseMode reads an input's octal mode. Empty means 0644; setuid, setgid and sticky bits are refused.
-func parseMode(text string) (os.FileMode, error) {
-	if text == "" {
-		return 0o644, nil
-	}
-	value, err := strconv.ParseUint(text, 8, 32)
-	if err != nil || value > 0o777 {
-		return 0, fmt.Errorf("mode %q isn't an octal permission between 0 and 777", text)
-	}
-	return os.FileMode(value), nil
 }

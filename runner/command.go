@@ -172,14 +172,14 @@ waiting:
 		stdoutReader.Close()
 		stderrReader.Close()
 		<-readersDone
-		run.fail("run", fmt.Errorf("a process outside the unit's group held its output open %v after the command exited; stopped reading", run.options.OutputGrace))
+		run.fail(protocol.PhaseRun, fmt.Errorf("a process outside the unit's group held its output open %v after the command exited; stopped reading", run.options.OutputGrace))
 	}
 	stdoutReader.Close()
 	stderrReader.Close()
 	for _, readError := range readErrors {
 		if readError != nil && !errors.Is(readError, os.ErrClosed) {
 			outcome.readFailed = true
-			run.fail("run", fmt.Errorf("reading the command's output: %w", readError))
+			run.fail(protocol.PhaseRun, fmt.Errorf("reading the command's output: %w", readError))
 		}
 	}
 

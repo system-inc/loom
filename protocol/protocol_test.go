@@ -1,7 +1,11 @@
 package protocol
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -207,5 +211,205 @@ func TestTokenVector(t *testing.T) {
 	}
 	if _, err := MintToken(secret, TokenClaims{Run: "r", Scope: "admin", Expires: 1}); err == nil {
 		t.Error("unknown scope minted")
+	}
+}
+
+func TestVerdictIsLowercaseWithEmptyListsAsArrays(t *testing.T) {
+	for _, verdict := range []Verdict{{Status: "green"}, Decide("r", []string{"a"}, events("r", map[string]string{"a": StatusPassed}, []string{"a"}))} {
+		text, err := json.Marshal(verdict)
+		if err != nil || string(text) != `{"status":"green","failed":[],"problems":[]}` {
+			t.Fatalf("marshalled %s (%v)", text, err)
+		}
+	}
+	var back Verdict
+	if err := Decode(strings.NewReader(`{"status":"red","failed":["b"],"problems":[]}`), &back); err != nil || back.Failed[0] != "b" {
+		t.Fatalf("decoded %+v (%v)", back, err)
+	}
+}
+
+func TestPlanOfNamesEveryUnitInPlanOrder(t *testing.T) {
+	plan, err := Expand(readJob(t, "../examples/adamic-gate.job.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := json.Marshal(PlanOf(plan))
+	if err != nil || !strings.HasPrefix(string(text), `{"units":["build","tests[shard=0]",`) {
+		t.Fatalf("plan body %s (%v)", text, err)
+	}
+}
+
+// A zero is left off the line and reads back as zero: the rule viewers rely on.
+func TestZeroFieldsAreLeftOffAndReadBackAsZero(t *testing.T) {
+	zero := 0
+	for _, event := range []Event{
+		{Run: "r", Unit: "a", Type: "output", Stream: "stdout"},
+		{Run: "r", Unit: "a", Type: "uploaded", Path: "empty", Sha256: strings.Repeat("e", 64)},
+		{Run: "r", Unit: "a", Type: "exit", Code: &zero},
+	} {
+		text, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, absent := range []string{`"text"`, `"bytes"`, `"wallSeconds"`} {
+			if strings.Contains(string(text), absent) {
+				t.Errorf("%s carries %s", text, absent)
+			}
+		}
+		if event.Type == "exit" && !strings.Contains(string(text), `"code":0`) {
+			t.Errorf("exit code 0 was dropped: %s", text)
+		}
+		var back Event
+		if err := Decode(strings.NewReader(string(text)), &back); err != nil || back.Text != "" || back.Bytes != 0 || back.WallSeconds != 0 {
+			t.Errorf("read back %+v (%v)", back, err)
+		}
+	}
+}
+
+func TestCheckUnitRefusesWhatARunnerCouldOnlyRunWrongly(t *testing.T) {
+	good := func() Unit {
+		return Unit{Run: "r-1.a_b", Unit: "tests[shard=0]", Argv: []string{"true"}, TimeoutSeconds: 1,
+			Inputs:  []Input{{Path: "bin/x", Sha256: strings.Repeat("a", 64), Mode: "755"}},
+			Outputs: []Output{{Glob: "out/*.json"}}, Store: &Endpoint{Url: "https://wire.example/blobs"}}
+	}
+	if err := CheckUnit(good()); err != nil {
+		t.Fatalf("the good unit is refused: %v", err)
+	}
+	cases := map[string]func(*Unit){
+		"no run":            func(u *Unit) { u.Run = "" },
+		"run with a slash":  func(u *Unit) { u.Run = "a/b" },
+		"run starting dot":  func(u *Unit) { u.Run = ".a" },
+		"run too long":      func(u *Unit) { u.Run = strings.Repeat("r", 129) },
+		"no unit":           func(u *Unit) { u.Unit = "" },
+		"unit too long":     func(u *Unit) { u.Unit = strings.Repeat("u", MaximumUnitIdLength+1) },
+		"no argv":           func(u *Unit) { u.Argv = nil },
+		"no timeout":        func(u *Unit) { u.TimeoutSeconds = 0 },
+		"directory escapes": func(u *Unit) { u.Directory = "../x" },
+		"bad variable name": func(u *Unit) { u.Environment = map[string]string{"A=B": "c"} },
+		"input escapes":     func(u *Unit) { u.Inputs[0].Path = "/etc/passwd" },
+		"bad hash":          func(u *Unit) { u.Inputs[0].Sha256 = "abc" },
+		"setuid mode":       func(u *Unit) { u.Inputs[0].Mode = "4755" },
+		"tar with a mode":   func(u *Unit) { u.Inputs[0].Archive = "tar" },
+		"output escapes":    func(u *Unit) { u.Outputs[0].Glob = "../x" },
+		"no store":          func(u *Unit) { u.Store = nil },
+		"store not http":    func(u *Unit) { u.Store = &Endpoint{Url: "file:///tmp"} },
+	}
+	for name, breakIt := range cases {
+		unit := good()
+		breakIt(&unit)
+		if err := CheckUnit(unit); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if err := CheckUnit(Unit{Run: strings.Repeat("r", 128), Unit: "a", Argv: []string{"true"}, TimeoutSeconds: 1}); err != nil {
+		t.Errorf("a 128-character run id is refused: %v", err)
+	}
+}
+
+// Signs arbitrary claim bytes, to show the claims check stands on its own behind a good signature.
+func signedClaims(secret []byte, payload string) string {
+	first := encoding.EncodeToString([]byte(payload))
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(first))
+	return first + "." + encoding.EncodeToString(mac.Sum(nil))
+}
+
+func TestVerifyTokenRefusesWellSignedClaimsTheWorkerWouldRefuse(t *testing.T) {
+	secret := []byte("loom-test-secret")
+	now := time.Unix(1791486000, 0)
+	if _, err := VerifyToken(secret, signedClaims(secret, `{"run":"r","scope":"viewer","expires":4102444800}`), now); err != nil {
+		t.Fatalf("the good claims are refused: %v", err)
+	}
+	for _, payload := range []string{
+		`{"Run":"r","scope":"viewer","expires":4102444800}`,
+		`{"run":"r","SCOPE":"viewer","expires":4102444800}`,
+		`{"run":"r","scope":"viewer","Expires":4102444800}`,
+		`{"run":"r","Run":"q","scope":"viewer","expires":4102444800}`,
+		`{"run":"","scope":"viewer","expires":4102444800}`,
+		`{"run":"r","scope":"admin","expires":4102444800}`,
+		`{"run":"r","scope":"viewer"}`,
+		`{"run":"r","scope":"viewer","expires":4102444800,"extra":1}`,
+		`{"run":"r","scope":"viewer","expires":0}`,
+	} {
+		if _, err := VerifyToken(secret, signedClaims(secret, payload), now); err == nil {
+			t.Errorf("accepted %s", payload)
+		}
+	}
+	if _, err := MintToken(secret, TokenClaims{Run: "a/b", Scope: ScopeRunner, Expires: 1}); err == nil {
+		t.Error("minted a token for a run id the wire refuses")
+	}
+}
+
+func TestReadTokenSecretSignsTheTrimmedTextNotDecodedBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "token-secret")
+	if err := os.WriteFile(path, []byte("6c6f6f6d\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := ReadTokenSecret(path)
+	if err != nil || string(secret) != "6c6f6f6d" {
+		t.Fatalf("read %q (%v)", secret, err)
+	}
+	if err := os.WriteFile(path, []byte(" \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadTokenSecret(path); err == nil {
+		t.Error("an empty secret was read")
+	}
+}
+
+// The events the zero rule and the error phases produce, as Go marshals them. The Worker's tests post this
+// same file (wire/test/Contract.test.ts), so a change on either side that breaks the other fails a test.
+func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
+	zero := 0
+	at := func(sequence int) string {
+		return time.Unix(1791486000, int64(sequence)*int64(time.Millisecond)).UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	}
+	var fixture []Event
+	add := func(unit string, event Event) {
+		event.Run, event.Unit = "r-fixture", unit
+		for _, existing := range fixture {
+			if existing.Unit == unit {
+				event.Sequence++
+			}
+		}
+		event.Time = at(event.Sequence)
+		fixture = append(fixture, event)
+	}
+	add("a", Event{Type: "started", Machine: "box", RunnerVersion: "v0-dev", Cpus: 4, MemoryMegabytes: 16384})
+	add("a", Event{Type: "output", Stream: "stdout"})
+	add("a", Event{Type: "output", Stream: "stderr", Text: "�", Replaced: true})
+	add("a", Event{Type: "error", Phase: PhaseWire, Message: "posting to the wire failed, retrying"})
+	add("a", Event{Type: "exit", Code: &zero})
+	add("a", Event{Type: "uploaded", Path: "empty.txt", Sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"})
+	add("a", Event{Type: "finished", Status: StatusPassed})
+	add("tests[shard=0]", Event{Type: "started", Machine: "box", RunnerVersion: "v0-dev", Cpus: 4, MemoryMegabytes: 16384,
+		InputHashes: map[string]string{"bin/x": strings.Repeat("a", 64)}})
+	add("tests[shard=0]", Event{Type: "exit", Signal: "SIGTERM", TimedOut: true, WallSeconds: 600.002, UserSeconds: 1.5})
+	add("tests[shard=0]", Event{Type: "error", Phase: PhaseRun, Message: "a process outside the unit's group held its output open 2s after the command exited; stopped reading"})
+	add("tests[shard=0]", Event{Type: "finished", Status: StatusFailed})
+
+	var written strings.Builder
+	for _, event := range fixture {
+		text, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written.Write(text)
+		written.WriteByte('\n')
+	}
+	path := "testdata/events.jsonl"
+	if os.Getenv("LOOM_WRITE_FIXTURES") == "1" {
+		if err := os.WriteFile(path, []byte(written.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(held) != written.String() {
+		t.Fatalf("%s no longer matches what Go writes; rerun with LOOM_WRITE_FIXTURES=1 if the change is meant:\n%s", path, written.String())
+	}
+	if verdict := Decide("r-fixture", []string{"a", "tests[shard=0]"}, fixture); verdict.Status != "red" || verdict.Failed[0] != "tests[shard=0]" {
+		t.Fatalf("the fixture decides %+v", verdict)
 	}
 }

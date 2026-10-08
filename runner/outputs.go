@@ -26,14 +26,14 @@ func (run *unitRun) uploadOutputs(runContext context.Context) string {
 	status := protocol.StatusPassed
 	workspace, err := filepath.EvalSymlinks(run.workspace)
 	if err != nil {
-		run.fail("upload", err)
+		run.fail(protocol.PhaseUpload, err)
 		return protocol.StatusBroken
 	}
 	uploaded := map[string]bool{}
 	for _, output := range run.unit.Outputs {
 		matches, err := fs.Glob(os.DirFS(workspace), output.Glob)
 		if err != nil {
-			run.fail("upload", fmt.Errorf("output glob %q: %w", output.Glob, err))
+			run.fail(protocol.PhaseUpload, fmt.Errorf("output glob %q: %w", output.Glob, err))
 			status = worse(status, protocol.StatusFailed)
 			continue
 		}
@@ -41,12 +41,12 @@ func (run *unitRun) uploadOutputs(runContext context.Context) string {
 		for _, match := range matches {
 			resolved, err := filepath.EvalSymlinks(filepath.Join(workspace, filepath.FromSlash(match)))
 			if err != nil {
-				run.fail("upload", fmt.Errorf("output %s: %w", match, err))
+				run.fail(protocol.PhaseUpload, fmt.Errorf("output %s: %w", match, err))
 				status = worse(status, protocol.StatusFailed)
 				continue
 			}
 			if !inside(workspace, resolved) {
-				run.fail("upload", fmt.Errorf("refused: output %s resolves to %s, outside the workspace", match, resolved))
+				run.fail(protocol.PhaseUpload, fmt.Errorf("refused: output %s resolves to %s, outside the workspace", match, resolved))
 				status = worse(status, protocol.StatusFailed)
 				continue
 			}
@@ -64,14 +64,14 @@ func (run *unitRun) uploadOutputs(runContext context.Context) string {
 				err = run.uploadBlob(runContext, hash, resolved, size)
 			}
 			if err != nil {
-				run.fail("upload", fmt.Errorf("output %s: %w", match, err))
+				run.fail(protocol.PhaseUpload, fmt.Errorf("output %s: %w", match, err))
 				status = worse(status, protocol.StatusBroken)
 				continue
 			}
 			run.emitter.emit(protocol.Event{Type: "uploaded", Path: match, Sha256: hash, Bytes: size})
 		}
 		if files == 0 {
-			run.fail("upload", fmt.Errorf("output glob %q matched no file", output.Glob))
+			run.fail(protocol.PhaseUpload, fmt.Errorf("output glob %q matched no file", output.Glob))
 			status = worse(status, protocol.StatusFailed)
 		}
 	}

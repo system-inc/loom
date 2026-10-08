@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/system-inc/loom/protocol"
 )
 
 // storeAttempts is how many times a GET or PUT to the store is tried before the unit is broken.
@@ -126,7 +128,7 @@ func storeUrl(store string, hash string) string {
 // placeFile copies a verified blob to path in the workspace with the input's mode. An input never
 // replaces a file already there.
 func placeFile(workspace *os.Root, path string, modeText string, blob string) error {
-	mode, err := parseMode(modeText)
+	mode, err := protocol.ParseMode(modeText)
 	if err != nil {
 		return err
 	}
