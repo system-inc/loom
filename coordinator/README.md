@@ -22,3 +22,9 @@ The cache: a unit marked `"cache": true` is looked up by `protocol.CacheKey` bef
 The runner: built from this checkout for each box's platform, named for its commit (`git-<sha12>`, plus a hash of any uncommitted change to the Go module), installed at `~/.loom/bin/loom-runner-<version>` on the box. A version reaches a second box only after a green run on its first (`~/.loom/rollout.tsv`). Since the version is the whole module's, a new coordinator is held to the same law: its first run goes to one box.
 
 `LOOM_SSH_BOX=<box> go test -run SSHMachineOnARealBox ./coordinator/` proves the ssh path on a real box.
+
+## The board's other commands
+
+- `loom board` prints the board's address with a fresh board token after the `#`.
+- `loom gate-lines` reads what Adamic's gate is doing from its own files and posts it to the board every 3 s (docs/protocol.md, "The gate's lines"). On Kirk's Mac it runs as the LaunchAgent `com.loom.gate-lines`: `cmd/loom/com.loom.gate-lines.plist`, copied to ~/Library/LaunchAgents, running ~/.loom/bin/loom (`go build -o ~/.loom/bin/loom ./cmd/loom`), loaded with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.loom.gate-lines.plist`, logging to ~/.loom/gate-lines.log.
+- `loom top` draws the same lines in a terminal, redrawn every second.

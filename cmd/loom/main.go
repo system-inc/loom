@@ -38,6 +38,7 @@ const usage = `usage:
   loom run [--uncached] [--local <slots> | --slots <file>] [--record <file>] [--wire <url>] <job.json>
   loom board [--days <n>] [--wire <url>]
   loom gate-lines [--once] [--interval <duration>] [--wire <url>]
+  loom top [--once] [--wire <url>]
 `
 
 func main() {
@@ -47,6 +48,9 @@ func main() {
 func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "board" {
 		return board(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "top" {
+		return top(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "gate-lines" {
 		return gateLines(arguments[1:], stdout, stderr)
