@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decodeBase64Url, encodeBase64Url, mintToken, verifyToken } from '../source/Token';
-import { call, freshRun, postEvents, TestSecret, token, unitEvents } from './Helpers';
+import { blobPath, call, freshRun, postEvents, postPlan, TestSecret, token, unitEvents, upload, verdictBody } from './Helpers';
 
 // The vector TestTokenVector pins in protocol/protocol_test.go.
 const vector =
@@ -115,6 +115,36 @@ describe('the Worker checks every token', function () {
         });
         expect(queried.status).toBe(401);
         expect((await postEvents(run, await token(run, 'runner'), events)).status).toBe(200);
+    });
+
+    it('refuses a board token on every run endpoint, the blobs and the cache', async function () {
+        // A board token names the run `board`, so the run named board is tried too: its scope is what refuses it.
+        for (const run of [freshRun(), 'board']) {
+            const board = await token(run, 'board');
+            const coordinator = await token(run, 'coordinator');
+            await postPlan(run, coordinator, ['a']);
+            const stored = await upload(run, coordinator, new TextEncoder().encode(`a blob of ${run}`));
+            const refused: [string, Promise<Response>][] = [
+                ['plan', call(`/runs/${run}/plan`, { method: 'POST', bearer: board, body: '{"units":["a"],"inputs":[]}' })],
+                ['events', postEvents(run, board, unitEvents(run, 'a'))],
+                ['verdict', call(`/runs/${run}/verdict`, { method: 'POST', bearer: board, body: verdictBody('green') })],
+                ['stream', call(`/runs/${run}/stream?token=${encodeURIComponent(board)}`, { headers: { Upgrade: 'websocket' } })],
+                ['stream by header', call(`/runs/${run}/stream`, { bearer: board, headers: { Upgrade: 'websocket' } })],
+                ['page', call(`/runs/${run}?token=${encodeURIComponent(board)}`)],
+                ['page by header', call(`/runs/${run}`, { bearer: board })],
+                ['blob GET', call(blobPath(run, stored.sha256), { bearer: board })],
+                ['blob GET by query', call(`${blobPath(run, stored.sha256)}?token=${encodeURIComponent(board)}`)],
+                ['blob HEAD', call(blobPath(run, stored.sha256), { method: 'HEAD', bearer: board })],
+                ['blob PUT', call(blobPath(run, stored.sha256), { method: 'PUT', bearer: board, body: `a blob of ${run}` })],
+                ['cache GET', call(`/cache/${'c'.repeat(64)}`, { bearer: board })],
+                ['cache PUT', call(`/cache/${'c'.repeat(64)}`, { method: 'PUT', bearer: board, body: '{}' })],
+            ];
+            for (const [what, answer] of refused) {
+                const response = await answer;
+                expect(response.status, `${what} on ${run}`).toBe(403);
+                await response.body?.cancel();
+            }
+        }
     });
 
     it('serves the live page to any scope of the run', async function () {

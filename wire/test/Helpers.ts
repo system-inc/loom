@@ -1,6 +1,7 @@
 // Shared test helpers: tokens signed with the pinned test secret, calls into the Worker, event lines and blobs.
 
 import { exports } from 'cloudflare:workers';
+import type { RunSummary, Snapshot } from '../source/Board';
 import { mintToken, type TokenScope } from '../source/Token';
 
 export const TestSecret = 'loom-test-secret';
@@ -127,4 +128,80 @@ export async function waitFor(condition: () => boolean, milliseconds = 3000): Pr
             setTimeout(resolve, 10);
         });
     }
+}
+
+// A run id the way coordinator.RunId writes one: the job, the start time and four random bytes in hex.
+export function datedRun(job: string): string {
+    const suffix = Array.from(crypto.getRandomValues(new Uint8Array(4)), function (byte) {
+        return byte.toString(16).padStart(2, '0');
+    }).join('');
+    return `${job}-20261008T200212-${suffix}`;
+}
+
+export function boardToken(expiresInSeconds = 3600): Promise<string> {
+    return token('board', 'board', expiresInSeconds);
+}
+
+export async function boardSnapshot(bearer: string): Promise<Snapshot> {
+    const response = await call('/board/snapshot', { bearer: bearer });
+    if (response.status !== 200) {
+        throw new Error(`snapshot refused: ${response.status} ${await response.text()}`);
+    }
+    return (await response.json()) as Snapshot;
+}
+
+// Polls the board's snapshot until the condition holds, since each run feeds the board from its alarm.
+export async function snapshotWhen(bearer: string, condition: (snapshot: Snapshot) => boolean, milliseconds = 3000): Promise<Snapshot> {
+    const deadline = Date.now() + milliseconds;
+    for (;;) {
+        const snapshot = await boardSnapshot(bearer);
+        if (condition(snapshot)) {
+            return snapshot;
+        }
+        if (Date.now() > deadline) {
+            throw new Error(`timed out waiting for the board; it holds ${JSON.stringify(snapshot)}`);
+        }
+        await new Promise(function (resolve) {
+            setTimeout(resolve, 20);
+        });
+    }
+}
+
+export function runOf(snapshot: Snapshot, run: string): RunSummary | undefined {
+    return snapshot.runs.find(function (summary) {
+        return summary.run === run;
+    });
+}
+
+// Waits until the board holds the run and the condition holds for its summary, and returns the summary.
+export async function boardRunWhen(bearer: string, run: string, condition: (summary: RunSummary) => boolean): Promise<RunSummary> {
+    const snapshot = await snapshotWhen(bearer, function (candidate) {
+        const summary = runOf(candidate, run);
+        return summary !== undefined && condition(summary);
+    });
+    return runOf(snapshot, run) as RunSummary;
+}
+
+// Opens the board's stream offering these subprotocols, the way the page does: "loom, token.<token>".
+export function boardStream(subprotocols: string | null, init: RequestInit & { bearer?: string } = {}): Promise<Response> {
+    const headers = new Headers(init.headers);
+    headers.set('Upgrade', 'websocket');
+    if (subprotocols !== null) {
+        headers.set('Sec-WebSocket-Protocol', subprotocols);
+    }
+    return call('/board/stream', { ...init, headers: headers });
+}
+
+export async function openBoard(bearer: string): Promise<Viewer & { response: Response }> {
+    const response = await boardStream(`loom, token.${bearer}`);
+    if (response.status !== 101 || response.webSocket === null) {
+        throw new Error(`board stream refused: ${response.status} ${await response.text()}`);
+    }
+    const socket = response.webSocket;
+    const viewer = { frames: [] as Viewer['frames'], socket: socket, response: response };
+    socket.addEventListener('message', function (message) {
+        viewer.frames.push(JSON.parse(String(message.data)));
+    });
+    socket.accept();
+    return viewer;
 }

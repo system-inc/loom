@@ -1,11 +1,13 @@
 // One Durable Object per run. It holds the run's plan, its ordered event log, the events waiting for a gap to
 // fill, the blobs the run has uploaded, and the verdict, all in the object's SQLite storage, and fans every
 // accepted event out to the run's viewers over hibernating WebSockets. The Worker has already checked the
-// token; this object trusts it, and decides which blobs that token's scope may reach.
+// token; this object trusts it, and decides which blobs that token's scope may reach. It also keeps each unit's
+// state for the board, and pushes the run's summary there from its alarm, never on a request's way out.
 
 import { DurableObject } from 'cloudflare:workers';
 import { Sha256Pattern } from './Blobs';
-import { canonicalJson, checkEventLine, MaximumUnitIdLength } from './Events';
+import { BoardName, jobOfRun, type ActiveUnit, type FailedUnit, type RunSummary } from './Board';
+import { canonicalJson, checkEventLine, MaximumUnitIdLength, type LoomEvent } from './Events';
 import { jsonResponse, readBodyText } from './Http';
 import { TokenScopes, type TokenScope } from './Token';
 
@@ -16,6 +18,11 @@ export const MaximumEventsBodyBytes = 16 * 1024 * 1024;
 export const MaximumEventLineBytes = 1024 * 1024;
 export const MaximumHeldEvents = 10_000;
 export const MaximumPlannedUnits = 10_000;
+// At most one push of the summary to the board per this many milliseconds, so a busy run feeds it twice a second.
+export const BoardPushMilliseconds = 500;
+export const BoardRetryMilliseconds = 2000;
+export const UnitLines = 5;
+export const BoardFailures = 20;
 
 const textEncoder = new TextEncoder();
 
@@ -75,6 +82,16 @@ export class RunObject extends DurableObject<Env> {
                 bytes INTEGER NOT NULL,
                 scope TEXT NOT NULL,
                 time TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS units (
+                unit TEXT PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'queued',
+                machine TEXT NOT NULL DEFAULT '',
+                since TEXT,
+                cached INTEGER NOT NULL DEFAULT 0,
+                lines TEXT NOT NULL DEFAULT '[]',
+                finishedAt TEXT,
+                finishedPosition INTEGER
             );
         `);
         context.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
@@ -148,8 +165,14 @@ export class RunObject extends DurableObject<Env> {
             for (const input of plan.inputs) {
                 this.sql.exec('INSERT INTO inputs (sha256) VALUES (?)', input);
             }
+            // Events may have come first, so a unit already seen keeps its state.
+            for (const unit of plan.units) {
+                this.sql.exec('INSERT INTO units (unit) VALUES (?) ON CONFLICT (unit) DO NOTHING', unit);
+            }
+            this.setFact('plannedAt', new Date().toISOString());
         });
         this.broadcast(planFrame(planText));
+        await this.scheduleBoardPush();
         return jsonResponse(201, { plan: 'set', ...counts });
     }
 
@@ -250,6 +273,9 @@ export class RunObject extends DurableObject<Env> {
         for (const frame of tally.frames) {
             this.broadcast(frame);
         }
+        if (tally.frames.length > 0) {
+            await this.scheduleBoardPush();
+        }
         const summary = {
             accepted: tally.accepted,
             released: tally.frames.length,
@@ -349,7 +375,53 @@ export class RunObject extends DurableObject<Env> {
             event.unit,
             event.sequence + 1,
         );
+        this.trackUnit(JSON.parse(event.line) as LoomEvent, position);
         return eventFrame(position, event.line);
+    }
+
+    // Moves the unit's board state on by one logged event, inside the batch's transaction. A unit nobody planned
+    // gets a row too, so the board shows what the wire was sent.
+    private trackUnit(logged: LoomEvent, position: number): void {
+        this.sql.exec('INSERT INTO units (unit) VALUES (?) ON CONFLICT (unit) DO NOTHING', logged.unit);
+        if (logged.type === 'started') {
+            this.sql.exec(
+                `UPDATE units SET status = 'running', machine = ?, since = ?
+                 WHERE unit = ? AND status IN ('queued', 'running')`,
+                typeof logged.machine === 'string' ? logged.machine : '',
+                logged.time,
+                logged.unit,
+            );
+        }
+        else if (logged.type === 'cached') {
+            // Served from the cache, never run: it goes from queued straight to its finished event.
+            this.sql.exec('UPDATE units SET cached = 1 WHERE unit = ?', logged.unit);
+        }
+        else if (logged.type === 'error' && logged.phase === 'place') {
+            // The coordinator took the unit off a box that dropped it; it waits to be placed again.
+            this.sql.exec(
+                "UPDATE units SET status = 'queued', machine = '', since = NULL WHERE unit = ? AND status = 'running'",
+                logged.unit,
+            );
+        }
+        else if (logged.type === 'output') {
+            const row = this.sql.exec<{ lines: string }>('SELECT lines FROM units WHERE unit = ?', logged.unit).one();
+            const lines = JSON.parse(row.lines) as string[];
+            lines.push(typeof logged.text === 'string' ? logged.text : '');
+            this.sql.exec(
+                'UPDATE units SET lines = ? WHERE unit = ?',
+                JSON.stringify(lines.slice(-UnitLines)),
+                logged.unit,
+            );
+        }
+        else if (logged.type === 'finished') {
+            this.sql.exec(
+                'UPDATE units SET status = ?, finishedAt = ?, finishedPosition = ? WHERE unit = ?',
+                logged.status as string,
+                logged.time,
+                position,
+                logged.unit,
+            );
+        }
     }
 
     // ---------- Verdict ----------
@@ -374,6 +446,7 @@ export class RunObject extends DurableObject<Env> {
         if (existing === null) {
             this.setFact('verdict', verdictText);
             this.broadcast(verdictFrame(verdictText));
+            await this.scheduleBoardPush();
         }
         // Archive once; a repeat of the same verdict retries an archive that failed.
         if (this.fact('archived') === null) {
@@ -488,6 +561,111 @@ export class RunObject extends DurableObject<Env> {
         }
     }
 
+    // ---------- Board ----------
+
+    // Marks the summary as owed to the board and makes sure an alarm will push it, no sooner than 500 ms after the
+    // last push. Only storage is touched here, so the request that changed the run answers without waiting on the
+    // board, and nothing here can fail that request.
+    private async scheduleBoardPush(): Promise<void> {
+        this.setFact('updatedAt', new Date().toISOString());
+        this.setFact('boardOwed', '1');
+        try {
+            if ((await this.ctx.storage.getAlarm()) === null) {
+                await this.ctx.storage.setAlarm(this.nextBoardPush());
+            }
+        }
+        catch {
+            // The next change sets the alarm again; the summary it pushes includes this one.
+        }
+    }
+
+    private nextBoardPush(): number {
+        return Math.max(Date.now(), Number(this.fact('boardPushedAt') ?? '0') + BoardPushMilliseconds);
+    }
+
+    // Pushes the summary when one is owed. A push that fails stays owed and is tried again on the next alarm.
+    override async alarm(): Promise<void> {
+        const run = this.fact('run');
+        if (run === null || this.fact('boardOwed') === null) {
+            return;
+        }
+        // Cleared before the push, so a change that lands while it is in flight is owed again.
+        this.deleteFact('boardOwed');
+        this.setFact('boardPushedAt', String(Date.now()));
+        try {
+            const board = this.env.Board.get(this.env.Board.idFromName(BoardName));
+            const response = await board.fetch('https://board/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(this.boardSummary(run)),
+            });
+            await response.body?.cancel();
+            if (!response.ok) {
+                throw new Error(`the board answered ${response.status}`);
+            }
+        }
+        catch {
+            this.setFact('boardOwed', '1');
+            await this.ctx.storage.setAlarm(Date.now() + BoardRetryMilliseconds);
+            return;
+        }
+        // A change during the push asked for an alarm while this one was running; make sure one is set.
+        if (this.fact('boardOwed') !== null) {
+            await this.ctx.storage.setAlarm(this.nextBoardPush());
+        }
+    }
+
+    // The run's summary as the board holds it (docs/protocol.md, The board), built from the units table.
+    private boardSummary(run: string): RunSummary {
+        const counts: Record<string, number> = {};
+        for (const row of this.sql.exec<{ status: string; count: number }>(
+            'SELECT status, COUNT(*) AS count FROM units GROUP BY status',
+        )) {
+            counts[row.status] = row.count;
+        }
+        const active: ActiveUnit[] = this.sql
+            .exec<{ unit: string; machine: string; since: string | null }>(
+                "SELECT unit, machine, since FROM units WHERE status = 'running' ORDER BY since, unit",
+            )
+            .toArray()
+            .map(function (row) {
+                return { unit: row.unit, machine: row.machine, since: row.since ?? '' };
+            });
+        const failures: FailedUnit[] = this.sql
+            .exec<{ unit: string; finishedAt: string | null; status: 'failed' | 'broken'; lines: string }>(
+                `SELECT unit, finishedAt, status, lines FROM units WHERE status IN ('failed', 'broken')
+                 ORDER BY finishedPosition DESC LIMIT ?`,
+                BoardFailures,
+            )
+            .toArray()
+            .map(function (row) {
+                return {
+                    unit: row.unit,
+                    at: row.finishedAt ?? '',
+                    status: row.status,
+                    lines: JSON.parse(row.lines) as string[],
+                };
+            });
+        const verdict = this.fact('verdict');
+        const cached = this.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM units WHERE cached = 1').one();
+        return {
+            run: run,
+            job: jobOfRun(run),
+            plannedAt: this.fact('plannedAt'),
+            updatedAt: this.fact('updatedAt') ?? new Date().toISOString(),
+            units: this.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM units').one().count,
+            queued: counts.queued ?? 0,
+            running: counts.running ?? 0,
+            passed: counts.passed ?? 0,
+            failed: counts.failed ?? 0,
+            broken: counts.broken ?? 0,
+            cached: cached.count,
+            verdict: verdict === null ? null : (JSON.parse(verdict) as Verdict).status,
+            active: active,
+            failures: failures,
+        };
+    }
+
     // ---------- Facts ----------
 
     private fact(name: string): string | null {
@@ -501,6 +679,10 @@ export class RunObject extends DurableObject<Env> {
             name,
             value,
         );
+    }
+
+    private deleteFact(name: string): void {
+        this.sql.exec('DELETE FROM facts WHERE name = ?', name);
     }
 }
 

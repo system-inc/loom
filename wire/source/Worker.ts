@@ -1,27 +1,50 @@
 // Loom's live wire: the endpoint table in docs/protocol.md. The Worker checks every token and hands run
-// work to that run's Durable Object. Blob bytes go straight to R2, but whether a token may reach a blob is
-// the run object's call, since it holds the plan's inputs and the run's uploads.
+// work to that run's Durable Object, and board work to the one board object. Blob bytes go straight to R2, but
+// whether a token may reach a blob is the run object's call, since it holds the plan's inputs and the run's uploads.
 
+import { BoardName, BoardSubprotocol } from './Board';
 import { getBlob, headBlob, putBlob, Sha256Pattern } from './Blobs';
 import { getCacheEntry, putCacheEntry } from './Cache';
 import { RunIdPattern } from './Events';
 import { jsonResponse } from './Http';
 import { renderLivePage } from './LivePage';
 import { RunHeader, ScopeHeader } from './RunObject';
-import { verifyToken, type TokenClaims, type TokenScope } from './Token';
+import { mintToken, verifyToken, type TokenClaims, type TokenScope } from './Token';
 
+export { Board } from './Board';
 export { RunObject } from './RunObject';
 
+// Every scope of a run. A board token is none of them: it watches the board and reaches no run endpoint.
 const anyScope: TokenScope[] = ['runner', 'viewer', 'coordinator'];
 const writerScopes: TokenScope[] = ['runner', 'coordinator'];
 const coordinatorScope: TokenScope[] = ['coordinator'];
 const viewerScope: TokenScope[] = ['viewer'];
+const boardScope: TokenScope[] = ['board'];
+const subprotocolTokenPrefix = 'token.';
 
 interface Grant {
     scopes: TokenScope[];
     // The scopes whose token may come as ?token=. The page and its WebSocket come from a browser, which can't
     // set an Authorization header, and so does a viewer's blob download link.
     queryScopes: TokenScope[];
+    // The board's WebSocket takes its token only as the subprotocol token.<token>, so it is never in a URL.
+    subprotocol?: boolean;
+}
+
+// The subprotocols a WebSocket request offers, in order.
+function offeredSubprotocols(request: Request): string[] {
+    const header = request.headers.get('Sec-WebSocket-Protocol');
+    if (header === null) {
+        return [];
+    }
+    return header
+        .split(',')
+        .map(function (protocol) {
+            return protocol.trim();
+        })
+        .filter(function (protocol) {
+            return protocol !== '';
+        });
 }
 
 // Finds the token, checks it, and checks its scope and run. Returns the claims or the refusal.
@@ -38,7 +61,13 @@ async function authorize(
     let token: string | null = null;
     let fromQuery = false;
     const authorization = request.headers.get('Authorization');
-    if (authorization !== null) {
+    if (grant.subprotocol === true) {
+        const offered = offeredSubprotocols(request).find(function (protocol) {
+            return protocol.startsWith(subprotocolTokenPrefix);
+        });
+        token = offered === undefined ? null : offered.slice(subprotocolTokenPrefix.length);
+    }
+    else if (authorization !== null) {
         const match = /^Bearer\s+(\S+)$/i.exec(authorization);
         if (match === null) {
             return jsonResponse(401, { error: 'Authorization must be Bearer <token>' });
@@ -197,6 +226,89 @@ async function handleBlob(request: Request, environment: Env, run: string, sha25
     return put.response;
 }
 
+function boardObject(environment: Env): DurableObjectStub {
+    return environment.Board.get(environment.Board.idFromName(BoardName));
+}
+
+// Forwards to the board object at a fixed operation; the Worker names it, so the outside can't reach /run, the
+// door each run's object pushes its summary through.
+function forwardToBoard(environment: Env, operation: string, request: Request): Promise<Response> {
+    const headers = new Headers(request.headers);
+    headers.delete('Authorization');
+    if (headers.has('Sec-WebSocket-Protocol')) {
+        // The token has done its work here; the board object only needs to know what to answer.
+        headers.set('Sec-WebSocket-Protocol', BoardSubprotocol);
+    }
+    const inner = new Request(`https://board/${operation}`, {
+        method: request.method,
+        headers: headers,
+        body: request.body,
+    });
+    return boardObject(environment).fetch(inner);
+}
+
+// The board: its stream and snapshot for a board token, the machines from any run's coordinator.
+async function handleBoard(request: Request, environment: Env, operation: string): Promise<Response> {
+    if (operation === 'stream') {
+        if (request.method !== 'GET') {
+            return methodNotAllowed('GET');
+        }
+        const claims = await authorize(request, environment, BoardName, {
+            scopes: boardScope,
+            queryScopes: [],
+            subprotocol: true,
+        });
+        if (claims instanceof Response) {
+            return claims;
+        }
+        // The answer must name a subprotocol the browser offered, and the page offers loom beside its token.
+        if (!offeredSubprotocols(request).includes(BoardSubprotocol)) {
+            return jsonResponse(400, { error: `offer the ${BoardSubprotocol} subprotocol beside the token` });
+        }
+        return forwardToBoard(environment, 'stream', request);
+    }
+    if (operation === 'snapshot') {
+        if (request.method !== 'GET') {
+            return methodNotAllowed('GET');
+        }
+        const claims = await authorize(request, environment, BoardName, { scopes: boardScope, queryScopes: [] });
+        if (claims instanceof Response) {
+            return claims;
+        }
+        return forwardToBoard(environment, 'snapshot', request);
+    }
+    if (operation === 'machines') {
+        if (request.method !== 'POST') {
+            return methodNotAllowed('POST');
+        }
+        // Like the cache, the machines belong to no one run, so any run's coordinator token posts them.
+        const claims = await authorize(request, environment, null, { scopes: coordinatorScope, queryScopes: [] });
+        if (claims instanceof Response) {
+            return claims;
+        }
+        return forwardToBoard(environment, 'machines', request);
+    }
+    return jsonResponse(404, { error: 'no such endpoint' });
+}
+
+// A board token asks for a viewer token to one run, to open that run's page and stream. It expires when the board
+// token does, so it can never outlive the token that asked for it.
+async function handleBoardViewer(request: Request, environment: Env, run: string): Promise<Response> {
+    if (request.method !== 'POST') {
+        return methodNotAllowed('POST');
+    }
+    const claims = await authorize(request, environment, BoardName, { scopes: boardScope, queryScopes: [] });
+    if (claims instanceof Response) {
+        return claims;
+    }
+    const viewer = await mintToken(environment.LOOM_TOKEN_SECRET, {
+        run: run,
+        scope: 'viewer',
+        expires: claims.expires,
+    });
+    return jsonResponse(200, { token: viewer });
+}
+
 // The cache belongs to no one run, so any run's coordinator token reaches it.
 async function handleCache(request: Request, environment: Env, key: string): Promise<Response> {
     if (request.method !== 'GET' && request.method !== 'PUT') {
@@ -234,6 +346,18 @@ export default {
                 return jsonResponse(400, { error: 'a run id is letters, digits, dot, dash and underscore' });
             }
             return handleRun(request, environment, run, runMatch[2] ?? '');
+        }
+        const boardViewerMatch = /^\/board\/runs\/([^/]+)\/viewer$/.exec(path);
+        if (boardViewerMatch !== null) {
+            const run = boardViewerMatch[1] ?? '';
+            if (!RunIdPattern.test(run)) {
+                return jsonResponse(400, { error: 'a run id is letters, digits, dot, dash and underscore' });
+            }
+            return handleBoardViewer(request, environment, run);
+        }
+        const boardMatch = /^\/board\/([a-z]+)$/.exec(path);
+        if (boardMatch !== null) {
+            return handleBoard(request, environment, boardMatch[1] ?? '');
         }
         const cacheMatch = /^\/cache\/([^/]+)$/.exec(path);
         if (cacheMatch !== null) {

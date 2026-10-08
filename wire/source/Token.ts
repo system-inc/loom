@@ -2,9 +2,10 @@
 // <base64url(claims JSON)>.<base64url(HMAC-SHA256(secret, first part))>, base64url without padding.
 // Pure Web Crypto, so the Worker, the tests and the smoke script under Node all sign the same bytes.
 
-// The scope strings are the protocol's own spelling, so they stay lowercase here.
-export type TokenScope = 'runner' | 'viewer' | 'coordinator';
-export const TokenScopes: readonly TokenScope[] = ['runner', 'viewer', 'coordinator'];
+// The scope strings are the protocol's own spelling, so they stay lowercase here. A board token's run is
+// `board`, and it reaches only the board's endpoints.
+export type TokenScope = 'runner' | 'viewer' | 'coordinator' | 'board';
+export const TokenScopes: readonly TokenScope[] = ['runner', 'viewer', 'coordinator', 'board'];
 
 export interface TokenClaims {
     run: string;

@@ -152,7 +152,7 @@ A run's summary, as the board holds it:
 
 A machine, as the coordinator posts it and the board adds to: `{"name": "home", "cores": 64, "slots": 3}`, plus `running`, the number of active units on it across every run.
 
-The stream (`GET /board/stream`, WebSocket) sends `{"kind": "snapshot", "runs": [...], "machines": [...], "pulse": {...}}` first, then `{"kind": "run", "run": {...}}` and `{"kind": "machines", "machines": [...]}` as they change, each followed by `{"kind": "pulse", ...}`: units running now, units finished in the last minute, units queued, and the longest-running unit (`unit`, `run`, `machine`, `since`). The page passes its token as the WebSocket subprotocol `token.<token>` beside `loom`, so the token is never in a URL; the page's own address carries it after `#`, which a browser never sends.
+The stream (`GET /board/stream`, WebSocket) sends `{"kind": "snapshot", "runs": [...], "machines": [...], "pulse": {...}}` first, then `{"kind": "run", "run": {...}}` and `{"kind": "machines", "machines": [...]}` as they change, then one `{"kind": "pulse", "running", "finishedLastMinute", "queued", "longest"}` after each batch of changes: units running now, units finished in the last minute, units queued, and the longest-running unit (`{"unit", "run", "machine", "since"}`, or null). A run with its verdict counts toward no pulse or machine. `passed` includes cached units, so queued, running, passed, failed and broken add up to `units`. The page passes its token as the WebSocket subprotocol `token.<token>` beside `loom`, so the token is never in a URL; the page's own address carries it after `#`, which a browser never sends.
 
 ## The wire's endpoints
 
