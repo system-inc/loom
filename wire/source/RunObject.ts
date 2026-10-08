@@ -23,6 +23,9 @@ export const BoardPushMilliseconds = 500;
 export const BoardRetryMilliseconds = 2000;
 export const UnitLines = 5;
 export const BoardFailures = 20;
+// GET /runs/<run>/events answers at most this many events, and waits this long for the first when there are none.
+export const EventsPageSize = 1000;
+export const EventsWaitMilliseconds = 20_000;
 
 const textEncoder = new TextEncoder();
 
@@ -55,6 +58,11 @@ class HeldLimitError extends Error {}
 
 export class RunObject extends DurableObject<Env> {
     private readonly sql: SqlStorage;
+    // The coordinator's reads of the log waiting for an event, each woken when events are appended. They live in
+    // memory: an evicted object drops them, and the coordinator asks again.
+    private readonly eventWaiters: (() => void)[] = [];
+    // How long such a read waits. Production keeps EventsWaitMilliseconds; a test shortens it on its own run.
+    eventsWaitMilliseconds = EventsWaitMilliseconds;
 
     constructor(context: DurableObjectState, environment: Env) {
         super(context, environment);
@@ -114,7 +122,7 @@ export class RunObject extends DurableObject<Env> {
             return this.acceptPlan(request);
         }
         if (operation === '/events') {
-            return this.acceptEvents(request, run);
+            return request.method === 'GET' ? this.readEvents(request) : this.acceptEvents(request, run);
         }
         if (operation === '/verdict') {
             return this.acceptVerdict(request, run);
@@ -274,6 +282,9 @@ export class RunObject extends DurableObject<Env> {
             this.broadcast(frame);
         }
         if (tally.frames.length > 0) {
+            for (const wake of this.eventWaiters.splice(0)) {
+                wake();
+            }
             await this.scheduleBoardPush();
         }
         const summary = {
@@ -501,6 +512,56 @@ export class RunObject extends DurableObject<Env> {
             httpMetadata: { contentType: 'application/x-ndjson' },
         });
         this.setFact('archived', new Date().toISOString());
+    }
+
+    // ---------- Reading the log ----------
+
+    // The log's events after a position as JSON lines, {"position", "event"} each, at most EventsPageSize of them.
+    // When there are none yet, waits for the first append (or the timeout) and reads again, so the coordinator
+    // follows a pool unit's stream by plain HTTP. Nothing to say after the wait is an empty 200.
+    private async readEvents(request: Request): Promise<Response> {
+        const afterText = new URL(request.url).searchParams.get('after');
+        if (afterText !== null && !/^\d{1,15}$/.test(afterText)) {
+            return jsonResponse(400, { error: 'after is a position, a whole number from 0' });
+        }
+        const after = afterText === null ? 0 : Number(afterText);
+        let lines = this.eventLinesAfter(after);
+        if (lines.length === 0) {
+            await this.waitForEvents();
+            lines = this.eventLinesAfter(after);
+        }
+        return new Response(lines.join(''), {
+            headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store' },
+        });
+    }
+
+    private eventLinesAfter(after: number): string[] {
+        return this.sql
+            .exec<{ position: number; line: string }>(
+                'SELECT position, line FROM events WHERE position > ? ORDER BY position LIMIT ?',
+                after,
+                EventsPageSize,
+            )
+            .toArray()
+            .map(function (row) {
+                return `{"position":${row.position},"event":${row.line}}\n`;
+            });
+    }
+
+    private waitForEvents(): Promise<void> {
+        return new Promise<void>((resolve) => {
+            const waiters = this.eventWaiters;
+            const wake = function (): void {
+                clearTimeout(timer);
+                const index = waiters.indexOf(wake);
+                if (index >= 0) {
+                    waiters.splice(index, 1);
+                }
+                resolve();
+            };
+            const timer = setTimeout(wake, this.eventsWaitMilliseconds);
+            waiters.push(wake);
+        });
     }
 
     // ---------- Stream ----------

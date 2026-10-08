@@ -3,9 +3,10 @@
 // Pure Web Crypto, so the Worker, the tests and the smoke script under Node all sign the same bytes.
 
 // The scope strings are the protocol's own spelling, so they stay lowercase here. A board token's run is
-// `board`, and it reaches only the board's endpoints.
-export type TokenScope = 'runner' | 'viewer' | 'coordinator' | 'board';
-export const TokenScopes: readonly TokenScope[] = ['runner', 'viewer', 'coordinator', 'board'];
+// `board`, and it reaches only the board's endpoints. A pool token's run is the pool's name (a run id the wire
+// takes), and it reaches only that pool's next.
+export type TokenScope = 'runner' | 'viewer' | 'coordinator' | 'board' | 'pool';
+export const TokenScopes: readonly TokenScope[] = ['runner', 'viewer', 'coordinator', 'board', 'pool'];
 
 export interface TokenClaims {
     run: string;

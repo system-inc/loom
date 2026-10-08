@@ -1,5 +1,6 @@
 // Loom's live wire: the endpoint table in docs/protocol.md. The Worker checks every token and hands run
-// work to that run's Durable Object, and board work to the one board object. Blob bytes go straight to R2, but
+// work to that run's Durable Object, board work to the one board object, and pool work to that pool's object.
+// Blob bytes go straight to R2, but
 // whether a token may reach a blob is the run object's call, since it holds the plan's inputs and the run's uploads.
 
 import { BoardName, BoardSubprotocol } from './Board';
@@ -13,14 +14,18 @@ import { RunHeader, ScopeHeader } from './RunObject';
 import { mintToken, verifyToken, type TokenClaims, type TokenScope } from './Token';
 
 export { Board } from './Board';
+export { Pool } from './Pool';
 export { RunObject } from './RunObject';
 
-// Every scope of a run. A board token is none of them: it watches the board and reaches no run endpoint.
+// Every scope of a run. A board token is none of them: it watches the board and reaches no run endpoint. Nor is a
+// pool token, which reaches its own pool's next and nothing else.
 const anyScope: TokenScope[] = ['runner', 'viewer', 'coordinator'];
 const writerScopes: TokenScope[] = ['runner', 'coordinator'];
 const coordinatorScope: TokenScope[] = ['coordinator'];
 const viewerScope: TokenScope[] = ['viewer'];
 const boardScope: TokenScope[] = ['board'];
+const poolScope: TokenScope[] = ['pool'];
+const watcherScopes: TokenScope[] = ['coordinator', 'board'];
 const subprotocolTokenPrefix = 'token.';
 
 interface Grant {
@@ -180,6 +185,14 @@ async function handleRun(request: Request, environment: Env, run: string, operat
         }
         return forward(environment, run, 'stream', request);
     }
+    if (operation === 'events' && request.method === 'GET') {
+        // The coordinator follows a pool unit's stream here, by plain HTTP, after a position it has read up to.
+        const claims = await authorize(request, environment, run, { scopes: coordinatorScope, queryScopes: [] });
+        if (claims instanceof Response) {
+            return claims;
+        }
+        return forward(environment, run, 'events', request);
+    }
     const grants: Record<string, TokenScope[]> = {
         plan: coordinatorScope,
         events: writerScopes,
@@ -190,7 +203,7 @@ async function handleRun(request: Request, environment: Env, run: string, operat
         return jsonResponse(404, { error: 'no such endpoint' });
     }
     if (request.method !== 'POST') {
-        return methodNotAllowed('POST');
+        return methodNotAllowed(operation === 'events' ? 'GET, POST' : 'POST');
     }
     const claims = await authorize(request, environment, run, { scopes: scopes, queryScopes: [] });
     if (claims instanceof Response) {
@@ -327,6 +340,48 @@ async function handleBoardViewer(request: Request, environment: Env, run: string
     return jsonResponse(200, { token: viewer });
 }
 
+// Forwards to the pool's object at a fixed operation, so the outside names only the endpoints below.
+function forwardToPool(environment: Env, pool: string, operation: string, request: Request): Promise<Response> {
+    const headers = new Headers(request.headers);
+    headers.delete('Authorization');
+    const inner = new Request(`https://pool/${operation}`, {
+        method: request.method,
+        headers: headers,
+        body: request.body,
+    });
+    return environment.Pools.get(environment.Pools.idFromName(pool)).fetch(inner);
+}
+
+// A pool (docs/protocol.md, The pool). The units, the cancel and the pool's state belong to no one run, so any
+// run's coordinator token reaches them, and a board token may watch. Only the pool's own pool token asks for next.
+async function handlePool(request: Request, environment: Env, pool: string, operation: string): Promise<Response> {
+    if (operation === '') {
+        if (request.method !== 'GET') {
+            return methodNotAllowed('GET');
+        }
+        const claims = await authorize(request, environment, null, { scopes: watcherScopes, queryScopes: [] });
+        if (claims instanceof Response) {
+            return claims;
+        }
+        return forwardToPool(environment, pool, 'status', request);
+    }
+    if (operation !== 'units' && operation !== 'next' && operation !== 'cancel') {
+        return jsonResponse(404, { error: 'no such endpoint' });
+    }
+    if (request.method !== 'POST') {
+        return methodNotAllowed('POST');
+    }
+    // A pool token's run is its pool's name, so a token for another pool is refused like a token for another run.
+    const claims =
+        operation === 'next'
+            ? await authorize(request, environment, pool, { scopes: poolScope, queryScopes: [] })
+            : await authorize(request, environment, null, { scopes: coordinatorScope, queryScopes: [] });
+    if (claims instanceof Response) {
+        return claims;
+    }
+    return forwardToPool(environment, pool, operation, request);
+}
+
 // The cache belongs to no one run, so any run's coordinator token reaches it.
 // The public store (adamic-public): anyone reads it direct at adamic-store.kirkouimet.com/blobs/<sha256>, so a
 // hundred instances fetch from Cloudflare's edge, never through this Worker. Only a coordinator token of any
@@ -410,6 +465,14 @@ export default {
         const boardMatch = /^\/board\/([a-z]+)$/.exec(path);
         if (boardMatch !== null) {
             return handleBoard(request, environment, boardMatch[1] ?? '');
+        }
+        const poolMatch = /^\/pools\/([^/]+)(?:\/([a-z]+))?\/?$/.exec(path);
+        if (poolMatch !== null) {
+            const pool = poolMatch[1] ?? '';
+            if (!RunIdPattern.test(pool)) {
+                return jsonResponse(400, { error: 'a pool name is letters, digits, dot, dash and underscore' });
+            }
+            return handlePool(request, environment, pool, poolMatch[2] ?? '');
         }
         const cacheMatch = /^\/cache\/([^/]+)$/.exec(path);
         if (cacheMatch !== null) {

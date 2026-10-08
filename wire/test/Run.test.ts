@@ -1,5 +1,7 @@
 import { env } from 'cloudflare:workers';
+import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
+import { EventsPageSize, EventsWaitMilliseconds } from '../source/RunObject';
 import {
     call,
     event,
@@ -334,5 +336,122 @@ describe('the stream', function () {
         const run = freshRun();
         const response = await call(`/runs/${run}/stream?token=${encodeURIComponent(await token(run, 'viewer'))}`);
         expect(response.status).toBe(426);
+    });
+});
+
+// GET /runs/<run>/events?after=<position>: what the coordinator follows a pool unit's stream with.
+describe('reading the log', function () {
+    // Shortens how long a read waits for the first event, on this run's object only; production keeps 20 s.
+    async function eventsWaitOf(run: string, milliseconds: number): Promise<void> {
+        await runInDurableObject(env.Runs.get(env.Runs.idFromName(run)), function (instance) {
+            instance.eventsWaitMilliseconds = milliseconds;
+        });
+    }
+
+    function readLog(run: string, bearer: string, after: string | null): Promise<Response> {
+        return call(`/runs/${run}/events${after === null ? '' : `?after=${after}`}`, { bearer: bearer });
+    }
+
+    function logged(text: string): { position: number; event: Record<string, unknown> }[] {
+        return text
+            .split('\n')
+            .filter(function (line) {
+                return line !== '';
+            })
+            .map(function (line) {
+                return JSON.parse(line) as { position: number; event: Record<string, unknown> };
+            });
+    }
+
+    it('waits 20 s in production, and answers at most 1000 events', function () {
+        expect(EventsWaitMilliseconds).toBe(20_000);
+        expect(EventsPageSize).toBe(1000);
+    });
+
+    it('answers the events after a position as JSON lines, to the run\'s coordinator only', async function () {
+        const run = freshRun();
+        const coordinator = await token(run, 'coordinator');
+        const events = unitEvents(run, 'a', 'passed', 2);
+        await postEvents(run, await token(run, 'runner'), events);
+        const all = await readLog(run, coordinator, null);
+        expect(all.status).toBe(200);
+        expect(all.headers.get('Content-Type')).toContain('application/x-ndjson');
+        const text = await all.text();
+        expect(text.endsWith('\n')).toBe(true);
+        expect(logged(text)).toEqual(events.map(function (logged, index) {
+            return { position: index + 1, event: logged };
+        }));
+        const later = logged(await (await readLog(run, coordinator, '3')).text());
+        expect(later.map(function (line) {
+            return [line.position, line.event.sequence];
+        })).toEqual([[4, 3], [5, 4]]);
+        expect(Object.keys(later[0] ?? {})).toEqual(['position', 'event']);
+        for (const after of ['-1', 'x', '1.5', '', '9999999999999999']) {
+            expect((await readLog(run, coordinator, after)).status, after).toBe(400);
+        }
+        for (const scope of ['runner', 'viewer', 'board', 'pool'] as const) {
+            expect((await readLog(run, await token(run, scope), '0')).status, scope).toBe(403);
+        }
+        expect((await readLog(run, await token(freshRun(), 'coordinator'), '0')).status).toBe(403);
+        expect((await call(`/runs/${run}/events?after=0&token=${encodeURIComponent(coordinator)}`)).status).toBe(401);
+        expect((await call(`/runs/${run}/events`, { method: 'PUT', bearer: coordinator })).status).toBe(405);
+    });
+
+    it('waits for the first event after the position, and wakes the moment one is appended', async function () {
+        const run = freshRun();
+        await eventsWaitOf(run, 4000);
+        const coordinator = await token(run, 'coordinator');
+        const runner = await token(run, 'runner');
+        const events = unitEvents(run, 'a', 'passed', 1);
+        await postEvents(run, runner, events.slice(0, 2));
+        const started = Date.now();
+        const waiting = readLog(run, coordinator, '2');
+        const second = readLog(run, coordinator, '2');
+        await new Promise(function (resolve) {
+            setTimeout(resolve, 100);
+        });
+        // Held for a gap, so not appended yet: the reads keep waiting.
+        await postEvents(run, runner, events.slice(3));
+        await new Promise(function (resolve) {
+            setTimeout(resolve, 100);
+        });
+        await postEvents(run, runner, events.slice(2, 3));
+        for (const answer of [waiting, second]) {
+            const response = await answer;
+            expect(response.status).toBe(200);
+            expect(logged(await response.text()).map(function (line) {
+                return line.position;
+            })).toEqual([3, 4]);
+        }
+        expect(Date.now() - started).toBeLessThan(4000);
+        expect(Date.now() - started).toBeGreaterThanOrEqual(190);
+    });
+
+    it('answers an empty 200 when nothing comes within the wait', async function () {
+        const run = freshRun();
+        await eventsWaitOf(run, 200);
+        const started = Date.now();
+        const response = await readLog(run, await token(run, 'coordinator'), '0');
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe('');
+        expect(Date.now() - started).toBeGreaterThanOrEqual(190);
+    });
+
+    it('answers at most 1000 events at a time', async function () {
+        const run = freshRun();
+        const coordinator = await token(run, 'coordinator');
+        const many = Array.from({ length: 1205 }, function (_, sequence) {
+            return event(run, 'a', sequence, 'output', { stream: 'stdout', text: `line ${sequence}` });
+        });
+        expect((await postEvents(run, await token(run, 'runner'), many)).status).toBe(200);
+        const first = logged(await (await readLog(run, coordinator, '0')).text());
+        expect(first).toHaveLength(1000);
+        expect(first.at(-1)?.position).toBe(1000);
+        const rest = logged(await (await readLog(run, coordinator, '1000')).text());
+        expect(rest.map(function (line) {
+            return line.position;
+        })).toEqual(Array.from({ length: 205 }, function (_, index) {
+            return 1001 + index;
+        }));
     });
 });

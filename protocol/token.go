@@ -14,12 +14,14 @@ import (
 
 // Token scopes. A runner token posts its run's events and reads and writes blobs; a viewer token only
 // watches its run; a coordinator token also posts the run's plan and its verdict. A board token (run
-// BoardRun) watches the board of every run and nothing else.
+// BoardRun) watches the board of every run and nothing else. A pool token (run = the pool's name) asks its
+// pool for the next unit and nothing else; each unit it is handed carries its own run token.
 const (
 	ScopeRunner      = "runner"
 	ScopeViewer      = "viewer"
 	ScopeCoordinator = "coordinator"
 	ScopeBoard       = "board"
+	ScopePool        = "pool"
 )
 
 // BoardRun is the run a board token names.
@@ -54,7 +56,7 @@ func MintToken(secret []byte, claims TokenClaims) (string, error) {
 }
 
 func knownScope(scope string) bool {
-	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard
+	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool
 }
 
 // ReadTokenSecret reads the HMAC key from a file such as ~/.loom/token-secret. The key is the file's text

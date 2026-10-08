@@ -147,6 +147,48 @@ describe('the Worker checks every token', function () {
         }
     });
 
+    it("refuses a pool token everywhere but its own pool's next", async function () {
+        // A pool token names its pool as its run, so a run with the pool's name is tried too: its scope refuses it.
+        const poolName = 'pool-' + crypto.randomUUID();
+        for (const run of [freshRun(), poolName]) {
+            const pool = await token(run, 'pool');
+            const coordinator = await token(run, 'coordinator');
+            await postPlan(run, coordinator, ['a']);
+            const stored = await upload(run, coordinator, new TextEncoder().encode(`a pool's blob of ${run}`));
+            const unit = JSON.stringify({ units: [{ run: run, unit: 'a' }] });
+            const refused: [string, Promise<Response>][] = [
+                ['plan', call(`/runs/${run}/plan`, { method: 'POST', bearer: pool, body: '{"units":["a"],"inputs":[]}' })],
+                ['events', postEvents(run, pool, unitEvents(run, 'a'))],
+                ['events read', call(`/runs/${run}/events?after=0`, { bearer: pool })],
+                ['verdict', call(`/runs/${run}/verdict`, { method: 'POST', bearer: pool, body: verdictBody('green') })],
+                ['stream', call(`/runs/${run}/stream?token=${encodeURIComponent(pool)}`, { headers: { Upgrade: 'websocket' } })],
+                ['stream by header', call(`/runs/${run}/stream`, { bearer: pool, headers: { Upgrade: 'websocket' } })],
+                ['page', call(`/runs/${run}?token=${encodeURIComponent(pool)}`)],
+                ['page by header', call(`/runs/${run}`, { bearer: pool })],
+                ['blob GET', call(blobPath(run, stored.sha256), { bearer: pool })],
+                ['blob HEAD', call(blobPath(run, stored.sha256), { method: 'HEAD', bearer: pool })],
+                ['blob PUT', call(blobPath(run, stored.sha256), { method: 'PUT', bearer: pool, body: `a pool's blob of ${run}` })],
+                ['public HEAD', call(`/public/blobs/${stored.sha256}`, { method: 'HEAD', bearer: pool })],
+                ['cache GET', call(`/cache/${'c'.repeat(64)}`, { bearer: pool })],
+                ['cache PUT', call(`/cache/${'c'.repeat(64)}`, { method: 'PUT', bearer: pool, body: '{}' })],
+                ['board snapshot', call('/board/snapshot', { bearer: pool })],
+                ['board stream', call('/board/stream', { headers: { 'Upgrade': 'websocket', 'Sec-WebSocket-Protocol': `loom, token.${pool}` } })],
+                ['board machines', call('/board/machines', { method: 'POST', bearer: pool, body: '{"machines":[]}' })],
+                ['board gate', call('/board/gate', { method: 'POST', bearer: pool, body: '{"at":"x","machines":[]}' })],
+                ['board viewer', call(`/board/runs/${run}/viewer`, { method: 'POST', bearer: pool })],
+                ['pool units', call(`/pools/${run}/units`, { method: 'POST', bearer: pool, body: unit })],
+                ['pool cancel', call(`/pools/${run}/cancel`, { method: 'POST', bearer: pool, body: JSON.stringify({ run: run }) })],
+                ['pool state', call(`/pools/${run}`, { bearer: pool })],
+                ['another pool\'s next', call(`/pools/${run}x/next`, { method: 'POST', bearer: pool, body: '{"worker":"w","cpus":1}' })],
+            ];
+            for (const [what, answer] of refused) {
+                const response = await answer;
+                expect(response.status, `${what} on ${run}`).toBe(403);
+                await response.body?.cancel();
+            }
+        }
+    });
+
     it('serves the live page to any scope of the run', async function () {
         const run = freshRun();
         for (const scope of ['viewer', 'runner', 'coordinator'] as const) {

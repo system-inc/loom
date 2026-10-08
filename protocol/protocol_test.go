@@ -217,6 +217,11 @@ func TestTokenVector(t *testing.T) {
 	if claims, verifyError := VerifyToken(secret, board, now); err != nil || verifyError != nil || claims.Scope != ScopeBoard {
 		t.Fatalf("a board token: %v %v %+v", err, verifyError, claims)
 	}
+	// A pool token names its pool where other tokens name a run.
+	pool, err := MintToken(secret, TokenClaims{Run: "codex", Scope: ScopePool, Expires: 4102444800})
+	if claims, verifyError := VerifyToken(secret, pool, now); err != nil || verifyError != nil || claims.Scope != ScopePool || claims.Run != "codex" {
+		t.Fatalf("a pool token: %v %v %+v", err, verifyError, claims)
+	}
 }
 
 func TestVerdictIsLowercaseWithEmptyListsAsArrays(t *testing.T) {

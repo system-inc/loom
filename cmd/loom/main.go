@@ -1,14 +1,19 @@
 // Command loom is the coordinator: it runs a job file on Loom's slots and prints the verdict. It exits 0 when
 // the run is green, 1 when red, 2 when void, and 3 when the run couldn't be set up.
 //
-//	loom run [--uncached] [--local <slots> | --slots <file>] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
+//	loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
 //	loom board [--days <n>]   prints the board's address with a board token
+//	loom pool status <name>   prints a pool's queue and the workers serving it
 //
 // The slots come from ~/.loom/slots, one "box class" per line (class B is a box's area slot, S a small one),
 // unless --local runs every unit on this machine. The token secret is ~/.loom/token-secret. For each box
 // the runner is built from this repository's source for the box's platform, named for its version, and
 // installed under the staged-rollout law (~/.loom/rollout.tsv): a version, which is the whole Go module's
 // commit, so a new coordinator too, reaches a second box only after a green run on its first.
+//
+// --pool adds slots on a pool beside the others: units queued on the wire for machines Loom can't ssh into
+// (Codex instances running loom-runner serve). The staged-rollout law doesn't reach a pool, since Loom
+// doesn't install its runner, and a green there unlocks no box.
 package main
 
 import (
@@ -20,6 +25,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
@@ -36,8 +42,9 @@ import (
 )
 
 const usage = `usage:
-  loom run [--uncached] [--local <slots> | --slots <file>] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
+  loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
   loom board [--days <n>] [--wire <url>]
+  loom pool status [--wire <url>] <name>
   loom gate-lines [--once] [--interval <duration>] [--wire <url>]
   loom top [--once] [--wire <url>]
 `
@@ -56,6 +63,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "gate-lines" {
 		return gateLines(arguments[1:], stdout, stderr)
 	}
+	if len(arguments) > 0 && arguments[0] == "pool" {
+		return pool(arguments[1:], stdout, stderr)
+	}
 	if len(arguments) == 0 || arguments[0] != "run" {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -69,6 +79,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	slotsPath := flags.String("slots", "", "the slot allowance, one \"box class\" per line (default ~/.loom/slots)")
 	recordPath := flags.String("record", "", "write the run's record, every event as a JSON line, to this file")
 	yieldTo := flags.String("yield-to", "", "the gate's slot table: Loom uses a box's slots only while the gate's table doesn't hold them")
+	var pools poolSlotsFlag
+	flags.Var(&pools, "pool", "also place units on a pool on the wire, <name>=<slots>; repeatable")
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 1 {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -117,6 +129,21 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
+	poolMachines := map[string]bool{}
+	if len(pools) > 0 {
+		// The pool's workers are built from this source, the version every pool unit's cache key names.
+		poolVersion, err := runnerVersion(*source)
+		if err != nil {
+			return fail(err)
+		}
+		for _, wanted := range pools {
+			machine := &coordinator.PoolMachine{Pool: wanted.name, Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform}
+			poolMachines[machine.Name()] = true
+			for range wanted.slots {
+				slots = append(slots, machine)
+			}
+		}
+	}
 	config := coordinator.Config{Wire: *wire, Secret: secret, Slots: slots, Uncached: *uncached, Durations: durations, Log: stdout}
 	if *yieldTo != "" {
 		config.SlotLimit = yieldLimit(slots, *yieldTo)
@@ -134,7 +161,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	case "green":
 		if version != "" {
 			for _, box := range result.Machines {
-				rollout.Green(version, box)
+				if !poolMachines[box] {
+					rollout.Green(version, box)
+				}
 			}
 		}
 		return 0
@@ -246,6 +275,10 @@ func yieldLimit(slots []coordinator.Machine, table string) func(string) int {
 		}
 	}
 	return func(box string) int {
+		if allowance[box] == nil {
+			// The gate's table names boxes; a machine it doesn't name, such as a pool, is never the gate's.
+			return math.MaxInt
+		}
 		content, err := os.ReadFile(table)
 		if err != nil {
 			return 0 // can't read the gate's table: take nothing from it
@@ -269,8 +302,16 @@ func yieldLimit(slots []coordinator.Machine, table string) func(string) int {
 	}
 }
 
-// starRunsOn says whether the gate watcher in directory state has a front-file tip running on box.
+// starRunsOn says whether box is the star's: the watcher's star-boxes file (one box per line, written every
+// pass, naming a box the star runs on or has reserved) lists it, or a front-file tip runs there now.
 func starRunsOn(state string, box string) bool {
+	if content, err := os.ReadFile(filepath.Join(state, "star-boxes")); err == nil {
+		for _, line := range strings.Split(string(content), "\n") {
+			if strings.TrimSpace(line) == box {
+				return true
+			}
+		}
+	}
 	content, err := os.ReadFile(filepath.Join(state, "front"))
 	if err != nil {
 		return false

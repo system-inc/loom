@@ -130,12 +130,26 @@ The coordinator keeps the cache. After a unit passes it writes a `protocol.Cache
 
 ## Tokens
 
-`<base64url(claims JSON)>.<base64url(HMAC-SHA256(secret, first part))>`, base64url without padding. Claims: `run`, `scope` (`runner`, `viewer`, `coordinator` or `board`) and `expires` (Unix seconds). The coordinator mints them (`protocol.MintToken`, which refuses a run id the wire wouldn't take); the Worker verifies them with the same secret (Worker secret `LOOM_TOKEN_SECRET`; on the coordinator's machine `~/.loom/token-secret`, mode 600).
+`<base64url(claims JSON)>.<base64url(HMAC-SHA256(secret, first part))>`, base64url without padding. Claims: `run`, `scope` (`runner`, `viewer`, `coordinator`, `board` or `pool`) and `expires` (Unix seconds). The coordinator mints them (`protocol.MintToken`, which refuses a run id the wire wouldn't take); the Worker verifies them with the same secret (Worker secret `LOOM_TOKEN_SECRET`; on the coordinator's machine `~/.loom/token-secret`, mode 600).
 
 The HMAC key is the secret's **text as it stands**, surrounding whitespace trimmed: the file holds hex digits, and those digits are signed as UTF-8 text, never decoded to bytes. `protocol.ReadTokenSecret` reads it that way. Both sides verify alike (`protocol.VerifyToken`, the Worker's `verifyToken`): the signature first, then claims with exactly the keys `run`, `scope` and `expires` in that exact case and nothing else, a non-empty run, a known scope, a positive expiry, and not expired. `TestTokenVector` pins one token so the Go and TypeScript sides sign the same bytes:
 
 - secret `loom-test-secret`, claims `{"run":"r-vector","scope":"runner","expires":4102444800}`
 - token `eyJydW4iOiJyLXZlY3RvciIsInNjb3BlIjoicnVubmVyIiwiZXhwaXJlcyI6NDEwMjQ0NDgwMH0.5yFFC9AOwC9L6zqwWz8V0aCJNrLwusF5LjbOv_hoDWY`
+
+## The pool
+
+Machines Loom can't ssh into (Codex cloud instances) pull their units instead. A **pool** (`codex`, say) is a queue of units on the wire. Each instance runs `loom-runner serve`, which asks the pool for its next unit, runs it, and asks again until its deadline, posting each unit's events straight to the run's events endpoint with the unit's own run token. The coordinator puts units in and reads their events back from the wire. One long Codex turn runs one `serve`, which runs many units, and its output stays in a file, off the model.
+
+A **pool token** (scope `pool`, run = the pool's name) is all an instance holds besides the units it is handed: it reaches its pool's `next` and nothing else. Each unit carries its own run token, store and wire, as any unit does.
+
+- `POST /pools/<pool>/units` (a coordinator token of any run): `{"units": [<unit>, ...]}`, each a whole `protocol.Unit` with its `wire` set. They join the end of the queue in the order given (the coordinator sends longest first). Answers `{"queued": <the queue's length>}`.
+- `POST /pools/<pool>/next` (a pool token for that pool): `{"worker": "<name>", "cpus": <n>}`. Answers 200 with one unit, taken off the queue, or 204 when none arrives within 20 s (the call waits, so an idle instance asks about three times a minute).
+- `POST /pools/<pool>/cancel` (a coordinator token): `{"run": "<run>"}` drops that run's units still queued; answers `{"dropped": <n>}`.
+- `GET /pools/<pool>` (a coordinator or board token): `{"queued": <n>, "workers": [{"worker", "cpus", "seenAt", "took"}]}`: every worker seen in the last ten minutes, when it last asked, and the unit it last took.
+- `GET /runs/<run>/events?after=<position>` (a coordinator token for the run): the log's events after that position as JSON lines (`{"position", "event"}` each), waiting up to 20 s for the first one when there are none yet. The coordinator follows a pool unit's stream this way: plain HTTP, no WebSocket client needed.
+
+`loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration>` exits 0 at its deadline, finishing the unit in hand first if it can within the unit's timeout, or at once on `SIGTERM` (the unit is then broken, as with any stopped runner).
 
 ## The board
 

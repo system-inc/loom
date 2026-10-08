@@ -23,4 +23,9 @@ func TestLoomTakesNothingOnABoxWhereTheStarRuns(t *testing.T) {
 	if limit("workshop") != 0 || limit("server") != 1 {
 		t.Fatalf("with the star on workshop: workshop %d, server %d", limit("workshop"), limit("server"))
 	}
+	// The watcher's star-boxes names a box the star has reserved before it runs there.
+	os.WriteFile(filepath.Join(state, "star-boxes"), []byte("workshop\nserver\n"), 0o644)
+	if limit("server") != 0 {
+		t.Fatalf("server is in star-boxes but has %d slots", limit("server"))
+	}
 }

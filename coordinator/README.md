@@ -3,7 +3,8 @@
 Runs a job file on Loom's slots and decides it. The only verdict authority (see `docs/protocol.md`).
 
 ```
-loom run [--uncached] [--local <slots> | --slots <file>] [--wire <url>] <job.json>
+loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--wire <url>] <job.json>
+loom pool status [--wire <url>] <name>
 ```
 
 Exit codes: `0` green, `1` red, `2` void, `3` the run couldn't be set up. Build it with `go build ./cmd/loom`.
@@ -22,6 +23,8 @@ The cache: a unit marked `"cache": true` is looked up by `protocol.CacheKey` bef
 The runner: built from this checkout for each box's platform, named for its commit (`git-<sha12>`, plus a hash of any uncommitted change to the Go module), installed at `~/.loom/bin/loom-runner-<version>` on the box. A version reaches a second box only after a green run on its first (`~/.loom/rollout.tsv`). Since the version is the whole module's, a new coordinator is held to the same law: its first run goes to one box.
 
 `LOOM_SSH_BOX=<box> go test -run SSHMachineOnARealBox ./coordinator/` proves the ssh path on a real box.
+
+The pool: `--pool <name>=<slots>` (repeatable) adds that many slots on a pool beside the others, for machines Loom can't ssh into (docs/protocol.md, "The pool"). Each slot queues its unit on the wire with its `wire` set, so the worker's runner posts the events itself, and follows the run's event log back (`GET /runs/<run>/events?after=`); a pool's slots share one follower per run. The late clock starts at queuing, so give a pool no more slots than it has workers. A re-placed pool unit can't finish in v1 (its runner numbers from 0 again and the wire refuses the conflict), so it leaves the run void. `loom pool status <name>` prints the queue and the workers seen in the last ten minutes.
 
 ## The board's other commands
 

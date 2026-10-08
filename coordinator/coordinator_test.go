@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,21 +24,26 @@ import (
 var testSecret = []byte("loom-test-secret")
 
 // A fakeWire is the Worker's endpoints, enough to watch what the coordinator posts: the plan, every event
-// line in arrival order, the verdict, blobs and cache entries. Tokens are verified with the test secret.
+// line in arrival order, the verdict, blobs and cache entries, and a pool's queue with its next and the
+// run's log read back by position. Tokens are verified with the test secret. As the Worker does, it drops
+// an event it already holds and refuses a batch that would change one.
 type fakeWire struct {
 	mutex    sync.Mutex
 	plans    map[string]protocol.Plan
-	lines    map[string][]protocol.Event
+	lines    map[string][]protocol.Event // a run's log; an event's position is its index plus one
 	verdict  map[string]protocol.Verdict
 	blobs    map[string][]byte
 	cache    map[string]protocol.CacheEntry
 	machines []BoardMachine
+	pools    map[string][]protocol.Unit // each pool's queue
+	reading  map[string]int             // reads of each run's log in flight
+	mostRead int                        // the most reads of one run's log ever in flight at once
 	server   *httptest.Server
 }
 
 func newFakeWire(t *testing.T) *fakeWire {
 	wire := &fakeWire{plans: map[string]protocol.Plan{}, lines: map[string][]protocol.Event{}, verdict: map[string]protocol.Verdict{},
-		blobs: map[string][]byte{}, cache: map[string]protocol.CacheEntry{}}
+		blobs: map[string][]byte{}, cache: map[string]protocol.CacheEntry{}, pools: map[string][]protocol.Unit{}, reading: map[string]int{}}
 	wire.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		claims, err := protocol.VerifyToken(testSecret, strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "), time.Now())
 		if err != nil {
@@ -46,6 +52,15 @@ func newFakeWire(t *testing.T) *fakeWire {
 		}
 		parts := strings.Split(strings.TrimPrefix(request.URL.Path, "/"), "/")
 		body, _ := io.ReadAll(request.Body)
+		// These two wait for something to arrive, so they take the mutex themselves.
+		if request.Method == http.MethodGet && len(parts) == 3 && parts[0] == "runs" && parts[2] == "events" {
+			wire.serveLog(writer, request, claims, parts[1])
+			return
+		}
+		if len(parts) == 3 && parts[0] == "pools" && parts[2] == "next" {
+			wire.serveNext(writer, claims, parts[1], body)
+			return
+		}
 		wire.mutex.Lock()
 		defer wire.mutex.Unlock()
 		switch {
@@ -73,6 +88,20 @@ func newFakeWire(t *testing.T) *fakeWire {
 				return
 			}
 			json.NewEncoder(writer).Encode(entry)
+		case len(parts) == 3 && parts[0] == "pools" && parts[2] == "units":
+			if claims.Scope != protocol.ScopeCoordinator {
+				http.Error(writer, "a coordinator token queues units", http.StatusForbidden)
+				return
+			}
+			var posted struct {
+				Units []protocol.Unit `json:"units"`
+			}
+			if err := protocol.Decode(bytes.NewReader(body), &posted); err != nil {
+				http.Error(writer, err.Error(), http.StatusBadRequest)
+				return
+			}
+			wire.pools[parts[1]] = append(wire.pools[parts[1]], posted.Units...)
+			json.NewEncoder(writer).Encode(map[string]int{"queued": len(wire.pools[parts[1]])})
 		case len(parts) >= 3 && parts[0] == "runs" && claims.Run != parts[1]:
 			http.Error(writer, "other run", http.StatusForbidden)
 		case len(parts) == 3 && parts[2] == "plan":
@@ -84,6 +113,8 @@ func newFakeWire(t *testing.T) *fakeWire {
 				http.Error(writer, "verdict held", http.StatusConflict)
 				return
 			}
+			var accepted []protocol.Event
+			var conflicts []string
 			scanner := bufio.NewScanner(bytes.NewReader(body))
 			for scanner.Scan() {
 				var event protocol.Event
@@ -91,8 +122,21 @@ func newFakeWire(t *testing.T) *fakeWire {
 					http.Error(writer, err.Error(), http.StatusBadRequest)
 					return
 				}
-				wire.lines[parts[1]] = append(wire.lines[parts[1]], event)
+				if held, found := heldEvent(append(wire.lines[parts[1]], accepted...), event); found {
+					if !reflect.DeepEqual(held, event) {
+						conflicts = append(conflicts, fmt.Sprintf("%s %d", event.Unit, event.Sequence))
+					}
+					continue
+				}
+				accepted = append(accepted, event)
 			}
+			// A batch lands whole or not at all.
+			if len(conflicts) > 0 {
+				writer.WriteHeader(http.StatusConflict)
+				json.NewEncoder(writer).Encode(map[string][]string{"conflicts": conflicts})
+				return
+			}
+			wire.lines[parts[1]] = append(wire.lines[parts[1]], accepted...)
 		case len(parts) == 3 && parts[2] == "verdict":
 			var verdict protocol.Verdict
 			protocol.Decode(bytes.NewReader(body), &verdict)
@@ -120,6 +164,90 @@ func newFakeWire(t *testing.T) *fakeWire {
 	}))
 	t.Cleanup(wire.server.Close)
 	return wire
+}
+
+// heldEvent finds the event of the same unit and sequence in a log.
+func heldEvent(log []protocol.Event, event protocol.Event) (protocol.Event, bool) {
+	for _, held := range log {
+		if held.Unit == event.Unit && held.Sequence == event.Sequence {
+			return held, true
+		}
+	}
+	return protocol.Event{}, false
+}
+
+// serveLog answers GET /runs/<run>/events?after=<position> with the log's lines after it, waiting a moment
+// for the first when there are none, as the Worker waits 20 s.
+func (wire *fakeWire) serveLog(writer http.ResponseWriter, request *http.Request, claims protocol.TokenClaims, run string) {
+	if claims.Scope != protocol.ScopeCoordinator || claims.Run != run {
+		http.Error(writer, "a coordinator token of the run reads its log", http.StatusForbidden)
+		return
+	}
+	after, err := strconv.Atoi(request.URL.Query().Get("after"))
+	if err != nil || after < 0 {
+		http.Error(writer, "after is a position", http.StatusBadRequest)
+		return
+	}
+	wire.mutex.Lock()
+	wire.reading[run]++
+	wire.mostRead = max(wire.mostRead, wire.reading[run])
+	wire.mutex.Unlock()
+	defer func() {
+		wire.mutex.Lock()
+		wire.reading[run]--
+		wire.mutex.Unlock()
+	}()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		wire.mutex.Lock()
+		log := wire.lines[run]
+		if len(log) > after || time.Now().After(deadline) {
+			for index := after; index < len(log); index++ {
+				line, _ := json.Marshal(log[index])
+				fmt.Fprintf(writer, "{\"position\":%d,\"event\":%s}\n", index+1, line)
+			}
+			wire.mutex.Unlock()
+			return
+		}
+		wire.mutex.Unlock()
+		select {
+		case <-request.Context().Done():
+			return
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+// serveNext answers POST /pools/<pool>/next with the queue's first unit, or 204 when none arrives in a moment.
+func (wire *fakeWire) serveNext(writer http.ResponseWriter, claims protocol.TokenClaims, pool string, body []byte) {
+	if claims.Scope != protocol.ScopePool || claims.Run != pool {
+		http.Error(writer, "a pool token for this pool asks for its units", http.StatusForbidden)
+		return
+	}
+	var asker struct {
+		Worker string `json:"worker"`
+		Cpus   int    `json:"cpus"`
+	}
+	if err := protocol.Decode(bytes.NewReader(body), &asker); err != nil || asker.Worker == "" {
+		http.Error(writer, "worker and cpus", http.StatusBadRequest)
+		return
+	}
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for {
+		wire.mutex.Lock()
+		if queue := wire.pools[pool]; len(queue) > 0 {
+			wire.pools[pool] = queue[1:]
+			wire.mutex.Unlock()
+			json.NewEncoder(writer).Encode(queue[0])
+			return
+		}
+		wire.mutex.Unlock()
+		if time.Now().After(deadline) {
+			writer.WriteHeader(http.StatusNoContent)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (wire *fakeWire) put(content string) string {

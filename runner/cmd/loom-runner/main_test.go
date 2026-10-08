@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +48,48 @@ func TestExitCodesFollowTheStatus(t *testing.T) {
 	}
 	if code := run(nil, &stdout, &stderr); code != 2 {
 		t.Errorf("no arguments: exit %d", code)
+	}
+}
+
+// serve prints one summary line and nothing else on stdout; the events go to --log and to the wire.
+func TestServePrintsOneSummaryLineAndLogsTheEvents(t *testing.T) {
+	var mutex sync.Mutex
+	queue := []string{"first", "second"}
+	posted := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		switch request.URL.Path {
+		case "/pools/codex/next":
+			if request.Header.Get("Authorization") != "Bearer pool-token" || len(queue) == 0 {
+				writer.WriteHeader(http.StatusNoContent)
+				return
+			}
+			id := queue[0]
+			queue = queue[1:]
+			fmt.Fprintf(writer, `{"run":"r-cli","unit":%q,"argv":["true"],"timeoutSeconds":30,"wire":{"url":"http://%s/runs/r-cli/events"},"token":"run-token"}`, id, request.Host)
+		case "/runs/r-cli/events":
+			body, _ := io.ReadAll(request.Body)
+			posted += bytes.Count(body, []byte("\n"))
+		}
+	}))
+	defer server.Close()
+	logPath := filepath.Join(t.TempDir(), "serve.log")
+	var stdout, stderr bytes.Buffer
+	// With 61 s to serve and the last minute closed to new units, it serves for about a second.
+	code := run([]string{"serve", "--pool", server.URL + "/pools/codex", "--token", "pool-token", "--worker", "codex-1", "--until", "61s",
+		"--workspace", t.TempDir(), "--log", logPath}, &stdout, &stderr)
+	if code != 0 || !strings.HasPrefix(stdout.String(), "loom-runner serve: 2 units, 2 passed, 0 failed, 0 broken in ") || strings.Count(stdout.String(), "\n") != 1 {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	logged, _ := os.ReadFile(logPath)
+	mutex.Lock()
+	defer mutex.Unlock()
+	if strings.Count(string(logged), `"type":"finished"`) != 2 || posted != bytes.Count(logged, []byte("\n")) {
+		t.Fatalf("logged %d lines, posted %d", bytes.Count(logged, []byte("\n")), posted)
+	}
+	if code := run([]string{"serve", "--pool", server.URL + "/pools/codex"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("serve without a token or a deadline: exit %d", code)
 	}
 }
 

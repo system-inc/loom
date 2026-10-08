@@ -1,4 +1,4 @@
-// Loom's live wire: one Durable Object per run, one for the board, blobs in R2. docs/protocol.md is the contract.
+// Loom's live wire: one Durable Object per run, one for the board, one per pool, blobs in R2. docs/protocol.md is the contract.
 {
     "$schema": "node_modules/wrangler/config-schema.json",
     "name": "loom-wire",
@@ -13,12 +13,14 @@
     "durable_objects": {
         "bindings": [
             { "name": "Runs", "class_name": "RunObject" },
-            { "name": "Board", "class_name": "Board" }
+            { "name": "Board", "class_name": "Board" },
+            { "name": "Pools", "class_name": "Pool" }
         ]
     },
     "migrations": [
         { "tag": "v1", "new_sqlite_classes": ["RunObject"] },
-        { "tag": "v2", "new_sqlite_classes": ["Board"] }
+        { "tag": "v2", "new_sqlite_classes": ["Board"] },
+        { "tag": "v3", "new_sqlite_classes": ["Pool"] }
     ],
     "r2_buckets": [
         { "binding": "Store", "bucket_name": "loom-store" },
