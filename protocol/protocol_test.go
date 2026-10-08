@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -217,24 +218,48 @@ func TestTokenVector(t *testing.T) {
 func TestVerdictIsLowercaseWithEmptyListsAsArrays(t *testing.T) {
 	for _, verdict := range []Verdict{{Status: "green"}, Decide("r", []string{"a"}, events("r", map[string]string{"a": StatusPassed}, []string{"a"}))} {
 		text, err := json.Marshal(verdict)
-		if err != nil || string(text) != `{"status":"green","failed":[],"problems":[]}` {
+		if err != nil || string(text) != `{"status":"green","failed":[],"problems":[],"cached":[]}` {
 			t.Fatalf("marshalled %s (%v)", text, err)
 		}
 	}
 	var back Verdict
-	if err := Decode(strings.NewReader(`{"status":"red","failed":["b"],"problems":[]}`), &back); err != nil || back.Failed[0] != "b" {
+	if err := Decode(strings.NewReader(`{"status":"red","failed":["b"],"problems":[],"cached":[]}`), &back); err != nil || back.Failed[0] != "b" {
 		t.Fatalf("decoded %+v (%v)", back, err)
 	}
 }
 
-func TestPlanOfNamesEveryUnitInPlanOrder(t *testing.T) {
+func TestPlanOfNamesEveryUnitInPlanOrderAndEveryInputOnce(t *testing.T) {
 	plan, err := Expand(readJob(t, "../examples/adamic-gate.job.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, err := json.Marshal(PlanOf(plan))
+	body := PlanOf(plan)
+	text, err := json.Marshal(body)
 	if err != nil || !strings.HasPrefix(string(text), `{"units":["build","tests[shard=0]",`) {
 		t.Fatalf("plan body %s (%v)", text, err)
+	}
+	if len(body.Inputs) == 0 || !sort.StringsAreSorted(body.Inputs) {
+		t.Fatalf("inputs %v", body.Inputs)
+	}
+	shared := Input{Path: "x", Sha256: strings.Repeat("b", 64)}
+	twice := PlanOf([]PlannedUnit{{Id: "a", Unit: JobUnit{Inputs: []Input{shared}}}, {Id: "b", Unit: JobUnit{Inputs: []Input{shared}}}})
+	none := PlanOf([]PlannedUnit{{Id: "a"}})
+	if len(twice.Inputs) != 1 || none.Inputs == nil {
+		t.Fatalf("a shared input once, and none as []: %v %v", twice.Inputs, none.Inputs)
+	}
+}
+
+func TestDecideListsCachedUnitsAndRefusesACachedFailure(t *testing.T) {
+	plan := []string{"a", "b"}
+	stream := append(events("r", map[string]string{"a": StatusPassed}, []string{"a"}),
+		Event{Run: "r", Unit: "b", Sequence: 0, Type: "cached", Key: strings.Repeat("c", 64), FromRun: "r0", EventLog: strings.Repeat("d", 64)},
+		Event{Run: "r", Unit: "b", Sequence: 1, Type: "finished", Status: StatusPassed})
+	if verdict := Decide("r", plan, stream); verdict.Status != "green" || !reflect.DeepEqual(verdict.Cached, []string{"b"}) {
+		t.Fatalf("a cached pass: %+v", verdict)
+	}
+	stream[len(stream)-1].Status = StatusFailed
+	if verdict := Decide("r", plan, stream); verdict.Status != "void" {
+		t.Fatalf("a cached failure: %+v", verdict)
 	}
 }
 
@@ -386,6 +411,8 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 	add("tests[shard=0]", Event{Type: "exit", Signal: "SIGTERM", TimedOut: true, WallSeconds: 600.002, UserSeconds: 1.5})
 	add("tests[shard=0]", Event{Type: "error", Phase: PhaseRun, Message: "a process outside the unit's group held its output open 2s after the command exited; stopped reading"})
 	add("tests[shard=0]", Event{Type: "finished", Status: StatusFailed})
+	add("cached", Event{Type: "cached", Key: strings.Repeat("c", 64), FromRun: "r-earlier", EventLog: strings.Repeat("d", 64)})
+	add("cached", Event{Type: "finished", Status: StatusPassed})
 
 	var written strings.Builder
 	for _, event := range fixture {
@@ -409,7 +436,7 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 	if string(held) != written.String() {
 		t.Fatalf("%s no longer matches what Go writes; rerun with LOOM_WRITE_FIXTURES=1 if the change is meant:\n%s", path, written.String())
 	}
-	if verdict := Decide("r-fixture", []string{"a", "tests[shard=0]"}, fixture); verdict.Status != "red" || verdict.Failed[0] != "tests[shard=0]" {
+	if verdict := Decide("r-fixture", []string{"a", "tests[shard=0]", "cached"}, fixture); verdict.Status != "red" || verdict.Failed[0] != "tests[shard=0]" || verdict.Cached[0] != "cached" {
 		t.Fatalf("the fixture decides %+v", verdict)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/system-inc/loom/poster"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -22,7 +23,7 @@ type emitter struct {
 	unit       string
 	sequence   int
 	writer     io.Writer
-	wire       *wire
+	wire       *poster.Poster
 	now        func() time.Time
 	writeError error
 }
@@ -46,6 +47,6 @@ func (emitter *emitter) emit(event protocol.Event) {
 		emitter.writeError = err
 	}
 	if emitter.wire != nil {
-		emitter.wire.enqueue(line.Bytes())
+		emitter.wire.Enqueue(line.Bytes())
 	}
 }

@@ -1,4 +1,4 @@
-# The Loom protocol, v0.1
+# The Loom protocol, v0.2
 
 Loom runs commands on machines we own or rent and turns in what they proved. Three things cross the wire: a **job** (what to run, written by a person or a tool), a **unit** (one command, handed to one runner), and **events** (what happened, streamed back). The Go types in `protocol/` are the source of truth; this document explains them. Unknown fields are refused everywhere, so a typo is an error and never a silent default.
 
@@ -43,9 +43,9 @@ What one runner receives. The coordinator fills in the store and wire addresses 
 | `outputs` | Globs, relative to the workspace, hashed and uploaded after the command exits. |
 | `timeoutSeconds` | After this the whole process group gets `SIGTERM`, then `SIGKILL` 5 s later. The `exit` event says `timedOut: true` and the unit finishes `failed`; there is no separate timeout status. |
 | `resources` | `cpus` and `memoryMegabytes` the unit needs; placement reads it, the runner reports what it had. |
-| `store` | `url` of the blob endpoint (`GET`/`PUT <url>/<sha256>`). |
+| `store` | `url` of the run's blob endpoint, `<wire>/runs/<run>/blobs` (`GET`/`PUT <url>/<sha256>`). |
 | `wire` | Optional `url` to post events to. |
-| `token` | The run's token. Its events go to its own run only; blobs are by hash for any runner or coordinator token (see Store). It expires with the run. A runner holds nothing else. |
+| `token` | The run's token. It posts events to its own run and reads and writes blobs only through its own run's blob endpoint, as Store says. It expires with the run. A runner holds nothing else. |
 
 `protocol.CheckUnit` checks what decoding can't: the id limits above, local paths, 64-hex hashes, a plain mode, a positive timeout, a store when there are inputs or outputs. The runner calls it before anything runs (a unit it refuses finishes `broken`), and the coordinator calls it before handing a unit out.
 
@@ -60,6 +60,7 @@ One JSON object per line. Every event carries `run`, `unit`, `sequence` (from 0,
 | `exit` | `code`, `signal` (if killed), `timedOut`, `wallSeconds`, `userSeconds`, `systemSeconds` |
 | `uploaded` | `path`, `sha256`, `bytes` |
 | `error` | `phase`, `message` |
+| `cached` | `key` (the unit's cache key), `fromRun` (the run that proved it), `events` (sha256 of that unit's event log) |
 | `finished` | `status`: `passed`, `failed` or `broken` (below) |
 
 `finished` is always the last event of a unit. A unit without one never finished.
@@ -75,6 +76,7 @@ One JSON object per line. Every event carries `run`, `unit`, `sequence` (from 0,
 | `run` | While the command runs: the runner was stopped, its output couldn't be read, or a process that left the unit's group held the output open after the command exited. |
 | `upload` | Finding, hashing or uploading a declared output. |
 | `wire` | Posting events to the wire. Never changes the status: stdout holds the whole stream either way. |
+| `place` | The coordinator's own note in a unit's stream: a box that dropped the unit (its runner ended without `finished`, or ran past its timeout), and where the unit was placed again. A unit is placed again once; a second drop leaves it unfinished, and the run void. |
 
 **How a unit finishes:**
 
@@ -92,20 +94,35 @@ The coordinator decides a run from the plan and the events, never from a runner'
 - **red**: some unit finished `failed`. The verdict names each one with its last output lines.
 - **void**: anything else. A unit missing, late, duplicated, out of sequence or `broken`, or a unit nobody planned. Void is never green and never red: it says the run proved nothing.
 
-`protocol.Verdict` is also the body of the verdict endpoint: exactly `{"status", "failed", "problems"}`, lowercase, with an empty list written as `[]`, never `null`.
+`protocol.Verdict` is also the body of the verdict endpoint: exactly `{"status", "failed", "problems", "cached"}`, lowercase, with an empty list written as `[]`, never `null`. `cached` names the units served from the cache instead of run; it never changes the status, and a run that lands main has it empty.
 
 ## Store
 
-Blobs are addressed by sha256. `GET <store>/<sha256>` returns the bytes, `PUT <store>/<sha256>` stores them, and the store recomputes the hash and refuses a mismatch. A `PUT` of a blob that already exists succeeds without rewriting it. Machines that build inputs (the coordinator's boxes) write to the bucket directly with their own keys; runners only ever use the run token.
+Blobs are addressed by sha256 and live in R2 (`loom-store`) at `blobs/<sha256>`. A blob is reached only through a run: `GET <wire>/runs/<run>/blobs/<sha256>` returns the bytes and `PUT` stores them, the Worker recomputing the hash and refusing a mismatch. A `PUT` of a blob that already exists succeeds without rewriting it. The unit's `store.url` is that run's endpoint, so a runner never sees a key, a bucket or another run.
 
-- **Layout.** In R2 (`loom-store`) a blob lives at `blobs/<sha256>`, and a finished run's log at `runs/<run>/events.jsonl` (with `runs/<run>/held.jsonl` beside it when events were still waiting on a gap).
-- **Access is by hash, not by run.** Any valid runner or coordinator token reads and writes any blob; a viewer token reads none. A hash names its bytes, so a blob is no secret to the runs that share it; per-run presigned access comes with the store task (#lmstore).
-- **A `PUT` needs `Content-Length`** (411 without it), and the body must be exactly that long.
-- **Size.** Up to 100 MiB (104,857,600 bytes) per blob in v0.1; more is 413.
+What each token may do there (its run must be the run in the path):
 
-## Cache (later)
+| Token | `GET` | `PUT` |
+|---|---|---|
+| runner | a hash the run's plan declares as an input, or one this run has uploaded (an earlier unit's output) | any hash, recorded as the run's |
+| coordinator | any hash | any hash |
+| viewer | a hash this run has uploaded, so a person can read a unit's logs | no |
 
-A unit's result may be reused when its key matches: argv, environment, every input hash, directory, outputs, and the runner version. Each of those has a test that drops it from the key and must turn a hit into a miss. `--uncached` bypasses the cache, and an uncached run is what lands main.
+This is the run-scoped access the store promised, and it is better than an S3 presigned URL: a runner's output hashes aren't known until it runs, so a write can't be presigned in advance, and a presigned `PUT` would skip the hash check. The run token already expires with the run and is scoped to it. A run's uploads are listed in `runs/<run>/blobs.jsonl` when it is archived.
+
+- A `PUT` needs `Content-Length` (411 without it), and the body must be exactly that long.
+- Up to 100 MiB (104,857,600 bytes) per blob; more is 413. A bigger input is split into several, one per file.
+- The coordinator's machines upload inputs through the same endpoint with a coordinator token; nothing holds an R2 key but the Worker.
+
+## Cache
+
+A unit that passed may stand in for a later unit with the same **cache key**: `protocol.CacheKey(unit, runnerVersion, platform)`, the sha256 of a canonical encoding of the unit's argv, environment, directory, every input (path, sha256, mode, archive), outputs and timeout, plus the runner version and the platform (`linux/amd64`, `darwin/arm64`). The run id, unit id, resources, store, wire and token are left out: they say where a unit ran, not what it computed. Every part of the key has a test that changes it and must turn a hit into a miss, and a mutant that drops the part and must fail that test.
+
+Caching is opt-in per job unit: `"cache": true` says the unit is hermetic, its result depending on nothing its key doesn't hold. It is off by default, because a unit that reads a machine's own state (a warm checkout, a build cache) has inputs its key can't see.
+
+The coordinator keeps the cache. After a unit passes it writes a `protocol.CacheEntry` (`key`, `run`, `unit`, `machine`, `runnerVersion`, `wallSeconds`, `outputs` with path, sha256 and bytes, `events`, the sha256 of the unit's event log as a blob) to `PUT /cache/<key>`. Before placing a unit it reads `GET /cache/<key>`; on a hit it posts the unit's stream itself, `cached` then `finished passed`, and the verdict lists the unit under `cached`. Only passed units are cached, an entry is written once and never replaced, and the Worker refuses an entry whose outputs or event log aren't in the store.
+
+`--uncached` bypasses the cache entirely: no reads, every unit runs. An uncached run is what lands main, and its verdict's `cached` is empty.
 
 ## Tokens
 
@@ -122,12 +139,15 @@ All on the Worker (`wire/`). A token goes in `Authorization: Bearer <token>`, or
 
 | Endpoint | Token | What it does |
 |---|---|---|
-| `POST /runs/<run>/plan` | coordinator | The run's plan, `protocol.Plan`: `{"units": ["<id>", ...]}` (`protocol.PlanOf` builds it). Set once; the same plan again is 200, a different one 409. |
+| `POST /runs/<run>/plan` | coordinator | The run's plan, `protocol.Plan`: `{"units": ["<id>", ...], "inputs": ["<sha256>", ...]}`, every unit id and every input hash the plan names (`protocol.PlanOf` builds it). Set once; the same plan again is 200, a different one 409. |
 | `POST /runs/<run>/events` | runner or coordinator | JSON lines of events for that run. Each is checked against the schema and the run id, and a batch lands whole or not at all. An event identical to one already held (same unit and sequence, same content) is dropped as a replay. The same unit and sequence with **different** content is a conflict, not a replay: the first stays, and the answer is 409 with `conflicts`, a list of `"<unit> <sequence>"`. Out of order is held until its gap fills. |
 | `POST /runs/<run>/verdict` | coordinator | `protocol.Verdict` from `protocol.Decide`. Shown, never computed, by the Worker. |
 | `GET /runs/<run>/stream` | any for the run | WebSocket: the tail so far, then every event as it is accepted, then the verdict. |
 | `GET /runs/<run>` | any for the run | The live page: one row per planned unit, filling as it runs, red with its last lines the moment it fails. |
-| `GET /blobs/<sha256>` | runner or coordinator | The blob's bytes from R2 (`loom-store`). |
-| `PUT /blobs/<sha256>` | runner or coordinator | Stores the body if its sha256 matches (201); an existing blob is left as is (200). Needs `Content-Length`; up to 100 MiB. |
+| `GET /runs/<run>/blobs/<sha256>` | as Store says | The blob's bytes from R2. A hash the token may not read is 403; one not in the store is 404. A viewer token may come as `?token=`. |
+| `HEAD /runs/<run>/blobs/<sha256>` | as `GET` | 200 with `Content-Length` when the blob is in the store, 404 when not. The coordinator asks before uploading an input, so a blob already held costs no bytes. It records nothing: only a `PUT`, which proves the bytes, counts as the run's upload. |
+| `PUT /runs/<run>/blobs/<sha256>` | runner or coordinator | Stores the body if its sha256 matches (201); an existing blob is left as is (200). Either way the hash is recorded as uploaded by the run. Needs `Content-Length`; up to 100 MiB. |
+| `GET /cache/<key>` | coordinator (any run) | The `protocol.CacheEntry` for that key, or 404. |
+| `PUT /cache/<key>` | coordinator (any run) | Writes the entry once (201); an existing one is left as is (200). Refused when its `key` isn't the path's, or its outputs or event log aren't in the store. |
 
-A finished run's events are archived to R2 as `runs/<run>/events.jsonl`.
+A finished run's events are archived to R2 as `runs/<run>/events.jsonl`, and its uploads as `runs/<run>/blobs.jsonl` (`{"sha256", "bytes", "scope"}` per line). Cache entries live at `cache/<key>`.

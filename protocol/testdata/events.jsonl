@@ -9,3 +9,5 @@
 {"run":"r-fixture","unit":"tests[shard=0]","sequence":1,"time":"2026-10-08T19:00:00.001Z","type":"exit","signal":"SIGTERM","timedOut":true,"wallSeconds":600.002,"userSeconds":1.5}
 {"run":"r-fixture","unit":"tests[shard=0]","sequence":2,"time":"2026-10-08T19:00:00.002Z","type":"error","phase":"run","message":"a process outside the unit's group held its output open 2s after the command exited; stopped reading"}
 {"run":"r-fixture","unit":"tests[shard=0]","sequence":3,"time":"2026-10-08T19:00:00.003Z","type":"finished","status":"failed"}
+{"run":"r-fixture","unit":"cached","sequence":0,"time":"2026-10-08T19:00:00.000Z","type":"cached","key":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","fromRun":"r-earlier","events":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+{"run":"r-fixture","unit":"cached","sequence":1,"time":"2026-10-08T19:00:00.001Z","type":"finished","status":"passed"}

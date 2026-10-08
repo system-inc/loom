@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/system-inc/loom/poster"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -140,11 +141,11 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 	run := &unitRun{unit: unit, options: options}
 	run.emitter = &emitter{run: unit.Run, unit: unit.Unit, writer: options.Events, now: time.Now}
 	if unit.Wire != nil && unit.Wire.Url != "" {
-		run.emitter.wire = newWire(unit.Wire.Url, unit.Token, options.Client, options.WireInterval)
-		run.emitter.wire.report = func(message string) {
+		run.emitter.wire = poster.New(unit.Wire.Url, unit.Token, options.Client, options.WireInterval)
+		run.emitter.wire.Report = func(message string) {
 			run.emitter.emit(protocol.Event{Type: "error", Phase: protocol.PhaseWire, Message: message})
 		}
-		go run.emitter.wire.loop()
+		go run.emitter.wire.Loop()
 	}
 
 	machine := describeMachine()
@@ -223,14 +224,14 @@ func (run *unitRun) finish(status string) {
 		return
 	}
 	deadline := time.Now().Add(run.options.WireDrainTimeout)
-	if err := wire.drain(deadline); err != nil {
-		wire.abandon()
+	if err := wire.Drain(deadline); err != nil {
+		wire.Abandon()
 		run.fail(protocol.PhaseWire, fmt.Errorf("the wire didn't take every event; stdout holds the whole stream: %w", err))
 		run.emitter.emit(protocol.Event{Type: "finished", Status: status})
 		return
 	}
 	run.emitter.emit(protocol.Event{Type: "finished", Status: status})
-	if err := wire.drain(deadline.Add(5 * time.Second)); err != nil {
+	if err := wire.Drain(deadline.Add(5 * time.Second)); err != nil {
 		fmt.Fprintf(run.options.Diagnostics, "loom-runner: the wire missed the finished event (stdout has it): %v\n", err)
 	}
 }

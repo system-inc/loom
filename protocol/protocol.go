@@ -29,6 +29,10 @@ type JobUnit struct {
 	Outputs        []Output            `json:"outputs,omitempty"`
 	TimeoutSeconds int                 `json:"timeoutSeconds"`
 	Resources      Resources           `json:"resources,omitempty"`
+	// Cache says the unit is hermetic: its result depends on nothing but what its cache key holds, so a
+	// pass may stand in for a later unit with the same key. Off by default, since a unit that reads a
+	// machine's own state (a warm checkout, say) has inputs its key can't see.
+	Cache bool `json:"cache,omitempty"`
 }
 
 type Input struct {
@@ -102,6 +106,10 @@ type Event struct {
 	// error
 	Phase   string `json:"phase,omitempty"`
 	Message string `json:"message,omitempty"`
+	// cached
+	Key      string `json:"key,omitempty"`
+	FromRun  string `json:"fromRun,omitempty"`
+	EventLog string `json:"events,omitempty"`
 	// finished
 	Status string `json:"status,omitempty"`
 }
@@ -122,6 +130,7 @@ const (
 	PhaseRun    = "run"    // while the command runs: the runner stopped, output unreadable, a process escaping the group
 	PhaseUpload = "upload" // finding, hashing or uploading a declared output
 	PhaseWire   = "wire"   // posting events to the wire; never changes the status, since stdout holds the stream
+	PhasePlace  = "place"  // the coordinator's own: a box that dropped the unit, and where it was placed again
 )
 
 // Decode reads exactly one JSON value into value, refusing unknown fields and trailing data.
@@ -328,6 +337,7 @@ type Verdict struct {
 	Status   string   `json:"status"`   // "green", "red" or "void"
 	Failed   []string `json:"failed"`   // planned unit ids that finished failed
 	Problems []string `json:"problems"` // why a run is void, one line each
+	Cached   []string `json:"cached"`   // planned unit ids served from the cache instead of run
 }
 
 // MarshalJSON writes an empty list as [], never null, so every reader sees the same shape.
@@ -339,21 +349,35 @@ func (verdict Verdict) MarshalJSON() ([]byte, error) {
 	if verdict.Problems == nil {
 		verdict.Problems = []string{}
 	}
+	if verdict.Cached == nil {
+		verdict.Cached = []string{}
+	}
 	return json.Marshal(plain(verdict))
 }
 
-// A Plan is the body of the wire's plan endpoint: every planned unit id, in plan order.
+// A Plan is the body of the wire's plan endpoint: every planned unit id in plan order, and every input hash
+// the plan names, sorted. A runner token may read only those inputs and what its own run uploads.
 type Plan struct {
-	Units []string `json:"units"`
+	Units  []string `json:"units"`
+	Inputs []string `json:"inputs"`
 }
 
-// PlanOf names an expanded job's units in the form the wire takes.
+// PlanOf names an expanded job's units and inputs in the form the wire takes.
 func PlanOf(plan []PlannedUnit) Plan {
 	units := make([]string, len(plan))
+	seen := map[string]bool{}
+	inputs := []string{}
 	for index, unit := range plan {
 		units[index] = unit.Id
+		for _, input := range unit.Unit.Inputs {
+			if !seen[input.Sha256] {
+				seen[input.Sha256] = true
+				inputs = append(inputs, input.Sha256)
+			}
+		}
 	}
-	return Plan{Units: units}
+	sort.Strings(inputs)
+	return Plan{Units: units, Inputs: inputs}
 }
 
 // Decide reads a run's events against its plan. Green needs every planned unit to have finished passed,
@@ -367,6 +391,7 @@ func Decide(run string, plan []string, events []Event) Verdict {
 	type stream struct {
 		next     int
 		finished []string
+		cached   bool
 	}
 	streams := map[string]*stream{}
 	var problems []string
@@ -388,15 +413,24 @@ func Decide(run string, plan []string, events []Event) Verdict {
 			problems = append(problems, fmt.Sprintf("unit %s: event %d where %d was next", event.Unit, event.Sequence, current.next))
 		}
 		current.next = event.Sequence + 1
+		if event.Type == "cached" {
+			current.cached = true
+		}
 		if event.Type == "finished" {
 			current.finished = append(current.finished, event.Status)
 		} else if len(current.finished) > 0 {
 			problems = append(problems, fmt.Sprintf("unit %s: %s event after finished", event.Unit, event.Type))
 		}
 	}
-	var failed []string
+	var failed, cached []string
 	for _, id := range plan {
 		current := streams[id]
+		if current != nil && current.cached {
+			if len(current.finished) == 1 && current.finished[0] != StatusPassed {
+				problems = append(problems, fmt.Sprintf("unit %s came from the cache but finished %s; only passed units are cached", id, current.finished[0]))
+			}
+			cached = append(cached, id)
+		}
 		switch {
 		case current == nil || len(current.finished) == 0:
 			problems = append(problems, fmt.Sprintf("unit %s never finished", id))
@@ -415,10 +449,10 @@ func Decide(run string, plan []string, events []Event) Verdict {
 	}
 	switch {
 	case len(problems) > 0:
-		return Verdict{Status: "void", Failed: failed, Problems: problems}
+		return Verdict{Status: "void", Failed: failed, Problems: problems, Cached: cached}
 	case len(failed) > 0:
-		return Verdict{Status: "red", Failed: failed}
+		return Verdict{Status: "red", Failed: failed, Cached: cached}
 	default:
-		return Verdict{Status: "green"}
+		return Verdict{Status: "green", Cached: cached}
 	}
 }
