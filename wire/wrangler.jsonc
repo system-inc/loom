@@ -7,6 +7,8 @@
     "compatibility_date": "2026-10-01",
     "workers_dev": true,
     "preview_urls": false,
+    // The board's address for Kirk; workers.dev stays for runners and scripts.
+    "routes": [{ "pattern": "loom.kirkouimet.com", "custom_domain": true }],
     "observability": { "enabled": true },
     "durable_objects": {
         "bindings": [
