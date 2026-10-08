@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -249,6 +250,10 @@ func yieldLimit(slots []coordinator.Machine, table string) func(string) int {
 		if err != nil {
 			return 0 // can't read the gate's table: take nothing from it
 		}
+		// A box running a front-file tip, the star, is the star's alone (@system_adamic, Oct 8): Loom takes nothing there.
+		if starRunsOn(filepath.Dir(table), box) {
+			return 0
+		}
 		held := map[string]int{}
 		for _, line := range strings.Split(string(content), "\n") {
 			fields := strings.Fields(line)
@@ -262,6 +267,38 @@ func yieldLimit(slots []coordinator.Machine, table string) func(string) int {
 		}
 		return limit
 	}
+}
+
+// starRunsOn says whether the gate watcher in directory state has a front-file tip running on box.
+func starRunsOn(state string, box string) bool {
+	content, err := os.ReadFile(filepath.Join(state, "front"))
+	if err != nil {
+		return false
+	}
+	var globs []string
+	for _, line := range strings.Split(string(content), "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		if line = strings.TrimSpace(line); line != "" {
+			globs = append(globs, line)
+		}
+	}
+	entries, _ := os.ReadDir(filepath.Join(state, "running"))
+	for _, entry := range entries {
+		running, err := os.ReadFile(filepath.Join(state, "running", entry.Name()))
+		if err != nil {
+			continue
+		}
+		fields := strings.Fields(string(running))
+		if len(fields) < 4 || fields[3] != box {
+			continue
+		}
+		for _, glob := range globs {
+			if matched, _ := path.Match(glob, fields[0]); matched {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // writeRecord keeps a run's record on this machine: a first line naming the run, then every event.
