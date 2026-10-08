@@ -15,7 +15,8 @@ func TestARedGateThatEndsAtOnceStaysRedOnItsSlot(t *testing.T) {
 	state := t.TempDir()
 	os.MkdirAll(filepath.Join(state, "running"), 0o755)
 	os.MkdirAll(filepath.Join(state, "running-started"), 0o755)
-	os.WriteFile(filepath.Join(state, "slots"), []byte("server B\nserver S\n"), 0o644)
+	// Only the area slot is in the table: slot 2 is lent out, as it is while Loom holds the small slots.
+	os.WriteFile(filepath.Join(state, "slots"), []byte("server B\n"), 0o644)
 	os.WriteFile(filepath.Join(state, "running", "7"), []byte("codex/x 0123456789abcdef0123 S server S tools log\n"), 0o644)
 	os.WriteFile(filepath.Join(state, "running-started", "7"), []byte("1791490000\n"), 0o644)
 	status := "running: fast gate of 0123456789ab"
@@ -39,7 +40,7 @@ func TestARedGateThatEndsAtOnceStaysRedOnItsSlot(t *testing.T) {
 				}
 			}
 		}
-		t.Fatal("no server slot 2")
+		t.Fatalf("no server slot 2 in %+v", lines.Machines)
 		return Line{}
 	}
 	if line := lineOf(reader.Read(context.Background())); line.State != "gating" || line.Branch != "codex/x" {
@@ -53,8 +54,13 @@ func TestARedGateThatEndsAtOnceStaysRedOnItsSlot(t *testing.T) {
 	if second.State != "red" || !strings.Contains(second.Detail, "first failure") {
 		t.Fatalf("after it ended red: first poll %+v, second poll %+v", first, second)
 	}
+	// After the linger a slot the table doesn't name (this one is lent out) leaves the board.
 	reader.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
-	if line := lineOf(reader.Read(context.Background())); line.State != "idle" {
-		t.Fatalf("after the linger: %+v", line)
+	for _, machine := range reader.Read(context.Background()).Machines {
+		for _, line := range machine.Lines {
+			if machine.Name == "server" && line.Slot == 2 {
+				t.Fatalf("after the linger, the lent slot is still shown: %+v", line)
+			}
+		}
 	}
 }

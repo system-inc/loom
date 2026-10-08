@@ -380,6 +380,23 @@ func (reader *Reader) Read(readContext context.Context) Lines {
 			}
 		}
 
+		// A slot whose gate just ended stays on the board through the linger even when the table doesn't name it
+		// (a borrowed slot, or one lent to Loom), so its verdict, a red above all, is seen.
+		// The same goes for a slot that was running at the last poll: its gate may have just ended there.
+		for key, ended := range reader.ended {
+			if strings.HasPrefix(key, box.Name+" ") && now.Sub(ended.at) < reader.Linger {
+				if _, named := classes[ended.line.Slot]; !named {
+					classes[ended.line.Slot] = ended.line.Class
+				}
+			}
+		}
+		for key, last := range reader.running {
+			if strings.HasPrefix(key, box.Name+" ") {
+				if _, named := classes[last.Slot]; !named {
+					classes[last.Slot] = last.Class
+				}
+			}
+		}
 		numbers := make([]int, 0, len(classes))
 		for number := range classes {
 			numbers = append(numbers, number)
