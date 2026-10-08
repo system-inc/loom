@@ -56,6 +56,10 @@ type Config struct {
 	LateGrace time.Duration
 	// Client makes every HTTP call. Nil means one with sane timeouts.
 	Client *http.Client
+	// SlotLimit says how many of a machine's slots Loom may use right now; nil means all of them. It is asked
+	// every few seconds: a machine over its limit has its newest unit stopped and queued again (preempted, not
+	// failed), and a limit of 0 holds units back until it rises. The gate takes slots back this way.
+	SlotLimit func(machine string) int
 }
 
 // A Result is a run's outcome: its id, the verdict, and where a person can watch it.
@@ -71,11 +75,14 @@ type Result struct {
 
 // unitState is where one planned unit stands.
 type unitState struct {
-	planned  protocol.PlannedUnit
-	status   string // "" while waiting or running, then the finished status, or "dropped" or "skipped"
-	running  bool
-	attempts int
-	lastSlot int // the slot of the last attempt, so a re-placement goes elsewhere when it can
+	planned   protocol.PlannedUnit
+	status    string // "" while waiting or running, then the finished status, or "dropped" or "skipped"
+	running   bool
+	attempts  int
+	preempt   context.CancelFunc // stops the running attempt to give its slot back
+	preempted bool
+	startedAt time.Time
+	lastSlot  int // the slot of the last attempt, so a re-placement goes elsewhere when it can
 }
 
 // Run runs a job to its verdict. An error means the run couldn't be set up (no plan was posted, or an input
@@ -243,15 +250,26 @@ func (coordinator *coordinator) schedule(runContext context.Context, plan []prot
 				running++
 			}
 		}
+		waiting := 0
+		for _, state := range coordinator.units {
+			if state.status == "" && !state.running {
+				waiting++
+			}
+		}
 		coordinator.mutex.Unlock()
-		if running == 0 && !started {
+		// Done when nothing runs and nothing can start; with a slot limit, units may wait for slots to come back.
+		if running == 0 && !started && (waiting == 0 || coordinator.config.SlotLimit == nil) {
 			break
 		}
 		if runContext.Err() != nil && running == 0 {
 			break
 		}
+		coordinator.mutex.Lock()
+		coordinator.preemptOverLimit()
+		coordinator.mutex.Unlock()
 		select {
 		case <-coordinator.wake:
+		case <-time.After(3 * time.Second):
 		case <-runContext.Done():
 			// Running attempts see the same context and end; wait for them.
 			coordinator.active.Wait()
@@ -352,12 +370,60 @@ func (coordinator *coordinator) expected(state *unitState) float64 {
 	return float64(1 << 30)
 }
 
-// pickSlot returns a free slot, preferring one on another machine than avoid's, or -1 when none is free.
+// busyOn counts the slots of a machine in use. The caller holds the mutex.
+func (coordinator *coordinator) busyOn(name string) int {
+	busy := 0
+	for index, free := range coordinator.free {
+		if !free && coordinator.config.Slots[index].Name() == name {
+			busy++
+		}
+	}
+	return busy
+}
+
+// preemptOverLimit stops the newest unit on each machine that holds more slots than its limit allows. The
+// caller holds the mutex.
+func (coordinator *coordinator) preemptOverLimit() {
+	if coordinator.config.SlotLimit == nil {
+		return
+	}
+	names := map[string]bool{}
+	for _, machine := range coordinator.config.Slots {
+		names[machine.Name()] = true
+	}
+	for name := range names {
+		over := coordinator.busyOn(name) - coordinator.config.SlotLimit(name)
+		for ; over > 0; over-- {
+			var newest *unitState
+			for _, state := range coordinator.units {
+				if state.running && !state.preempted && state.preempt != nil && state.lastSlot >= 0 &&
+					coordinator.config.Slots[state.lastSlot].Name() == name && (newest == nil || state.startedAt.After(newest.startedAt)) {
+					newest = state
+				}
+			}
+			if newest == nil {
+				break
+			}
+			newest.preempted = true
+			newest.preempt()
+			fmt.Fprintf(coordinator.config.Log, "%s: preempted on %s, the gate wants the slot back\n", newest.planned.Id, name)
+		}
+	}
+}
+
+// pickSlot returns a free slot, preferring one on another machine than avoid's, or -1 when none is free. A
+// machine at its slot limit offers none.
 func (coordinator *coordinator) pickSlot(avoid int) int {
 	fallback := -1
 	for index, free := range coordinator.free {
 		if !free {
 			continue
+		}
+		if limit := coordinator.config.SlotLimit; limit != nil {
+			name := coordinator.config.Slots[index].Name()
+			if coordinator.busyOn(name) >= limit(name) {
+				continue
+			}
 		}
 		if avoid < 0 || coordinator.config.Slots[index].Name() != coordinator.config.Slots[avoid].Name() {
 			return index
@@ -388,6 +454,13 @@ func (coordinator *coordinator) attempt(runContext context.Context, state *unitS
 	defer coordinator.mutex.Unlock()
 	state.running = false
 	coordinator.free[slot] = true
+	if status == "preempted" {
+		// The gate took the slot back: the unit waits for one again, and this attempt doesn't count.
+		state.attempts--
+		state.preempted = false
+		status = ""
+	}
+	state.preempt = nil
 	if status == "dropped" && state.attempts < 2 && runContext.Err() == nil {
 		// Placed again once, elsewhere when there is an elsewhere; the drop is already in the record.
 		status = ""
@@ -449,6 +522,10 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 	limit := time.Duration(unit.TimeoutSeconds)*time.Second + coordinator.config.LateGrace
 	attemptContext, cancel := context.WithTimeout(runContext, limit)
 	defer cancel()
+	coordinator.mutex.Lock()
+	state.preempt = cancel
+	state.startedAt = time.Now()
+	coordinator.mutex.Unlock()
 	attempt := coordinator.record.begin(id)
 	reader, writer := io.Pipe()
 	parsed := make(chan struct{})
@@ -461,6 +538,14 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 			var event protocol.Event
 			if err := protocol.Decode(strings.NewReader(scanner.Text()), &event); err != nil {
 				coordinator.record.note(id, placeError("the runner on %s sent a line that isn't an event: %v", machine.Name(), err))
+				continue
+			}
+			// A preempted attempt's stream ends at the preemption: what its runner says after belongs to an
+			// attempt that was given up, and its finished would make the unit finish twice.
+			coordinator.mutex.Lock()
+			given := state.preempted
+			coordinator.mutex.Unlock()
+			if given {
 				continue
 			}
 			if event.Run == coordinator.run && event.Unit == id && event.Type == "finished" {
@@ -476,7 +561,11 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 	<-parsed
 	wall := time.Since(started)
 
-	if attempt.finished && attemptContext.Err() == nil {
+	coordinator.mutex.Lock()
+	preempted := state.preempted
+	coordinator.mutex.Unlock()
+	// A unit that finished as it was being preempted finished: queuing it again would finish it twice.
+	if attempt.finished && (attemptContext.Err() == nil || preempted) {
 		if coordinator.config.Durations != nil {
 			coordinator.config.Durations.Set(coordinator.job.Name, id, wall.Seconds())
 		}
@@ -485,6 +574,10 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 			coordinator.remember(runContext, id, key, machine, wall)
 		}
 		return finishedStatus
+	}
+	if preempted && runContext.Err() == nil {
+		coordinator.record.note(id, placeError("preempted on %s after %d events: the gate took the slot back; queued again", machine.Name(), attempt.lines))
+		return "preempted"
 	}
 	why := "its runner ended without finishing"
 	if attemptContext.Err() != nil && runContext.Err() == nil {

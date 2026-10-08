@@ -1,7 +1,7 @@
 // Command loom is the coordinator: it runs a job file on Loom's slots and prints the verdict. It exits 0 when
 // the run is green, 1 when red, 2 when void, and 3 when the run couldn't be set up.
 //
-//	loom run [--uncached] [--local <slots> | --slots <file>] [--record <file>] [--wire <url>] <job.json>
+//	loom run [--uncached] [--local <slots> | --slots <file>] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
 //	loom board [--days <n>]   prints the board's address with a board token
 //
 // The slots come from ~/.loom/slots, one "box class" per line (class B is a box's area slot, S a small one),
@@ -35,7 +35,7 @@ import (
 )
 
 const usage = `usage:
-  loom run [--uncached] [--local <slots> | --slots <file>] [--record <file>] [--wire <url>] <job.json>
+  loom run [--uncached] [--local <slots> | --slots <file>] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
   loom board [--days <n>] [--wire <url>]
   loom gate-lines [--once] [--interval <duration>] [--wire <url>]
   loom top [--once] [--wire <url>]
@@ -67,6 +67,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	source := flags.String("source", defaultSource(), "this repository's checkout, to build the runner from")
 	slotsPath := flags.String("slots", "", "the slot allowance, one \"box class\" per line (default ~/.loom/slots)")
 	recordPath := flags.String("record", "", "write the run's record, every event as a JSON line, to this file")
+	yieldTo := flags.String("yield-to", "", "the gate's slot table: Loom uses a box's slots only while the gate's table doesn't hold them")
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 1 {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -115,9 +116,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
-	result, err := coordinator.Run(runContext, coordinator.Config{
-		Wire: *wire, Secret: secret, Slots: slots, Uncached: *uncached, Durations: durations, Log: stdout,
-	}, job)
+	config := coordinator.Config{Wire: *wire, Secret: secret, Slots: slots, Uncached: *uncached, Durations: durations, Log: stdout}
+	if *yieldTo != "" {
+		config.SlotLimit = yieldLimit(slots, *yieldTo)
+	}
+	result, err := coordinator.Run(runContext, config, job)
 	if err != nil {
 		return fail(err)
 	}
@@ -226,6 +229,39 @@ func board(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "%s/board#%s\n", origin, token)
 	fmt.Fprintf(stdout, "snapshot: curl -s -H 'Authorization: Bearer %s' %s/board/snapshot\n", token, origin)
 	return 0
+}
+
+// yieldLimit lets Loom use a box's slots only while the gate doesn't: a box's limit is Loom's allowance on it
+// less the lines of the same class the gate's slot table holds for it. The gate's owner pulls lines out of
+// the table to hand slots over and puts them back to take them, and Loom follows within seconds.
+func yieldLimit(slots []coordinator.Machine, table string) func(string) int {
+	allowance := map[string]map[string]int{}
+	for _, machine := range slots {
+		if ssh, ok := machine.(coordinator.SSHMachine); ok {
+			if allowance[ssh.Box] == nil {
+				allowance[ssh.Box] = map[string]int{}
+			}
+			allowance[ssh.Box][ssh.Class]++
+		}
+	}
+	return func(box string) int {
+		content, err := os.ReadFile(table)
+		if err != nil {
+			return 0 // can't read the gate's table: take nothing from it
+		}
+		held := map[string]int{}
+		for _, line := range strings.Split(string(content), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 && fields[0] == box {
+				held[fields[1]]++
+			}
+		}
+		limit := 0
+		for class, count := range allowance[box] {
+			limit += max(0, count-held[class])
+		}
+		return limit
+	}
 }
 
 // writeRecord keeps a run's record on this machine: a first line naming the run, then every event.

@@ -35,7 +35,7 @@ func (machine SSHMachine) Platform() string      { return machine.GoPlatform }
 func (machine SSHMachine) Cores() int            { return machine.CoreCount }
 
 // slotScript takes a free gate slot of the class, waiting for one, and runs the runner pinned to its CPUs
-// with the unit on stdin. The lock is fd 9, which exec hands to the runner, so it holds while the unit runs.
+// with the unit read from stdin. The lock is fd 9, held by this shell while the runner runs.
 // Keep the partition identical to adamic's cloud/fast-gate.sh.
 const slotScript = `set -euo pipefail
 class=$1 runner=$2
@@ -65,7 +65,21 @@ case ${slot} in
 esac
 echo "loom: $(hostname) slot ${slot}, cpus ${first}-$((first + share - 1))" >&2
 export LOOM_SLOT=${slot} LOOM_SLOT_CPUS=${first}-$((first + share - 1))
-exec taskset -c "${LOOM_SLOT_CPUS}" "${runner}" run --workspace ~/loom-units -
+# The runner runs as a child, not in this shell's place, so the shell can watch its ssh session: when the
+# coordinator lets go (a preemption, a late unit, a stop), the runner is told to stop, kills its unit's group
+# and exits, and the slot's lock (fd 9, held here) goes with this shell.
+unit=$(mktemp)
+cat > "${unit}"
+taskset -c "${LOOM_SLOT_CPUS}" "${runner}" run --workspace ~/loom-units "${unit}" &
+child=$!
+while kill -0 "${child}" 2>/dev/null; do
+  kill -0 "${PPID}" 2>/dev/null || kill -TERM "${child}" 2>/dev/null
+  sleep 1
+done
+wait "${child}"
+code=$?
+rm -f "${unit}"
+exit "${code}"
 `
 
 func (machine SSHMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {

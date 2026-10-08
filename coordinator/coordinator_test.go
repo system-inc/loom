@@ -444,3 +444,34 @@ func TestAStoppedCoordinatorStillDecidesVoidAndPostsIt(t *testing.T) {
 		t.Fatalf("verdict %+v, posted %+v", result.Verdict, wire.verdict[result.Run])
 	}
 }
+
+func TestAUnitPreemptedByTheGateIsQueuedAgainNotFailed(t *testing.T) {
+	wire := newFakeWire(t)
+	var mutex sync.Mutex
+	limit := 2
+	configuration := config(wire, LocalMachine{Label: "box"}, LocalMachine{Label: "box"})
+	configuration.SlotLimit = func(string) int { mutex.Lock(); defer mutex.Unlock(); return limit }
+	// The gate takes one slot back while both units run.
+	time.AfterFunc(400*time.Millisecond, func() { mutex.Lock(); limit = 1; mutex.Unlock() })
+	result := run(t, configuration, shell("a", "sleep 5; echo a"), shell("b", "sleep 5; echo b"))
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	if !strings.Contains(fmt.Sprint(wire.events(result.Run)), "the gate took the slot back; queued again") {
+		t.Fatal("the preemption isn't in the record")
+	}
+}
+
+func TestUnitsWaitForSlotsWhileTheLimitIsZero(t *testing.T) {
+	wire := newFakeWire(t)
+	var mutex sync.Mutex
+	limit := 0
+	configuration := config(wire, LocalMachine{Label: "box"})
+	configuration.SlotLimit = func(string) int { mutex.Lock(); defer mutex.Unlock(); return limit }
+	started := time.Now()
+	time.AfterFunc(time.Second, func() { mutex.Lock(); limit = 1; mutex.Unlock() })
+	result := run(t, configuration, shell("a", "echo a"))
+	if result.Verdict.Status != "green" || time.Since(started) < time.Second {
+		t.Fatalf("verdict %+v after %v", result.Verdict, time.Since(started))
+	}
+}
