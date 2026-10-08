@@ -1,6 +1,8 @@
-// Blobs in R2 (loom-store), addressed by sha256 under blobs/<sha256>. A PUT streams its body through a
-// SHA-256 digest and into R2 at once; R2 is also given the expected hash, so a body that doesn't match is
-// never written, and the digest decides the answer. An existing blob is left exactly as it is. Who may reach
+// Blobs in R2 (loom-store), addressed by sha256 under blobs/<sha256>. A PUT hands its body straight to R2
+// with the expected hash, and R2 verifies it: a body that doesn't match is never written. No JavaScript
+// touches the bytes on the way, because per-chunk work here is CPU time: a tee into a DigestStream used 2.2 s
+// of CPU on a 100 MiB PUT and was killed for exceeding the limit whenever the client sent fast (Oct 8, from a
+// Codex instance at 13 to 20 MB/s). An existing blob is left exactly as it is. Who may reach
 // which blob is the run object's decision (docs/protocol.md, Store); this file only moves bytes.
 
 import { jsonResponse } from './Http';
@@ -10,12 +12,6 @@ export const Sha256Pattern = /^[0-9a-f]{64}$/;
 
 export function blobKey(sha256: string): string {
     return `blobs/${sha256}`;
-}
-
-function hex(bytes: ArrayBuffer): string {
-    return Array.from(new Uint8Array(bytes), function (byte) {
-        return byte.toString(16).padStart(2, '0');
-    }).join('');
 }
 
 // The answer to a PUT, and the blob's size when it is in the store afterwards (stored now or already there),
@@ -78,36 +74,27 @@ export async function putBlob(store: R2Bucket, sha256: string, request: Request)
         };
     }
 
-    const body = request.body ?? new Response('').body;
-    if (body === null) {
-        return refused(jsonResponse(400, { error: 'no body' }));
-    }
-    const [forDigest, forStore] = body.tee();
-    const digestStream = new crypto.DigestStream('SHA-256');
-    const digesting = forDigest.pipeTo(digestStream).then(function () {
-        return digestStream.digest;
-    });
-    const fixedLength = new FixedLengthStream(length);
-    const copying = forStore.pipeTo(fixedLength.writable);
-    const storing = store.put(blobKey(sha256), fixedLength.readable, {
-        sha256: sha256,
-        httpMetadata: { contentType: 'application/octet-stream' },
-    });
-    const [digested, copied, stored] = await Promise.allSettled([digesting, copying, storing]);
-
-    if (digested.status === 'rejected' || copied.status === 'rejected') {
-        return refused(jsonResponse(400, { error: 'the body ended early or ran past its Content-Length' }));
-    }
-    const actual = hex(digested.value);
-    if (actual !== sha256) {
-        if (stored.status === 'fulfilled') {
-            // R2 checks the hash we gave it, so this should never run; if it does, take the wrong bytes back out.
-            await store.delete(blobKey(sha256));
+    if (request.body === null) {
+        if (length !== 0) {
+            return refused(jsonResponse(400, { error: 'no body' }));
         }
-        return refused(jsonResponse(400, { error: `the body hashes to ${actual}, not ${sha256}` }));
     }
-    if (stored.status === 'rejected') {
-        return refused(jsonResponse(502, { error: `the store refused the blob: ${String(stored.reason)}` }));
+    try {
+        await store.put(blobKey(sha256), request.body ?? new Uint8Array(0), {
+            sha256: sha256,
+            httpMetadata: { contentType: 'application/octet-stream' },
+        });
+    }
+    catch (error) {
+        const message = String(error);
+        // R2 names a checksum it refused; anything else is the store's own failure, or a body cut short.
+        if (/checksum|sha-?256|digest/i.test(message)) {
+            return refused(jsonResponse(400, { error: `the body doesn't hash to ${sha256}` }));
+        }
+        if (/length|ended|closed|short|aborted|truncat/i.test(message)) {
+            return refused(jsonResponse(400, { error: 'the body ended early or ran past its Content-Length' }));
+        }
+        return refused(jsonResponse(502, { error: `the store refused the blob: ${message}` }));
     }
     return { response: jsonResponse(201, { sha256: sha256, bytes: length, stored: true }), bytes: length };
 }
