@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func readJob(t *testing.T, path string) Job {
@@ -69,16 +70,18 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 		return Job{Name: "j", Units: []JobUnit{{Id: "a", Argv: []string{"true"}, TimeoutSeconds: 1}}}
 	}
 	cases := map[string]func(*Job){
-		"no name":          func(j *Job) { j.Name = "" },
-		"no units":         func(j *Job) { j.Units = nil },
-		"bad id":           func(j *Job) { j.Units[0].Id = "A b" },
-		"duplicate id":     func(j *Job) { j.Units = append(j.Units, j.Units[0]) },
-		"no argv":          func(j *Job) { j.Units[0].Argv = nil },
-		"no timeout":       func(j *Job) { j.Units[0].TimeoutSeconds = 0 },
-		"unknown need":     func(j *Job) { j.Units[0].Needs = []string{"z"} },
-		"self need":        func(j *Job) { j.Units[0].Needs = []string{"a"} },
-		"bad hash":         func(j *Job) { j.Units[0].Inputs = []Input{{Path: "x", Sha256: "abc"}} },
-		"bad archive":      func(j *Job) { j.Units[0].Inputs = []Input{{Path: "x", Sha256: strings.Repeat("a", 64), Archive: "zip"}} },
+		"no name":      func(j *Job) { j.Name = "" },
+		"no units":     func(j *Job) { j.Units = nil },
+		"bad id":       func(j *Job) { j.Units[0].Id = "A b" },
+		"duplicate id": func(j *Job) { j.Units = append(j.Units, j.Units[0]) },
+		"no argv":      func(j *Job) { j.Units[0].Argv = nil },
+		"no timeout":   func(j *Job) { j.Units[0].TimeoutSeconds = 0 },
+		"unknown need": func(j *Job) { j.Units[0].Needs = []string{"z"} },
+		"self need":    func(j *Job) { j.Units[0].Needs = []string{"a"} },
+		"bad hash":     func(j *Job) { j.Units[0].Inputs = []Input{{Path: "x", Sha256: "abc"}} },
+		"bad archive": func(j *Job) {
+			j.Units[0].Inputs = []Input{{Path: "x", Sha256: strings.Repeat("a", 64), Archive: "zip"}}
+		},
 		"undefined matrix": func(j *Job) { j.Units[0].Argv = []string{"${matrix.k}"} },
 		"cycle": func(j *Job) {
 			j.Units[0].Needs = []string{"b"}
@@ -169,4 +172,40 @@ func removeSequence(stream []Event, unit string, sequence int) []Event {
 		result = append(result, event)
 	}
 	return result
+}
+
+// The Worker (wire/) checks the same vector, so Go and TypeScript sign the same bytes.
+const tokenVector = "eyJydW4iOiJyLXZlY3RvciIsInNjb3BlIjoicnVubmVyIiwiZXhwaXJlcyI6NDEwMjQ0NDgwMH0.5yFFC9AOwC9L6zqwWz8V0aCJNrLwusF5LjbOv_hoDWY"
+
+func TestTokenVector(t *testing.T) {
+	secret := []byte("loom-test-secret")
+	token, err := MintToken(secret, TokenClaims{Run: "r-vector", Scope: ScopeRunner, Expires: 4102444800})
+	if err != nil || token != tokenVector {
+		t.Fatalf("minted %q (%v), want the pinned vector", token, err)
+	}
+	now := time.Unix(1791486000, 0)
+	if claims, err := VerifyToken(secret, token, now); err != nil || claims.Run != "r-vector" || claims.Scope != ScopeRunner {
+		t.Fatalf("verify: %+v %v", claims, err)
+	}
+	bad := map[string]string{
+		"other secret":  "",
+		"tampered":      strings.Replace(token, "eyJydW4iOiJy", "eyJydW4iOiJz", 1),
+		"no signature":  strings.Split(token, ".")[0],
+		"bad signature": strings.Split(token, ".")[0] + ".AAAA",
+	}
+	for name, candidate := range bad {
+		key := secret
+		if name == "other secret" {
+			candidate, key = token, []byte("other")
+		}
+		if _, err := VerifyToken(key, candidate, now); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := VerifyToken(secret, token, time.Unix(4102444800, 0)); err == nil {
+		t.Error("expired token accepted")
+	}
+	if _, err := MintToken(secret, TokenClaims{Run: "r", Scope: "admin", Expires: 1}); err == nil {
+		t.Error("unknown scope minted")
+	}
 }

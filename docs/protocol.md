@@ -77,3 +77,26 @@ Blobs are addressed by sha256. `GET <store>/<sha256>` returns the bytes, `PUT <s
 ## Cache (later)
 
 A unit's result may be reused when its key matches: argv, environment, every input hash, directory, outputs, and the runner version. Each of those has a test that drops it from the key and must turn a hit into a miss. `--uncached` bypasses the cache, and an uncached run is what lands main.
+
+## Tokens
+
+`<base64url(claims JSON)>.<base64url(HMAC-SHA256(secret, first part))>`, base64url without padding. Claims: `run`, `scope` (`runner`, `viewer` or `coordinator`) and `expires` (Unix seconds). The coordinator mints them (`protocol.MintToken`); the Worker verifies them with the same secret (Worker secret `LOOM_TOKEN_SECRET`; on the coordinator's machine `~/.loom/token-secret`, mode 600). `TestTokenVector` pins one token so the Go and TypeScript sides sign the same bytes:
+
+- secret `loom-test-secret`, claims `{"run":"r-vector","scope":"runner","expires":4102444800}`
+- token `eyJydW4iOiJyLXZlY3RvciIsInNjb3BlIjoicnVubmVyIiwiZXhwaXJlcyI6NDEwMjQ0NDgwMH0.5yFFC9AOwC9L6zqwWz8V0aCJNrLwusF5LjbOv_hoDWY`
+
+## The wire's endpoints
+
+All on the Worker (`wire/`). A token goes in `Authorization: Bearer <token>`, or `?token=` where a browser can't set headers (the page and its WebSocket).
+
+| Endpoint | Token | What it does |
+|---|---|---|
+| `POST /runs/<run>/plan` | coordinator | The run's plan: `{"units": ["<id>", ...]}`. Set once; a second, different plan is refused. |
+| `POST /runs/<run>/events` | runner or coordinator | JSON lines of events for that run. Each is checked against the schema and the run id; an event already held (same unit and sequence) is dropped as a replay; out of order is held until its gap fills. |
+| `POST /runs/<run>/verdict` | coordinator | `{"status", "failed", "problems"}` from `protocol.Decide`. Shown, never computed, by the Worker. |
+| `GET /runs/<run>/stream` | any for the run | WebSocket: the tail so far, then every event as it is accepted, then the verdict. |
+| `GET /runs/<run>` | any for the run | The live page: one row per planned unit, filling as it runs, red with its last lines the moment it fails. |
+| `GET /blobs/<sha256>` | runner or coordinator | The blob's bytes from R2 (`loom-store`). |
+| `PUT /blobs/<sha256>` | runner or coordinator | Stores the body if its sha256 matches; an existing blob is left as is (200). Up to 100 MB per blob in v0. |
+
+A finished run's events are archived to R2 as `runs/<run>/events.jsonl`.
