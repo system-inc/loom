@@ -331,9 +331,9 @@ print(next((event.get('machine') for event in map(json.loads, open(sys.argv[1]))
 	rm -f "${index}"
 }
 
-# within serves one job under the ceiling: a watchdog that, once the job has run `ceiling` seconds, marks it and stops
-# every coordinator whose record lies in its work directory (the selection's, the tests', the phases'). Whatever path
-# the job then takes to finish, finish reads the mark.
+# within serves one job under the ceiling: a watchdog that, once the job has run `ceiling` seconds past its first placed
+# unit, marks it and stops every coordinator whose record lies in its work directory (the selection's, the tests', the
+# phases'). Whatever path the job then takes to finish, finish reads the mark.
 within() {
 	local sha=$1 work=${jobs}/$1.work watchdog
 	# The star's jobs (priority 30 and up) get 30 minutes tonight (@system_adamic, Oct 9 09:23Z): their units on the
@@ -342,15 +342,26 @@ within() {
 	local priority
 	priority=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("priority", 0))' "${jobs}/${sha}.json" 2> /dev/null || echo 0)
 	[ "${priority:-0}" -ge 30 ] 2> /dev/null && ceiling=${LOOM_FAST_STAR_CEILING:-1800}
+	# An earlier attempt's units-placed signal never starts this one's ceiling: cleared before the watchdog reads it.
+	rm -f "${jobs}/${sha}.placed"
 	(
+		# The ceiling counts from the job's first placed unit, never from serve (#h16aj9a; @system_adamic, Oct 9 10:14
+		# local: time queued with no unit on a worker says nothing about the change; that day five tier-30 jobs voided at
+		# their ceiling with nothing run, their one selection unit never handed to a worker). placed.py's <sha>.placed
+		# counts a unit once its started event is on the wire, not when the coordinator queues it. A job that ends or is
+		# cancelled while it waits drops its .running, and the wait ends with it.
+		until [ "$(cut -d' ' -f1 "${jobs}/${sha}.placed" 2> /dev/null)" -ge 1 ] 2> /dev/null; do
+			[ -f "${jobs}/${sha}.running" ] || exit 0
+			sleep 1
+		done
 		sleep "${ceiling}"
 		[ -f "${jobs}/${sha}.running" ] || exit 0
 		touch "${work}/ceiling"
 		pkill -TERM -f "loom-pregate run .*${work}/" && echo "$(date -u +%H:%M:%S) ceiling: ${sha:0:12} stopped at ${ceiling} s"
 	) &
 	watchdog=$!
-	# The units-placed signal for developer tools' watcher (#3tj643t): <sha>.placed, "<placed> <total>", while the job runs.
-	rm -f "${jobs}/${sha}.placed"
+	# The units-placed signal for developer tools' watcher (#3tj643t) and the watchdog: <sha>.placed, "<placed> <total>",
+	# while the job runs.
 	python3 "${bin}/placed.py" "${jobs}" "${sha}" > /dev/null 2>&1 &
 	local placed=$!
 	serve "${sha}"
