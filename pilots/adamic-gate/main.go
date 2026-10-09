@@ -398,8 +398,10 @@ if [ "${vet}" = 0 ]; then echo "loom-stage: go vet ./... passed"; else echo "loo
 // commit (run.py --full --phase, developer tools' file), so Loom never keeps a copy of the gate's logic. The tools
 // tree is a worktree of the instance's clone at the tools sha, made once per sha. run.py's out directory comes back
 // whole as phase.tar.gz; its exit is the unit's, and only a missing tools tree is Loom's fault (exit 2). The phase
-// census takes the sha256 of the pool's merged go test record in the public store as its unit name.
-const phaseBody = `toolsSha=$1 phase=$2 unitName=${3:-}
+// census takes the sha256 of the pool's merged go test record in the public store as its unit name. The phase fast
+// is a landing's fast gate beyond its Go tests (developer tools' run.py at d5ccabd0, Oct 9): build, vet, smoke and the
+// census over that record, against the landing's base, named "fast <sha256> <base>".
+const phaseBody = `toolsSha=$1 phase=$2 unitName=${3:-} base=${4:-}
 [ -n "${tree:-}" ] && [ -d "${tree}/.git" ] && [ -n "${out:-}" ] || { echo "loom-phase: no tree (the opening never ran): Loom's fault"; exit 2; }
 gateTools=/tmp/adamic-gate-tools/${toolsSha:0:12}
 if [ ! -f "${gateTools}/cloud/fast-gate/run.py" ]; then
@@ -414,6 +416,10 @@ if [ "${phase}" = census ]; then
   # census <sha256>: the whole gate's census over the merged go test record of the pool's runs, fetched by hash.
   curl -fsS --retry 3 -o "${out}/merged.jsonl" "https://adamic-store.kirkouimet.com/blobs/${unitName}" && echo "${unitName}  ${out}/merged.jsonl" | sha256sum -c --quiet || { echo "loom-phase: merged record ${unitName} unreadable: Loom's fault"; exit 2; }
   python3 "${gateTools}/cloud/fast-gate/run.py" --full --census "${out}/merged.jsonl" --tree "${tree}" --sha "${sha}" --base "${sha}" --tools "${gateTools}" --out "${out}/phase" > "${out}/phase.log" 2>&1
+elif [ "${phase}" = fast ]; then
+  curl -fsS --retry 3 -o "${out}/merged.jsonl" "https://adamic-store.kirkouimet.com/blobs/${unitName}" && echo "${unitName}  ${out}/merged.jsonl" | sha256sum -c --quiet || { echo "loom-phase: merged record ${unitName} unreadable: Loom's fault"; exit 2; }
+  retry git -C "${tree}" fetch -q origin "${base}" || { echo "loom-phase: fetching the base ${base} failed: Loom's fault"; exit 2; }
+  python3 "${gateTools}/cloud/fast-gate/run.py" --tree "${tree}" --sha "${sha}" --base "${base}" --tools "${gateTools}" --out "${out}/phase" --phases build,vet,smoke,census --census "${out}/merged.jsonl" > "${out}/phase.log" 2>&1
 else
   python3 "${gateTools}/cloud/fast-gate/run.py" --full --phase "${phase}" ${unitName:+--unit "${unitName}"} --tree "${tree}" --sha "${sha}" --base "${sha}" --tools "${gateTools}" --out "${out}/phase" > "${out}/phase.log" 2>&1
 fi
@@ -1196,6 +1202,15 @@ func phaseJobUnits(opening string, sha string, toolsSha string, listPath string)
 	for number, line := range strings.Split(string(content), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
+			continue
+		}
+		// fast <sha256> <base>: a landing's fast gate over the pool's go test record, against its base.
+		if fields[0] == "fast" {
+			if len(fields) != 3 || !protocol.Sha256Pattern.MatchString(fields[1]) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(fields[2]) {
+				return nil, fmt.Errorf("%s:%d: fast takes the merged record's sha256 and the base's full sha", listPath, number+1)
+			}
+			units = append(units, protocol.JobUnit{Id: "phase-fast", Argv: append([]string{"bash", "-c", opening + phaseBody, "adamic-gate-phase", sha, toolsSha}, fields...),
+				TimeoutSeconds: 3600, Outputs: []protocol.Output{{Glob: "loom-out/phase.tar.gz"}}, Resources: protocol.Resources{Cpus: 4}})
 			continue
 		}
 		if len(fields) > 2 || !phaseName.MatchString(fields[0]) || (len(fields) == 2 && (!unitName.MatchString(fields[1]) || strings.Contains(fields[1], ".."))) {

@@ -299,15 +299,21 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 // the same way, readies the instance first, so a cold one's setup never runs inside a unit's budget; a failure to
 // fetch or run it never costs the turn its serve, since each unit's own opening still checks what it needs.
 func servePrompt(wire string, pool string, token string, runnerHash string, until string, before string) string {
-	readying := ""
+	readying, explained := "", ""
 	if before != "" {
+		// Codex's approval review refused the first turn that ran a before script unexplained (Oct 9, loom-side-codex-7:
+		// "behavior and potential access to sensitive local data remain unknown"), so the brief says what it does.
+		explained = "The first script readies this instance for the compute work: it clones the public repository " +
+			"github.com/system-inc/adamic into /tmp/adamic at a commit, runs that repository's own cloud/setup.sh to install " +
+			"its Go and Node toolchain, and downloads the test inputs from the same public store, each checked by its sha256. " +
+			"It reads no credentials or local data, and its output goes to /tmp/loom-before.log. "
 		readying = "script=/tmp/loom-before-" + before[:12] + ".sh\n" +
 			"[ -s \"$script\" ] || { curl -fsS -o \"$script.partial\" https://adamic-store.kirkouimet.com/blobs/" + before + " && " +
 			"echo \"" + before + "  $script.partial\" | sha256sum -c --quiet && mv \"$script.partial\" \"$script\"; } || true\n" +
 			"[ -s \"$script\" ] && (mkdir -p /tmp/loom-before && cd /tmp/loom-before && timeout 30m bash \"$script\" > /tmp/loom-before.log 2>&1) || true\n"
 	}
 	return "This is a compute worker, not a coding task: do not edit, commit or push anything in any repository. " +
-		"Run exactly this in the shell, in the foreground, and wait for it however long it takes. " +
+		"Run exactly this in the shell, in the foreground, and wait for it however long it takes. " + explained +
 		"Then reply with only its last line of output, nothing else.\n\n```bash\n" +
 		"set -e\nmkdir -p /tmp/loom-units\n" + readying +
 		"runner=/tmp/loom-runner-" + runnerHash[:12] + "\n" +
