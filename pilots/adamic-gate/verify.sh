@@ -11,19 +11,15 @@
 # reference never saw still runs whole; LOOM_VERIFY_SELECT names a fast gate's select.json, whose only_tests
 # (package -> the only tests to run) and deferred (package -> tests to skip) shape every unit.
 #
-# A fast gate plans budgeted exactly like main's whole gate (@system_adamic, Oct 9 07:21Z: one gate, one rule, never a
-# second planner with its own timeouts): test units within 60 s, killed at 90, a kill a red; products first and run to
-# completion under 10 minutes. Side work runs only on the side pool (LOOM_VERIFY_POOL, default codex-side), never the
-# star's (@system_adamic, Oct 8 23:59Z); the star's own fast gate (LOOM_PRIORITY 30 and up) runs on the star's pool.
-# <slots> is "auto" by default: as many as the plan has units, up to 72 on the star's pool and 20 on the side pool.
-# Nothing builds on Kirk's Mac: the binaries are the pre-gate's (pregate.sh's header says how they are made on a box).
+# Side work runs only on the side pool (LOOM_VERIFY_POOL, default codex-side): the star's pool never holds it
+# (@system_adamic, Oct 8 23:59Z). <slots> caps how much of it one run takes (default 5). Nothing builds on
+# Kirk's Mac: the binaries are the pre-gate's (pregate.sh's header says how they are made on a box).
 set -uo pipefail
 # The tools this run uses: the live set by default, a staged set under its canary (#66qvxdd: pool tools are promoted only
 # after main's tip passes through them).
 export LOOM_BIN=${LOOM_BIN:-${HOME}/.loom/bin}
 bin=${LOOM_BIN}
-sha=$1 packages=$2 requester=$3 slots=${4:-auto} note=${5:-} pool=${LOOM_VERIFY_POOL:-codex-side}
-[ "${LOOM_PRIORITY:-0}" -ge 30 ] && [ -z "${LOOM_VERIFY_POOL:-}" ] && pool=codex
+sha=$1 packages=$2 requester=$3 slots=${4:-5} note=${5:-} pool=${LOOM_VERIFY_POOL:-codex-side}
 work=${LOOM_VERIFY_WORK:-${HOME}/.loom/verify/${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "${work}"
 loom=${bin}/loom-pregate planner=${bin}/adamic-gate
@@ -40,17 +36,11 @@ if [ ! -s "${reference}" ]; then
 	ref=$(git -C "${gate}" ls-remote origin "refs/heads/gate-logs/${green:0:12}/*" | awk '$2 ~ /\/full-main$/ {print $2}' | sort | tail -1)
 	git -C "${gate}" fetch -q origin "${ref}" && git -C "${gate}" show FETCH_HEAD:test.jsonl.gz > "${reference}"
 fi
-# The tree's own test list at the sha, Loom's own times, and the gate's selection when it names only some tests.
+"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" > "${work}/tests.json" 2> /dev/null || { echo "verify: planning failed"; exit 1; }
+# The tree's own test list at the sha: a selected name it doesn't hold is dropped, TestWASI's shards get a spec of their
+# own, and zerorun.py reads stale names against it.
 git -C "${gate}" fetch -q origin "${sha}" 2> /dev/null
-python3 "${bin}/treetests.py" "${sha}" > "${work}/tree-tests.txt" 2> /dev/null
-budget=(--budget 60 --unit-setup 10 --split-all)
-[ -s "${work}/tree-tests.txt" ] && budget+=(--tree-tests "${work}/tree-tests.txt")
-[ -s "${HOME}/.loom/loom-times.tsv" ] && budget+=(--loom-times "${HOME}/.loom/loom-times.tsv")
-if [ -n "${LOOM_VERIFY_SELECT:-}" ] && python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("only_tests") else 1)' "${LOOM_VERIFY_SELECT}" 2> /dev/null; then
-	python3 -c 'import json, sys; json.dump(json.load(open(sys.argv[1]))["only_tests"], open(sys.argv[2], "w"))' "${LOOM_VERIFY_SELECT}" "${work}/only-tests.json"
-	budget+=(--only-tests "${work}/only-tests.json")
-fi
-"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" "${budget[@]}" > "${work}/tests.json" 2> "${work}/plan.err" || { echo "verify: planning failed: $(tail -1 "${work}/plan.err")"; exit 1; }
+python3 "${bin}/treetests.py" "${sha}" > "${work}/tree-tests.txt" 2> /dev/null || : > "${work}/tree-tests.txt"
 
 # The build-and-vet unit runs on the same opening as the tests, so it sees the tree they will.
 python3 - "${work}" "${LOOM_VERIFY_ENV:-}" "${LOOM_VERIFY_PACKAGES:-}" "${LOOM_VERIFY_SELECT:-}" <<'PY'
@@ -72,11 +62,57 @@ open(work + "/planned-packages.txt", "w").write("".join(name + "\n" for name in 
 def quote(name):  # Go's regexp.QuoteMeta
     return "".join("\\" + c if c in "\\.+*?()|[]{}^$" else c for c in name)
 selection = json.load(open(selected)) if selected else {}
-# A package whose tests the gate names runs exactly those: the planner packed only them (--only-tests), so here its
-# remainder spec, which would run the rest, is dropped.
-for package in sorted(selection.get("only_tests") or {}):
+import re
+tree = {}
+for line in open(work + "/tree-tests.txt"):
+    package, _, test = line.strip().partition(" ")
+    if test:
+        tree.setdefault(package, set()).add(test)
+# TestWASI and its shards TestWASIUnit00 and on run with the WASI SDK's clang first, in a spec of their own (Oct 9: the
+# selection's ^(...|TestWASI) put all 36 shards on native clang, and every one skipped). The unit body knows the spec.
+wasiClang = re.compile(r"TestWASI(Unit[0-9]+)?")
+stale = []
+# A package whose tests the gate names runs exactly those, in one spec on the unit with the fewest.
+for package, tests in sorted((selection.get("only_tests") or {}).items()):
     for unit in job["units"]:
-        unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if not (spec.split("=", 1)[0] == package and " skip=" in spec)]
+        unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if spec.split("=", 1)[0] != package]
+    # A name the tree at the sha holds no test of, itself or as a family's prefix, can't run: it's dropped and listed,
+    # never planned (floor1 1e8eff51's plan named three, and its record was refused for running none of them).
+    if tree:
+        held = tree.get(package, set())
+        stale += [package + " " + test for test in sorted(tests) if not any(name.startswith(test) for name in held)]
+        tests = [test for test in tests if any(name.startswith(test) for name in held)]
+        wasi = sorted(name for name in held if wasiClang.fullmatch(name) and any(name.startswith(test) for test in tests))
+        if wasi:
+            # A requested family holding a shard is written as its members by name, the shards apart from the rest.
+            tests = sorted({member for test in tests for member in ([name for name in held if name.startswith(test) and not wasiClang.fullmatch(name)]
+                                                                      if any(wasiClang.fullmatch(name) and name.startswith(test) for name in held) else [test])})
+    else:
+        wasi = []
+    unit = min(job["units"], key=lambda unit: len(unit["argv"]))
+    if tests:
+        # A requested name is a family, matched as a prefix, never an exact anchor alone (@system_adamic, Oct 9 11:01Z:
+        # the trio's internal/native requested TestNormalizeMatchesNode, the tree holds TestNormalizeMatchesNodePoints00
+        # and on, and ^(...)$ ran "no tests to run" and passed).
+        unit["argv"].append(package + "=^(" + "|".join(quote(test) for test in sorted(tests)) + ")")
+    if wasi:
+        unit["argv"].append(package + "=^(" + "|".join(quote(name) for name in wasi) + ")$")
+open(work + "/stale-names.txt", "w").write("".join(name + "\n" for name in stale))
+# A remainder runs every test of its package the specs don't name, and the plan here comes from the reference, which
+# can predate TestWASI's split: its shards would ride in internal/native's remainder on native clang. They leave it for
+# a spec of their own on the same unit.
+native = "github.com/system-inc/adamic/internal/native"
+shards = sorted(name for name in tree.get(native, ()) if wasiClang.fullmatch(name))
+for unit in job["units"]:
+    for index, spec in enumerate(list(unit["argv"][5:]), start=5):
+        package, _, pattern = spec.partition("=")
+        if package != native or not pattern.startswith(". skip=^(") or not pattern.endswith(")$"):
+            continue
+        skip = pattern[len(". skip="):]
+        loose = [name for name in shards if not re.search(skip, name)]
+        if loose:
+            unit["argv"][index] = package + "=. skip=" + skip[:-2] + "|" + "|".join(quote(name) for name in loose) + ")$"
+            unit["argv"].append(native + "=^(" + "|".join(quote(name) for name in loose) + ")$")
 # Tests an earlier attempt already proved, under the same package hash at this sha (inputs.py kept-match, named by
 # LOOM_VERIFY_KEPT), are skipped like deferred ones: a re-plan, a new width or a run stopped at its ceiling never
 # throws away a proven test (#kmtvw7m; @system_adamic, Oct 9 09:24Z: key kept verdicts by package and hash).
@@ -106,13 +142,6 @@ for package, tests in deferred.items():
             else:
                 unit["argv"][index] = spec + " skip=^(" + "|".join(names) + ")$"
 job["units"] = [unit for unit in job["units"] if len(unit["argv"]) > 5]
-# A unit whose specs all left takes its needs with it; a unit that needed it no longer waits.
-present = {unit["id"] for unit in job["units"]}
-for unit in job["units"]:
-    if unit.get("needs"):
-        unit["needs"] = [need for need in unit["needs"] if need in present] or None
-        if unit["needs"] is None:
-            del unit["needs"]
 # A listed package the reference never saw runs whole, as a remainder that skips nothing, on the unit with least.
 covered = {spec.split("=", 1)[0] for unit in job["units"] for spec in unit["argv"][5:]}
 for package in (open(listed).read().split() if listed else []):
@@ -169,11 +198,6 @@ job["name"] = "adamic-verify"
 job["units"].insert(0, unit)
 json.dump(job, open(work + "/job.json", "w"), indent=2)
 PY
-if [ "${slots}" = auto ]; then
-	slots=$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["units"]))' "${work}/job.json")
-	cap=$([ "${pool}" = codex ] && echo 72 || echo 20)
-	[ "${slots}" -gt "${cap}" ] && slots=${cap}
-fi
 "${loom}" run --uncached --slots none --pool "${pool}=${slots}" --priority "${LOOM_PRIORITY:-0}" --record "${work}/record.jsonl" "${work}/job.json" > "${work}/run.log" 2>&1 &
 coordinator=$!
 
@@ -297,13 +321,15 @@ for unit in broken:
 PY
 (exit "${status}")
 echo $? > "${work}/reds.exit"
-# A unit that passed having run none of a family it requested proved nothing: it is red, "requested tests ran: 0"
-# (@system_adamic, Oct 9 11:01Z: a void is never a pass). zerorun.py checks every passed unit's named specs against
-# the tests the run's record holds; a family that ran anywhere in the run counts.
-if python3 "${bin}/zerorun.py" "${work}" > "${work}/zerorun.txt" 2>&1; then
+# A unit that ran none of a family it requested, or whose tests started and never reached a verdict (a binary that died
+# partway), proved nothing: it is red (@system_adamic, Oct 9 11:01Z and 06:13Z: a void is never a pass). zerorun.py
+# checks every unit that reported against the tests the run's record holds, and the tree's own tests at the sha.
+tree=() && [ -s "${work}/tree-tests.txt" ] && tree=(--tree-tests "${work}/tree-tests.txt")
+if python3 "${bin}/zerorun.py" ${tree[@]+"${tree[@]}"} "${work}" > "${work}/zerorun.txt" 2>&1; then
 	:
 elif [ -s "${work}/zerorun.txt" ] && ! grep -q unreadable "${work}/zerorun.txt"; then
-	awk -F'\t' '{print "FAIL " $3 " requested tests ran: 0 (" $2 "): " $4}' "${work}/zerorun.txt" >> "${work}/reds.txt"
+	# Its notes (a stale name, a tree it couldn't read) are lines of their own, never fields of four.
+	awk -F'\t' 'NF == 4 && $4 !~ /^note: / {print "FAIL " $3 " " $4 " (" $2 ")"}' "${work}/zerorun.txt" >> "${work}/reds.txt"
 	echo 1 > "${work}/reds.exit"
 fi
 {

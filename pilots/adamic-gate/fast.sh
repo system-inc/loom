@@ -92,10 +92,16 @@ PY
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the job names no Go package, so the boxes take it" ""
 		return
 	fi
+	# The star's jobs (priority 30 and up) run on the star's pool, every unit at once (Oct 9 08:3xZ: on the side pool's
+	# five slots 3095b212's thirteen units needed three waves of five to seven minutes, against the 20-minute ceiling).
+	local width=5
+	# and in units a third the size: the 12-unit plan held units of 13 to 15 minutes, which with selection and setup
+	# overran the 20-minute ceiling (Oct 9 09:21Z: star 6b11cbda, f2a4527e and the trio each void with 1 to 3 left).
+	[ "$(cat "${work}/priority")" -ge 30 ] && width=72 && export LOOM_VERIFY_POOL=codex LOOM_VERIFY_UNITS=36
 	if [ -s "${work}/kept-previous.json" ]; then
 		python3 "${bin}/inputs.py" kept-match --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/kept-previous.json" > "${work}/kept.json" 2> /dev/null || rm -f "${work}/kept.json"
 	fi
-	LOOM_VERIFY_KEPT=$([ -s "${work}/kept.json" ] && echo "${work}/kept.json") LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${bin}/verify.sh" "$(cat "${work}/gate")" "$(cat "${work}/packages")" none auto > "${work}/verify.log" 2>&1
+	LOOM_VERIFY_KEPT=$([ -s "${work}/kept.json" ] && echo "${work}/kept.json") LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${bin}/verify.sh" "$(cat "${work}/gate")" "$(cat "${work}/packages")" none "${width}" > "${work}/verify.log" 2>&1
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
 	rm -f "${work}/phases-status" "${work}/phases-ref"
