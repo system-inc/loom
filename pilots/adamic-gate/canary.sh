@@ -11,8 +11,10 @@
 # broke only merge-gated jobs). It runs that directory's fast.sh --once at priority 40 on the star's pool, into its own
 # jobs directory (~/.loom/jobs/canary), and publishes nothing to gate-logs (LOOM_FAST_PUBLISH=0).
 #
-# Pass: the verdict is green. Red, void or no verdict fails, its reds listed: main's own whole gate rarely exists for
-# the tip it moved to, so a red can't be checked against main's and the canary fails closed. The result is written to
+# Pass: the verdict is green, or red only on tests in ~/.loom/canary/main-reds.txt ("<package> <test>" per line), the
+# reds @system_adamic has ruled main's own (Oct 9 11:24Z: internal/ir TestCallTargetReaders, until compiler's fix lands).
+# Void, no verdict, or any other red fails, its reds listed: main's own whole gate rarely exists for the tip it moved
+# to, so an unlisted red can't be called main's and the canary fails closed. The result is written to
 # ~/.loom/canary/<stamp>.json, and a pass also to ~/.loom/canary/pass/<tools hash>, which promote.sh requires.
 set -uo pipefail
 tools=$(cd "${1:-${HOME}/.loom/stage}" && pwd) || { echo "canary: no tools directory ${1:-${HOME}/.loom/stage}"; exit 2; }
@@ -63,21 +65,25 @@ echo "canary ${stamp}: tools ${hash:0:12} (${tools}) on main ${main:0:12}, the l
 started=${SECONDS}
 LOOM_BIN=${tools} LOOM_FAST_JOBS=${jobs} LOOM_FAST_PUBLISH=0 bash "${tools}/fast.sh" --once "${landed}" > "${out}/${stamp}.log" 2>&1
 verdict=$(head -1 "${jobs}/${landed}.verdict" 2> /dev/null)
-python3 - "${out}/${stamp}.json" "${hash}" "${tools}" "${main}" "${landed}" "${landedOn}" "${verdict}" "$((SECONDS - started))" "${jobs}/${landed}.work/reds.txt" <<'PY'
-import json, os, sys
-path, hash, tools, main, landed, landedOn, verdict, seconds, reds = sys.argv[1:]
+python3 - "${out}/${stamp}.json" "${hash}" "${tools}" "${main}" "${landed}" "${landedOn}" "${verdict}" "$((SECONDS - started))" "${jobs}/${landed}.work/reds.txt" "${out}/main-reds.txt" <<'PY'
+import json, os, re, sys
+path, hash, tools, main, landed, landedOn, verdict, seconds, reds, mainReds = sys.argv[1:]
 failed = []
 if os.path.exists(reds):
-    failed = sorted({line[5:].split(" (")[0].strip() for line in open(reds) if line.startswith("FAIL ")})
-passed = verdict.startswith("green:")
+    # "FAIL <package> <test> (<unit>)": a numbered shard counts as its family's name.
+    failed = sorted({re.sub(r"_\d+$", "", " ".join(line[5:].split(" (")[0].split()[:2])) for line in open(reds) if line.startswith("FAIL ")})
+known = {line.strip() for line in open(mainReds) if line.strip() and not line.startswith("#")} if os.path.exists(mainReds) else set()
+unknown = [name for name in failed if name not in known]
+green = verdict.startswith("green:")
+passed = green or (verdict.startswith("red:") and failed and not unknown)
+reason = "green" if green else ("red only on main's own: " + ", ".join(failed) if passed else ("no verdict" if not verdict else verdict.split(":")[0] + (", not main's: " + ", ".join(unknown[:8]) if unknown else "")))
 json.dump({"tools_hash": hash, "tools": tools, "main": main, "landed": landed, "landed_on": landedOn, "verdict": verdict,
-           "seconds": int(seconds), "failed": failed, "pass": passed,
-           "reason": "green" if passed else ("no verdict" if not verdict else verdict.split(":")[0] + (", %d failed tests" % len(failed) if failed else ""))},
+           "seconds": int(seconds), "failed": failed, "main_reds": sorted(known & set(failed)), "pass": passed, "reason": reason},
           open(path, "w"), indent=2)
 PY
-if [[ ${verdict} == green:* ]]; then
+if python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))["pass"] else 1)' "${out}/${stamp}.json"; then
 	cp "${out}/${stamp}.json" "${out}/pass/${hash}"
-	echo "canary ${stamp}: pass, ${verdict:0:200}"
+	echo "canary ${stamp}: pass, $(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["reason"])' "${out}/${stamp}.json")"
 	exit 0
 fi
 echo "canary ${stamp}: FAIL, ${verdict:-no verdict}"
