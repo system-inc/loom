@@ -69,3 +69,24 @@ func TestEveryUnitScriptParsesAsBash(t *testing.T) {
 		}
 	}
 }
+
+// With --remainder, one unit asks go list for packages the reference never ran, and compare counts what they ran
+// as that unit's own.
+func TestTheUnplannedSpecNamesTheKnownPackagesAndCompareReadsIt(t *testing.T) {
+	job := protocol.Job{Name: "j", Units: []protocol.JobUnit{
+		{Id: "tests-00", Argv: []string{"bash", "-c", "body", "adamic-gate-unit", testSha, module + "a=^(TestA)$", "@unplanned=" + module + "a," + module + "b"}},
+	}}
+	planned, err := plannedTests(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(planned.unplanned["tests-00"], map[string]bool{module + "a": true, module + "b": true}) {
+		t.Fatalf("unplanned %v", planned.unplanned)
+	}
+	if !reflect.DeepEqual(planned.tests["tests-00"], []string{module + "a TestA"}) {
+		t.Fatalf("tests %v", planned.tests)
+	}
+	if output, err := exec.Command("bash", "-n", "-c", unitBody).CombinedOutput(); err != nil {
+		t.Fatalf("unitBody: %v %s", err, output)
+	}
+}

@@ -157,8 +157,23 @@ parallel=$(( $(nproc) / 2 )); [ "${parallel}" -ge 1 ] || parallel=1
 echo "loom-pilot: $(hostname) slot ${LOOM_SLOT:-?} cpus ${LOOM_SLOT_CPUS:-?} tree $(git -C "${tree}" rev-parse HEAD) setup $(( SECONDS - started )) s, ${parallel} packages at a time"
 export tree out
 status=0
+# @unplanned=<package,...>: every package go list names on this tree that the list doesn't, run whole. A package new
+# since the reference the plan was made from is in no other spec (8161285a's internal/buildcache, Oct 9).
+specs=()
+for spec in "$@"; do
+  case "${spec}" in
+    @unplanned=*)
+      listing=$(cd "${tree}" && go list ./... 2> "${out}/go-list.stderr") || { echo "loom-pilot: go list ./... failed on the tree"; tail -5 "${out}/go-list.stderr"; exit 1; }
+      known=",${spec#@unplanned=},"
+      for package in ${listing}; do
+        case "${known}" in *",${package},"*) ;; *) specs+=("${package}=."); echo "loom-pilot: ${package} is new since the reference; running it whole" ;; esac
+      done
+      ;;
+    *) specs+=("${spec}") ;;
+  esac
+done
 index=0
-for spec in "$@"; do printf '%s\t%s\n' "${index}" "${spec}"; index=$((index + 1)); done |
+for spec in "${specs[@]}"; do printf '%s\t%s\n' "${index}" "${spec}"; index=$((index + 1)); done |
   xargs -d '\n' -P "${parallel}" -I{} bash -c '
     index=${1%%	*} spec=${1#*	}
     package=${spec%%=*} pattern=${spec#*=} skip=""
@@ -699,6 +714,9 @@ func plan(arguments []string) error {
 			index := lightest()
 			remainders[index] = append(remainders[index], packageName+"=. skip=^("+strings.Join(byPackage[packageName], "|")+")$")
 		}
+		// A package the reference never ran (new since it) is named by no spec above; the unit asks go list for them.
+		unplannedUnit := lightest()
+		remainders[unplannedUnit] = append(remainders[unplannedUnit], "@unplanned="+strings.Join(names, ","))
 		parents := make([]string, 0, len(split))
 		for parentKey := range split {
 			parents = append(parents, parentKey)
@@ -866,6 +884,9 @@ type plannedJob struct {
 	remainderPackages map[string]map[string]bool
 	remainderParents  map[string]map[string]bool
 	split             map[string]bool
+	// unplanned is, per unit holding an @unplanned spec, the packages it knows: any other package's tests it ran
+	// were new since the reference, and are that unit's.
+	unplanned map[string]map[string]bool
 }
 
 var childSpec = regexp.MustCompile(`^\^(.+)\$/\^\((.*)\)\$$`)
@@ -895,16 +916,24 @@ func unquoteAlternation(quoted string) []string {
 }
 
 func plannedTests(job protocol.Job) (plannedJob, error) {
-	planned := plannedJob{tests: map[string][]string{}, remainderPackages: map[string]map[string]bool{}, remainderParents: map[string]map[string]bool{}, split: map[string]bool{}}
+	planned := plannedJob{tests: map[string][]string{}, remainderPackages: map[string]map[string]bool{}, remainderParents: map[string]map[string]bool{}, split: map[string]bool{},
+		unplanned: map[string]map[string]bool{}}
 	unquote := func(quoted string) string { return strings.Join(unquoteAlternation(quoted), "|") }
 	for _, unit := range job.Units {
-		if strings.HasPrefix(unit.Id, "stage-") {
-			continue // a stage unit runs no tests of the plan
+		if strings.HasPrefix(unit.Id, "stage-") || strings.HasPrefix(unit.Id, "phase-") {
+			continue // a stage or phase unit runs no tests of the plan
 		}
 		if len(unit.Argv) < 5 {
 			return planned, fmt.Errorf("unit %s isn't a pilot unit", unit.Id)
 		}
 		for _, spec := range unit.Argv[5:] {
+			if known, isUnplanned := strings.CutPrefix(spec, "@unplanned="); isUnplanned {
+				planned.unplanned[unit.Id] = map[string]bool{}
+				for _, packageName := range strings.Split(known, ",") {
+					planned.unplanned[unit.Id][packageName] = true
+				}
+				continue
+			}
 			packageName, pattern, _ := strings.Cut(spec, "=")
 			if run, _, isRemainder := strings.Cut(pattern, " skip="); isRemainder {
 				if parent, isParent := strings.CutSuffix(run, "$/."); isParent {
@@ -1082,7 +1111,7 @@ func compare(arguments []string) (bool, error) {
 			}
 		}
 		timings = append(timings, timing)
-		if strings.HasPrefix(unit.Id, "stage-") {
+		if strings.HasPrefix(unit.Id, "stage-") || strings.HasPrefix(unit.Id, "phase-") {
 			if exitCode != 0 {
 				report("STAGE %s: exited %d", unit.Id, exitCode)
 				parity = false
@@ -1124,7 +1153,9 @@ func compare(arguments []string) (bool, error) {
 			if nested && (!planned.split[parentKey] || strings.Contains(child, "/")) {
 				continue // a subtest inside a whole test, or deeper inside a child: its test's verdict carries it
 			}
-			if !mine[key] && plannedSet[key] == "" && ((!nested && planned.remainderPackages[unit.Id][packageName]) || (nested && planned.remainderParents[unit.Id][parentKey])) {
+			known, unplanned := planned.unplanned[unit.Id]
+			if !mine[key] && plannedSet[key] == "" && ((!nested && planned.remainderPackages[unit.Id][packageName]) || (nested && planned.remainderParents[unit.Id][parentKey]) ||
+				(!nested && unplanned && !known[packageName])) {
 				plannedSet[key] = unit.Id // a test no record named, run by its remainder
 				mine[key] = true
 			}
