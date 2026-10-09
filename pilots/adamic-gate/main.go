@@ -68,6 +68,13 @@ started=${SECONDS}
 [ -n "${HTTPS_PROXY:-}${https_proxy:-}" ] || eval "$(tr '\0' '\n' < /proc/${PPID}/environ 2>/dev/null | grep -E '^(HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|ALL_PROXY|all_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|REQUESTS_CA_BUNDLE|GIT_SSL_CAINFO)=' | sed -E "s/^([^=]+)=(.*)$/export \\1='\\2'/")"
 tree=/tmp/adamic out=${PWD}/loom-out
 mkdir -p "${out}"
+# Some instances mount the home directory read-only, where setup.sh can't take its lock and go can't keep its caches
+# (Oct 9: a8ff7263308d broke 45 of main 0615623a's 144 units in 0.3 s each, "setup.lock: Read-only file system"). Such an
+# instance keeps its home under /tmp instead, so setup, its env.sh and go's caches all land somewhere writable.
+if ! { mkdir -p "${HOME}/.adamic-tools" && touch "${HOME}/.adamic-tools/.writable"; } 2> /dev/null; then
+  export HOME=/tmp/loom-home
+  mkdir -p "${HOME}"
+fi
 # A full disk must never read as a test red (Oct 9: cf04e18f's and e3f2be21's reds were all "no space left on device"
 # under ~/.cache/adamic/runtime/.build-* and ~/.cache/go-build). A Codex instance's disk is 8.8 GB, about 4 GB free
 # with the tree and the gate inputs on it. An instance runs one unit at a time, so the runtime's build directories
