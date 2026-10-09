@@ -32,6 +32,10 @@ export LOOM_FAST_BUDGET
 sha=$1 packages=$2 requester=$3 slots=${4:-5} note=${5:-} pool=${LOOM_VERIFY_POOL:-codex-side}
 work=${LOOM_VERIFY_WORK:-${HOME}/.loom/verify/${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "${work}"
+# An earlier attempt's retry rounds belong to that attempt: their records said "passed" for units this attempt never ran,
+# and the reds and zerorun.py read every again-<n>-record.jsonl in the directory (Oct 9 18:50Z: C emission 3fefe5b2's
+# tests-00, never placed this attempt, read its 14:22Z round's pass and turned into 676 "ran: 0" reds).
+rm -f "${work}"/again-*.json "${work}"/again-*-record.jsonl
 loom=${bin}/loom-pregate planner=${bin}/adamic-gate
 state=${HOME}/.adamic-full-gate gate=${HOME}/Projects/system/adamic-gate
 send() {

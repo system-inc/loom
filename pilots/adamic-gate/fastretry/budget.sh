@@ -91,6 +91,9 @@ scenario; run $stubs/verify.sh 60; check budget-no-changed-paths '! grep -qx -- 
 # D: budgeted without the tree, nothing names the members: no --only-tests, and the selection is one family spec, as today.
 scenario notree; run $stubs/verify.sh 60
 check budget-without-tree '! grep -qx -- --only-tests $T/argv && grep -qx -- --budget $T/argv && spec | grep -qF "pkg/a=^(TestA|TestGone)((Unit|Points|_)[0-9]+|_Setup|_Union)?$"'
+# F: an earlier attempt's retry-round files are gone before this attempt plans (its records lied to the reds and zerorun).
+scenario; echo '{}' > $work/again-2.json; echo '{"unit":"tests-00","type":"finished","status":"passed"}' > $work/again-2-record.jsonl
+run $stubs/verify.sh off; check stale-rounds-cleared '[ ! -e $work/again-2.json ] && [ ! -e $work/again-2-record.jsonl ]'
 # E: a budget that isn't seconds plans nothing.
 scenario; run $stubs/verify.sh soon; check budget-not-seconds '[ ! -e $T/argv ] && grep -q "LOOM_FAST_BUDGET is seconds" $T/out.log'
 echo "failures: ${failures}"
