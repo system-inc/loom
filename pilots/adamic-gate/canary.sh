@@ -33,6 +33,15 @@ for name in sorted(os.listdir(root)):
 print(hashlib.sha256("".join(lines).encode()).hexdigest())
 PY
 )
+# The run uses a snapshot of the directory, named by that hash, so an edit made to it while the canary runs (fast.sh
+# reads verify.sh minutes after it starts) can't make a pass name tools it didn't run.
+snapshot=${out}/tools-${hash}
+if [ ! -d "${snapshot}" ]; then
+	# Regular files only, as the hash counts them (cp leaves a directory such as __pycache__ out).
+	mkdir -p "${snapshot}.partial" && cp -p "${tools}"/* "${snapshot}.partial"/ 2> /dev/null
+	mv "${snapshot}.partial" "${snapshot}"
+fi
+tools=${snapshot}
 main=$(git -C "${gate}" ls-remote origin refs/heads/main | cut -f1)
 git -C "${gate}" fetch -q origin "${main}" || { echo "canary: can't fetch main ${main:0:12}"; exit 2; }
 read -r landedOn landed < <(git -C "${gate}" rev-list --parents -n 1 "${main}" | cut -d' ' -f2-)

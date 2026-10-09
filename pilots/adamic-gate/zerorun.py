@@ -3,6 +3,7 @@
 that ran "no tests to run" read as passed, and a void is never a pass).
 
 	zerorun.py <work directory>...     # a fast job's work directory: its job.json and its test.jsonl
+	zerorun.py --tests <file> ... <work directory>   # also counts tests these go test -json files ran (a split, a rerun)
 
 A unit spec "<package>=^(A|B)$ skip=^(C)$" asks go test for the tests its run pattern matches, less those its skip
 pattern matches. The job's test.jsonl holds every test that ran, so a spec whose patterns match none of its package's
@@ -74,10 +75,13 @@ def passed(work):
     return units
 
 
-def sweep(work):
+def sweep(work, extra=()):
     job = json.load(open(os.path.join(work, "job.json")))
     path = os.path.join(work, "test.jsonl")
     tests = ran(open(path, errors="replace") if os.path.exists(path) else [])
+    for more in extra:
+        for package, extra_tests in ran(open(more, errors="replace")).items():
+            tests.setdefault(package, set()).update(extra_tests)
     green = passed(work)
     found = []
     for unit in job.get("units") or []:
@@ -106,9 +110,13 @@ def main():
         print(__doc__.strip().split("\n\n")[1])
         return 2
     status = 0
-    for work in sys.argv[1:]:
+    arguments, extra = sys.argv[1:], []
+    while arguments[:1] == ["--tests"] and len(arguments) > 1:
+        extra.append(arguments[1])
+        arguments = arguments[2:]
+    for work in arguments:
         try:
-            for line in sweep(work):
+            for line in sweep(work, extra):
                 print(line)
                 status = 1
         except (OSError, ValueError) as error:
