@@ -76,24 +76,23 @@ retry() { local attempt; for attempt in 1 2 3 4; do "$@" && return 0; sleep $(( 
 [ -d "${tree}/.git" ] || retry git clone -q --filter=blob:none https://github.com/system-inc/adamic.git "${tree}" || { echo "loom-pilot: clone failed"; exit 2; }
 find "${tree}/.git" -maxdepth 6 -name index.lock -delete 2>/dev/null
 retry git -C "${tree}" fetch -q origin "${sha}" && retry git -C "${tree}" switch -q --detach "${sha}" && retry git -C "${tree}" submodule update -q --init --recursive || { echo "loom-pilot: checkout of ${sha} failed"; exit 2; }
+# A download cut short can leave a Go toolchain that runs but lacks much of its standard library (Oct 9, the side
+# pool: "package fmt is not in std"), which setup.sh then keeps as installed and fails on. Before setup, an installed
+# Go that can't list these packages moves aside so setup installs it fresh; after setup the same probe must pass.
+# The probe names packages, since go list std lists only the ones a partial install has, and passes.
+stdProbe="fmt context time syscall runtime hash flag unicode testing go/format go/parser text/tabwriter regexp/syntax math/rand/v2"
+for tools in "${HOME}/.adamic-tools" "${HOME}/adamic-tools"; do
+  if [ -x "${tools}/go/bin/go" ] && ! (cd / && GOROOT="${tools}/go" GOTOOLCHAIN=local "${tools}/go/bin/go" list ${stdProbe} > /dev/null 2>&1); then
+    echo "loom-pilot: ${tools}/go lacks its standard library; moving it aside so setup installs Go again"
+    mv "${tools}/go" "${tools}/go.broken-$$"
+    rm -f /tmp/adamic-setup-done
+  fi
+done
 if [ ! -f /tmp/adamic-setup-done ]; then
   (cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && touch /tmp/adamic-setup-done || { echo "loom-pilot: setup failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
 fi
 for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do [ -f "${environment}" ] && { source "${environment}"; break; }; done
-# A download cut short can leave a Go toolchain that runs but lacks its standard library (Oct 9, the side pool:
-# "package text/tabwriter is not in std"), which setup.sh then takes as installed. Such a toolchain moves aside
-# and setup runs again, once; a second failure is Loom's, never the change's. The probe names packages, since
-# go list std lists only the ones a partial install has, and passes; these were missing on Oct 9.
-stdProbe="fmt context time syscall runtime hash flag go/format go/parser text/tabwriter regexp/syntax math/rand/v2"
-if ! go list ${stdProbe} > /dev/null 2>&1; then
-  echo "loom-pilot: the Go toolchain lacks its standard library; setting it up again"
-  goroot=$(go env GOROOT 2> /dev/null)
-  [ -n "${goroot}" ] && [ -d "${goroot}" ] && mv "${goroot}" "${goroot}.broken-$$"
-  rm -f /tmp/adamic-setup-done
-  (cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && touch /tmp/adamic-setup-done || { echo "loom-pilot: setup failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
-  for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do [ -f "${environment}" ] && { source "${environment}"; break; }; done
-  go list ${stdProbe} > /dev/null 2>&1 || { echo "loom-pilot: the Go toolchain still lacks its standard library"; exit 2; }
-fi
+(cd / && go list ${stdProbe} > /dev/null 2>&1) || { echo "loom-pilot: the Go toolchain lacks its standard library after setup"; rm -f /tmp/adamic-setup-done; exit 2; }
 export PATH="${ADAMIC_TYPESCRIPT_SOURCE:+${ADAMIC_TYPESCRIPT_SOURCE}/bin:}${PATH}"
 mkdir -p -m 1777 "${TMPDIR:-/tmp}"
 # The pinned npm packages the tests read (stage3/api's @types/node and typescript), as the gate's npmPackages
