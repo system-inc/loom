@@ -545,6 +545,8 @@ func main() {
 		err = ab(os.Args[2:])
 	case "unit":
 		err = oneUnit(os.Args[2:])
+	case "test-jobs":
+		err = testJobs(os.Args[2:])
 	case "reds":
 		var verdict string
 		verdict, err = reds(os.Args[2:])

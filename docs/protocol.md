@@ -148,6 +148,8 @@ The HMAC key is the secret's **text as it stands**, surrounding whitespace trimm
 
 Machines Loom can't ssh into (Codex cloud instances) pull their units instead. A **pool** (`codex`, say) is a queue of units on the wire. Each instance runs `loom-runner serve`, which asks the pool for its next unit, runs it, and asks again until its deadline, posting each unit's events straight to the run's events endpoint with the unit's own run token. The coordinator puts units in and reads their events back from the wire. One long Codex turn runs one `serve`, which runs many units, and its output stays in a file, off the model.
 
+A **strict pool** (`loom run --strict-pool codex-strict=<slots>`) is one whose workers serve `--strict`: the coordinator places only units carrying a test job there, never argv, and while a run has one, its test jobs go only to it. `adamic-gate test-jobs --job <job.json>` rewrites a planned job's go test units (tests and products) as test jobs and leaves every unit a test job can't say exactly (build-vet, phases, stage 3, select, the `@unplanned` remainder) as argv, for a box.
+
 A **pool token** (scope `pool`, run = the pool's name) is all an instance holds besides the units it is handed: it reaches its pool's `next` and nothing else. Each unit carries its own run token, store and wire, as any unit does.
 
 - `POST /pools/<pool>/units` (a coordinator token of any run): `{"units": [<unit>, ...]}`, each a whole `protocol.Unit` with its `wire` set. They join the end of the queue in the order given (the coordinator sends longest first). Answers `{"queued": <the queue's length>}`.

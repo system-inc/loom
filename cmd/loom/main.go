@@ -34,6 +34,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -90,6 +91,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	yieldTo := flags.String("yield-to", "", "the gate's slot table: Loom uses a box's slots only while the gate's table doesn't hold them")
 	var pools poolSlotsFlag
 	flags.Var(&pools, "pool", "also place units on a pool on the wire, <name>=<slots>; repeatable")
+	var strictPools poolSlotsFlag
+	flags.Var(&strictPools, "strict-pool", "a pool whose workers serve --strict, <name>=<slots>: it takes the job's test jobs and nothing else; repeatable")
 	priority := flags.Int("priority", 0, "the run's units' priority on its pools, 0 to 1000, highest handed out first")
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 1 {
 		fmt.Fprint(stderr, usage)
@@ -147,14 +150,15 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	poolMachines := map[string]bool{}
-	if len(pools) > 0 {
+	if len(pools) > 0 || len(strictPools) > 0 {
 		// The pool's workers are built from this source, the version every pool unit's cache key names.
 		poolVersion, err := runnerVersion(*source)
 		if err != nil {
 			return fail(err)
 		}
-		for _, wanted := range pools {
-			machine := &coordinator.PoolMachine{Pool: wanted.name, Priority: *priority, Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
+		for _, wanted := range append(append(poolSlotsFlag{}, pools...), strictPools...) {
+			strict := slices.Contains(strictPools, wanted)
+			machine := &coordinator.PoolMachine{Pool: wanted.name, Strict: strict, Priority: *priority, Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
 			poolMachines[machine.Name()] = true
 			for range wanted.slots {
 				slots = append(slots, machine)
@@ -169,7 +173,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	// A run stopped by a signal takes its queued units off every pool it used, so they never sit ahead of live
 	// work; a unit a worker already took runs on, unread.
 	if runContext.Err() != nil && result.Run != "" {
-		for _, wanted := range pools {
+		for _, wanted := range append(append(poolSlotsFlag{}, pools...), strictPools...) {
 			if dropped, err := cancelPoolRun(&http.Client{Timeout: 15 * time.Second}, *wire, secret, wanted.name, result.Run); err != nil {
 				fmt.Fprintf(stderr, "loom: dropping the run's queued units from pool %s: %v\n", wanted.name, err)
 			} else {

@@ -365,9 +365,10 @@ func (coordinator *coordinator) placeReady(runContext context.Context) bool {
 	})
 	started := false
 	for _, state := range ready {
-		slot := coordinator.pickSlot(state.lastSlot)
+		slot := coordinator.pickSlot(state.lastSlot, state.planned.Unit.Test != nil)
 		if slot < 0 {
-			break
+			// A test job may wait for a strict slot while an argv unit behind it takes a box's, or the other way round.
+			continue
 		}
 		coordinator.free[slot] = false
 		state.running = true
@@ -434,12 +435,20 @@ func (coordinator *coordinator) preemptOverLimit() {
 	}
 }
 
-// pickSlot returns a free slot, preferring one on another machine than avoid's, or -1 when none is free. A
-// machine at its slot limit offers none.
-func (coordinator *coordinator) pickSlot(avoid int) int {
+// pickSlot returns a free slot that can run the unit, preferring one on another machine than avoid's, or -1 when
+// none is free. A machine at its slot limit offers none. A strict machine's slots take only test jobs; when the run
+// has any, a test job goes only to them, and an argv unit never does (#098rcha).
+func (coordinator *coordinator) pickSlot(avoid int, testJob bool) int {
 	fallback := -1
+	strictSlots := false
+	for _, machine := range coordinator.config.Slots {
+		strictSlots = strictSlots || takesOnlyTestJobs(machine)
+	}
 	for index, free := range coordinator.free {
 		if !free {
+			continue
+		}
+		if strict := takesOnlyTestJobs(coordinator.config.Slots[index]); strict != (testJob && strictSlots) {
 			continue
 		}
 		if limit := coordinator.config.SlotLimit; limit != nil {
@@ -456,6 +465,12 @@ func (coordinator *coordinator) pickSlot(avoid int) int {
 		}
 	}
 	return fallback
+}
+
+// takesOnlyTestJobs says whether a machine runs only test jobs (a strict pool's).
+func takesOnlyTestJobs(machine Machine) bool {
+	strict, ok := machine.(interface{ TakesOnlyTestJobs() bool })
+	return ok && strict.TakesOnlyTestJobs()
 }
 
 // attempt runs one unit once on one slot, or serves it from the cache, and settles its state.

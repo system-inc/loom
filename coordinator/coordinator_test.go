@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -665,5 +666,55 @@ func TestUnitsWaitForSlotsWhileTheLimitIsZero(t *testing.T) {
 	result := run(t, configuration, shell("a", "echo a"))
 	if result.Verdict.Status != "green" || time.Since(started) < time.Second {
 		t.Fatalf("verdict %+v after %v", result.Verdict, time.Since(started))
+	}
+}
+
+// A passMachine records each unit it's handed and reports it passed without running it; strict makes it a strict
+// pool's machine, which takes only test jobs.
+type passMachine struct {
+	LocalMachine
+	strict bool
+	mutex  sync.Mutex
+	ran    []string
+}
+
+func (machine *passMachine) TakesOnlyTestJobs() bool { return machine.strict }
+
+func (machine *passMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {
+	machine.mutex.Lock()
+	machine.ran = append(machine.ran, unit.Unit)
+	machine.mutex.Unlock()
+	for sequence, event := range []protocol.Event{{Type: "started"}, {Type: "finished", Status: protocol.StatusPassed}} {
+		event.Run, event.Unit, event.Sequence, event.Time = unit.Run, unit.Unit, sequence, "2026-10-09T22:00:00.000Z"
+		line, _ := json.Marshal(event)
+		events.Write(append(line, '\n'))
+	}
+	return nil
+}
+
+func testJobUnit(id string) protocol.JobUnit {
+	return protocol.JobUnit{Id: id, TimeoutSeconds: 30, Test: &protocol.TestJob{Repository: protocol.AdamicRepository,
+		Sha: strings.Repeat("a", 40), Packages: []protocol.TestPackage{{Package: protocol.AdamicModule + "/internal/lower"}}}}
+}
+
+// #098rcha: a strict pool's workers refuse argv, so the coordinator never hands them any; test jobs go only to them.
+func TestTestJobsGoToTheStrictPoolAndArgvNeverDoes(t *testing.T) {
+	wire := newFakeWire(t)
+	strict := &passMachine{LocalMachine: LocalMachine{Label: "codex-strict"}, strict: true}
+	box := &passMachine{LocalMachine: LocalMachine{Label: "box"}}
+	// The box comes first, so a test job a careless pick put on the first free slot would land there.
+	result := run(t, config(wire, box, box, strict, strict), testJobUnit("t1"), shell("argv-1", "true"), testJobUnit("t2"), shell("argv-2", "true"), testJobUnit("t3"))
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	sort.Strings(strict.ran)
+	sort.Strings(box.ran)
+	if !reflect.DeepEqual(strict.ran, []string{"t1", "t2", "t3"}) || !reflect.DeepEqual(box.ran, []string{"argv-1", "argv-2"}) {
+		t.Fatalf("strict ran %v, box ran %v", strict.ran, box.ran)
+	}
+	// With no strict pool in the run, a test job runs where it can, as any runner runs one.
+	plain := &passMachine{LocalMachine: LocalMachine{Label: "box"}}
+	if result := run(t, config(wire, plain), testJobUnit("t1"), shell("argv-1", "true")); result.Verdict.Status != "green" || len(plain.ran) != 2 {
+		t.Fatalf("verdict %+v, ran %v", result.Verdict, plain.ran)
 	}
 }

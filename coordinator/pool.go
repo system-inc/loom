@@ -41,6 +41,9 @@ import (
 type PoolMachine struct {
 	// Pool is the pool's name on the wire, such as codex.
 	Pool string
+	// Strict says the pool's workers serve with --strict, running only test jobs: only a unit carrying one is placed
+	// there, so a strict worker never meets argv and refuses it (#098rcha).
+	Strict bool
 	// Priority ranks this machine's units on the pool, 0 to 1000: the pool hands out the highest first, and first in,
 	// first out within one priority.
 	Priority int
@@ -97,6 +100,9 @@ func (machine *PoolMachine) Name() string {
 }
 
 func (machine *PoolMachine) RunnerVersion() string { return machine.Version }
+
+// TakesOnlyTestJobs says the machine's workers run nothing but test jobs.
+func (machine *PoolMachine) TakesOnlyTestJobs() bool { return machine.Strict }
 
 func (machine *PoolMachine) Platform() string { return machine.GoPlatform }
 
