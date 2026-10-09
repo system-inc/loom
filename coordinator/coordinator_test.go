@@ -37,7 +37,10 @@ type fakeWire struct {
 	cache    map[string]protocol.CacheEntry
 	machines []BoardMachine
 	pools    map[string][]protocol.Unit // each pool's queue
+	ranks    map[string][]int           // each queued unit's priority, beside it in pools
 	priority map[string][]int           // each pool's batches' priorities, in the order they came
+	taken    map[string][]protocol.Unit // units a worker took off the queue just before a cancel, handed out next
+	racing   int                        // the next cancels find a worker took one of the run's units just before them
 	swallow  int                        // the next asks to take a unit lose it, as an ask whose turn ended does
 	ghosts   int                        // the next units taken go to a worker that says started, then is gone
 	reading  map[string]int             // reads of each run's log in flight
@@ -47,7 +50,8 @@ type fakeWire struct {
 
 func newFakeWire(t *testing.T) *fakeWire {
 	wire := &fakeWire{plans: map[string]protocol.Plan{}, lines: map[string][]protocol.Event{}, verdict: map[string]protocol.Verdict{},
-		blobs: map[string][]byte{}, cache: map[string]protocol.CacheEntry{}, pools: map[string][]protocol.Unit{}, priority: map[string][]int{}, reading: map[string]int{}}
+		blobs: map[string][]byte{}, cache: map[string]protocol.CacheEntry{}, pools: map[string][]protocol.Unit{}, ranks: map[string][]int{}, priority: map[string][]int{}, taken: map[string][]protocol.Unit{},
+		reading: map[string]int{}}
 	wire.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		claims, err := protocol.VerifyToken(testSecret, strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "), time.Now())
 		if err != nil {
@@ -106,8 +110,40 @@ func newFakeWire(t *testing.T) *fakeWire {
 				return
 			}
 			wire.pools[parts[1]] = append(wire.pools[parts[1]], posted.Units...)
+			for range posted.Units {
+				wire.ranks[parts[1]] = append(wire.ranks[parts[1]], posted.Priority)
+			}
 			wire.priority[parts[1]] = append(wire.priority[parts[1]], posted.Priority)
 			json.NewEncoder(writer).Encode(map[string]int{"queued": len(wire.pools[parts[1]])})
+		case len(parts) == 3 && parts[0] == "pools" && parts[2] == "cancel":
+			var asked struct {
+				Run string `json:"run"`
+			}
+			if claims.Scope != protocol.ScopeCoordinator || claims.Run == "" || protocol.Decode(bytes.NewReader(body), &asked) != nil || asked.Run != claims.Run {
+				http.Error(writer, "a coordinator token for the run", http.StatusForbidden)
+				return
+			}
+			queue, ranks := wire.pools[parts[1]], wire.ranks[parts[1]]
+			if wire.racing > 0 {
+				for index, unit := range queue {
+					if unit.Run == asked.Run {
+						wire.racing--
+						wire.taken[parts[1]] = append(wire.taken[parts[1]], unit)
+						queue, ranks = append(queue[:index:index], queue[index+1:]...), append(ranks[:index:index], ranks[index+1:]...)
+						break
+					}
+				}
+			}
+			var keptUnits []protocol.Unit
+			var keptRanks []int
+			for index, unit := range queue {
+				if unit.Run != asked.Run {
+					keptUnits, keptRanks = append(keptUnits, unit), append(keptRanks, ranks[index])
+				}
+			}
+			dropped := len(queue) - len(keptUnits)
+			wire.pools[parts[1]], wire.ranks[parts[1]] = keptUnits, keptRanks
+			json.NewEncoder(writer).Encode(map[string]int{"dropped": dropped})
 		case len(parts) == 3 && parts[0] == "pools" && parts[2] == "queued":
 			var asked struct {
 				Run string `json:"run"`
@@ -256,7 +292,23 @@ func (wire *fakeWire) serveNext(writer http.ResponseWriter, claims protocol.Toke
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for {
 		wire.mutex.Lock()
+		if taken := wire.taken[pool]; len(taken) > 0 {
+			wire.taken[pool] = taken[1:]
+			wire.mutex.Unlock()
+			json.NewEncoder(writer).Encode(taken[0])
+			return
+		}
 		if queue := wire.pools[pool]; len(queue) > 0 {
+			// The highest priority's oldest goes first, as the wire hands them out.
+			first := 0
+			for index, rank := range wire.ranks[pool] {
+				if rank > wire.ranks[pool][first] {
+					first = index
+				}
+			}
+			queue = append([]protocol.Unit{queue[first]}, append(queue[:first:first], queue[first+1:]...)...)
+			ranks := wire.ranks[pool]
+			wire.ranks[pool] = append(ranks[:first:first], ranks[first+1:]...)
 			wire.pools[pool] = queue[1:]
 			swallowed := wire.swallow > 0
 			if swallowed {

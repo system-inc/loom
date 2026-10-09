@@ -1,7 +1,7 @@
 // Command loom is the coordinator: it runs a job file on Loom's slots and prints the verdict. It exits 0 when
 // the run is green, 1 when red, 2 when void, and 3 when the run couldn't be set up.
 //
-//	loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--priority <n>] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
+//	loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--priority <n> [--pool-age-every <duration> [--pool-age-step <n>] [--pool-age-ceiling <n>]]] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
 //	loom board [--days <n>]   prints the board's address with a board token
 //	loom pool status <name>   prints a pool's queue and the workers serving it
 //
@@ -16,6 +16,8 @@
 // doesn't install its runner, and a green there unlocks no box. --priority ranks the run's units on every pool it
 // uses: a pool hands out the highest first, so the star's candidates (30) pass main's own gate (20), and main's
 // pass a side candidate's (10). A unit already running finishes; the star takes each worker as its unit ends.
+// --pool-age-every lifts a unit still waiting on a pool by --pool-age-step each time it passes, up to
+// --pool-age-ceiling, so a lower tier is never starved for good by a stream of higher ones.
 package main
 
 import (
@@ -45,7 +47,7 @@ import (
 )
 
 const usage = `usage:
-  loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--priority <n>] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
+  loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--priority <n> [--pool-age-every <duration> [--pool-age-step <n>] [--pool-age-ceiling <n>]]] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
   loom board [--days <n>] [--wire <url>]
   loom pool status [--wire <url>] <name>
   loom pool token <pool> [--hours N]
@@ -102,12 +104,19 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	var strictPools poolSlotsFlag
 	flags.Var(&strictPools, "strict-pool", "a pool whose workers serve --strict, <name>=<slots>: it takes the job's test jobs and nothing else; repeatable")
 	priority := flags.Int("priority", 0, "the run's units' priority on its pools, 0 to 1000, highest handed out first")
+	ageEvery := flags.Duration("pool-age-every", 0, "lift a pool unit that waits this long, and again each time after, so a lower tier never starves; 0 is off")
+	ageStep := flags.Int("pool-age-step", 10, "how much higher each --pool-age-every lifts a waiting unit")
+	ageCeiling := flags.Int("pool-age-ceiling", 0, "the highest priority a waiting unit is lifted to, 0 to 1000; 0 is 1000")
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 1 {
 		fmt.Fprint(stderr, usage)
 		return 3
 	}
 	if *priority < 0 || *priority > 1000 {
 		fmt.Fprintf(stderr, "loom: --priority is 0 to 1000, not %d\n", *priority)
+		return 3
+	}
+	if *ageEvery < 0 || *ageStep < 0 || *ageCeiling < 0 || *ageCeiling > 1000 {
+		fmt.Fprintf(stderr, "loom: --pool-age-every and --pool-age-step are 0 or more, --pool-age-ceiling 0 to 1000\n")
 		return 3
 	}
 	home, _ := os.UserHomeDir()
@@ -166,7 +175,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		for _, wanted := range append(append(poolSlotsFlag{}, pools...), strictPools...) {
 			strict := slices.Contains(strictPools, wanted)
-			machine := &coordinator.PoolMachine{Pool: wanted.name, Strict: strict, Priority: *priority, Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
+			machine := &coordinator.PoolMachine{Pool: wanted.name, Strict: strict, Priority: *priority, AgeEvery: *ageEvery, AgeStep: *ageStep, AgeCeiling: *ageCeiling,
+				Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
 			poolMachines[machine.Name()] = true
 			for range wanted.slots {
 				slots = append(slots, machine)

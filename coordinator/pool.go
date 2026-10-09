@@ -66,12 +66,34 @@ type PoolMachine struct {
 	// queued again; 0 means two minutes. QueueCheck is how often a unit that hasn't started looks; 0 means 30 s.
 	NeverStarted time.Duration
 	QueueCheck   time.Duration
+	// AgeEvery lifts a unit that waits: each AgeEvery it hasn't started, it is offered again AgeStep higher than
+	// Priority, up to AgeCeiling (0 means MaximumPoolPriority), so a lower tier never starves behind a stream of
+	// higher ones (Oct 9: a 6-unit tier-30 probe placed 0 of 6 in 30 minutes behind tier-40 landings, #0k03wz1).
+	// 0 leaves every unit at Priority.
+	AgeEvery   time.Duration
+	AgeStep    int
+	AgeCeiling int
 	// Log, when set, hears each unit queued again.
 	Log io.Writer
 
 	mutex     sync.Mutex
-	followers map[string]*runFollower   // by run
-	queued    map[string]queuedSnapshot // by run, the last look at its units still queued
+	followers map[string]*runFollower            // by run
+	queued    map[string]queuedSnapshot          // by run, the last look at its units still queued
+	waiting   map[string]map[string]*waitingUnit // by run and unit, the units queued that haven't started
+	// placing is held around every post to the pool and every re-offer, so a re-offer's look, cancel and post see no
+	// post of this machine's in between.
+	placing sync.Mutex
+}
+
+// MaximumPoolPriority is the highest priority the wire takes.
+const MaximumPoolPriority = 1000
+
+// A waitingUnit is a unit queued on the pool that hasn't started: when it was first queued, and at what priority it
+// sits there now. Its fields are guarded by the machine's mutex.
+type waitingUnit struct {
+	unit     protocol.Unit
+	since    time.Time
+	priority int
 }
 
 // A poolBatch is the body of a pool's units call: the units and the priority they share, left off at 0.
@@ -124,12 +146,10 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 	// Following starts before the unit is queued, so none of its events can come before the follower looks.
 	stream := machine.subscribe(unit.Run, unit.Unit, token)
 	defer machine.unsubscribe(unit.Run, unit.Unit, stream)
-	body, err := json.Marshal(poolBatch{Units: []protocol.Unit{unit}, Priority: machine.Priority})
-	if err != nil {
-		return err
-	}
 	wire := &wireClient{url: machine.Wire, client: machine.client()}
-	if _, err := wire.call(runContext, http.MethodPost, "/pools/"+machine.Pool+"/units", token, body); err != nil {
+	waiting := machine.wait(unit)
+	defer machine.unwait(unit)
+	if err := machine.post(runContext, wire, token, []*waitingUnit{waiting}, machine.Priority); err != nil {
 		return fmt.Errorf("queuing on pool %s: %w", machine.Pool, err)
 	}
 	check := time.NewTicker(machine.queueCheck())
@@ -178,13 +198,17 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 				// No answer says nothing about the unit; the next look asks again.
 			case queued[unit.Unit]:
 				leftQueue = time.Time{}
+				if machine.aged(waiting) > machine.priorityOf(waiting) {
+					machine.reoffer(runContext, wire, token, unit.Run)
+				}
 			case leftQueue.IsZero():
 				leftQueue = time.Now()
 			case time.Since(leftQueue) >= machine.neverStarted():
 				if requeues == maximumRequeues {
 					return fmt.Errorf("taken off pool %s's queue %d times and never started", machine.Pool, requeues+1)
 				}
-				if _, err := wire.call(runContext, http.MethodPost, "/pools/"+machine.Pool+"/units", token, body); err != nil {
+				// Queued again at the tier its wait has earned, so a unit a re-offer had to leave out loses no rank.
+				if err := machine.post(runContext, wire, token, []*waitingUnit{waiting}, machine.aged(waiting)); err != nil {
 					return fmt.Errorf("queuing again on pool %s: %w", machine.Pool, err)
 				}
 				requeues++
@@ -197,6 +221,168 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 			return fmt.Errorf("given up on pool %s; the unit may still be queued or running there", machine.Pool)
 		}
 	}
+}
+
+// wait records the unit as queued and not started, from now.
+func (machine *PoolMachine) wait(unit protocol.Unit) *waitingUnit {
+	machine.mutex.Lock()
+	defer machine.mutex.Unlock()
+	if machine.waiting == nil {
+		machine.waiting = map[string]map[string]*waitingUnit{}
+	}
+	if machine.waiting[unit.Run] == nil {
+		machine.waiting[unit.Run] = map[string]*waitingUnit{}
+	}
+	waiting := &waitingUnit{unit: unit, since: time.Now(), priority: machine.Priority}
+	machine.waiting[unit.Run][unit.Unit] = waiting
+	return waiting
+}
+
+func (machine *PoolMachine) unwait(unit protocol.Unit) {
+	machine.mutex.Lock()
+	defer machine.mutex.Unlock()
+	delete(machine.waiting[unit.Run], unit.Unit)
+	if len(machine.waiting[unit.Run]) == 0 {
+		delete(machine.waiting, unit.Run)
+	}
+}
+
+func (machine *PoolMachine) priorityOf(waiting *waitingUnit) int {
+	machine.mutex.Lock()
+	defer machine.mutex.Unlock()
+	return waiting.priority
+}
+
+// aged is the priority a waiting unit has earned: Priority, plus AgeStep for each AgeEvery since it was first queued,
+// up to the ceiling. It never falls below Priority.
+func (machine *PoolMachine) aged(waiting *waitingUnit) int {
+	if machine.AgeEvery <= 0 || machine.AgeStep <= 0 {
+		return machine.Priority
+	}
+	ceiling := machine.AgeCeiling
+	if ceiling <= 0 || ceiling > MaximumPoolPriority {
+		ceiling = MaximumPoolPriority
+	}
+	earned := machine.Priority + machine.AgeStep*int(time.Since(waiting.since)/machine.AgeEvery)
+	return max(machine.Priority, min(earned, ceiling))
+}
+
+// post queues the units on the pool as one batch at the priority, under placing, and records it as theirs.
+func (machine *PoolMachine) post(callContext context.Context, wire *wireClient, token string, units []*waitingUnit, priority int) error {
+	machine.placing.Lock()
+	defer machine.placing.Unlock()
+	return machine.postLocked(callContext, wire, token, units, priority)
+}
+
+func (machine *PoolMachine) postLocked(callContext context.Context, wire *wireClient, token string, units []*waitingUnit, priority int) error {
+	batch := poolBatch{Priority: priority}
+	for _, waiting := range units {
+		batch.Units = append(batch.Units, waiting.unit)
+	}
+	body, err := json.Marshal(batch)
+	if err != nil {
+		return err
+	}
+	if _, err := wire.call(callContext, http.MethodPost, "/pools/"+machine.Pool+"/units", token, body); err != nil {
+		return err
+	}
+	machine.mutex.Lock()
+	for _, waiting := range units {
+		waiting.priority = priority
+	}
+	machine.mutex.Unlock()
+	return nil
+}
+
+// reoffer moves the run's queued units up to the tiers their waits have earned. The wire has no way to change a queued
+// unit's priority and drops queued units only a whole run at a time, so it looks at the run's queue, drops it, and
+// queues the same units again. A worker can take a unit between the look and the drop; then the drop counts fewer
+// than the look listed, and nothing is queued again, since queuing a unit already taken would run it twice. Each
+// dropped unit is found gone from the queue and queued again on its own, at its earned tier, after NeverStarted.
+func (machine *PoolMachine) reoffer(callContext context.Context, wire *wireClient, token string, run string) {
+	machine.placing.Lock()
+	defer machine.placing.Unlock()
+	listed, err := machine.queuedNow(callContext, wire, token, run)
+	if err != nil || len(listed) == 0 {
+		return
+	}
+	units := make([]*waitingUnit, 0, len(listed))
+	due := false
+	machine.mutex.Lock()
+	for _, id := range listed {
+		waiting := machine.waiting[run][id]
+		if waiting == nil {
+			// A unit in the queue this machine isn't waiting on: dropping it would lose it, so nothing moves.
+			machine.mutex.Unlock()
+			return
+		}
+		units = append(units, waiting)
+	}
+	machine.mutex.Unlock()
+	for _, waiting := range units {
+		if machine.aged(waiting) > machine.priorityOf(waiting) {
+			due = true
+		}
+	}
+	if !due {
+		return
+	}
+	body, err := json.Marshal(map[string]string{"run": run})
+	if err != nil {
+		return
+	}
+	answer, err := wire.call(callContext, http.MethodPost, "/pools/"+machine.Pool+"/cancel", token, body)
+	if err != nil {
+		return
+	}
+	var cancelled struct {
+		Dropped int `json:"dropped"`
+	}
+	if err := protocol.Decode(bytes.NewReader(answer), &cancelled); err != nil {
+		return
+	}
+	machine.mutex.Lock()
+	delete(machine.queued, run)
+	machine.mutex.Unlock()
+	if cancelled.Dropped != len(listed) {
+		if machine.Log != nil {
+			fmt.Fprintf(machine.Log, "pool %s: %d of run %s's units were queued and %d dropped, so a worker took one in between; each is queued again on its own\n", machine.Pool, len(listed), run, cancelled.Dropped)
+		}
+		return
+	}
+	byPriority := map[int][]*waitingUnit{}
+	for _, waiting := range units {
+		earned := machine.aged(waiting)
+		byPriority[earned] = append(byPriority[earned], waiting)
+	}
+	for priority, group := range byPriority {
+		if err := machine.postLocked(callContext, wire, token, group, priority); err != nil {
+			// Not queued again here; each is found gone and queued again on its own.
+			continue
+		}
+		if machine.Log != nil {
+			fmt.Fprintf(machine.Log, "pool %s: %d of run %s's units offered again at priority %d after waiting %.0f s\n", machine.Pool, len(group), run, priority, time.Since(group[0].since).Seconds())
+		}
+	}
+}
+
+// queuedNow is the run's units in the pool's queue, oldest first, from a fresh look.
+func (machine *PoolMachine) queuedNow(callContext context.Context, wire *wireClient, token string, run string) ([]string, error) {
+	body, err := json.Marshal(map[string]string{"run": run})
+	if err != nil {
+		return nil, err
+	}
+	answer, err := wire.call(callContext, http.MethodPost, "/pools/"+machine.Pool+"/queued", token, body)
+	if err != nil {
+		return nil, err
+	}
+	var listed struct {
+		Units []string `json:"units"`
+	}
+	if err := protocol.Decode(bytes.NewReader(answer), &listed); err != nil {
+		return nil, fmt.Errorf("pool %s's queued units: %w", machine.Pool, err)
+	}
+	return listed.Units, nil
 }
 
 func (machine *PoolMachine) neverStarted() time.Duration {

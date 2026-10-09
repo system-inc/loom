@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -271,5 +272,107 @@ func TestAPoolUnitWhoseWorkerGoesSilentIsPlacedAgainAndContinuesItsStream(t *tes
 	sort.Slice(onWire, func(left, right int) bool { return onWire[left].Sequence < onWire[right].Sequence })
 	if !reflect.DeepEqual(onWire, inRecord) {
 		t.Fatalf("the wire holds %+v, the record %+v", onWire, inRecord)
+	}
+}
+
+// agingSlots is one pool at priority 30 that lifts a waiting unit 10 every 150 ms, up to 50.
+func agingSlots(wire *fakeWire, count int) []Machine {
+	slots := poolSlots(wire, count)
+	pool := slots[0].(*PoolMachine)
+	pool.Priority, pool.AgeEvery, pool.AgeStep, pool.AgeCeiling = 30, 150*time.Millisecond, 10, 50
+	pool.QueueCheck, pool.NeverStarted = 40*time.Millisecond, 300*time.Millisecond
+	return slots
+}
+
+// waitFor polls the fake wire until check holds, failing the test after a few seconds.
+func waitFor(t *testing.T, wire *fakeWire, what string, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		wire.mutex.Lock()
+		held := check()
+		wire.mutex.Unlock()
+		if held {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("never saw %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func startedCounts(events []protocol.Event) map[string]int {
+	counts := map[string]int{}
+	for _, event := range events {
+		if event.Type == "started" {
+			counts[event.Unit]++
+		}
+	}
+	return counts
+}
+
+// #0k03wz1, Oct 9: a tier-30 job placed 0 of 6 units in 30 minutes behind a stream of tier-40 landings. A unit that
+// waits climbs a tier each AgeEvery, to the ceiling and no higher, and sits in the queue once however often it moves.
+func TestAWaitingUnitIsOfferedAgainATierHigherEachAgeStepUpToTheCeiling(t *testing.T) {
+	wire := newFakeWire(t)
+	done := make(chan Result, 1)
+	go func() {
+		result, _ := Run(context.Background(), config(wire, agingSlots(wire, 2)...), protocol.Job{Name: "test-job", Units: []protocol.JobUnit{poolUnit("a", "echo a"), poolUnit("b", "echo b")}})
+		done <- result
+	}()
+	waitFor(t, wire, "both units at the ceiling", func() bool {
+		ranks := wire.ranks["codex"]
+		return len(ranks) == 2 && ranks[0] == 50 && ranks[1] == 50
+	})
+	time.Sleep(400 * time.Millisecond) // two more steps' worth: nothing climbs past the ceiling, nothing doubles
+	wire.mutex.Lock()
+	queued, ranks, batches := len(wire.pools["codex"]), append([]int{}, wire.ranks["codex"]...), append([]int{}, wire.priority["codex"]...)
+	wire.mutex.Unlock()
+	if queued != 2 || !reflect.DeepEqual(ranks, []int{50, 50}) {
+		t.Fatalf("queued %d at %v, not each unit once at 50", queued, ranks)
+	}
+	if len(batches) < 4 || batches[0] != 30 || batches[1] != 30 || !slices.Contains(batches, 40) || slices.Max(batches) != 50 {
+		t.Fatalf("batches came at %v: 30 for each unit, then 40, then 50, never higher", batches)
+	}
+	servePool(t, wire, "codex", 2)
+	result := <-done
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	if counts := startedCounts(result.Events); counts["a"] != 1 || counts["b"] != 1 {
+		t.Fatalf("started %v, not each unit once", counts)
+	}
+}
+
+// The wire drops a run's queued units only all at once and says how many, not which. A worker that takes one between
+// the re-offer's look and its drop must not get a second copy: the drop counts fewer than the look listed, nothing is
+// queued again, and each unit the drop took is found gone and queued again on its own, at the tier it earned.
+func TestAReofferThatRacesAWorkerQueuesNothingTwice(t *testing.T) {
+	wire := newFakeWire(t)
+	wire.racing = 1
+	done := make(chan Result, 1)
+	go func() {
+		result, _ := Run(context.Background(), config(wire, agingSlots(wire, 3)...), protocol.Job{Name: "test-job", Units: []protocol.JobUnit{poolUnit("a", "echo a"), poolUnit("b", "echo b"), poolUnit("c", "echo c")}})
+		done <- result
+	}()
+	waitFor(t, wire, "a re-offer racing a worker", func() bool { return wire.racing == 0 })
+	// The worker that took the unit starts it at once, as a real one does; the two the drop took come back on their own.
+	wire.mutex.Lock()
+	before := len(wire.priority["codex"])
+	wire.mutex.Unlock()
+	servePool(t, wire, "codex", 2)
+	result := <-done
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	wire.mutex.Lock()
+	after := append([]int{}, wire.priority["codex"][before:]...)
+	wire.mutex.Unlock()
+	if len(after) != 2 || after[0] <= 30 || after[1] <= 30 {
+		t.Fatalf("after the race the pool took batches at %v: the two dropped units, each on its own, above 30", after)
+	}
+	if counts := startedCounts(result.Events); counts["a"] != 1 || counts["b"] != 1 || counts["c"] != 1 {
+		t.Fatalf("started %v, not each unit once", counts)
 	}
 }
