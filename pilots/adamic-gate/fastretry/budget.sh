@@ -68,6 +68,10 @@ check budget-family-members '[ "$(cat $work/only-tests.json)" = "{\"pkg/a\": [\"
 check budget-packs-exactly '[ "$(spec)" = "build-vet null
 tests-01 null pkg/a=^(TestA|TestAUnit00|TestA_Setup)$ pkg/b=^(TestB)$ skip=^(TestSlow)$
 tests-03 null pkg/b=. skip=^(TestSlow|TestB)$" ] && [ "$(cat $work/stale-names.txt)" = "pkg/a TestGone" ]'
+# C': the selection's changed paths, beside its select.json, reach the planner as packages (#6pekqxy's headroom).
+scenario; printf 'pkg/a/a.go\npkg/a/testdata/x.json\nREADME.md\n' > $T/changed-paths.txt; run $stubs/verify.sh 60
+check budget-changed-packages '[ "$(grep -A1 -x -- --changed-packages $T/argv | tail -1)" = "github.com/system-inc/adamic,github.com/system-inc/adamic/pkg/a" ]'
+scenario; run $stubs/verify.sh 60; check budget-no-changed-paths '! grep -qx -- --changed-packages $T/argv'
 # D: budgeted without the tree, nothing names the members: no --only-tests, and the selection is one family spec, as today.
 scenario notree; run $stubs/verify.sh 60
 check budget-without-tree '! grep -qx -- --only-tests $T/argv && grep -qx -- --budget $T/argv && spec | grep -qF "pkg/a=^(TestA|TestGone)((Unit|Points|_)[0-9]+|_Setup|_Union)?$"'

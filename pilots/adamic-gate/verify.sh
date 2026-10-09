@@ -84,6 +84,14 @@ if only:
 PY
 		[ -s "${work}/only-tests.json" ] && budget+=(--only-tests "${work}/only-tests.json")
 	fi
+	# A changed package's tests pack at 1.5x their times (#6pekqxy): its tests are the likeliest to run slower than they
+	# did. The selection's changed paths, beside its select.json, name the packages: each path's directory under the
+	# module, up to any testdata. A name no plan holds changes nothing.
+	changedPaths=$([ -n "${LOOM_VERIFY_SELECT:-}" ] && dirname "${LOOM_VERIFY_SELECT}")/changed-paths.txt
+	if [ -s "${changedPaths}" ]; then
+		changed=$(awk '{ directory = $0; sub(/\/[^\/]*$/, "", directory); if (directory == $0) directory = ""; sub(/(^|\/)testdata(\/.*)?$/, "", directory); print "github.com/system-inc/adamic" (directory == "" ? "" : "/" directory) }' "${changedPaths}" | sort -u | paste -sd, -)
+		[ -n "${changed}" ] && budget+=(--changed-packages "${changed}")
+	fi
 fi
 "${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" ${treeTests[@]+"${treeTests[@]}"} ${budget[@]+"${budget[@]}"} > "${work}/tests.json" 2> "${planErrors}" || { echo "verify: planning failed$([ -s "${planErrors}" ] && echo ": $(tail -1 "${planErrors}")")"; exit 1; }
 
