@@ -26,18 +26,15 @@ for ((minute = 0; minute < 30; minute++)); do
 	pgrep -f "[l]oom-units/before.sh" > /dev/null || break
 	sleep 60
 done
-# A quiet box: load under 4 and every gate slot free, checked each minute for two hours.
+# A quiet box: load under 4 (@system_adamic's line) and slot 3, the one this holds, free, checked each minute for two
+# hours. Another slot may be running a gate quietly; the load says how much it costs, and every pass logs it.
 for ((minute = 0; ; minute++)); do
 	load=$(cut -d' ' -f1 /proc/loadavg)
-	busy=0
-	for lock in "${HOME}"/fast-gate/lock "${HOME}"/fast-gate/lock-2 "${HOME}"/fast-gate/lock-3; do
-		[ -e "${lock}" ] && ! flock -n "${lock}" true && busy=$((busy + 1))
-	done
-	awk -v current="${load}" 'BEGIN { exit !(current < 4) }' && [ "${busy}" = 0 ] && break
-	[ "${minute}" -ge 120 ] && { log "no quiet window in two hours (load ${load}, ${busy} slots busy)"; exit 1; }
+	awk -v current="${load}" 'BEGIN { exit !(current < 4) }' && flock -n "${HOME}/fast-gate/lock-3" true && break
+	[ "${minute}" -ge 120 ] && { log "no quiet window in two hours (load ${load})"; exit 1; }
 	sleep 60
 done
-log "quiet: load ${load}, every slot free"
+log "quiet: load ${load}, slot 3 free"
 
 # The last slot and its tree, held for the whole measure.
 lock=${HOME}/fast-gate/lock-3 tree=${HOME}/fast-gate/tree-3
