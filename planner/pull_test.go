@@ -1,6 +1,8 @@
 package planner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,7 +11,8 @@ import (
 	"testing"
 )
 
-// A stub Queue: two unplanned futures of one tree (one uncached), the verdict index, and the plans posted back.
+// A stub Queue in loom-pipeline's shapes (wire/source/Queue.ts): two unplanned futures of one tree (one uncached),
+// the verdict index, and the plans posted back as bare lists, each unit's key recomputed from its posted keyParts.
 func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	t.Parallel()
 	tree, gateTools := planFixture(t)
@@ -33,7 +36,7 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 		}
 		switch {
 		case request.Method == "GET" && request.URL.Path == "/futures" && request.URL.Query().Get("state") == "unplanned":
-			json.NewEncoder(writer).Encode([]Future{{Future: "fut-1", Tree: "tree-sha"}, {Future: "fut-2", Tree: "tree-sha", Uncached: true}})
+			json.NewEncoder(writer).Encode(map[string][]Future{"futures": {{Future: "fut-1", Tree: "tree-sha"}, {Future: "fut-2", Tree: "tree-sha", Uncached: true}}})
 		case request.Method == "GET" && strings.HasPrefix(request.URL.Path, "/verdicts/"):
 			verdict, found := passed[strings.TrimPrefix(request.URL.Path, "/verdicts/")]
 			if !found {
@@ -42,10 +45,26 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 			}
 			json.NewEncoder(writer).Encode(verdict)
 		case request.Method == "POST" && strings.HasSuffix(request.URL.Path, "/plan"):
-			var body struct{ Units []PlannedResult }
-			json.NewDecoder(request.Body).Decode(&body)
+			var units []struct {
+				PlannedResult
+				KeyParts map[string]any `json:"keyParts"`
+			}
+			if err := json.NewDecoder(request.Body).Decode(&units); err != nil {
+				http.Error(writer, "the plan is a JSON list of units", http.StatusUnprocessableEntity)
+				return
+			}
+			results := []PlannedResult{}
+			for _, unit := range units {
+				// Queue keys the posted keyParts as JSON, so a null where the key had [] or {} is a mismatch.
+				canonical, _ := Canonical(unit.KeyParts)
+				if sum := sha256.Sum256(append([]byte(unitKeyVersion+"\n"), canonical...)); hex.EncodeToString(sum[:]) != unit.UnitKey {
+					http.Error(writer, "unitKey is not its keyParts' key", http.StatusUnprocessableEntity)
+					return
+				}
+				results = append(results, unit.PlannedResult)
+			}
 			lock.Lock()
-			posted[strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/futures/"), "/plan")] = body.Units
+			posted[strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/futures/"), "/plan")] = results
 			lock.Unlock()
 			writer.WriteHeader(http.StatusCreated)
 		default:

@@ -12,7 +12,8 @@ import (
 	"strings"
 )
 
-// A Future is an unplanned future as Queue serves it at GET /futures?state=unplanned (contract v1.1).
+// A Future is an unplanned future as Queue serves it at GET /futures?state=unplanned (contract v1.1), where the
+// future is its tree sha (slice 1).
 type Future struct {
 	Future   string   `json:"future"`
 	Tree     string   `json:"tree"` // the tree sha to plan
@@ -54,16 +55,19 @@ func (client QueueClient) Unplanned() ([]Future, error) {
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GET /futures: %s", response.Status)
 	}
-	var futures []Future
-	if err := json.NewDecoder(response.Body).Decode(&futures); err != nil {
+	var listing struct {
+		Futures []Future `json:"futures"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&listing); err != nil {
 		return nil, fmt.Errorf("GET /futures: %w", err)
 	}
-	return futures, nil
+	return listing.Futures, nil
 }
 
-// PostPlan hands a future's plan to Queue, which writes one unit.planned event per unit.
+// PostPlan hands a future's plan to Queue as the bare unit list, and Queue writes one unit.planned event per unit. It
+// recomputes each unit's key from its keyParts and refuses a mismatch, so the keyParts posted are the ones keyed.
 func (client QueueClient) PostPlan(future string, results []PlannedResult) error {
-	body, err := json.Marshal(map[string]any{"units": results})
+	body, err := json.Marshal(results)
 	if err != nil {
 		return err
 	}
