@@ -286,3 +286,77 @@ func TestFreeMegabytesReadsTheNearestDirectoryThatExists(t *testing.T) {
 		t.Fatalf("free %d, %v", free, err)
 	}
 }
+
+// A strict serve that finds its root full trims it once (prepare.sh trim-only) and asks again when that frees it; one
+// whose trim frees nothing trims only that once; a box worker never trims and only stands down. The mutant that drops
+// the trim stays unfit and fails the first case.
+func TestAStrictServeTrimsItsFullRootOnceAndAsksAgain(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		strict, frees bool
+		trims         int
+		asks          bool
+	}{
+		{"strict, the trim frees it", true, true, 1, true},
+		{"strict, the trim frees nothing", true, false, 1, false},
+		{"a box worker", false, true, 0, false},
+	} {
+		pool := newTestPool(t)
+		options := pool.serveOptions(t, time.Now().Add(1500*time.Millisecond), time.Second, io.Discard)
+		options.Unit.Strict, options.Unit.Root, options.UnfitPause = test.strict, t.TempDir(), 20*time.Millisecond
+		var mutex sync.Mutex
+		full, trims := true, 0
+		options.freeMegabytes = func(path string) (int64, error) {
+			mutex.Lock()
+			defer mutex.Unlock()
+			if full {
+				return 900, nil
+			}
+			return 50000, nil
+		}
+		options.trim = func(_ context.Context, root string, _ io.Writer) error {
+			mutex.Lock()
+			defer mutex.Unlock()
+			trims++
+			if root != options.Unit.Root {
+				t.Errorf("%s: trimmed %s, not the root %s", test.name, root, options.Unit.Root)
+			}
+			full = full && !test.frees
+			return nil
+		}
+		summary, _ := Serve(context.Background(), options)
+		pool.mutex.Lock()
+		asked := len(pool.askers) > 0
+		pool.mutex.Unlock()
+		if trims != test.trims || asked != test.asks || (summary.Unfit == "") != test.asks {
+			t.Errorf("%s: %d trims, asked %v, summary %q", test.name, trims, asked, summary.String())
+		}
+	}
+}
+
+// The real trim, on a root and a HOME of the test's own: what earlier units left goes, and the rest stays.
+func TestTheTrimClearsEarlierUnitsLeavingsOnItsRoot(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	left := []string{filepath.Join(root, "go-build123", "x"), filepath.Join(root, "adamic-stage3-lane-1", "x"), filepath.Join(root, "adamic-gate", "old", "x"),
+		filepath.Join(home, ".cache", "adamic", "runtime", ".build-1", "x")}
+	kept := []string{filepath.Join(root, "adamic", "x"), filepath.Join(root, "adamic-gate", "markdown-width-1", "x"), filepath.Join(root, "adamic-tools", "x")}
+	for _, path := range append(append([]string{}, left...), kept...) {
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		os.WriteFile(path, []byte("x"), 0o644)
+	}
+	var report bytes.Buffer
+	if err := trimRoot(context.Background(), root, &report); err != nil || !strings.Contains(report.String(), "trimmed "+root) {
+		t.Fatalf("%v: %s", err, report.String())
+	}
+	for _, path := range left {
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("left %s", path)
+		}
+	}
+	for _, path := range kept {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("trimmed %s, which isn't a leaving", path)
+		}
+	}
+}

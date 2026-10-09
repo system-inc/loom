@@ -5,6 +5,7 @@
 # quoted at every use; nothing of the job is ever part of this text.
 #
 #	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep> <root>
+#	prepare.sh trim-only <root>
 #
 # <root> holds everything it keeps between units beside the tree (the npm trees, the gate inputs, the setup marker) and
 # is where it looks for what earlier units left: /tmp only for a strict runner, whose instance is the runner's alone.
@@ -14,13 +15,32 @@
 # Exit 0: the tree is at <sha> and <environment file> holds the environment, NUL separated. Exit 3: the job is refused
 # (the sha or base can't be fetched from the public repository, a submodule isn't public on GitHub); nothing ran. Exit 2:
 # the instance couldn't be readied (disk, network, setup): Loom's fault, never the change's.
+#
+# trim-only runs the trim alone and exits 0: a strict serve that finds its disk too full to take a unit runs it once
+# (serve.go, #zzmz489), then looks again.
 set -uo pipefail
+say() { echo "loom-runner prepare: $*"; }
+# Disk: on an instance that runs one unit at a time, what earlier units left in /tmp and the caches is no one's.
+freeMegabytes() { df -Pm "${HOME}" "${root}" | awk 'NR > 1 {print $4}' | sort -n | head -1; }
+trimLeftovers() {
+	rm -rf "${HOME}/.cache/adamic/runtime"/.build-* "${root}"/go-build* "${root}"/Test* "${root}"/adamic-npm/replaced-* "${root}"/adamic-npm/*.staging-* 2> /dev/null
+	find "${root}/adamic-gate" -mindepth 1 -maxdepth 1 ! -name 'markdown-width-*' -exec rm -rf {} + 2> /dev/null
+	rm -rf "${root}"/adamic-stage3-lane-* 2> /dev/null
+	[ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
+}
+if [ "${1:-}" = trim-only ]; then
+	root=${2:-}
+	case ${root} in /*) ;; *) say "the root must be an absolute path"; exit 2 ;; esac
+	[ -d "${root}" ] || exit 0
+	trimLeftovers
+	say "trimmed ${root}: $(freeMegabytes) MB free"
+	exit 0
+fi
 tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6 root=$7
 case ${root} in /*) ;; *) echo "loom-runner prepare: the root must be an absolute path"; exit 2 ;; esac
 mkdir -p "${root}"
 repository=https://github.com/system-inc/adamic
 started=${SECONDS}
-say() { echo "loom-runner prepare: $*"; }
 
 # Git reads no configuration but what this script gives it: no system or global file (no credential helper, no URL
 # rewrite, no hooks), never prompts, and never asks a helper for a password. Submodules recorded over ssh are fetched
@@ -29,14 +49,7 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 G
 export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:
 export GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2=/dev/null
 
-# Disk: on an instance that runs one unit at a time, what earlier units left in /tmp and the caches is no one's.
-freeMegabytes() { df -Pm "${HOME}" "${root}" | awk 'NR > 1 {print $4}' | sort -n | head -1; }
-if [ "${trim}" = trim ]; then
-	rm -rf "${HOME}/.cache/adamic/runtime"/.build-* "${root}"/go-build* "${root}"/Test* "${root}"/adamic-npm/replaced-* "${root}"/adamic-npm/*.staging-* 2> /dev/null
-	find "${root}/adamic-gate" -mindepth 1 -maxdepth 1 ! -name 'markdown-width-*' -exec rm -rf {} + 2> /dev/null
-	rm -rf "${root}"/adamic-stage3-lane-* 2> /dev/null
-	[ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
-fi
+[ "${trim}" = trim ] && trimLeftovers
 free=$(freeMegabytes)
 [ "${free:-0}" -ge 1500 ] || { say "only ${free} MB free after trimming"; exit 2; }
 

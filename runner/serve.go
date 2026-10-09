@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -45,6 +46,8 @@ type ServeOptions struct {
 	UnfitPause time.Duration
 	// freeMegabytes reads a path's free room; nil means the file system's. Tests plant a full disk through it.
 	freeMegabytes func(path string) (int64, error)
+	// trim clears what earlier units left on a strict runner's root (prepare.sh trim-only); nil means that script.
+	trim func(trimContext context.Context, root string, report io.Writer) error
 }
 
 // A ServeSummary is how a serving runner ended: how many units it ran and how each finished, how long it
@@ -95,12 +98,17 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	if options.freeMegabytes == nil {
 		options.freeMegabytes = freeMegabytes
 	}
+	if options.trim == nil {
+		options.trim = trimRoot
+	}
 	// The disks a unit writes: its workspace's, and a strict runner's root, where its test job keeps the checkout.
 	disks := []string{unitOptions.WorkspaceParent}
-	if root := unitOptions.Root; root != "" {
+	root := unitOptions.Root
+	if root == "" && unitOptions.Strict {
+		root = "/tmp"
+	}
+	if root != "" {
 		disks = append(disks, root)
-	} else if unitOptions.Strict {
-		disks = append(disks, "/tmp")
 	}
 	cpus := describeMachine().cpus
 	summary := ServeSummary{}
@@ -114,7 +122,20 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			summary.Stopped = "at the deadline"
 			break
 		}
-		if unfit := unfitDisk(options, disks); unfit != summary.Unfit {
+		unfit := unfitDisk(options, disks)
+		// A strict runner's instance is its alone, so what earlier units left on its root is no one's: the first time
+		// it finds no room it clears that once, as every unit's preparation does, and looks again. A box worker shares
+		// its machine, so it only stands down.
+		if unfit != "" && summary.Unfit == "" && unitOptions.Strict {
+			fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; trimming earlier units' leavings on %s\n", unfit, root)
+			trimContext, cancel := context.WithTimeout(serveContext, 5*time.Minute)
+			if err := options.trim(trimContext, root, options.Report); err != nil {
+				fmt.Fprintf(options.Report, "loom-runner serve: trimming %s: %v\n", root, err)
+			}
+			cancel()
+			unfit = unfitDisk(options, disks)
+		}
+		if unfit != summary.Unfit {
 			if unfit != "" {
 				fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; asking for no unit until there is room\n", unfit)
 			} else {
@@ -187,6 +208,15 @@ func ReadTokenFile(path string) (string, error) {
 		return "", fmt.Errorf("the pool token file %s is empty", path)
 	}
 	return token, nil
+}
+
+// trimRoot runs prepare.sh trim-only on the root, the script read from stdin, so a full disk needn't hold a copy.
+func trimRoot(trimContext context.Context, root string, report io.Writer) error {
+	command := exec.CommandContext(trimContext, "bash", "-s", "--", "trim-only", root)
+	command.Stdin = bytes.NewReader(prepareScript)
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+	command.Stdout, command.Stderr = report, report
+	return command.Run()
 }
 
 // unfitDisk names the first disk with less room than a unit needs ("1200 MB free on /tmp"), or is empty. A disk it
