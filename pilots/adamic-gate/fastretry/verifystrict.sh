@@ -6,7 +6,7 @@
 # strict worker would meet argv) must fail:
 #
 #	pilots/adamic-gate/fastretry/verifystrict.sh
-#	sed 's/--strict-pool "codex-strict=/--pool "codex-strict=/' verify.sh > m.sh && fastretry/verifystrict.sh m.sh   # fails 1
+#	sed 's/--strict-pool "${LOOM_VERIFY_STRICT_POOL/--pool "${LOOM_VERIFY_STRICT_POOL/' verify.sh > m.sh && fastretry/verifystrict.sh m.sh   # fails 1
 #	sed 's/echo 1 > "${work}\/reds.exit"$/: /' verify.sh > m.sh && fastretry/verifystrict.sh m.sh   # fails 2: a mismatch that leaves the verdict
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
@@ -33,6 +33,9 @@ scenario ok; LOOM_VERIFY_STRICT= place "${T}/job.json" "${T}/record.jsonl" 5 > "
 check off-runs-as-before '[ "$(cat "${T}/loom")" = "run --uncached --slots none --pool codex-side=5 --priority 40 --record ${T}/record.jsonl ${T}/job.json " ] && [ ! -e "${T}/converted-from" ]'
 scenario ok; LOOM_VERIFY_STRICT=1 place "${T}/job.json" "${T}/record.jsonl" 5 > "${T}/out" 2>&1
 check strict-places-test-jobs-on-codex-strict '[ "$(cat "${T}/loom")" = "run --uncached --slots none --strict-pool codex-strict=5 --pool codex-side=1 --priority 40 --record ${T}/record.jsonl ${T}/job.strict.json " ] && grep -q "^strict: 1 of 2 units are test jobs on codex-strict$" "${T}/out"'
+scenario ok; LOOM_VERIFY_STRICT=1 LOOM_VERIFY_STRICT_POOL=codex-strict-canary place "${T}/job.json" "${T}/record.jsonl" 5 > "${T}/out" 2>&1
+check strict-pool-is-named-by-its-variable 'grep -q -- "--strict-pool codex-strict-canary=5 " "${T}/loom"'
+scenario ok; LOOM_VERIFY_STRICT=1 place "${T}/job.json" "${T}/record.jsonl" 5 > "${T}/out" 2>&1
 check strict-drops-the-round-marker-only '! grep -q LOOM_AGAIN "${T}/converted-from" && grep -q "\"argv\": \[\"bash\"\]" "${T}/converted-from"'
 scenario fails; LOOM_VERIFY_STRICT=1 place "${T}/job.json" "${T}/record.jsonl" 5 > "${T}/out" 2>&1
 check a-failed-conversion-runs-as-before '[ "$(cat "${T}/loom")" = "run --uncached --slots none --pool codex-side=5 --priority 40 --record ${T}/record.jsonl ${T}/job.json " ] && grep -q "^strict: converting job.json failed (a job it cannot read); placed as argv$" "${T}/out"'

@@ -16,7 +16,8 @@
 # ruling that the caches land on, since an off-by-default landing only adds a flip we'd make anyway). "off" or empty
 # plans a fixed count of units, as it ran from f18497c's dry run until #3sjs0rn brought the budgeted planner back.
 #
-# LOOM_VERIFY_STRICT=1 (off by default, #098rcha's step d) places the job's go test units on the codex-strict pool as
+# LOOM_VERIFY_STRICT=1 (off by default, #098rcha's step d) places the job's go test units on the strict pool
+# (LOOM_VERIFY_STRICT_POOL, default codex-strict; a canary names its own, so its units never reach another run's) as
 # test jobs (adamic-gate test-jobs), whose workers serve --strict and run nothing else; what a test job can't say
 # exactly (build-vet, a retried unit's round marker aside) stays argv on the pool below. job.json itself stays argv:
 # every step after placement reads it, and the units keep their ids and outputs. LOOM_VERIFY_STRICT_RACE=1 also runs
@@ -324,8 +325,8 @@ for unit in job["units"]:
     if unit.get("environment") == {}:
         del unit["environment"]
 json.dump(job, open(sys.argv[2], "w"))' "${job}" "${strictJob}.in" && "${planner}" test-jobs --job "${strictJob}.in" > "${strictJob}" 2> "${strictJob%.json}.log"; then
-			echo "strict: $(tail -1 "${strictJob%.json}.log") on codex-strict"
-			"${loom}" run --uncached --slots none --strict-pool "codex-strict=${count}" --pool "${pool}=1" --priority "${LOOM_PRIORITY:-0}" --record "${record}" "${strictJob}"
+			echo "strict: $(tail -1 "${strictJob%.json}.log") on ${LOOM_VERIFY_STRICT_POOL:-codex-strict}"
+			"${loom}" run --uncached --slots none --strict-pool "${LOOM_VERIFY_STRICT_POOL:-codex-strict}=${count}" --pool "${pool}=1" --priority "${LOOM_PRIORITY:-0}" --record "${record}" "${strictJob}"
 			return
 		fi
 		echo "strict: converting ${job##*/} failed ($(tail -1 "${strictJob%.json}.log" 2> /dev/null)); placed as argv"
