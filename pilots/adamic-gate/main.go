@@ -80,6 +80,18 @@ if [ ! -f /tmp/adamic-setup-done ]; then
   (cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && touch /tmp/adamic-setup-done || { echo "loom-pilot: setup failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
 fi
 for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do [ -f "${environment}" ] && { source "${environment}"; break; }; done
+# A download cut short can leave a Go toolchain that runs but lacks its standard library (Oct 9, the side pool:
+# "package text/tabwriter is not in std"), which setup.sh then takes as installed. Such a toolchain moves aside
+# and setup runs again, once; a second failure is Loom's, never the change's.
+if ! go list std > /dev/null 2>&1; then
+  echo "loom-pilot: the Go toolchain lacks its standard library; setting it up again"
+  goroot=$(go env GOROOT 2> /dev/null)
+  [ -n "${goroot}" ] && [ -d "${goroot}" ] && mv "${goroot}" "${goroot}.broken-$$"
+  rm -f /tmp/adamic-setup-done
+  (cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && touch /tmp/adamic-setup-done || { echo "loom-pilot: setup failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
+  for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do [ -f "${environment}" ] && { source "${environment}"; break; }; done
+  go list std > /dev/null 2>&1 || { echo "loom-pilot: the Go toolchain still lacks its standard library"; exit 2; }
+fi
 export PATH="${ADAMIC_TYPESCRIPT_SOURCE:+${ADAMIC_TYPESCRIPT_SOURCE}/bin:}${PATH}"
 mkdir -p -m 1777 "${TMPDIR:-/tmp}"
 # The pinned npm packages the tests read (stage3/api's @types/node and typescript), as the gate's npmPackages
