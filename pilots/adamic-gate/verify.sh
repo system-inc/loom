@@ -8,7 +8,8 @@
 # A requester of "none" sends nothing (the fast-gate server reads the results from the work directory instead).
 # LOOM_VERIFY_WORK names the work directory; LOOM_VERIFY_ENV names a file of `export K=V` lines every unit runs
 # first (a fast gate's env); LOOM_VERIFY_PACKAGES names a file of import paths, one a line, so a package the
-# reference never saw still runs whole.
+# reference never saw still runs whole; LOOM_VERIFY_SELECT names a fast gate's select.json, whose only_tests
+# (package -> the only tests to run) and deferred (package -> tests to skip) shape every unit.
 #
 # Side work runs only on the side pool (LOOM_VERIFY_POOL, default codex-side): the star's pool never holds it
 # (@system_adamic, Oct 8 23:59Z). <slots> caps how much of it one run takes (default 5). Nothing builds on
@@ -34,10 +35,34 @@ fi
 "${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units 12 --only "${packages}" > "${work}/tests.json" 2> /dev/null || { echo "verify: planning failed"; exit 1; }
 
 # The build-and-vet unit runs on the same opening as the tests, so it sees the tree they will.
-python3 - "${work}" "${LOOM_VERIFY_ENV:-}" "${LOOM_VERIFY_PACKAGES:-}" <<'PY'
+python3 - "${work}" "${LOOM_VERIFY_ENV:-}" "${LOOM_VERIFY_PACKAGES:-}" "${LOOM_VERIFY_SELECT:-}" <<'PY'
 import json, sys
-work, environment, listed = sys.argv[1], sys.argv[2], sys.argv[3]
+work, environment, listed, selected = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 job = json.load(open(work + "/tests.json"))
+def quote(name):  # Go's regexp.QuoteMeta
+    return "".join("\\" + c if c in "\\.+*?()|[]{}^$" else c for c in name)
+selection = json.load(open(selected)) if selected else {}
+# A package whose tests the gate names runs exactly those, in one spec on the unit with the fewest.
+for package, tests in sorted((selection.get("only_tests") or {}).items()):
+    for unit in job["units"]:
+        unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if spec.split("=", 1)[0] != package]
+    if tests:
+        min(job["units"], key=lambda unit: len(unit["argv"]))["argv"].append(package + "=^(" + "|".join(quote(test) for test in sorted(tests)) + ")$")
+# Tests the fast gate defers are skipped in every spec of their package.
+for package, tests in (selection.get("deferred") or {}).items():
+    if not tests:
+        continue
+    names = [quote(test) for test in sorted(tests)]
+    for unit in job["units"]:
+        for index, spec in enumerate(unit["argv"][5:], start=5):
+            if spec.split("=", 1)[0] != package:
+                continue
+            if " skip=^(" in spec:
+                head, skipped = spec.split(" skip=^(", 1)
+                unit["argv"][index] = head + " skip=^(" + "|".join(names) + "|" + skipped
+            else:
+                unit["argv"][index] = spec + " skip=^(" + "|".join(names) + ")$"
+job["units"] = [unit for unit in job["units"] if len(unit["argv"]) > 5]
 # A listed package the reference never saw runs whole, as a remainder that skips nothing, on the unit with least.
 covered = {spec.split("=", 1)[0] for unit in job["units"] for spec in unit["argv"][5:]}
 for package in (open(listed).read().split() if listed else []):

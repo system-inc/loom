@@ -163,6 +163,9 @@ for spec in "$@"; do printf '%s\t%s\n' "${index}" "${spec}"; index=$((index + 1)
     index=${1%%	*} spec=${1#*	}
     package=${spec%%=*} pattern=${spec#*=} skip=""
     case "${pattern}" in *" skip="*) skip=${pattern#* skip=} pattern=${pattern%% skip=*} ;; esac
+    # TestWASI runs alone with the WASI SDK'"'"'s clang first on PATH, as the gate'"'"'s wasi phase runs it; every other
+    # test keeps the native clang (internal/native/wasm_test.go says so).
+    [ "${pattern}" = "^(TestWASI)\$" ] && [ -n "${WASI_SYSROOT:-}" ] && export PATH="${WASI_SYSROOT%/share/wasi-sysroot}/bin:${PATH}"
     echo "${package}" > "${out}/part-${index}.package"
     cd "${tree}" && go test -count=1 -exec /bin/true -run "${pattern}" "${package}" > /dev/null 2>&1
     times > "${out}/part-${index}.build"
@@ -266,6 +269,45 @@ func ab(arguments []string) error {
 	return encoder.Encode(job)
 }
 
+// oneUnit plans a job of one unit: the Codex opening readies the sha with the gate's environment, then the
+// body (a bash file) runs on that tree, with any arguments after the flags as its positional parameters.
+type outputGlobs []string
+
+func (globs *outputGlobs) String() string        { return strings.Join(*globs, ",") }
+func (globs *outputGlobs) Set(glob string) error { *globs = append(*globs, glob); return nil }
+
+func oneUnit(arguments []string) error {
+	flags := flag.NewFlagSet("unit", flag.ContinueOnError)
+	sha := flags.String("sha", "", "the commit the opening checks out")
+	gateInputs := flags.String("gate-inputs", "", "the hash of the gate inputs' manifest in the public store")
+	bodyPath := flags.String("body", "", "a bash file run after the opening, on its tree")
+	id := flags.String("id", "unit", "the unit's id")
+	timeout := flags.Int("timeout", 3600, "the unit's timeout in seconds")
+	var outputs outputGlobs
+	flags.Var(&outputs, "output", "an output glob under the unit's directory (repeatable)")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(*sha) || *bodyPath == "" {
+		return fmt.Errorf("unit needs a full --sha and a --body")
+	}
+	body, err := os.ReadFile(*bodyPath)
+	if err != nil {
+		return err
+	}
+	unit := protocol.JobUnit{
+		Id: *id, Argv: append([]string{"bash", "-c", codexPreamble(*gateInputs) + codexOpening + string(body), "adamic-unit", *sha}, flags.Args()...),
+		TimeoutSeconds: *timeout, Resources: protocol.Resources{Cpus: 4},
+	}
+	for _, glob := range outputs {
+		unit.Outputs = append(unit.Outputs, protocol.Output{Glob: glob})
+	}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(protocol.Job{Name: "adamic-" + *id, Units: []protocol.JobUnit{unit}})
+}
+
 // codexPreamble names the gate inputs' manifest for codexOpening; empty fetches none.
 func codexPreamble(gateInputs string) string {
 	if gateInputs != "" && !protocol.Sha256Pattern.MatchString(gateInputs) {
@@ -274,6 +316,17 @@ func codexPreamble(gateInputs string) string {
 	}
 	return "gateInputs=" + gateInputs + "\n"
 }
+
+// buildVetBody is the gate's build and vet as one stage unit: go build ./... and go vet ./... on the tree the
+// opening readied. A stage unit reports no tests: compare and reds judge it by its exit, 0 green, 1 the change's
+// red, anything else Loom's.
+const buildVetBody = `cd "${tree}" || exit 2
+go build ./... > "${out}/build.log" 2>&1; build=$?
+go vet ./... > "${out}/vet.log" 2>&1; vet=$?
+if [ "${build}" = 0 ]; then echo "loom-stage: go build ./... passed"; else echo "loom-stage: go build ./... FAILED (exit ${build})"; head -40 "${out}/build.log"; fi
+if [ "${vet}" = 0 ]; then echo "loom-stage: go vet ./... passed"; else echo "loom-stage: go vet ./... FAILED (exit ${vet})"; head -40 "${out}/vet.log"; fi
+[ "${build}" = 0 ] && [ "${vet}" = 0 ]
+`
 
 // warmBody readies an instance for the sha's real units without running a test: every test binary built and
 // vetted (`-exec /bin/true` stands in for running it), so a run's units find the build cache warm.
@@ -299,6 +352,8 @@ func main() {
 		err = warm(os.Args[2:])
 	case "ab":
 		err = ab(os.Args[2:])
+	case "unit":
+		err = oneUnit(os.Args[2:])
 	case "reds":
 		var verdict string
 		verdict, err = reds(os.Args[2:])
@@ -476,6 +531,7 @@ func plan(arguments []string) error {
 	target := flags.String("target", "box", "where the units run: box (a gate slot's warm tree) or codex (a Codex instance)")
 	gateInputs := flags.String("gate-inputs", "", "on codex, the hash of the gate inputs' manifest in the public store")
 	remainder := flags.Bool("remainder", false, "also run, per package, every test the reference doesn't name (a gate, not a parity check)")
+	stages := flags.Bool("stages", false, "also run the gate's other stages as units (today: go build and go vet)")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -505,8 +561,8 @@ func plan(arguments []string) error {
 		if _, test, _ := strings.Cut(key, " "); strings.Contains(test, "/") {
 			continue
 		}
-		if _, excluded := exclusions[key]; excluded {
-			continue
+		if _, excluded := exclusions[key]; excluded && *target == "box" {
+			continue // a Codex instance has the wasm SDK from setup.sh --wasi-sdk; a box slot may not
 		}
 		children, isSplit := split[key]
 		if !isSplit {
@@ -579,7 +635,7 @@ func plan(arguments []string) error {
 		}
 		for key := range exclusions {
 			packageName, name, _ := strings.Cut(key, " ")
-			if _, planned := byPackage[packageName]; planned {
+			if _, planned := byPackage[packageName]; planned && *target == "box" {
 				byPackage[packageName] = append(byPackage[packageName], regexp.QuoteMeta(name))
 			}
 		}
@@ -611,6 +667,13 @@ func plan(arguments []string) error {
 		}
 	}
 	job := protocol.Job{Name: "adamic-gate-pilot"}
+	if *stages {
+		job.Units = append(job.Units, protocol.JobUnit{
+			Id: "stage-build-vet", Argv: []string{"bash", "-c", opening + buildVetBody, "adamic-gate-stage", *sha}, TimeoutSeconds: 3600,
+			Outputs:   []protocol.Output{{Glob: "loom-out/build.log"}, {Glob: "loom-out/vet.log"}},
+			Resources: protocol.Resources{Cpus: 4},
+		})
+	}
 	for index, packages := range assigned {
 		if len(packages) == 0 && len(childrenOf[index]) == 0 && len(remainders[index]) == 0 {
 			continue
@@ -623,6 +686,17 @@ func plan(arguments []string) error {
 		sort.Strings(names)
 		for _, packageName := range names {
 			tests := packages[packageName]
+			// TestWASI needs the WASI clang, which the unit body puts on PATH for its spec alone.
+			for position, name := range tests {
+				if packageName+" "+name == module+"internal/native TestWASI" {
+					tests = append(tests[:position:position], tests[position+1:]...)
+					argv = append(argv, packageName+"=^(TestWASI)$")
+					break
+				}
+			}
+			if len(tests) == 0 {
+				continue
+			}
 			sort.Strings(tests)
 			quoted := make([]string, len(tests))
 			for position, name := range tests {
@@ -702,6 +776,9 @@ func plannedTests(job protocol.Job) (plannedJob, error) {
 	planned := plannedJob{tests: map[string][]string{}, remainderPackages: map[string]map[string]bool{}, remainderParents: map[string]map[string]bool{}, split: map[string]bool{}}
 	unquote := func(quoted string) string { return strings.ReplaceAll(quoted, `\`, "") }
 	for _, unit := range job.Units {
+		if strings.HasPrefix(unit.Id, "stage-") {
+			continue // a stage unit runs no tests of the plan
+		}
 		if len(unit.Argv) < 5 {
 			return planned, fmt.Errorf("unit %s isn't a pilot unit", unit.Id)
 		}
@@ -833,6 +910,7 @@ func compare(arguments []string) (bool, error) {
 	for _, unit := range job.Units {
 		timing := unitTiming{unit: unit.Id}
 		output, cpuOutput := "", ""
+		exitCode := -1
 		for _, event := range events {
 			if event.Unit != unit.Id {
 				continue
@@ -851,6 +929,9 @@ func compare(arguments []string) (bool, error) {
 			case "exit":
 				timing.wall = event.WallSeconds
 				timing.cpu += event.UserSeconds + event.SystemSeconds
+				if event.Code != nil {
+					exitCode = *event.Code
+				}
 			case "output":
 				if match := setupPattern.FindStringSubmatch(event.Text); match != nil {
 					timing.setup, _ = strconv.ParseFloat(match[1], 64)
@@ -879,6 +960,13 @@ func compare(arguments []string) (bool, error) {
 			}
 		}
 		timings = append(timings, timing)
+		if strings.HasPrefix(unit.Id, "stage-") {
+			if exitCode != 0 {
+				report("STAGE %s: exited %d", unit.Id, exitCode)
+				parity = false
+			}
+			continue
+		}
 		if output == "" {
 			report("UNIT %s: no test.jsonl.gz uploaded; its tests are missing", unit.Id)
 			parity = false
@@ -1098,6 +1186,16 @@ func reds(arguments []string) (string, error) {
 					output = event.Sha256
 				}
 			}
+		}
+		if strings.HasPrefix(unit.Id, "stage-") {
+			switch {
+			case exited && exitCode == 0:
+			case exited && exitCode == 1:
+				failed = append(failed, fmt.Sprintf("%s (stage)\n    %s", unit.Id, strings.ReplaceAll(strings.TrimSpace(tail), "\n", "\n    ")))
+			default:
+				broken = append(broken, fmt.Sprintf("%s: the stage broke (exited %t, code %d, last output %q)", unit.Id, exited, exitCode, strings.TrimSpace(tail)))
+			}
+			continue
 		}
 		if !exited || output == "" {
 			broken = append(broken, fmt.Sprintf("%s: no results (exited %t, last output %q)", unit.Id, exited, strings.TrimSpace(tail)))

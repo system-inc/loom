@@ -30,27 +30,92 @@ serve() {
 import json, re, shlex, sys
 job = json.load(open(sys.argv[1]))
 work = sys.argv[2]
-packages = [package for package in job.get("packages") or [] if package]
+open(work + "/select-mode", "w").write("yes" if job.get("packages") == "select" else "")
+for field in ("base_name", "tools"):
+    open(work + "/" + field, "w").write(str(job.get(field, "")))
+packages = [] if job.get("packages") == "select" else [package for package in job.get("packages") or [] if package]
 open(work + "/packages", "w").write("^(" + "|".join(re.escape(package) for package in packages) + ")$" if packages else "")
 open(work + "/package-list", "w").write("".join(package + "\n" for package in packages))
 open(work + "/env", "w").write("".join("export %s=%s\n" % (key, shlex.quote(str(value))) for key, value in sorted((job.get("env") or {}).items()) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)))
 open(work + "/branch", "w").write(str(job.get("branch", "")))
 open(work + "/base", "w").write(str(job.get("base", "")))
 PY
+	if [ -s "${work}/select-mode" ]; then
+		runSelection "${sha}" "${stamp}" || return
+	fi
 	if [ ! -s "${work}/packages" ]; then
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the job names no Go package, so the boxes take it" ""
 		return
 	fi
-	LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list "${HOME}/.loom/bin/verify.sh" "${sha}" "$(cat "${work}/packages")" none 5 > "${work}/verify.log" 2>&1
+	LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "${sha}" "$(cat "${work}/packages")" none 5 > "${work}/verify.log" 2>&1
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
 	case "$(cat "${work}/build.verdict" 2> /dev/null)|$(cat "${work}/reds.exit" 2> /dev/null)" in
-		passed\|0) verdict="green: ${sha} fast gate on Loom's side pool, go tests only,${line} in $((SECONDS - started)) s (branch $(cat "${work}/branch"), run ${run})" ;;
+		passed\|0) verdict="green: ${sha} fast gate on Loom's side pool, go tests only,${line} in $((SECONDS - started)) s (branch $(cat "${work}/branch"), run ${run}$([ -s "${work}/beyond" ] && echo "; not covered: $(cat "${work}/beyond")"))" ;;
 		failed\|*) verdict="red: ${sha} fast gate on Loom's side pool, first failure at go build or vet (branch $(cat "${work}/branch"), run ${run})" ;;
 		passed\|1) verdict="red: ${sha} fast gate on Loom's side pool, go tests only,${line}; first: $(grep -m1 '^FAIL ' "${work}/reds.txt" | cut -c6- | cut -d' ' -f1-2) (branch $(cat "${work}/branch"), run ${run})" ;;
 		*) verdict="void: ${sha} fast gate on Loom's side pool broke (a unit never reported: Loom's fault), so the boxes take it (run ${run})" ;;
 	esac
 	finish "${sha}" "${stamp}" "${verdict}" "${run}"
+}
+
+# runSelection runs the gate's own selection on one side instance (select.sh), then makes the job from its select.json:
+# the packages, the env with the selection directory recreated on every test instance at the same path, and the
+# select.json itself for verify.sh's only_tests and deferred. A selection that exits 1 with no select.json is the
+# change's red; anything else that leaves none is void.
+runSelection() {
+	local sha=$1 stamp=$2 work=${jobs}/$1.work run token hash
+	"${HOME}/.loom/bin/adamic-gate" unit --sha "${sha}" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --id select --body "${HOME}/.loom/bin/select.sh" --output loom-out/select.tgz --output loom-out/select.stdout -- "$(cat "${work}/base")" "$(cat "${work}/base_name")" "$(cat "${work}/tools")" > "${work}/select-job.json" 2> "${work}/select-plan.log" || {
+		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the selection couldn't be planned, so the boxes take it" ""
+		return 1
+	}
+	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool codex-side=1 --record "${work}/select-record.jsonl" "${work}/select-job.json" > "${work}/select-run.log" 2>&1
+	run=$(head -1 "${work}/select-run.log" | awk '{print $2}' | tr -d :)
+	token=$(python3 - "${run}" <<'PY'
+import base64, hashlib, hmac, json, os, sys, time
+secret = open(os.path.expanduser("~/.loom/token-secret")).read().strip().encode()
+payload = base64.urlsafe_b64encode(json.dumps({"run": sys.argv[1], "scope": "coordinator", "expires": int(time.time()) + 600}, separators=(",", ":")).encode()).rstrip(b"=")
+print((payload + b"." + base64.urlsafe_b64encode(hmac.new(secret, payload, hashlib.sha256).digest()).rstrip(b"=")).decode())
+PY
+)
+	curl -fsS "https://loom-wire.kirk-ouimet.workers.dev/runs/${run}/events?after=0" -H "Authorization: Bearer ${token}" > "${work}/select-events.jsonl"
+	hash=$(python3 -c "
+import json, sys
+for line in open(sys.argv[1]):
+    event = json.loads(line)['event']
+    if event['type'] == 'uploaded' and event['path'].endswith('select.tgz'): print(event['sha256'])" "${work}/select-events.jsonl" | tail -1)
+	mkdir -p "${work}/select"
+	[ -n "${hash}" ] && curl -fsS "https://loom-wire.kirk-ouimet.workers.dev/runs/${run}/blobs/${hash}" -H "Authorization: Bearer ${token}" > "${work}/select.tgz" && tar -xzf "${work}/select.tgz" -C "${work}/select"
+	if [ ! -f "${work}/select/select.json" ]; then
+		if grep -q '^select: failed' "${work}/select-run.log" && grep -q 'exited 1' "${work}/select-events.jsonl"; then
+			# The reason is the gate's own first failure from the selection's output (its status.txt still says
+			# running when the selection stops early).
+			reason=$(python3 -c "
+import json, sys
+text = '\n'.join(json.loads(line)['event'].get('text', '') for line in open(sys.argv[1]) if json.loads(line)['event']['type'] == 'output')
+lines = [line.strip() for line in text.splitlines() if line.strip()]
+start = next((index for index, line in enumerate(lines) if line.startswith('FIRST FAILURE')), None)
+print(' '.join(lines[start:start + 2]) if start is not None else 'see the selection output')" "${work}/select-events.jsonl")
+			finish "${sha}" "${stamp}" "red: ${sha} fast gate on Loom's side pool, the gate's selection refused the change: ${reason} (run ${run})" "${run}"
+		else
+			finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the selection broke (Loom's fault), so the boxes take it (run ${run})" "${run}"
+		fi
+		return 1
+	fi
+	python3 - "${work}" "${sha}" <<'PY'
+import base64, json, re, shlex, sys
+work, sha = sys.argv[1], sys.argv[2]
+selection = json.load(open(work + "/select/select.json"))
+packages = [package for package in selection.get("packages") or [] if package]
+open(work + "/packages", "w").write("^(" + "|".join(re.escape(package) for package in packages) + ")$" if packages else "")
+open(work + "/package-list", "w").write("".join(package + "\n" for package in packages))
+archive = base64.b64encode(open(work + "/select.tgz", "rb").read()).decode()
+lines = ["mkdir -p /tmp/loom-select/%s && echo %s | base64 -d | tar -xz -C /tmp/loom-select/%s" % (sha, archive, sha)]
+lines += ["export %s=%s" % (key, shlex.quote(str(value))) for key, value in sorted((selection.get("env") or {}).items()) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)]
+open(work + "/env", "w").write("\n".join(lines) + "\n")
+beyond = selection.get("executors_beyond_go_tests") or []
+open(work + "/beyond", "w").write(", ".join(str(item) for item in beyond))
+PY
 }
 
 # finish publishes the record and then writes the verdict, so the watcher never reads a verdict without its log.
