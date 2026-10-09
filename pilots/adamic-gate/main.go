@@ -171,6 +171,25 @@ parallel=$(( $(nproc) / 2 )); [ "${parallel}" -ge 1 ] || parallel=1
 echo "loom-pilot: $(hostname) slot ${LOOM_SLOT:-?} cpus ${LOOM_SLOT_CPUS:-?} tree $(git -C "${tree}" rev-parse HEAD) setup $(( SECONDS - started )) s, ${parallel} packages at a time"
 export tree out
 status=0
+# Killed at its budget (SIGTERM, then SIGKILL 5 s later), the unit names the leaves still running from the go test
+# lines written so far, so a kill says which test cooked (#2en3b4t (f)); reds reads these lines.
+atKill() {
+  trap - TERM
+  cat "${out}"/part-*.jsonl 2> /dev/null | awk '{
+    action = ""; package = ""; test = ""
+    if (match($0, /"Action":"[^"]*"/)) action = substr($0, RSTART + 10, RLENGTH - 11)
+    if (match($0, /"Package":"[^"]*"/)) package = substr($0, RSTART + 11, RLENGTH - 12)
+    if (match($0, /"Test":"[^"]*"/)) test = substr($0, RSTART + 8, RLENGTH - 9)
+    if (test == "") next
+    key = package " " test
+    if (action == "run" || action == "cont") live[key] = 1
+    else if (action == "pass" || action == "fail" || action == "skip" || action == "pause") delete live[key]
+  } END {
+    for (key in live) { leaf = 1; for (other in live) if (index(other, key "/") == 1) leaf = 0; if (leaf) print "loom-pilot: running at the kill: " key }
+  }' | head -20
+  exit 143
+}
+trap atKill TERM
 # @unplanned=<package,...>: every package go list names on this tree that the list doesn't, run whole. A package new
 # since the reference the plan was made from is in no other spec (8161285a's internal/buildcache, Oct 9).
 specs=()
@@ -1512,9 +1531,10 @@ func reds(arguments []string) (string, error) {
 		return "", err
 	}
 	var broken, failed, cooked []string
-	tests := 0
+	tests, killedUnits := 0, 0
 	for _, unit := range job.Units {
 		output, exitCode, exited, tail, timedOut := "", 0, false, "", false
+		var running []string // the leaves its kill trap named, "<package> <test>"
 		for _, event := range events {
 			if event.Unit != unit.Id {
 				continue
@@ -1528,6 +1548,11 @@ func reds(arguments []string) (string, error) {
 				timedOut = event.TimedOut
 			case "output":
 				tail = event.Text
+				for _, line := range strings.Split(event.Text, "\n") {
+					if leaf, found := strings.CutPrefix(strings.TrimSpace(line), "loom-pilot: running at the kill: "); found {
+						running = append(running, leaf)
+					}
+				}
 			case "uploaded":
 				if event.Path == "loom-out/test.jsonl.gz" {
 					output = event.Sha256
@@ -1548,8 +1573,17 @@ func reds(arguments []string) (string, error) {
 		// Killed at its budget's kill (90 s for 60): a red, P0 for its slowest leaf's owner (Kirk, Oct 9 03:17Z, in place
 		// of the 75 s cooked rule). The next plan splits it smaller.
 		if timedOut {
-			failed = append(failed, fmt.Sprintf("%s (killed at %d s, over budget)\n    last output %q", unit.Id, unit.TimeoutSeconds, strings.TrimSpace(tail)))
-			cooked = append(cooked, unit.Id)
+			killedUnits++
+			if len(running) == 0 {
+				failed = append(failed, fmt.Sprintf("%s (killed at %d s, over budget)\n    last output %q", unit.Id, unit.TimeoutSeconds, strings.TrimSpace(tail)))
+				cooked = append(cooked, unit.Id)
+				continue
+			}
+			// Each leaf still running at the kill is the cooked one, named for its owner (#2en3b4t (f)).
+			failed = append(failed, fmt.Sprintf("%s (killed at %d s, over budget)\n    running at the kill: %s", unit.Id, unit.TimeoutSeconds, strings.Join(running, "; ")))
+			for _, leaf := range running {
+				cooked = append(cooked, unit.Id+" "+leaf)
+			}
 			continue
 		}
 		if !exited || output == "" {
@@ -1637,7 +1671,7 @@ func reds(arguments []string) (string, error) {
 	case len(failed) > 0:
 		verdict = "red"
 	}
-	fmt.Printf("run %s: %s, %d tests in %d units, %d failed, %d units broken, %d killed over budget\n", run, verdict, tests, len(job.Units), len(failed), len(broken), len(cooked))
+	fmt.Printf("run %s: %s, %d tests in %d units, %d failed, %d units broken, %d killed over budget\n", run, verdict, tests, len(job.Units), len(failed), len(broken), killedUnits)
 	for _, line := range broken {
 		fmt.Println("BROKEN " + line)
 	}

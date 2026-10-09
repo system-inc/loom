@@ -144,3 +144,61 @@ func TestABudgetSetsTheUnitCountAndAnOverBudgetTestRunsAlone(t *testing.T) {
 		t.Fatalf("timeouts %v, TestHuge in %q", timeouts, huge)
 	}
 }
+
+// A unit killed at its budget is a red that names each leaf its kill trap found still running, one killed line per
+// leaf for its owner's P0 (#2en3b4t (f)); a killed unit whose trap named none still reads killed.
+func TestRedsNamesTheLeavesRunningAtAKill(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("HOME", directory)
+	if err := os.MkdirAll(filepath.Join(directory, ".loom"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, ".loom", "token-secret"), []byte(strings.Repeat("s", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	job := `{"name": "j", "units": [{"id": "tests-0", "argv": ["true"], "timeoutSeconds": 90}, {"id": "tests-1", "argv": ["true"], "timeoutSeconds": 90}]}`
+	record := strings.Join([]string{
+		`{"run": "r-1", "verdict": {"status": "red"}}`,
+		`{"run": "r-1", "unit": "tests-0", "sequence": 0, "type": "started", "time": "2026-10-09T04:00:00Z"}`,
+		`{"run": "r-1", "unit": "tests-0", "sequence": 1, "type": "output", "time": "2026-10-09T04:01:30Z", "stream": "stdout", "text": "loom-pilot: running at the kill: github.com/x/p TestA/two\nloom-pilot: running at the kill: github.com/x/q TestB\n"}`,
+		`{"run": "r-1", "unit": "tests-0", "sequence": 2, "type": "exit", "time": "2026-10-09T04:01:30Z", "timedOut": true}`,
+		`{"run": "r-1", "unit": "tests-1", "sequence": 0, "type": "started", "time": "2026-10-09T04:00:00Z"}`,
+		`{"run": "r-1", "unit": "tests-1", "sequence": 1, "type": "output", "time": "2026-10-09T04:01:30Z", "stream": "stdout", "text": "loom-pilot: setup 3 s\n"}`,
+		`{"run": "r-1", "unit": "tests-1", "sequence": 2, "type": "exit", "time": "2026-10-09T04:01:30Z", "timedOut": true}`,
+	}, "\n") + "\n"
+	jobPath, recordPath := filepath.Join(directory, "job.json"), filepath.Join(directory, "record.jsonl")
+	if err := os.WriteFile(jobPath, []byte(job), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(recordPath, []byte(record), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = writer
+	verdict, err := reds([]string{"--job", jobPath, "--record", recordPath})
+	os.Stdout = stdout
+	writer.Close()
+	var printed bytes.Buffer
+	printed.ReadFrom(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != "red" {
+		t.Fatalf("verdict %q, printed:\n%s", verdict, printed.String())
+	}
+	for _, want := range []string{
+		"KILLED tests-0 github.com/x/p TestA/two: over budget, P0",
+		"KILLED tests-0 github.com/x/q TestB: over budget, P0",
+		"KILLED tests-1: over budget, P0",
+		"running at the kill: github.com/x/p TestA/two; github.com/x/q TestB",
+		"2 killed over budget",
+	} {
+		if !strings.Contains(printed.String(), want) {
+			t.Fatalf("missing %q in:\n%s", want, printed.String())
+		}
+	}
+}
