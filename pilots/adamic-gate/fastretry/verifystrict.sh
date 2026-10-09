@@ -7,6 +7,7 @@
 #
 #	pilots/adamic-gate/fastretry/verifystrict.sh
 #	sed 's/--strict-pool "codex-strict=/--pool "codex-strict=/' verify.sh > m.sh && fastretry/verifystrict.sh m.sh   # fails 1
+#	sed 's/echo 1 > "${work}\/reds.exit"$/: /' verify.sh > m.sh && fastretry/verifystrict.sh m.sh   # fails 2: a mismatch that leaves the verdict
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
 verify=${1:-${here}/../verify.sh}
@@ -45,5 +46,22 @@ printf '%s\n' '{"Package":"p","Test":"TestA","Action":"fail"}' '{"Package":"p","
 python3 "${here}/../parity.py" "${P}/strict.jsonl" "${P}/race.jsonl" > "${P}/differ.txt"; differ=$?
 check parity-agrees '[ "${same}" = 0 ] && [ "$(head -1 "${P}/same.txt")" = "parity: identical, 2 tests the same, 0 differ (strict 2, race 2)" ]'
 check parity-names-each-difference '[ "${differ}" = 1 ] && grep -qx "p TestA: strict pass, race fail" "${P}/differ.txt" && grep -qx "p TestB: strict skip, race absent" "${P}/differ.txt" && grep -qx "p TestC: strict absent, race pass" "${P}/differ.txt"'
+# judgeRace: a race that agrees leaves the verdict; one that differs, or left no lines, turns it red with FAIL lines.
+awk '/^judgeRace\(\) \{/,/^}/' "${verify}" > "${stubs}/judge.sh"
+source "${stubs}/judge.sh"
+race() { # race <race lines file or "none">
+	work=$(mktemp -d) sha=1111111111111111111111111111111111111111 bin=${here}/..
+	cp "${P}/strict.jsonl" "${work}/test.jsonl" && echo "green: 2 tests" > "${work}/reds.txt" && echo 0 > "${work}/reds.exit"
+	printf '#!/bin/bash\n[ "%s" = none ] || cp "%s" "%s/race-test.jsonl"\n' "$1" "$1" "${work}" > "${work}/planner" && chmod +x "${work}/planner"
+	planner=${work}/planner
+	judgeRace > /dev/null
+}
+cp "${P}/strict.jsonl" "${P}/agree.jsonl"
+race "${P}/agree.jsonl"
+check race-that-agrees-keeps-the-verdict '[ "$(cat "${work}/reds.exit")" = 0 ] && ! grep -q FAIL "${work}/reds.txt"'
+race "${P}/race.jsonl"
+check race-that-differs-is-red '[ "$(cat "${work}/reds.exit")" = 1 ] && grep -qx "FAIL parity: p TestA: strict pass, race fail" "${work}/reds.txt"'
+race none
+check race-with-no-lines-is-red '[ "$(cat "${work}/reds.exit")" = 1 ] && grep -q "^FAIL parity: parity: " "${work}/reds.txt"'
 echo "failures: ${failures}"
 exit $((failures > 0))

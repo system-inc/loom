@@ -20,8 +20,9 @@
 # test jobs (adamic-gate test-jobs), whose workers serve --strict and run nothing else; what a test job can't say
 # exactly (build-vet, a retried unit's round marker aside) stays argv on the pool below. job.json itself stays argv:
 # every step after placement reads it, and the units keep their ids and outputs. LOOM_VERIFY_STRICT_RACE=1 also runs
-# the job as before on LOOM_VERIFY_RACE_POOL (default the pool below), in the background, and writes parity.txt, the
-# two runs' go test outcomes test for test; it never changes the verdict.
+# the job as before on LOOM_VERIFY_RACE_POOL (default the pool below), beside it, and before the verdict compares the
+# two runs' go test outcomes test for test (parity.py, into parity.txt): any difference is a FAIL line, so the run is
+# red (Loom, Oct 9 22:20Z: a mismatch fails). It is for a canary and the first wired candidates.
 #
 # Side work runs only on the side pool (LOOM_VERIFY_POOL, default codex-side): the star's pool never holds it
 # (@system_adamic, Oct 8 23:59Z). <slots> caps how much of it one run takes (default 5). Nothing builds on
@@ -333,7 +334,7 @@ json.dump(job, open(sys.argv[2], "w"))' "${job}" "${strictJob}.in" && "${planner
 }
 place "${work}/job.json" "${work}/record.jsonl" "${slots}" > "${work}/run.log" 2>&1 &
 coordinator=$!
-# The race beside it: the same job as before on its own pool, its go test outcomes against the strict run's once both end.
+# The race beside it: the same job as before on its own pool, its go test outcomes against the strict run's below.
 if [ "${LOOM_VERIFY_STRICT:-}" = 1 ] && [ "${LOOM_VERIFY_STRICT_RACE:-}" = 1 ]; then
 	"${loom}" run --uncached --slots none --pool "${LOOM_VERIFY_RACE_POOL:-${pool}}=${slots}" --priority "${LOOM_PRIORITY:-0}" --record "${work}/race-record.jsonl" "${work}/job.json" > "${work}/race-run.log" 2>&1 &
 	race=$!
@@ -477,6 +478,21 @@ elif [ -s "${work}/zerorun.txt" ] && ! grep -q unreadable "${work}/zerorun.txt";
 	awk -F'\t' 'NF == 4 && $4 !~ /^note: / {print "FAIL " $3 " " $4 " (" $2 ")"}' "${work}/zerorun.txt" >> "${work}/reds.txt"
 	echo 1 > "${work}/reds.exit"
 fi
+# judgeRace: the race's parity, once it ends: every test's outcome in both runs. A difference, or a race with no lines,
+# is a FAIL line and the run is red.
+judgeRace() {
+	"${planner}" reds --job "${work}/tests-only.json" --record "${work}/race-record.jsonl" --tests "${work}/race-test.jsonl" > "${work}/race-reds.txt" 2>&1
+	if ! python3 "${bin}/parity.py" "${work}/test.jsonl" "${work}/race-test.jsonl" > "${work}/parity.txt" 2>&1; then
+		sed 1d "${work}/parity.txt" | head -50 | sed 's/^/FAIL parity: /' >> "${work}/reds.txt"
+		echo "FAIL parity: $(head -1 "${work}/parity.txt")" >> "${work}/reds.txt"
+		echo 1 > "${work}/reds.exit"
+	fi
+	echo "$(date -u +%H:%M:%S) ${sha:0:12}: strict against the race: $(head -1 "${work}/parity.txt")"
+}
+if [ -n "${race:-}" ]; then
+	wait "${race}"
+	judgeRace
+fi
 {
 	echo "${sha:0:12} on Loom's pool, the packages (${packages}):${note:+ ${note}}"
 	echo
@@ -484,13 +500,3 @@ fi
 } > "${work}/reds-message.txt"
 send "${work}/reds-message.txt"
 echo "$(date -u +%H:%M:%S) ${sha:0:12}: $(head -1 "${work}/reds.txt")"
-# The race's parity, once it ends, in the background: the verdict above never waits on it.
-if [ -n "${race:-}" ]; then
-	(
-		# The race is the script's child, not this subshell's, so it is watched rather than waited for.
-		while kill -0 "${race}" 2> /dev/null; do sleep 10; done
-		"${planner}" reds --job "${work}/tests-only.json" --record "${work}/race-record.jsonl" --tests "${work}/race-test.jsonl" > /dev/null 2>&1
-		python3 "${bin}/parity.py" "${work}/test.jsonl" "${work}/race-test.jsonl" > "${work}/parity.txt" 2>&1
-		echo "$(date -u +%H:%M:%S) ${sha:0:12}: strict against the race: $(head -1 "${work}/parity.txt")"
-	) &
-fi
