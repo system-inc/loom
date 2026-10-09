@@ -714,6 +714,7 @@ func plan(arguments []string) error {
 	budget := flags.Float64("budget", 0, "seconds a unit may take, its setup included: units are as many as fit it, each killed at budget plus a half")
 	unitSetup := flags.Float64("unit-setup", 10, "with --budget, seconds a unit spends before its first test (warm instance)")
 	packageSetup := flags.Float64("package-setup", 5, "with --budget, seconds a unit spends on each package it runs, building its test binary")
+	productBudget := flags.Float64("product-budget", 300, "with --budget, seconds of products a unit may hold, its setup included: products pack into as few units as fit it, each still run to completion under 600 s")
 	only := flags.String("only", "", "plan only packages matching this regular expression, for a trial")
 	target := flags.String("target", "box", "where the units run: box (a gate slot's warm tree) or codex (a Codex instance)")
 	gateInputs := flags.String("gate-inputs", "", "on codex, the hash of the gate inputs' manifest in the public store")
@@ -749,6 +750,19 @@ func plan(arguments []string) error {
 				outcome.seconds = seconds
 				reference[key] = outcome
 			}
+		}
+	}
+	// A product the reference ran or Loom has timed has a known time. One new since both is sized by fromTheTree's
+	// guess, so under a budget it runs alone instead of packing a unit by a guess.
+	productTimed := map[string]bool{}
+	for key := range reference {
+		if _, test, _ := strings.Cut(key, " "); strings.HasPrefix(test, "TestProduct_") {
+			productTimed[key] = true
+		}
+	}
+	for key := range timed {
+		if _, test, _ := strings.Cut(key, " "); strings.HasPrefix(test, "TestProduct_") {
+			productTimed[key] = true
 		}
 	}
 	if *treeTests != "" {
@@ -1033,7 +1047,7 @@ func plan(arguments []string) error {
 		}
 		return heaviest
 	}
-	packByPackage := func(capacity float64, perPackage float64) int {
+	packByPackage := func(items []item, capacity float64, perPackage float64) int {
 		type chunk struct {
 			items   []item
 			seconds float64
@@ -1124,6 +1138,58 @@ func plan(arguments []string) error {
 		}
 		return len(unitLoads)
 	}
+	// A product unit: package to the products it runs, and the seconds it is expected to take.
+	type productUnit struct {
+		products map[string][]string
+		seconds  float64
+	}
+	var productPlan []productUnit
+	if *budget > 0 {
+		// Products pack too (#fysfvrx): one unit each, a candidate's 531 products were 531 of its 567 units, each paying
+		// an opening and a setup on a Codex instance for a few seconds of work (Oct 9, 2bb9a979). They pack the way tests
+		// do, package first and longest first by Loom's times (else the reference's), into units of --product-budget,
+		// setup included, all of a package's products in a unit one spec. A product unit still runs to completion under
+		// a 600 s ceiling, but a kill there reds every product it holds and leaves their packages' tests unrun, so the
+		// default budget, 300 s, keeps half the ceiling as headroom: a 4-CPU instance can take three times a box's wall
+		// on parallel work (tsprinter's TestMutants, 304 s to 963 s), and a reference time carries none of that. A
+		// product no record timed is a guess and one over the budget can't share, so each of those runs alone.
+		productCapacity := *productBudget - *unitSetup
+		if productCapacity <= 0 {
+			return fmt.Errorf("--product-budget must exceed --unit-setup")
+		}
+		var products, aloneProducts []item
+		for packageName, names := range productsOf {
+			for _, name := range names {
+				candidate := item{key: packageName + " " + name, seconds: productSeconds[packageName+" "+name]}
+				switch {
+				case !productTimed[candidate.key]:
+					fmt.Fprintf(os.Stderr, "untimed product: %s, %.0f s by a guess, a unit of its own\n", candidate.key, candidate.seconds)
+					aloneProducts = append(aloneProducts, candidate)
+				case candidate.seconds+*packageSetup > productCapacity:
+					fmt.Fprintf(os.Stderr, "over budget: %s, %.0f s, a product unit of its own\n", candidate.key, candidate.seconds)
+					aloneProducts = append(aloneProducts, candidate)
+				default:
+					products = append(products, candidate)
+				}
+			}
+		}
+		sort.Slice(products, func(left, right int) bool {
+			if products[left].seconds != products[right].seconds {
+				return products[left].seconds > products[right].seconds
+			}
+			return products[left].key < products[right].key
+		})
+		sort.Slice(aloneProducts, func(left, right int) bool { return aloneProducts[left].key < aloneProducts[right].key })
+		productCount := packByPackage(products, productCapacity, *packageSetup)
+		for unit := range productCount {
+			productPlan = append(productPlan, productUnit{products: assigned[unit], seconds: loads[unit]})
+		}
+		for _, candidate := range aloneProducts {
+			packageName, name, _ := strings.Cut(candidate.key, " ")
+			productPlan = append(productPlan, productUnit{products: map[string][]string{packageName: {name}}, seconds: candidate.seconds})
+		}
+		fmt.Fprintf(os.Stderr, "product budget %.0f s: %d products in %d units, %d alone\n", *productBudget, len(products), productCount, len(aloneProducts))
+	}
 	count := *units
 	if *budget > 0 {
 		// Package first (#wa8exgw): a unit builds the test binary of every package it runs, so a package's tests stay
@@ -1131,7 +1197,7 @@ func plan(arguments []string) error {
 		// a split parent's own time paid once in each chunk holding its children), and the chunks are packed into
 		// units the same way, each chunk paying its package's setup. Spread longest first over the lightest unit, main's
 		// 20,813 split tests landed in 2,625 units of many packages each (Oct 9).
-		count = packByPackage(capacity, *packageSetup)
+		count = packByPackage(items, capacity, *packageSetup)
 		fmt.Fprintf(os.Stderr, "budget %.0f s: %d units within %.0f s of tests each, %d over budget alone\n", *budget, count, capacity, len(alone))
 	} else {
 		pack(count)
@@ -1256,32 +1322,49 @@ func plan(arguments []string) error {
 	}
 	job := protocol.Job{Name: "adamic-gate-pilot"}
 	productUnits := map[string][]string{} // package to its product units' ids
-	productPackages := make([]string, 0, len(productsOf))
-	for packageName := range productsOf {
-		productPackages = append(productPackages, packageName)
-	}
-	sort.Strings(productPackages)
-	for _, packageName := range productPackages {
-		names := productsOf[packageName]
-		sort.Strings(names)
-		for _, name := range names {
-			id := fmt.Sprintf("product-%02d", len(job.Units))
-			// A product runs to completion, never killed at the test units' 90 s: killing it would leave every test in its
-			// package unrun, worse for truth than slowness (@system_adamic's ruling, Oct 9 06:40Z, until #c5k975w closes).
-			// Ten minutes is the ceiling, so a hung build reds instead of stalling the run; over 60 s it is listed and filed.
-			productTimeout := 3*3600 + 600
-			if *budget > 0 {
-				productTimeout = 600
-			}
-			job.Units = append(job.Units, protocol.JobUnit{
-				Id: id, Argv: []string{"bash", "-c", opening + unitBody, "adamic-gate-unit", *sha, packageName + "=^(" + regexp.QuoteMeta(name) + ")$"},
-				TimeoutSeconds: productTimeout, ExpectedSeconds: max(productSeconds[packageName+" "+name], 1),
-				Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
-				Resources: protocol.Resources{Cpus: 12},
-			})
-			productUnits[packageName] = append(productUnits[packageName], id)
-			fmt.Fprintf(os.Stderr, "%s: product %s %s, %.0f s by the reference\n", id, packageName, name, productSeconds[packageName+" "+name])
+	if *budget <= 0 {
+		productPackages := make([]string, 0, len(productsOf))
+		for packageName := range productsOf {
+			productPackages = append(productPackages, packageName)
 		}
+		sort.Strings(productPackages)
+		for _, packageName := range productPackages {
+			names := productsOf[packageName]
+			sort.Strings(names)
+			for _, name := range names {
+				productPlan = append(productPlan, productUnit{products: map[string][]string{packageName: {name}}, seconds: productSeconds[packageName+" "+name]})
+			}
+		}
+	}
+	for _, product := range productPlan {
+		id := fmt.Sprintf("product-%02d", len(job.Units))
+		// A product runs to completion, never killed at the test units' 90 s: killing it would leave every test in its
+		// package unrun, worse for truth than slowness (@system_adamic's ruling, Oct 9 06:40Z, until #c5k975w closes).
+		// Ten minutes is the ceiling, so a hung build reds instead of stalling the run; over 60 s it is listed and filed.
+		productTimeout := 3*3600 + 600
+		if *budget > 0 {
+			productTimeout = 600
+		}
+		argv := []string{"bash", "-c", opening + unitBody, "adamic-gate-unit", *sha}
+		packageNames := make([]string, 0, len(product.products))
+		for packageName := range product.products {
+			packageNames = append(packageNames, packageName)
+		}
+		sort.Strings(packageNames)
+		var named []string
+		for _, packageName := range packageNames {
+			// One spec per package, its products an alternation: whether two specs of one package in a unit break its
+			// build is open (#4zwdxa3).
+			argv = append(argv, packageName+"=^("+alternation(product.products[packageName])+")$")
+			productUnits[packageName] = append(productUnits[packageName], id)
+			named = append(named, packageName+" "+strings.Join(product.products[packageName], ", "))
+		}
+		job.Units = append(job.Units, protocol.JobUnit{
+			Id: id, Argv: argv, TimeoutSeconds: productTimeout, ExpectedSeconds: max(product.seconds, 1),
+			Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
+			Resources: protocol.Resources{Cpus: 12},
+		})
+		fmt.Fprintf(os.Stderr, "%s: product %s, %.0f s by the reference\n", id, strings.Join(named, "; "), product.seconds)
 	}
 	if *phasesTools != "" {
 		units, err := phaseJobUnits(opening, *sha, *phasesTools, *phaseUnits)
@@ -1339,14 +1422,19 @@ func plan(arguments []string) error {
 			argv = append(argv, packageName+"=^"+regexp.QuoteMeta(parent)+"$/^("+alternation(childrenOf[index][parentKey])+")$")
 		}
 		argv = append(argv, remainders[index]...)
-		// The products of every package this unit runs tests of, as its needs.
+		// The products of every package this unit runs tests of, as its needs, each unit once: a packed product unit
+		// holds several packages' products.
 		var needs []string
 		seen := map[string]bool{}
 		for _, spec := range argv[5:] {
 			packageName, _, _ := strings.Cut(spec, "=")
 			if !seen[packageName] {
 				seen[packageName] = true
-				needs = append(needs, productUnits[packageName]...)
+				for _, need := range productUnits[packageName] {
+					if !slices.Contains(needs, need) {
+						needs = append(needs, need)
+					}
+				}
 			}
 		}
 		// The coordinator places by this, longest first; the remainder unit runs what no record timed (988 s on main
@@ -2116,7 +2204,7 @@ func reds(arguments []string) (string, error) {
 		if rerun, ok := reruns[unit.Id]; ok {
 			events, run, token = rerun.events, rerun.run, rerun.token
 		}
-		output, exitCode, exited, tail, timedOut, wall := "", 0, false, "", false, 0.0
+		output, exitCode, exited, tail, timedOut := "", 0, false, "", false
 		var running []string // the leaves its kill trap named, "<package> <test>"
 		began := false       // the opening finished and the tests started: unitBody's first line was written
 		for _, event := range events {
@@ -2130,7 +2218,6 @@ func reds(arguments []string) (string, error) {
 					exitCode = *event.Code
 				}
 				timedOut = event.TimedOut
-				wall = event.WallSeconds
 			case "output":
 				tail = event.Text
 				began = began || testsBegan.MatchString(event.Text)
@@ -2144,12 +2231,6 @@ func reds(arguments []string) (string, error) {
 					output = event.Sha256
 				}
 			}
-		}
-		// A product over 60 s is listed beside the verdict on every run (the ruling's second guard), never a red unless
-		// it failed or hit its ceiling.
-		if strings.HasPrefix(unit.Id, "product-") && exited && !timedOut && wall > 60 && len(unit.Argv) > 5 {
-			packageName, pattern, _ := strings.Cut(unit.Argv[5], "=")
-			slowProducts = append(slowProducts, fmt.Sprintf("%s %s %s: %.0f s", unit.Id, packageName, strings.TrimSuffix(strings.TrimPrefix(pattern, "^("), ")$"), wall))
 		}
 		// A stage or phase unit has no go test lines: run.py's (or go build's and vet's) exit is its verdict.
 		if strings.HasPrefix(unit.Id, "stage-") || strings.HasPrefix(unit.Id, "phase-") {
@@ -2213,6 +2294,25 @@ func reds(arguments []string) (string, error) {
 		texts, actions, err := readOutputs(content)
 		if err != nil {
 			return "", fmt.Errorf("unit %s's results: %w", unit.Id, err)
+		}
+		// A product over 60 s is listed beside the verdict on every run (the ruling's second guard), never a red unless
+		// it failed or hit its ceiling. A packed product unit runs several products, so each is timed by its own go test
+		// line, never by the unit's wall.
+		if strings.HasPrefix(unit.Id, "product-") {
+			results, _, err := readTests(bytes.NewReader(content))
+			if err != nil {
+				return "", fmt.Errorf("unit %s's results: %w", unit.Id, err)
+			}
+			keys := make([]string, 0, len(results))
+			for key := range results {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				if _, test, _ := strings.Cut(key, " "); strings.HasPrefix(test, "TestProduct_") && results[key].seconds > 60 {
+					slowProducts = append(slowProducts, fmt.Sprintf("%s %s: %.0f s", unit.Id, key, results[key].seconds))
+				}
+			}
 		}
 		if *testsPath != "" {
 			decompressor, err := gzip.NewReader(bytes.NewReader(content))

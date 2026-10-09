@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -640,6 +642,235 @@ func TestProductsAreUnitsTheirPackagesTestUnitsNeed(t *testing.T) {
 	}
 	if needing == 0 || free == 0 {
 		t.Fatalf("%d units need the product, %d don't", needing, free)
+	}
+}
+
+// productFixture plans a reference of five packages' products and plain tests: a's four products sum to 260 s, b's
+// three to 270 s, c's two to 240 s beside c's 400 s TestProduct_Huge, d's and e's one each, 20 s and 10 s. The tree
+// also holds c's TestProduct_Fresh, which no record timed. a and d each have 20 s of tests, so under a 60 s budget
+// they share a test unit, and b and c 40 s each.
+func productFixture(t *testing.T, arguments ...string) protocol.Job {
+	t.Helper()
+	products := map[string]map[string]float64{
+		"a": {"TestProduct_Alpha": 100, "TestProduct_Apex": 80, "TestProduct_Atlas": 50, "TestProduct_Axle": 30},
+		"b": {"TestProduct_Badger": 120, "TestProduct_Basil": 90, "TestProduct_Birch": 60},
+		"c": {"TestProduct_Cedar": 200, "TestProduct_Cobalt": 40, "TestProduct_Huge": 400},
+		"d": {"TestProduct_Delta": 20},
+		"e": {"TestProduct_Echo": 10},
+	}
+	var reference bytes.Buffer
+	var tree []string
+	writer := gzip.NewWriter(&reference)
+	for packageName, names := range products {
+		for name, seconds := range names {
+			fmt.Fprintf(writer, `{"Action":"pass","Package":"%s%s","Test":"%s","Elapsed":%g}`+"\n", module, packageName, name, seconds)
+			tree = append(tree, module+packageName+" "+name)
+		}
+	}
+	plain := map[string][]float64{"a": {5, 5, 5, 5}, "b": {20, 20}, "c": {20, 20}, "d": {5, 5, 5, 5}}
+	for packageName, tests := range plain {
+		for test, seconds := range tests {
+			fmt.Fprintf(writer, `{"Action":"pass","Package":"%s%s","Test":"TestPlain%02d","Elapsed":%g}`+"\n", module, packageName, test, seconds)
+			tree = append(tree, fmt.Sprintf("%s%s TestPlain%02d", module, packageName, test))
+		}
+	}
+	writer.Close()
+	tree = append(tree, module+"c TestProduct_Fresh")
+	directory := t.TempDir()
+	referencePath, treePath := filepath.Join(directory, "reference.jsonl.gz"), filepath.Join(directory, "tree-tests.txt")
+	os.WriteFile(referencePath, reference.Bytes(), 0o644)
+	os.WriteFile(treePath, []byte(strings.Join(tree, "\n")+"\n"), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
+	err := plan(append([]string{"--reference", referencePath, "--sha", testSha, "--target", "codex", "--tree-tests", treePath}, arguments...))
+	write.Close()
+	os.Stdout = stdout
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(&printed, &job); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := protocol.Expand(job); err != nil {
+		t.Fatal(err)
+	}
+	return job
+}
+
+// Under a budget, products pack by their times into as few units of the product budget as fit (#fysfvrx): 800 s of
+// timed products in 290 s of room are three units, never one each. A package's products in a unit are one spec, an
+// alternation, so no unit holds two specs of one package (#4zwdxa3); a product no record timed and one over the
+// budget run alone.
+func TestABudgetPacksProductsIntoUnitsOfTheProductBudget(t *testing.T) {
+	job := productFixture(t, "--budget", "60", "--unit-setup", "10", "--package-setup", "5", "--product-budget", "300")
+	var products []protocol.JobUnit
+	for _, unit := range job.Units {
+		if strings.HasPrefix(unit.Id, "product-") {
+			products = append(products, unit)
+		}
+	}
+	got := map[string][]string{}
+	expected := map[string]float64{}
+	for index, unit := range products {
+		if unit.Id != fmt.Sprintf("product-%02d", index) || unit.TimeoutSeconds != 600 {
+			t.Fatalf("product unit %d is %s, timeout %d", index, unit.Id, unit.TimeoutSeconds)
+		}
+		got[unit.Id] = unit.Argv[5:]
+		expected[unit.Id] = unit.ExpectedSeconds
+	}
+	want := map[string][]string{
+		"product-00": {module + "b=^(TestProduct_Badger|TestProduct_Basil|TestProduct_Birch)$", module + "e=^(TestProduct_Echo)$"},
+		"product-01": {module + "a=^(TestProduct_Alpha|TestProduct_Apex|TestProduct_Atlas|TestProduct_Axle)$", module + "d=^(TestProduct_Delta)$"},
+		"product-02": {module + "c=^(TestProduct_Cedar|TestProduct_Cobalt)$"},
+		"product-03": {module + "c=^(TestProduct_Fresh)$"},
+		"product-04": {module + "c=^(TestProduct_Huge)$"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("product units:\n%v\nwant:\n%v", got, want)
+	}
+	// A packed unit expects its products' seconds and each package's setup; one alone, its product's own.
+	if expected["product-00"] != 270+10+2*5 || expected["product-01"] != 260+20+2*5 || expected["product-02"] != 240+5 || expected["product-04"] != 400 {
+		t.Fatalf("expected seconds %v", expected)
+	}
+	for _, unit := range products {
+		packages := map[string]bool{}
+		for _, spec := range unit.Argv[5:] {
+			packageName, _, _ := strings.Cut(spec, "=")
+			if packages[packageName] {
+				t.Fatalf("%s holds two specs of %s: %v", unit.Id, packageName, unit.Argv[5:])
+			}
+			packages[packageName] = true
+		}
+	}
+}
+
+// A test unit needs exactly the product units holding its packages' products, each once.
+func TestTestUnitsNeedThePackedProductUnitsOfTheirPackages(t *testing.T) {
+	job := productFixture(t, "--budget", "60", "--unit-setup", "10", "--package-setup", "5", "--product-budget", "300")
+	holding := map[string][]string{} // package to the product units holding its products
+	for _, unit := range job.Units {
+		if !strings.HasPrefix(unit.Id, "product-") {
+			continue
+		}
+		for _, spec := range unit.Argv[5:] {
+			packageName, _, _ := strings.Cut(spec, "=")
+			holding[packageName] = append(holding[packageName], unit.Id)
+		}
+	}
+	shared := 0
+	for _, unit := range job.Units {
+		if strings.HasPrefix(unit.Id, "product-") {
+			continue
+		}
+		want := map[string]bool{}
+		for _, spec := range unit.Argv[5:] {
+			packageName, _, _ := strings.Cut(spec, "=")
+			for _, id := range holding[packageName] {
+				want[id] = true
+			}
+		}
+		got := map[string]bool{}
+		for _, need := range unit.Needs {
+			if got[need] {
+				t.Fatalf("%s needs %s twice: %v", unit.Id, need, unit.Needs)
+			}
+			got[need] = true
+		}
+		if !reflect.DeepEqual(got, want) || len(want) == 0 {
+			t.Fatalf("%s (%v) needs %v, want %v", unit.Id, unit.Argv[5:], unit.Needs, want)
+		}
+		if strings.Contains(strings.Join(unit.Argv[5:], " "), module+"a=") && strings.Contains(strings.Join(unit.Argv[5:], " "), module+"d=") {
+			shared++
+		}
+	}
+	// a's and d's products share product-01, and their tests a unit: it needs product-01 once.
+	if shared == 0 {
+		t.Fatalf("no test unit holds both a and d")
+	}
+}
+
+// Without a budget the products plan as before: one unit each, in package and name order, its one name the spec.
+func TestWithoutABudgetEachProductIsAUnitOfItsOwn(t *testing.T) {
+	job := productFixture(t, "--units", "2")
+	var got []string
+	for _, unit := range job.Units {
+		if !strings.HasPrefix(unit.Id, "product-") {
+			continue
+		}
+		if len(unit.Argv) != 6 || unit.TimeoutSeconds != 3*3600+600 {
+			t.Fatalf("%s: %v, timeout %d", unit.Id, unit.Argv[5:], unit.TimeoutSeconds)
+		}
+		got = append(got, unit.Id+" "+unit.Argv[5])
+	}
+	var want []string
+	for _, product := range []string{"a Alpha", "a Apex", "a Atlas", "a Axle", "b Badger", "b Basil", "b Birch", "c Cedar", "c Cobalt", "c Fresh", "c Huge", "d Delta", "e Echo"} {
+		packageName, name, _ := strings.Cut(product, " ")
+		want = append(want, fmt.Sprintf("product-%02d %s%s=^(TestProduct_%s)$", len(want), module, packageName, name))
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("product units:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A packed product unit's slow products are each listed by their own seconds, never by the unit's wall.
+func TestRedsListsEachSlowProductOfAPackedUnit(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("HOME", directory)
+	os.MkdirAll(filepath.Join(directory, ".loom"), 0o700)
+	os.WriteFile(filepath.Join(directory, ".loom", "token-secret"), []byte(strings.Repeat("s", 64)), 0o600)
+	var output bytes.Buffer
+	writer := gzip.NewWriter(&output)
+	for _, line := range []string{
+		`{"Action":"pass","Package":"github.com/x/b","Test":"TestProduct_Badger","Elapsed":75}`,
+		`{"Action":"pass","Package":"github.com/x/b","Test":"TestProduct_Basil","Elapsed":30}`,
+		`{"Action":"pass","Package":"github.com/x/e","Test":"TestProduct_Echo","Elapsed":61}`,
+	} {
+		fmt.Fprintln(writer, line)
+	}
+	writer.Close()
+	wire := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Write(output.Bytes())
+	}))
+	defer wire.Close()
+	job := filepath.Join(directory, "job.json")
+	os.WriteFile(job, []byte(`{"name": "j", "units": [{"id": "product-00", "argv": ["bash", "-c", "true", "adamic-gate-unit", "`+testSha+`", "github.com/x/b=^(TestProduct_Badger|TestProduct_Basil)$", "github.com/x/e=^(TestProduct_Echo)$"], "timeoutSeconds": 600}]}`), 0o644)
+	record := filepath.Join(directory, "record.jsonl")
+	os.WriteFile(record, []byte(strings.Join([]string{
+		`{"run": "r-1", "verdict": {"status": "green"}}`,
+		`{"run": "r-1", "unit": "product-00", "sequence": 0, "type": "started", "time": "2026-10-09T04:00:00Z"}`,
+		`{"run": "r-1", "unit": "product-00", "sequence": 1, "type": "output", "time": "2026-10-09T04:00:01Z", "stream": "stdout", "text": "loom-pilot: setup 1 s, 2 packages at a time\n"}`,
+		`{"run": "r-1", "unit": "product-00", "sequence": 2, "type": "exit", "time": "2026-10-09T04:03:00Z", "code": 0, "wallSeconds": 180}`,
+		`{"run": "r-1", "unit": "product-00", "sequence": 3, "type": "uploaded", "time": "2026-10-09T04:03:01Z", "path": "loom-out/test.jsonl.gz", "sha256": "` + strings.Repeat("a", 64) + `"}`,
+	}, "\n")+"\n"), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	verdict, err := reds([]string{"--job", job, "--record", record, "--wire", wire.URL})
+	os.Stdout = stdout
+	write.Close()
+	var printed bytes.Buffer
+	printed.ReadFrom(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []string
+	for _, line := range strings.Split(printed.String(), "\n") {
+		if strings.HasPrefix(line, "PRODUCT OVER 60 S ") {
+			listed = append(listed, line)
+		}
+	}
+	want := []string{"PRODUCT OVER 60 S product-00 github.com/x/b TestProduct_Badger: 75 s", "PRODUCT OVER 60 S product-00 github.com/x/e TestProduct_Echo: 61 s"}
+	if verdict != "green" || !reflect.DeepEqual(listed, want) {
+		t.Fatalf("verdict %q, printed:\n%s", verdict, printed.String())
 	}
 }
 
