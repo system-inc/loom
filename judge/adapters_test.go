@@ -22,10 +22,18 @@ func TestTheAdaptersReadOnlyTheirUnitsEvents(t *testing.T) {
 	if _, found, _ := runs.Finished("future-x-1", strings.Repeat("3", 64)); found {
 		t.Fatal("a unit with no events was found")
 	}
-	fabric := EventFabric{Rerun: func(unitKey, tree string) ([]protocol.Event, error) { return stream, nil }}
-	rerun, err := fabric.RerunAlone(other, futureTree)
+	// A rerun is a one-unit job whose unit id on main's base isn't the unitKey: its whole stream is read.
+	baseRerun := []protocol.Event{{Unit: "rerun-on-base-id", Type: "started"}, {Unit: "rerun-on-base-id", Type: "exit", Code: code(-1), Signal: "killed"},
+		{Unit: "rerun-on-base-id", Type: "finished", Status: "failed"}}
+	fabric := EventFabric{Rerun: func(unitKey, tree string) ([]protocol.Event, error) {
+		if tree == baseTree {
+			return baseRerun, nil
+		}
+		return []protocol.Event{}, nil
+	}}
+	rerun, err := fabric.RerunAlone(other, baseTree)
 	if err != nil || rerun.Attempt.Status != Broken || rerun.Infra != InfraKill {
-		t.Fatalf("other's rerun %+v %v, want its kill", rerun, err)
+		t.Fatalf("the base rerun %+v %v, want its kill read under its own unit id", rerun, err)
 	}
 	silent, err := fabric.RerunAlone(strings.Repeat("3", 64), futureTree)
 	if err != nil || silent.Attempt.Status != Broken || silent.Infra != InfraSilent {

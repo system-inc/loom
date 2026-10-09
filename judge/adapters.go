@@ -29,13 +29,15 @@ type EventFabric struct {
 	Rerun func(unitKey, tree string) ([]protocol.Event, error)
 }
 
-// RerunAlone reruns the unit and reads its attempt. A rerun that never reported is silent infra.
+// RerunAlone reruns the unit and reads its attempt. The rerun is a one-unit job, so its whole stream is the unit's;
+// its unit id is Planner's JobUnitFor id for that tree, which differs from the unitKey on main's base, so the stream
+// isn't filtered by key. A rerun that never reported is silent infra.
 func (fabric EventFabric) RerunAlone(unitKey, tree string) (Finished, error) {
 	events, err := fabric.Rerun(unitKey, tree)
 	if err != nil {
 		return Finished{}, err
 	}
-	finished, found := FinishedFromEvents(eventsOf(events, unitKey))
+	finished, found := FinishedFromEvents(events)
 	if !found {
 		return Finished{Attempt: Attempt{Status: Broken}, Infra: InfraSilent}, nil
 	}
