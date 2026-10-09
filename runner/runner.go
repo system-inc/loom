@@ -224,6 +224,10 @@ func (run *unitRun) execute(runContext context.Context) string {
 		status = protocol.StatusBroken
 	case outcome.readFailed:
 		status = protocol.StatusBroken
+	case !outcome.timedOut && outcome.code != nil && run.unit.BrokenExit != 0 && *outcome.code == run.unit.BrokenExit:
+		// The unit's own word that its machine couldn't run it (a full disk, a failed checkout): nothing was proved.
+		run.fail(protocol.PhaseRun, fmt.Errorf("exit %d, the unit's brokenExit: its machine couldn't run it", *outcome.code))
+		status = protocol.StatusBroken
 	case outcome.timedOut || outcome.code == nil || *outcome.code != 0:
 		status = protocol.StatusFailed
 	}

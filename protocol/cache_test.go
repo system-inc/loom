@@ -17,7 +17,8 @@ func cacheUnit() Unit {
 // One change per part of the key. Each must turn a hit into a miss with the real key, and must not with a
 // mutant that drops that part: so each part is load-bearing and its test would catch it going missing.
 var cacheKeyChanges = map[string]func(unit *Unit, runnerVersion *string, platform *string){
-	"argv": func(u *Unit, _ *string, _ *string) { u.Argv[2] = "B" },
+	"argv":       func(u *Unit, _ *string, _ *string) { u.Argv[2] = "B" },
+	"brokenExit": func(u *Unit, _ *string, _ *string) { u.BrokenExit = 2 },
 	"test": func(u *Unit, _ *string, _ *string) {
 		u.Test = &TestJob{Repository: AdamicRepository, Sha: strings.Repeat("c", 40), Packages: []TestPackage{{Package: AdamicModule}}}
 	},

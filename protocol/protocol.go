@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -24,7 +25,10 @@ type JobUnit struct {
 	Matrix map[string][]string `json:"matrix,omitempty"`
 	Argv   []string            `json:"argv,omitempty"`
 	// Test is a structured go test of the adamic repository, in place of argv (test.go).
-	Test           *TestJob          `json:"test,omitempty"`
+	Test *TestJob `json:"test,omitempty"`
+	// BrokenExit is an exit code the command uses to say its machine couldn't run it (a full disk, a failed checkout):
+	// the runner finishes the unit broken, never failed, and the coordinator places it again elsewhere. Zero: none.
+	BrokenExit     int               `json:"brokenExit,omitempty"`
 	Environment    map[string]string `json:"environment,omitempty"`
 	Directory      string            `json:"directory,omitempty"`
 	Inputs         []Input           `json:"inputs,omitempty"`
@@ -63,7 +67,9 @@ type Unit struct {
 	Unit string   `json:"unit"`
 	Argv []string `json:"argv,omitempty"`
 	// Test is a structured go test of the adamic repository, in place of argv: a strict runner runs only these.
-	Test           *TestJob          `json:"test,omitempty"`
+	Test *TestJob `json:"test,omitempty"`
+	// BrokenExit is the exit code that means the machine couldn't run the unit: it finishes broken (JobUnit's).
+	BrokenExit     int               `json:"brokenExit,omitempty"`
 	Environment    map[string]string `json:"environment,omitempty"`
 	Directory      string            `json:"directory,omitempty"`
 	Inputs         []Input           `json:"inputs,omitempty"`
@@ -416,6 +422,7 @@ func Decide(run string, plan []string, events []Event) Verdict {
 		next     int
 		finished []string
 		cached   bool
+		reopened bool // placed again after a broken attempt: events may follow its finished
 	}
 	streams := map[string]*stream{}
 	var problems []string
@@ -440,9 +447,16 @@ func Decide(run string, plan []string, events []Event) Verdict {
 		if event.Type == "cached" {
 			current.cached = true
 		}
-		if event.Type == "finished" {
+		switch {
+		case event.Type == "finished":
 			current.finished = append(current.finished, event.Status)
-		} else if len(current.finished) > 0 {
+			current.reopened = false
+		case len(current.finished) == 0 || current.reopened:
+		case current.finished[len(current.finished)-1] == StatusBroken && event.Type == "error" && event.Phase == PhasePlace:
+			// The coordinator placed a broken unit again (its machine couldn't run it): its stream goes on, and the
+			// last attempt's finished decides it.
+			current.reopened = true
+		default:
 			problems = append(problems, fmt.Sprintf("unit %s: %s event after finished", event.Unit, event.Type))
 		}
 	}
@@ -455,17 +469,24 @@ func Decide(run string, plan []string, events []Event) Verdict {
 			}
 			cached = append(cached, id)
 		}
+		// Every attempt but the last finished broken and was placed again; the last decides the unit.
+		last := ""
+		if current != nil && len(current.finished) > 0 {
+			last = current.finished[len(current.finished)-1]
+		}
 		switch {
 		case current == nil || len(current.finished) == 0:
 			problems = append(problems, fmt.Sprintf("unit %s never finished", id))
-		case len(current.finished) > 1:
+		case current.reopened:
+			problems = append(problems, fmt.Sprintf("unit %s was placed again and never finished", id))
+		case slices.ContainsFunc(current.finished[:len(current.finished)-1], func(status string) bool { return status != StatusBroken }):
 			problems = append(problems, fmt.Sprintf("unit %s finished %d times", id, len(current.finished)))
-		case current.finished[0] == StatusFailed:
+		case last == StatusFailed:
 			failed = append(failed, id)
-		case current.finished[0] == StatusBroken:
+		case last == StatusBroken:
 			problems = append(problems, fmt.Sprintf("unit %s is broken: the runner couldn't do its job", id))
-		case current.finished[0] != StatusPassed:
-			problems = append(problems, fmt.Sprintf("unit %s finished with unknown status %q", id, current.finished[0]))
+		case last != StatusPassed:
+			problems = append(problems, fmt.Sprintf("unit %s finished with unknown status %q", id, last))
 		}
 	}
 	if len(planned) != len(plan) {

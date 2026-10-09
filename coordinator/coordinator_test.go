@@ -674,6 +674,7 @@ func TestUnitsWaitForSlotsWhileTheLimitIsZero(t *testing.T) {
 type passMachine struct {
 	LocalMachine
 	strict bool
+	hold   time.Duration // how long each unit runs before it passes
 	mutex  sync.Mutex
 	ran    []string
 }
@@ -684,6 +685,7 @@ func (machine *passMachine) Run(runContext context.Context, unit protocol.Unit, 
 	machine.mutex.Lock()
 	machine.ran = append(machine.ran, unit.Unit)
 	machine.mutex.Unlock()
+	time.Sleep(machine.hold)
 	for sequence, event := range []protocol.Event{{Type: "started"}, {Type: "finished", Status: protocol.StatusPassed}} {
 		event.Run, event.Unit, event.Sequence, event.Time = unit.Run, unit.Unit, sequence, "2026-10-09T22:00:00.000Z"
 		line, _ := json.Marshal(event)
@@ -716,5 +718,58 @@ func TestTestJobsGoToTheStrictPoolAndArgvNeverDoes(t *testing.T) {
 	plain := &passMachine{LocalMachine: LocalMachine{Label: "box"}}
 	if result := run(t, config(wire, plain), testJobUnit("t1"), shell("argv-1", "true")); result.Verdict.Status != "green" || len(plain.ran) != 2 {
 		t.Fatalf("verdict %+v, ran %v", result.Verdict, plain.ran)
+	}
+}
+
+// A breakingMachine finishes every unit broken, as a runner does for a unit's brokenExit; it records what it was handed.
+type breakingMachine struct {
+	LocalMachine
+	mutex sync.Mutex
+	ran   []string
+}
+
+func (machine *breakingMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {
+	machine.mutex.Lock()
+	machine.ran = append(machine.ran, unit.Unit)
+	machine.mutex.Unlock()
+	code := 2
+	for sequence, event := range []protocol.Event{{Type: "started"}, {Type: "exit", Code: &code}, {Type: "error", Phase: protocol.PhaseRun, Message: "exit 2, the unit's brokenExit"},
+		{Type: "finished", Status: protocol.StatusBroken}} {
+		event.Run, event.Unit, event.Sequence, event.Time = unit.Run, unit.Unit, sequence, "2026-10-09T22:30:00.000Z"
+		line, _ := json.Marshal(event)
+		events.Write(append(line, '\n'))
+	}
+	return nil
+}
+
+// #5pfcv0t: a unit its machine couldn't run is placed again on another box and the run is decided by that attempt; a
+// broken unit that declares no brokenExit, or with no other box to go to, stays broken.
+func TestABrokenUnitIsPlacedAgainOnAnotherBox(t *testing.T) {
+	wire := newFakeWire(t)
+	bad := &breakingMachine{LocalMachine: LocalMachine{Label: "box-bad"}}
+	good := &passMachine{LocalMachine: LocalMachine{Label: "box-good"}}
+	unit := shell("u", "true")
+	unit.BrokenExit = 2
+	result := run(t, config(wire, bad, good), unit)
+	// The first free slot is the bad box's, so the unit breaks there once and passes on the good box.
+	if result.Verdict.Status != "green" || len(bad.ran) != 1 || len(good.ran) != 1 {
+		t.Fatalf("verdict %+v, bad ran %v, good ran %v", result.Verdict, bad.ran, good.ran)
+	}
+	// The good box busy when the bad one breaks a unit: the unit waits for it, never falling back to the bad box.
+	bad, good = &breakingMachine{LocalMachine: LocalMachine{Label: "box-bad"}}, &passMachine{LocalMachine: LocalMachine{Label: "box-good"}, hold: 300 * time.Millisecond}
+	first, second := shell("a", "true"), shell("b", "true")
+	first.BrokenExit, second.BrokenExit = 2, 2
+	first.ExpectedSeconds, second.ExpectedSeconds = 2, 1
+	if result := run(t, config(wire, bad, good), first, second); result.Verdict.Status != "green" || len(bad.ran) != 1 {
+		t.Fatalf("with the good box busy: verdict %+v, bad ran %v, good ran %v", result.Verdict, bad.ran, good.ran)
+	}
+	plain := shell("u", "true")
+	bad, good = &breakingMachine{LocalMachine: LocalMachine{Label: "box-bad"}}, &passMachine{LocalMachine: LocalMachine{Label: "box-good"}}
+	if result := run(t, config(wire, bad, bad), plain); result.Verdict.Status != "void" || len(bad.ran) != 1 {
+		t.Fatalf("a broken unit without brokenExit: verdict %+v, ran %v", result.Verdict, bad.ran)
+	}
+	bad = &breakingMachine{LocalMachine: LocalMachine{Label: "box-bad"}}
+	if result := run(t, config(wire, bad, bad), unit); result.Verdict.Status != "void" || len(bad.ran) != 1 {
+		t.Fatalf("no other box: verdict %+v, ran %v", result.Verdict, bad.ran)
 	}
 }

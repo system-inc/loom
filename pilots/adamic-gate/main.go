@@ -420,6 +420,7 @@ func ab(arguments []string) error {
 	}
 	job := protocol.Job{Name: "adamic-ab", Units: []protocol.JobUnit{{
 		Id:             "ab",
+		BrokenExit:     2,
 		Argv:           []string{"bash", "-c", codexPreamble(*gateInputs) + codexOpening + abBody, "adamic-ab", *candidate, *mainSha, *packageName, strings.Join(parts, "/"), *test},
 		TimeoutSeconds: 3*1500 + 900,
 		Outputs:        []protocol.Output{{Glob: "loom-out/ab.json"}},
@@ -458,7 +459,8 @@ func oneUnit(arguments []string) error {
 		return err
 	}
 	unit := protocol.JobUnit{
-		Id: *id, Argv: append([]string{"bash", "-c", codexPreamble(*gateInputs) + codexOpening + string(body), "adamic-unit", *sha}, flags.Args()...),
+		BrokenExit: 2,
+		Id:         *id, Argv: append([]string{"bash", "-c", codexPreamble(*gateInputs) + codexOpening + string(body), "adamic-unit", *sha}, flags.Args()...),
 		TimeoutSeconds: *timeout, Resources: protocol.Resources{Cpus: 4},
 	}
 	for _, glob := range outputs {
@@ -1411,7 +1413,7 @@ func plan(arguments []string) error {
 			named = append(named, packageName+" "+strings.Join(product.products[packageName], ", "))
 		}
 		job.Units = append(job.Units, protocol.JobUnit{
-			Id: id, Argv: argv, TimeoutSeconds: productTimeout, ExpectedSeconds: max(product.seconds, 1),
+			BrokenExit: 2, Id: id, Argv: argv, TimeoutSeconds: productTimeout, ExpectedSeconds: max(product.seconds, 1),
 			Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
 			Resources: protocol.Resources{Cpus: 12},
 		})
@@ -1426,7 +1428,7 @@ func plan(arguments []string) error {
 	}
 	if *stages {
 		job.Units = append(job.Units, protocol.JobUnit{
-			Id: "stage-build-vet", Argv: []string{"bash", "-c", opening + buildVetBody, "adamic-gate-stage", *sha}, TimeoutSeconds: 3600,
+			BrokenExit: 2, Id: "stage-build-vet", Argv: []string{"bash", "-c", opening + buildVetBody, "adamic-gate-stage", *sha}, TimeoutSeconds: 3600,
 			Outputs:   []protocol.Output{{Glob: "loom-out/build.log"}, {Glob: "loom-out/vet.log"}},
 			Resources: protocol.Resources{Cpus: 4},
 		})
@@ -1500,7 +1502,7 @@ func plan(arguments []string) error {
 			id, expected = fmt.Sprintf("tests-untimed-%02d", index), *budget
 		}
 		job.Units = append(job.Units, protocol.JobUnit{
-			Id: id, Needs: needs, Argv: argv, TimeoutSeconds: timeout(index), ExpectedSeconds: max(expected, 1),
+			BrokenExit: 2, Id: id, Needs: needs, Argv: argv, TimeoutSeconds: timeout(index), ExpectedSeconds: max(expected, 1),
 			Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
 			Resources: protocol.Resources{Cpus: 12},
 		})
@@ -1648,7 +1650,7 @@ func phaseJobUnits(opening string, sha string, toolsSha string, listPath string)
 			if len(fields) != 3 || !protocol.Sha256Pattern.MatchString(fields[1]) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(fields[2]) {
 				return nil, fmt.Errorf("%s:%d: fast takes the merged record's sha256 and the base's full sha", listPath, number+1)
 			}
-			units = append(units, protocol.JobUnit{Id: "phase-fast", Argv: append([]string{"bash", "-c", opening + phaseBody, "adamic-gate-phase", sha, toolsSha}, fields...),
+			units = append(units, protocol.JobUnit{BrokenExit: 2, Id: "phase-fast", Argv: append([]string{"bash", "-c", opening + phaseBody, "adamic-gate-phase", sha, toolsSha}, fields...),
 				TimeoutSeconds: 3600, Outputs: []protocol.Output{{Glob: "loom-out/phase.tar.gz"}}, Resources: protocol.Resources{Cpus: 4}})
 			continue
 		}
@@ -1662,7 +1664,7 @@ func phaseJobUnits(opening string, sha string, toolsSha string, listPath string)
 		}
 		seen[id] = true
 		argv := append([]string{"bash", "-c", opening + phaseBody, "adamic-gate-phase", sha, toolsSha}, fields...)
-		units = append(units, protocol.JobUnit{Id: id, Argv: argv, TimeoutSeconds: 3600,
+		units = append(units, protocol.JobUnit{BrokenExit: 2, Id: id, Argv: argv, TimeoutSeconds: 3600,
 			Outputs: []protocol.Output{{Glob: "loom-out/phase.tar.gz"}}, Resources: protocol.Resources{Cpus: 4}})
 	}
 	if len(units) == 0 {
@@ -1701,7 +1703,7 @@ func warm(arguments []string) error {
 	job := protocol.Job{Name: "adamic-gate-warm"}
 	for index := 0; index < *units; index++ {
 		job.Units = append(job.Units, protocol.JobUnit{
-			Id: fmt.Sprintf("warm-%02d", index), Argv: []string{"bash", "-c", codexPreamble(*gateInputs) + codexOpening + warmBody, "adamic-gate-warm", *sha},
+			BrokenExit: 2, Id: fmt.Sprintf("warm-%02d", index), Argv: []string{"bash", "-c", codexPreamble(*gateInputs) + codexOpening + warmBody, "adamic-gate-warm", *sha},
 			TimeoutSeconds: 3600, Resources: protocol.Resources{Cpus: 4},
 		})
 	}

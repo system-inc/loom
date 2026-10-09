@@ -449,3 +449,53 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 		t.Fatalf("the fixture decides %+v", verdict)
 	}
 }
+
+// #5pfcv0t: a unit its machine couldn't run finishes broken, the coordinator notes it placed it again, and the next
+// attempt continues the stream; its last finished decides it. Anything else after a finished still voids the run.
+func TestABrokenUnitPlacedAgainIsDecidedByItsLastAttempt(t *testing.T) {
+	stream := func(statuses ...string) []Event {
+		var events []Event
+		add := func(kind string, status string, phase string) {
+			events = append(events, Event{Run: "r", Unit: "u", Sequence: len(events), Time: "t", Type: kind, Status: status, Phase: phase})
+		}
+		for index, status := range statuses {
+			if status == "place" {
+				add("error", "", PhasePlace)
+				continue
+			}
+			if status == "output" {
+				add("output", "", "")
+				continue
+			}
+			if status == "" {
+				continue
+			}
+			if index == 0 || statuses[index-1] == "place" {
+				add("started", "", "")
+			}
+			add("finished", status, "")
+		}
+		return events
+	}
+	for _, test := range []struct {
+		name     string
+		statuses []string
+		want     string
+	}{
+		{"broken, placed again, passed", []string{StatusBroken, "place", StatusPassed}, "green"},
+		{"broken twice, placed again twice, passed", []string{StatusBroken, "place", StatusBroken, "place", StatusPassed}, "green"},
+		{"broken, placed again, failed", []string{StatusBroken, "place", StatusFailed}, "red"},
+		{"broken, placed again, broken", []string{StatusBroken, "place", StatusBroken}, "void"},
+		{"broken, placed again, never finished", []string{StatusBroken, "place"}, "void"},
+		{"broken, then output without a placement", []string{StatusBroken, "output"}, "void"},
+		{"failed, placed again, passed", []string{StatusFailed, "place", StatusPassed}, "void"},
+		{"passed, placed again, passed", []string{StatusPassed, "place", StatusPassed}, "void"},
+	} {
+		if verdict := Decide("r", []string{"u"}, stream(test.statuses...)); verdict.Status != test.want {
+			t.Errorf("%s: %s %v, want %s", test.name, verdict.Status, verdict.Problems, test.want)
+		}
+	}
+	if err := CheckUnit(Unit{Run: "r", Unit: "u", Argv: []string{"true"}, TimeoutSeconds: 1, BrokenExit: 256}); err == nil {
+		t.Errorf("brokenExit 256 accepted")
+	}
+}

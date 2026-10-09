@@ -279,7 +279,7 @@ if { [ "${build}" != 0 ] && [ ! -s "${out}/build.log" ]; } || { [ "${vet}" != 0 
 fi
 [ "${build}" = 0 ] && [ "${vet}" = 0 ]
 '''
-unit = {"id": "build-vet", "argv": ["bash", "-c", opening + body, "adamic-build-vet", job["units"][0]["argv"][4]],
+unit = {"id": "build-vet", "brokenExit": 2, "argv": ["bash", "-c", opening + body, "adamic-build-vet", job["units"][0]["argv"][4]],
         "timeoutSeconds": 3600, "outputs": [{"glob": "loom-out/build.log"}, {"glob": "loom-out/vet.log"}], "resources": {"cpus": 4}}
 # Never more than one unsized package in a unit (@system_adamic, Oct 9 10:13Z): a remainder spec runs every test of its
 # package (or of a split parent) the reference never sized, so two of them in one 4-CPU unit ran past the ceiling three

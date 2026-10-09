@@ -88,6 +88,10 @@ type unitState struct {
 	preempted bool
 	startedAt time.Time
 	lastSlot  int // the slot of the last attempt, so a re-placement goes elsewhere when it can
+	// brokenAgain counts the placements after a broken attempt, and brokeOn names the boxes that broke it, which never
+	// get it again.
+	brokenAgain int
+	brokeOn     map[string]bool
 }
 
 // Run runs a job to its verdict. An error means the run couldn't be set up (no plan was posted, or an input
@@ -240,7 +244,7 @@ type coordinator struct {
 func (coordinator *coordinator) schedule(runContext context.Context, plan []protocol.PlannedUnit) {
 	coordinator.units = map[string]*unitState{}
 	for _, planned := range plan {
-		coordinator.units[planned.Id] = &unitState{planned: planned, lastSlot: -1}
+		coordinator.units[planned.Id] = &unitState{planned: planned, lastSlot: -1, brokeOn: map[string]bool{}}
 		coordinator.order = append(coordinator.order, planned.Id)
 	}
 	coordinator.free = make([]bool, len(coordinator.config.Slots))
@@ -365,7 +369,7 @@ func (coordinator *coordinator) placeReady(runContext context.Context) bool {
 	})
 	started := false
 	for _, state := range ready {
-		slot := coordinator.pickSlot(state.lastSlot, state.planned.Unit.Test != nil)
+		slot := coordinator.pickSlot(state.lastSlot, state.planned.Unit.Test != nil, state.brokeOn)
 		if slot < 0 {
 			// A test job may wait for a strict slot while an argv unit behind it takes a box's, or the other way round.
 			continue
@@ -438,7 +442,7 @@ func (coordinator *coordinator) preemptOverLimit() {
 // pickSlot returns a free slot that can run the unit, preferring one on another machine than avoid's, or -1 when
 // none is free. A machine at its slot limit offers none. A strict machine's slots take only test jobs; when the run
 // has any, a test job goes only to them, and an argv unit never does (#098rcha).
-func (coordinator *coordinator) pickSlot(avoid int, testJob bool) int {
+func (coordinator *coordinator) pickSlot(avoid int, testJob bool, brokeOn map[string]bool) int {
 	fallback := -1
 	strictSlots := false
 	for _, machine := range coordinator.config.Slots {
@@ -449,6 +453,9 @@ func (coordinator *coordinator) pickSlot(avoid int, testJob bool) int {
 			continue
 		}
 		if strict := takesOnlyTestJobs(coordinator.config.Slots[index]); strict != (testJob && strictSlots) {
+			continue
+		}
+		if brokeOn[coordinator.config.Slots[index].Name()] {
 			continue
 		}
 		if limit := coordinator.config.SlotLimit; limit != nil {
@@ -465,6 +472,21 @@ func (coordinator *coordinator) pickSlot(avoid int, testJob bool) int {
 		}
 	}
 	return fallback
+}
+
+// hasMachineFor says whether any slot of the run, free or not, could take the unit again: one of its kind on a machine
+// that hasn't broken it. The caller holds the mutex.
+func (coordinator *coordinator) hasMachineFor(state *unitState) bool {
+	strictSlots := false
+	for _, machine := range coordinator.config.Slots {
+		strictSlots = strictSlots || takesOnlyTestJobs(machine)
+	}
+	for _, machine := range coordinator.config.Slots {
+		if takesOnlyTestJobs(machine) == (state.planned.Unit.Test != nil && strictSlots) && !state.brokeOn[machine.Name()] {
+			return true
+		}
+	}
+	return false
 }
 
 // takesOnlyTestJobs says whether a machine runs only test jobs (a strict pool's).
@@ -503,6 +525,19 @@ func (coordinator *coordinator) attempt(runContext context.Context, state *unitS
 		// Placed again once, elsewhere when there is an elsewhere; the drop is already in the record.
 		status = ""
 	}
+	// A unit its machine couldn't run (#5pfcv0t: Codex 5116fd40e771 refused 220 units for its disk, and their reds
+	// cancelled the run) is placed again, at most twice, never on a box that broke it. A pool is one machine here: it
+	// may hand the unit back to the same worker until the wire skips the workers that broke it.
+	if status == protocol.StatusBroken && state.planned.Unit.BrokenExit != 0 && state.brokenAgain < 2 && runContext.Err() == nil {
+		if _, pooled := machine.(*PoolMachine); !pooled {
+			state.brokeOn[machine.Name()] = true
+		}
+		if coordinator.hasMachineFor(state) {
+			state.brokenAgain++
+			coordinator.record.note(id, placeError("%s broke the unit; placing it again", machine.Name()))
+			status = ""
+		}
+	}
 	state.status = status
 	select {
 	case coordinator.wake <- struct{}{}:
@@ -520,7 +555,7 @@ func jsonLine(event protocol.Event) (string, error) {
 // has no wire; it reads and writes blobs through the run's own endpoint.
 func (coordinator *coordinator) unitFor(planned protocol.PlannedUnit) protocol.Unit {
 	unit := protocol.Unit{
-		Run: coordinator.run, Unit: planned.Id, Argv: planned.Unit.Argv, Test: planned.Unit.Test, Environment: planned.Unit.Environment,
+		Run: coordinator.run, Unit: planned.Id, Argv: planned.Unit.Argv, Test: planned.Unit.Test, BrokenExit: planned.Unit.BrokenExit, Environment: planned.Unit.Environment,
 		Directory: planned.Unit.Directory, Inputs: planned.Unit.Inputs, Outputs: planned.Unit.Outputs,
 		TimeoutSeconds: planned.Unit.TimeoutSeconds, Resources: planned.Unit.Resources, Token: coordinator.runnerToken,
 	}

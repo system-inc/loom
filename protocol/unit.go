@@ -42,6 +42,9 @@ func CheckUnit(unit Unit) error {
 	if unit.TimeoutSeconds <= 0 {
 		return fmt.Errorf("the unit needs a positive timeoutSeconds")
 	}
+	if unit.BrokenExit < 0 || unit.BrokenExit > 255 {
+		return fmt.Errorf("brokenExit %d isn't an exit code, 1 to 255", unit.BrokenExit)
+	}
 	if unit.SequenceStart < 0 {
 		return fmt.Errorf("sequenceStart is a sequence, 0 or more")
 	}

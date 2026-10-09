@@ -847,3 +847,21 @@ func TestHeartbeatWhileSilent(t *testing.T) {
 		t.Fatalf("%d heartbeats in a silent second at 200 ms, want several", beats)
 	}
 }
+
+// #5pfcv0t: the unit's brokenExit finishes it broken, with an error saying so; any other nonzero exit still fails it.
+func TestAUnitsBrokenExitFinishesItBroken(t *testing.T) {
+	unit := testUnit("sh", "-c", "exit 2")
+	unit.BrokenExit = 2
+	result, events, _ := runUnit(t, unit, testOptions(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "exit 2, the unit's brokenExit") {
+		t.Fatalf("%s, errors %q", result.Status, errorPhases(events))
+	}
+	unit = testUnit("sh", "-c", "exit 3")
+	unit.BrokenExit = 2
+	if result, _, _ := runUnit(t, unit, testOptions(t)); result.Status != protocol.StatusFailed {
+		t.Fatalf("exit 3 with brokenExit 2: %s", result.Status)
+	}
+	if result, _, _ := runUnit(t, testUnit("sh", "-c", "exit 2"), testOptions(t)); result.Status != protocol.StatusFailed {
+		t.Fatalf("exit 2 without brokenExit: %s", result.Status)
+	}
+}
