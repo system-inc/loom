@@ -1369,3 +1369,39 @@ func TestTheOpeningTrimsTheRootToItsFloor(t *testing.T) {
 		t.Fatalf("above the floor: left %q, %q", left, output)
 	}
 }
+
+func TestAChangedSetupRunsAgainOnAnInstanceAlreadySetUp(t *testing.T) {
+	start := strings.Index(codexOpening, "setupHash=$(")
+	end := strings.Index(codexOpening[start:], "\nfi\n")
+	if start < 0 || end < 0 {
+		t.Fatal("the setup marker isn't in codexOpening")
+	}
+	block := codexOpening[start : start+end+len("\nfi\n")]
+	tree, markers := t.TempDir(), t.TempDir()
+	os.MkdirAll(filepath.Join(tree, "cloud"), 0o755)
+	counter := filepath.Join(markers, "runs")
+	os.WriteFile(filepath.Join(tree, "cloud", "setup.sh"), []byte("echo run >> "+counter+"\necho '== shared cache on'\n"), 0o644)
+	marker := filepath.Join(markers, "adamic-setup-done")
+	run := func() string {
+		script := strings.ReplaceAll(strings.ReplaceAll(block, "/tmp/adamic-setup-done", marker), "/tmp/adamic-setup.log", filepath.Join(markers, "setup.log"))
+		command := exec.Command("bash", "-c", script)
+		command.Env = append(os.Environ(), "tree="+tree)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s", err, output)
+		}
+		return string(output)
+	}
+	runs := func() int { text, _ := os.ReadFile(counter); return strings.Count(string(text), "run") }
+	if output := run(); runs() != 1 || !strings.Contains(output, "setup: == shared cache on") {
+		t.Fatalf("no marker: %d runs, %q", runs(), output)
+	}
+	if run(); runs() != 1 {
+		t.Fatalf("a marker for this setup.sh ran it again: %d runs", runs())
+	}
+	// An instance set up by an older setup.sh: its marker is empty (the old touch) or another hash.
+	os.WriteFile(marker, nil, 0o644)
+	if output := run(); runs() != 2 || !strings.Contains(output, "changed since this instance's setup") {
+		t.Fatalf("an old marker: %d runs, %q", runs(), output)
+	}
+}
