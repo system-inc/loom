@@ -188,7 +188,16 @@ payload = base64.urlsafe_b64encode(json.dumps({"run": sys.argv[1], "scope": "coo
 print((payload + b"." + base64.urlsafe_b64encode(hmac.new(secret, payload, hashlib.sha256).digest()).rstrip(b"=")).decode())
 PY
 )
-curl -fsS "https://loom-wire.kirk-ouimet.workers.dev/runs/${run}/events?after=0" -H "Authorization: Bearer ${token}" > "${work}/events.jsonl"
+# Every page of its events, 100 at a time: a build-vet placed after the first test units has its exit past the first
+# page, and read from that page alone it was broken (Oct 9 10:24Z: b02c1093 and 3ea66219, build passed, run void).
+: > "${work}/events.jsonl"
+after=0
+while page=$(curl -fsS "https://loom-wire.kirk-ouimet.workers.dev/runs/${run}/events?after=${after}" -H "Authorization: Bearer ${token}") && [ -n "${page}" ]; do
+	printf '%s\n' "${page}" >> "${work}/events.jsonl"
+	next=$(printf '%s\n' "${page}" | tail -1 | python3 -c 'import json, sys; print(json.loads(sys.stdin.read())["position"])')
+	[ "${next}" -gt "${after}" ] || break
+	after=${next}
+done
 python3 - "${work}" <<'PY'
 import json, sys
 work = sys.argv[1]
