@@ -44,7 +44,7 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "build-actions:", err)
 		return 1
 	}
-	declared, err := builder.CompilerDeclarations(*tree)
+	declared, err := planner.CompilerDeclarations(*tree)
 	if err != nil {
 		fmt.Fprintln(stderr, "build-actions:", err)
 		return 1
@@ -54,13 +54,17 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "build-actions: tools:", err)
 		return 1
 	}
-	keys, err := builder.ProductKeys(*tree, *gateTools, tools, actions, declared)
+	tests := make([]planner.ProductTest, len(actions))
+	for index, action := range actions {
+		tests[index] = planner.ProductTest(action)
+	}
+	keys, err := planner.ProductKeys(*tree, *gateTools, tools, tests, declared)
 	if err != nil {
 		fmt.Fprintln(stderr, "build-actions:", err)
 		return 1
 	}
 	key := func(action builder.Action) (string, error) {
-		if productKey, known := keys[action]; known {
+		if productKey, known := keys[planner.ProductTest(action)]; known {
 			return productKey, nil
 		}
 		return "", fmt.Errorf("no productKey for %s %s", action.Package, action.Test)

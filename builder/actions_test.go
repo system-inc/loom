@@ -5,7 +5,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 
 	"github.com/system-inc/loom/planner"
@@ -62,55 +61,6 @@ func TestListActionsFindsEveryProductTestForThisPlatformWithoutCompiling(t *test
 	}
 }
 
-func TestAProductKeyMovesWithTheTestThatBuildsItAndItsCompilerButNotTheRunnerOrAnotherPackage(t *testing.T) {
-	tree, gateTools := actionsFixture(t)
-	declared, err := CompilerDeclarations(tree)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tools := planner.Tools{Runner: strings.Repeat("a", 64), Go: "go1.27.2", Clang: "20.1.8", Node: "v24.1.0", WasiSdk: "27"}
-	oracle := Action{Package: "example.com/products/oracle", Directory: "oracle", Test: "TestProduct_Oracle"}
-	key := func(action Action, tools planner.Tools) string {
-		value, err := ProductKey(tree, gateTools, tools, action, declared[action.Directory])
-		if err != nil {
-			t.Fatal(err)
-		}
-		return value
-	}
-	base := key(oracle, tools)
-	if !planner.Sha256Hex(base) {
-		t.Fatalf("a productKey is 64 hex: %q", base)
-	}
-	stage0 := oracle
-	stage0.Test = "TestProduct_Stage0"
-	if key(stage0, tools) == base {
-		t.Fatal("two product tests of one package share a key")
-	}
-	otherRunner := tools
-	otherRunner.Runner = strings.Repeat("b", 64)
-	if key(oracle, otherRunner) != base {
-		t.Fatal("the runner binary moved a product's key")
-	}
-	otherGo := tools
-	otherGo.Go = "go1.27.3"
-	if key(oracle, otherGo) == base {
-		t.Fatal("a different Go left a product's key unchanged")
-	}
-	for _, edit := range []struct {
-		path  string
-		moves bool
-	}{{"oracle/o_test.go", true}, {"oracle/o.go", true}, {"compiler/c.go", true}, {"unrelated/u.go", false}} {
-		path := filepath.Join(tree, filepath.FromSlash(edit.path))
-		original, _ := os.ReadFile(path)
-		os.WriteFile(path, append(append([]byte{}, original...), []byte("\n// edited\n")...), 0o644)
-		moved := key(oracle, tools) != base
-		os.WriteFile(path, original, 0o644)
-		if moved != edit.moves {
-			t.Errorf("editing %s: the product key moved %v, want %v", edit.path, moved, edit.moves)
-		}
-	}
-}
-
 func TestWorkshopRunsProductTestsUnderTheGatesEnvironment(t *testing.T) {
 	store := newFakeStore()
 	var seen []string
@@ -130,33 +80,5 @@ func TestWorkshopRunsProductTestsUnderTheGatesEnvironment(t *testing.T) {
 		if !found {
 			t.Errorf("a product test ran without %s=%s: %v", name, value, seen)
 		}
-	}
-}
-
-func TestProductKeysGivesEachActionExactlyItsProductKey(t *testing.T) {
-	tree, gateTools := actionsFixture(t)
-	declared, _ := CompilerDeclarations(tree)
-	actions, err := ListActions(tree, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tools := planner.Tools{Runner: strings.Repeat("a", 64), Go: "go1.27.2"}
-	keys, err := ProductKeys(tree, gateTools, tools, actions, declared)
-	if err != nil {
-		t.Fatal(err)
-	}
-	seen := map[string]bool{}
-	for _, action := range actions {
-		one, err := ProductKey(tree, gateTools, tools, action, declared[action.Directory])
-		if err != nil {
-			t.Fatal(err)
-		}
-		if keys[action] != one {
-			t.Fatalf("%s: ProductKeys %s, ProductKey %s", action.Test, keys[action], one)
-		}
-		if seen[one] {
-			t.Fatalf("two actions share %s", one)
-		}
-		seen[one] = true
 	}
 }
