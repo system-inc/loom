@@ -11,6 +11,11 @@
 # reference never saw still runs whole; LOOM_VERIFY_SELECT names a fast gate's select.json, whose only_tests
 # (package -> the only tests to run) and deferred (package -> tests to skip) shape every unit.
 #
+# LOOM_FAST_BUDGET, seconds a test unit may take, plans the tests budgeted like main's whole gate (@system_adamic, Oct
+# 9 07:21Z: one gate, one rule). Unset or empty, the plan is a fixed count of units, as it has run since the budgeted
+# version was held back on its first dry run (f18497c to be20c4b, on held/budgeted-fast-gate; #3sjs0rn brings it back
+# behind this switch, Oct 9).
+#
 # Side work runs only on the side pool (LOOM_VERIFY_POOL, default codex-side): the star's pool never holds it
 # (@system_adamic, Oct 8 23:59Z). <slots> caps how much of it one run takes (default 5). Nothing builds on
 # Kirk's Mac: the binaries are the pre-gate's (pregate.sh's header says how they are made on a box).
@@ -44,7 +49,41 @@ fi
 git -C "${gate}" fetch -q origin "${sha}" 2> /dev/null
 python3 "${bin}/treetests.py" "${sha}" > "${work}/tree-tests.txt" 2> /dev/null || : > "${work}/tree-tests.txt"
 treeTests=() && [ -s "${work}/tree-tests.txt" ] && treeTests=(--tree-tests "${work}/tree-tests.txt")
-"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" ${treeTests[@]+"${treeTests[@]}"} > "${work}/tests.json" 2> /dev/null || { echo "verify: planning failed"; exit 1; }
+# Budgeted (LOOM_FAST_BUDGET set), the planner sizes units by the budget, killed at one and a half times it, with
+# Loom's own times, and a selection's only tests are packed exactly: the planner plans only the names it is given, plus
+# their products and setups (--only-tests). Held back on its first dry run (f18497c: floor1 88bd168f's selection planned
+# as 1,449 units and 133,676 s of predicted work, against about 8,000 s as 13 units, its untimed tests sized about 15
+# times pessimistic), so it runs only where the switch is set (#3sjs0rn, Oct 9). Unset or empty, nothing here changes
+# the plan: no argument, the same stderr, the same message.
+budget=() planErrors=/dev/null
+if [ -n "${LOOM_FAST_BUDGET:-}" ]; then
+	[[ ${LOOM_FAST_BUDGET} =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "verify: LOOM_FAST_BUDGET is seconds a unit may take, not ${LOOM_FAST_BUDGET}"; exit 1; }
+	budget=(--budget "${LOOM_FAST_BUDGET}" --unit-setup 10 --split-all)
+	[ -s "${HOME}/.loom/loom-times.tsv" ] && budget+=(--loom-times "${HOME}/.loom/loom-times.tsv")
+	planErrors=${work}/plan.err
+	# The planner keeps a selected name only as itself, but a requested name is a family (run.py 7adc5bf9's rule, which
+	# the selection's spec below writes): the name, its shards (the name plus Unit, Points or _ and a number), and its
+	# _Setup and _Union. So the names go to the planner as the tree's members of each family; a family with none is
+	# stale and plans nothing. Without the tree there are no members to name, and the selection is packed as below.
+	rm -f "${work}/only-tests.json"
+	if [ -n "${LOOM_VERIFY_SELECT:-}" ] && [ -s "${work}/tree-tests.txt" ]; then
+		python3 - "${LOOM_VERIFY_SELECT}" "${work}/tree-tests.txt" "${work}/only-tests.json" <<'PY'
+import json, re, sys
+selected, treeTests, out = sys.argv[1], sys.argv[2], sys.argv[3]
+only = json.load(open(selected)).get("only_tests") or {}
+tree = {}
+for line in open(treeTests):
+    package, _, test = line.strip().partition(" ")
+    if test:
+        tree.setdefault(package, set()).add(test)
+if only:
+    json.dump({package: sorted(name for name in tree.get(package, ()) if any(re.fullmatch(re.escape(test) + r"((Unit|Points|_)[0-9]+|_Setup|_Union)?", name) for test in tests))
+               for package, tests in only.items()}, open(out, "w"))
+PY
+		[ -s "${work}/only-tests.json" ] && budget+=(--only-tests "${work}/only-tests.json")
+	fi
+fi
+"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" ${treeTests[@]+"${treeTests[@]}"} ${budget[@]+"${budget[@]}"} > "${work}/tests.json" 2> "${planErrors}" || { echo "verify: planning failed$([ -s "${planErrors}" ] && echo ": $(tail -1 "${planErrors}")")"; exit 1; }
 
 # The build-and-vet unit runs on the same opening as the tests, so it sees the tree they will.
 python3 - "${work}" "${LOOM_VERIFY_ENV:-}" "${LOOM_VERIFY_PACKAGES:-}" "${LOOM_VERIFY_SELECT:-}" <<'PY'
@@ -76,10 +115,18 @@ for line in open(work + "/tree-tests.txt"):
 # selection's ^(...|TestWASI) put all 36 shards on native clang, and every one skipped). The unit body knows the spec.
 wasiClang = re.compile(r"TestWASI(Unit[0-9]+)?")
 stale = []
+import os
+# Budgeted with the tree, the planner packed a selected package's family members itself (--only-tests above), the
+# shards in a spec of their own: its remainder spec, which would run the rest, is dropped and its packed specs stay
+# (f18497c). Otherwise its specs all leave for the one family spec below.
+packed = bool(os.environ.get("LOOM_FAST_BUDGET")) and os.path.exists(work + "/only-tests.json")
 # A package whose tests the gate names runs exactly those, in one spec on the unit with the fewest.
 for package, tests in sorted((selection.get("only_tests") or {}).items()):
     for unit in job["units"]:
-        unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if spec.split("=", 1)[0] != package]
+        if packed:
+            unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if not (spec.split("=", 1)[0] == package and " skip=" in spec)]
+        else:
+            unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if spec.split("=", 1)[0] != package]
     # A requested name is a family: the test itself, or its split's shards, the name plus Unit, Points or _ and a number
     # (run.py 7adc5bf9's rule, which zerorun.py and the census read the same way; never a bare prefix, which took
     # TestWASITargetFlags for TestWASI). A name the tree at the sha holds no member of can't run: it's dropped and
@@ -93,6 +140,8 @@ for package, tests in sorted((selection.get("only_tests") or {}).items()):
         tests = [test for test in tests if members[test] and not any(wasiClang.fullmatch(name) for name in members[test])]
     else:
         wasi = []
+    if packed:
+        continue
     unit = min(job["units"], key=lambda unit: len(unit["argv"]))
     if tests:
         # Never an exact anchor alone (@system_adamic, Oct 9 11:01Z: the trio's internal/native requested
@@ -123,7 +172,6 @@ for unit in job["units"]:
 # Tests an earlier attempt already proved, under the same package hash at this sha (inputs.py kept-match, named by
 # LOOM_VERIFY_KEPT), are skipped like deferred ones: a re-plan, a new width or a run stopped at its ceiling never
 # throws away a proven test (#kmtvw7m; @system_adamic, Oct 9 09:24Z: key kept verdicts by package and hash).
-import os
 deferred = {package: list(tests) for package, tests in (selection.get("deferred") or {}).items()}
 if os.environ.get("LOOM_VERIFY_KEPT"):
     for package, tests in json.load(open(os.environ["LOOM_VERIFY_KEPT"])).items():
@@ -149,6 +197,15 @@ for package, tests in deferred.items():
             else:
                 unit["argv"][index] = spec + " skip=^(" + "|".join(names) + ")$"
 job["units"] = [unit for unit in job["units"] if len(unit["argv"]) > 5]
+# Budgeted, a unit can leave whole (a selected package's dropped remainder was its only spec), and the plan names its
+# units as needs: a unit that needed one that left no longer waits on it (f18497c).
+if os.environ.get("LOOM_FAST_BUDGET"):
+    present = {unit["id"] for unit in job["units"]}
+    for unit in job["units"]:
+        if unit.get("needs"):
+            unit["needs"] = [need for need in unit["needs"] if need in present]
+            if not unit["needs"]:
+                del unit["needs"]
 # A listed package the reference never saw runs whole, as a remainder that skips nothing, on the unit with least.
 covered = {spec.split("=", 1)[0] for unit in job["units"] for spec in unit["argv"][5:]}
 for package in (open(listed).read().split() if listed else []):
