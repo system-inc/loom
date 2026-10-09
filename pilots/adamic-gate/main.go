@@ -127,7 +127,17 @@ export GIT_TERMINAL_PROMPT=0
 retry() { local attempt; for attempt in 1 2 3 4; do "$@" && return 0; sleep $(( attempt * 10 + RANDOM % 10 )); done; return 1; }
 [ -d "${tree}/.git" ] || retry git clone -q --filter=blob:none https://github.com/system-inc/adamic.git "${tree}" || { echo "loom-pilot: clone failed"; exit 2; }
 find "${tree}/.git" -maxdepth 6 -name index.lock -delete 2>/dev/null
-retry git -C "${tree}" fetch -q origin "${sha}" && retry git -C "${tree}" switch -q --detach "${sha}" && retry git -C "${tree}" submodule update -q --init --recursive || { echo "loom-pilot: checkout of ${sha} failed"; exit 2; }
+retry git -C "${tree}" fetch -q origin "${sha}" && retry git -C "${tree}" switch -q --detach "${sha}" || { echo "loom-pilot: checkout of ${sha} failed"; exit 2; }
+# A submodule left mid-update by a unit killed earlier on this instance names a revision it doesn't have ("Unable to find
+# current revision in submodule path 'cohere/TypeScript'"), and updating again fails the same way every time (Oct 9: 2 of
+# canary 7's units, 3 of lint-alone's and 6 of gocacheprog's, each after four retries). The submodules are made again from
+# nothing, once, before the update retries.
+if ! git -C "${tree}" submodule update -q --init --recursive; then
+  echo "loom-pilot: the submodule update of ${sha} failed; making the submodules again"
+  git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
+  rm -rf "${tree}/.git/modules"
+  retry git -C "${tree}" submodule update -q --init --recursive || { echo "loom-pilot: checkout of ${sha} failed"; exit 2; }
+fi
 # A download cut short can leave a Go toolchain that runs but lacks much of its standard library (Oct 9, the side
 # pool: "package fmt is not in std"), which setup.sh then keeps as installed and fails on. Before setup, an installed
 # Go that can't list these packages moves aside so setup installs it fresh; after setup the same probe must pass.

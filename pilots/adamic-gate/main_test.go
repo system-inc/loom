@@ -812,3 +812,46 @@ func TestAWASISpecNeedsTheSDKsBuiltins(t *testing.T) {
 		t.Fatalf("no WASI spec, no SDK: exit %d %q", code, output)
 	}
 }
+
+// A tree whose submodule a killed unit left on a revision it doesn't have fails every submodule update the same way; the
+// opening makes the submodules again from nothing, once, and the checkout goes on (Oct 9: "Unable to find current
+// revision in submodule path 'cohere/TypeScript'" broke units of canary 7, lint-alone and gocacheprog).
+func TestABrokenSubmoduleIsMadeAgain(t *testing.T) {
+	start := strings.Index(codexOpening, "# A submodule left mid-update")
+	end := strings.Index(codexOpening[start:], "\nfi\n")
+	if start < 0 || end < 0 {
+		t.Fatal("the submodule repair isn't in codexOpening")
+	}
+	repair := codexOpening[start : start+end+len("\nfi\n")]
+	root := t.TempDir()
+	environment := append(os.Environ(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.file.allow", "GIT_CONFIG_VALUE_0=always",
+		"GIT_AUTHOR_NAME=loom", "GIT_AUTHOR_EMAIL=loom@test", "GIT_COMMITTER_NAME=loom", "GIT_COMMITTER_EMAIL=loom@test")
+	git := func(arguments ...string) {
+		command := exec.Command("git", arguments...)
+		command.Env = environment
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", arguments, err, output)
+		}
+	}
+	sub, super, tree := filepath.Join(root, "sub"), filepath.Join(root, "super"), filepath.Join(root, "tree")
+	git("init", "-q", sub)
+	git("-C", sub, "commit", "-q", "--allow-empty", "-m", "sub")
+	git("init", "-q", super)
+	git("-C", super, "submodule", "add", "-q", sub, "sub")
+	git("-C", super, "commit", "-q", "-m", "super")
+	git("clone", "-q", super, tree)
+	git("-C", tree, "submodule", "update", "-q", "--init")
+	run := func() (int, string) {
+		command := exec.Command("bash", "-c", "retry() { \"$@\"; }\n"+repair+"echo checked-out\n")
+		command.Env = append(environment, "tree="+tree, "sha=HEAD")
+		output, _ := command.CombinedOutput()
+		return command.ProcessState.ExitCode(), string(output)
+	}
+	if code, output := run(); code != 0 || strings.Contains(output, "making the submodules again") {
+		t.Fatalf("a sound tree: exit %d %q", code, output)
+	}
+	os.WriteFile(filepath.Join(tree, ".git", "modules", "sub", "HEAD"), []byte(strings.Repeat("1", 40)+"\n"), 0o644)
+	if code, output := run(); code != 0 || !strings.Contains(output, "making the submodules again") || !strings.Contains(output, "checked-out") {
+		t.Fatalf("a broken submodule: exit %d %q", code, output)
+	}
+}
