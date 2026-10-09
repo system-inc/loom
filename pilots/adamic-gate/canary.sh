@@ -46,7 +46,14 @@ if [ ! -d "${snapshot}" ]; then
 	mv "${snapshot}.partial" "${snapshot}"
 fi
 tools=${snapshot}
-main=$(git -C "${gate}" ls-remote origin refs/heads/main | cut -f1)
+# LOOM_CANARY_MAIN names an earlier landing on main when main's tip is itself red at the gate (Oct 9 19:16Z: canary 9d
+# met cd01cd09's own census refusal, which says nothing about the tools). It must be on main.
+main=${LOOM_CANARY_MAIN:-$(git -C "${gate}" ls-remote origin refs/heads/main | cut -f1)}
+[[ ${main} =~ ^[0-9a-f]{40}$ ]] || { echo "canary: main ${main} isn't a full sha"; exit 2; }
+if [ -n "${LOOM_CANARY_MAIN:-}" ]; then
+	git -C "${gate}" fetch -q origin main && git -C "${gate}" merge-base --is-ancestor "${main}" FETCH_HEAD ||
+		{ echo "canary: ${main:0:12} isn't on main"; exit 2; }
+fi
 git -C "${gate}" fetch -q origin "${main}" || { echo "canary: can't fetch main ${main:0:12}"; exit 2; }
 read -r landedOn landed < <(git -C "${gate}" rev-list --parents -n 1 "${main}" | cut -d' ' -f2-)
 [[ ${landed:-} =~ ^[0-9a-f]{40}$ ]] || { echo "canary: main ${main:0:12} isn't a landing merge, so it has no merge gate to run"; exit 2; }
