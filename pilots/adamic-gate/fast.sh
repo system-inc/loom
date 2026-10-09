@@ -65,6 +65,10 @@ open(work + "/package-list", "w").write("".join(package + "\n" for package in pa
 open(work + "/env", "w").write("".join("export %s=%s\n" % (key, shlex.quote(str(value))) for key, value in sorted((job.get("env") or {}).items()) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)))
 open(work + "/branch", "w").write(str(job.get("branch", "")))
 open(work + "/base", "w").write(str(job.get("base", "")))
+# The merge the gate tests (#11ymb02; @system_adamic, Oct 9 08:17Z: every gate tests the tip merged onto main's tip):
+# developer tools' watcher names it "gate" when the tip doesn't already hold main. The tip keeps naming the job.
+gate = job.get("gate") or job["sha"]
+open(work + "/gate", "w").write(gate if re.fullmatch(r"[0-9a-f]{40}", gate) else job["sha"])
 PY
 	if [ -s "${work}/select-mode" ]; then
 		runSelection "${sha}" "${stamp}" || return
@@ -73,7 +77,7 @@ PY
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the job names no Go package, so the boxes take it" ""
 		return
 	fi
-	LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "${sha}" "$(cat "${work}/packages")" none auto > "${work}/verify.log" 2>&1
+	LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "$(cat "${work}/gate")" "$(cat "${work}/packages")" none auto > "${work}/verify.log" 2>&1
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
 	rm -f "${work}/phases-status" "${work}/phases-ref"
@@ -103,7 +107,7 @@ PY
 # change's red; anything else that leaves none is void.
 runSelection() {
 	local sha=$1 stamp=$2 work=${jobs}/$1.work run token hash
-	"${HOME}/.loom/bin/adamic-gate" unit --sha "${sha}" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --id select --body "${HOME}/.loom/bin/select.sh" --output loom-out/select.tgz --output loom-out/select.stdout -- "$(cat "${work}/base")" "$(cat "${work}/base_name")" "$(cat "${work}/tools")" > "${work}/select-job.json" 2> "${work}/select-plan.log" || {
+	"${HOME}/.loom/bin/adamic-gate" unit --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --id select --body "${HOME}/.loom/bin/select.sh" --output loom-out/select.tgz --output loom-out/select.stdout -- "$(cat "${work}/base")" "$(cat "${work}/base_name")" "$(cat "${work}/tools")" > "${work}/select-job.json" 2> "${work}/select-plan.log" || {
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the selection couldn't be planned, so the boxes take it" ""
 		return 1
 	}
@@ -177,7 +181,7 @@ PY
 	curl -fsS -X PUT --data-binary @"${work}/test.jsonl" -H "Authorization: Bearer ${token}" "https://loom-wire.kirk-ouimet.workers.dev/public/blobs/${hash}" > /dev/null || { echo "void: the go test record didn't reach the public store" > "${work}/phases-status"; return; }
 	echo "fast ${hash} ${base}" > "${work}/phases-units.txt"
 	reference=$(ls -t "${HOME}"/.loom/pregate/reference-*.jsonl.gz | head -1)
-	"${HOME}/.loom/bin/adamic-gate" plan --target codex --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units 1 --only '^nothing-matches$' \
+	"${HOME}/.loom/bin/adamic-gate" plan --target codex --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "$(cat "${work}/gate")" --units 1 --only '^nothing-matches$' \
 		--phases "${tools}" --phase-units "${work}/phases-units.txt" 2> "${work}/phases-plan.err" | python3 -c "
 import json, sys
 job = json.load(sys.stdin); job['name'] = 'adamic-gate-fast-phases'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/phases.json" || { echo "void: the phases couldn't be planned" > "${work}/phases-status"; return; }
@@ -243,7 +247,7 @@ within() {
 
 # finish publishes the record and then writes the verdict, so the watcher never reads a verdict without its log.
 finish() {
-	local sha=$1 stamp=$2 verdict=$3 run=$4 work=${jobs}/$1.work record index gitDirectory tree commit
+	local sha=$1 stamp=$2 verdict=$3 run=$4 work=${jobs}/$1.work record index gitDirectory tree commit gated
 	# A job stopped at its ceiling (within) says so: its red stands, and a void names the ceiling, not Loom's breakage.
 	if [ -f "${work}/ceiling" ]; then
 		case "${verdict%%:*}" in
@@ -259,11 +263,15 @@ finish() {
 	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
 	# uncached_tests is the run's own mode, read from the coordinator's first line ("... units on N slots, uncached"),
 	# which push-main --fast-gate requires of a landing's Go-test record (integration, Oct 9 04:38Z).
-	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" <<'PY'
+	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" "$(cat "${work}/gate" 2> /dev/null)" <<'PY'
 import json, sys
-path, verdict, run, sha, branch, base, header = sys.argv[1:]
-json.dump({"finished": True, "verdict": verdict, "runner": "pool", "pool": "codex-side", "pool_run": run, "covers": "go-tests",
-           "uncached_tests": header.rstrip().endswith(", uncached"), "sha": sha, "branch": branch, "base": base}, open(path, "w"), indent=2)
+path, verdict, run, sha, branch, base, header, gate = sys.argv[1:]
+record = {"finished": True, "verdict": verdict, "runner": "pool", "pool": "codex-side", "pool_run": run, "covers": "go-tests",
+          "uncached_tests": header.rstrip().endswith(", uncached"), "sha": sha, "branch": branch, "base": base}
+# A gate of the tip merged onto main names both (#11ymb02), as the boxes' fast-gate.sh does.
+if gate and gate != sha:
+    record.update({"candidate": sha, "gated": gate})
+json.dump(record, open(path, "w"), indent=2)
 PY
 	find "${record}" -type f -size +5M -name '*.jsonl' -exec gzip -9 {} \;
 	index=$(mktemp -u)
@@ -271,6 +279,11 @@ PY
 	tree=$(cd "${record}" && GIT_INDEX_FILE=${index} git --git-dir="${gitDirectory}" --work-tree=. add -A -f . && GIT_INDEX_FILE=${index} git --git-dir="${gitDirectory}" write-tree)
 	commit=$(git -C "${gate}" commit-tree "${tree}" -m "Fast gate of ${sha} on Loom's side pool: ${verdict%%(*}")
 	git -C "${gate}" push -q origin "${commit}:refs/heads/gate-logs/${sha:0:12}/${stamp}/fast" || echo "fast: publishing ${sha:0:12}'s record failed"
+	# The merge's own record path too, so push-main lands the merge by its record (#11ymb02).
+	gated=$(cat "${work}/gate" 2> /dev/null)
+	if [[ ${gated} =~ ^[0-9a-f]{40}$ ]] && [ "${gated}" != "${sha}" ]; then
+		git -C "${gate}" push -q origin "${commit}:refs/heads/gate-logs/${gated:0:12}/${stamp}/fast" || echo "fast: publishing ${gated:0:12}'s record failed"
+	fi
 	rm -f "${index}" "${record}"/* && rmdir "${record}"
 	{ echo "${verdict}"; echo "record: gate-logs/${sha:0:12}/${stamp}/fast"; [ -s "${work}/phases-ref" ] && echo "phases: $(cat "${work}/phases-ref")"; } > "${jobs}/${sha}.verdict.partial"
 	mv "${jobs}/${sha}.verdict.partial" "${jobs}/${sha}.verdict"
