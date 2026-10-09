@@ -106,7 +106,7 @@ describe('reading changes', function () {
 });
 
 describe("loom-pipeline's Worker", function () {
-    it('checks the token with loom-wire\'s verifier, then the shape, then says the queue isn\'t on the wire yet', async function () {
+    it('checks the token with loom-wire\'s verifier, then the shape, then hands the change to the queue', async function () {
         const submitToken = await token(owner, 'submit');
         expect((await call('/changes', { method: 'POST', body: body() })).status).toBe(401);
         for (const scope of ['runner', 'viewer', 'pool', 'publish', 'publish-candidate'] as const) {
@@ -114,8 +114,10 @@ describe("loom-pipeline's Worker", function () {
         }
         expect((await call('/changes', { method: 'POST', bearer: submitToken, body: body({ owner: 'x' }) })).status).toBe(400);
         const accepted = await call('/changes', { method: 'POST', bearer: submitToken, body: body() });
+        // Past the front door the Queue object answers. A test has no GitHub token, so git can't be asked: the queue
+        // decides nothing, logs nothing and says to try again.
         expect(accepted.status).toBe(503);
-        expect(await accepted.json()).toEqual({ error: "the queue isn't on the wire yet" });
+        expect(await accepted.json()).toEqual({ reason: 'git facts are unavailable, try again: the queue has no GitHub token to read git with' });
         expect((await call('/runs/r1')).status).toBe(404);
         expect(await (await call('/')).text()).toContain('Loom pipeline');
     });
