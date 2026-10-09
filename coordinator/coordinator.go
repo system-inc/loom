@@ -347,8 +347,20 @@ func (coordinator *coordinator) placeReady(runContext context.Context) bool {
 			ready = append(ready, state)
 		}
 	}
-	// Longest first by the last recorded wall time; a unit never timed goes first, since it may be the longest.
+	// A unit another unit needs goes first, whatever its length: everything waiting on it starts only once it passes
+	// (Oct 9, main 002fdade: 59 product units of 6 s, which 635 test units need, ranked behind 545 longer units). Then
+	// longest first by the planner's estimate or the last recorded wall; a unit never timed goes first, since it may
+	// be the longest.
+	needed := map[string]bool{}
+	for _, id := range coordinator.order {
+		for _, need := range coordinator.units[id].planned.Needs {
+			needed[need] = true
+		}
+	}
 	sort.SliceStable(ready, func(left, right int) bool {
+		if needed[ready[left].planned.Base] != needed[ready[right].planned.Base] {
+			return needed[ready[left].planned.Base]
+		}
 		return coordinator.expected(ready[left]) > coordinator.expected(ready[right])
 	})
 	started := false

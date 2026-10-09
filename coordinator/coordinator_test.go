@@ -531,6 +531,19 @@ func TestThePlannersEstimateOutranksAStaleRecordedDuration(t *testing.T) {
 	}
 }
 
+// A short unit that another unit needs is placed before a long one nobody needs, so what waits on it can start.
+func TestAUnitOthersNeedIsPlacedFirst(t *testing.T) {
+	wire := newFakeWire(t)
+	configuration := config(wire, LocalMachine{Label: "only"})
+	product, long, test := shell("product", "true"), shell("long", "true"), shell("test", "true")
+	product.ExpectedSeconds, long.ExpectedSeconds, test.ExpectedSeconds = 5, 400, 50
+	test.Needs = []string{"product"}
+	result := run(t, configuration, long, product, test)
+	if first := wire.events(result.Run)[0].Unit; first != "product" || result.Verdict.Status != "green" {
+		t.Fatalf("placed %s first, verdict %s", first, result.Verdict.Status)
+	}
+}
+
 func TestACacheablePassIsServedFromTheCacheUnlessUncached(t *testing.T) {
 	wire := newFakeWire(t)
 	unit := shell("a", "echo computed")
