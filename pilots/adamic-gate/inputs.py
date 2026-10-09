@@ -192,6 +192,19 @@ def keptTests(sha, gateInputs, testLines, repository=gateRepository):
     return {"definition": Definition + "-package", "sha": sha, "gate_inputs": gateInputs, "packages": packages}
 
 
+def keptMatch(sha, gateInputs, kept, repository=gateRepository):
+    """The tests a kept file proved that still stand at the sha: each package's passed tests, when its input hash there
+    equals the kept one. A package whose hash moved keeps nothing, and failed tests are never kept."""
+    tree = Tree(repository, sha)
+    standing = {}
+    for importPath, record in sorted(kept["packages"].items()):
+        if not importPath.startswith(module) or not record.get("passed"):
+            continue
+        if packageInputs(tree, importPath[len(module):], gateInputs) == record["input_sha256"]:
+            standing[importPath] = record["passed"]
+    return standing
+
+
 def retarget(job, sha):
     """The job as it runs at another sha: each unit's argv names its sha at index 4, and nothing else does."""
     moved = json.loads(json.dumps(job))
@@ -267,7 +280,16 @@ def main():
     keeping.add_argument("--gate-inputs", required=True, help="the gate inputs' manifest hash the run pinned")
     keeping.add_argument("--repository", default=gateRepository)
     keeping.add_argument("tests", help="the run's go test -json lines (test.jsonl, or .gz)")
+    matching = commands.add_parser("kept-match", help="the kept tests still standing at a sha: {package: [tests]} whose package hash is unchanged")
+    matching.add_argument("--sha", required=True)
+    matching.add_argument("--gate-inputs", required=True)
+    matching.add_argument("--repository", default=gateRepository)
+    matching.add_argument("kept", help="a kept file (inputs.py kept)")
     arguments = parser.parse_args()
+    if arguments.command == "kept-match":
+        json.dump(keptMatch(arguments.sha, arguments.gate_inputs, json.load(open(arguments.kept)), arguments.repository), sys.stdout, indent=1)
+        print()
+        return
     if arguments.command == "kept":
         opener = gzip.open if arguments.tests.endswith(".gz") else open
         with opener(arguments.tests, "rt") as lines:

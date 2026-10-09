@@ -73,8 +73,22 @@ selection = json.load(open(selected)) if selected else {}
 for package in sorted(selection.get("only_tests") or {}):
     for unit in job["units"]:
         unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if not (spec.split("=", 1)[0] == package and " skip=" in spec)]
+# Tests an earlier attempt already proved, under the same package hash at this sha (inputs.py kept-match, named by
+# LOOM_VERIFY_KEPT), are skipped like deferred ones: a re-plan, a new width or a run stopped at its ceiling never
+# throws away a proven test (#kmtvw7m; @system_adamic, Oct 9 09:24Z: key kept verdicts by package and hash).
+import os
+deferred = {package: list(tests) for package, tests in (selection.get("deferred") or {}).items()}
+if os.environ.get("LOOM_VERIFY_KEPT"):
+    for package, tests in json.load(open(os.environ["LOOM_VERIFY_KEPT"])).items():
+        merged = sorted(set(deferred.get(package, [])) | set(tests))
+        # A skip list rides in one exec argument (Linux's 128 KiB): a package whose kept names would pass about 100 KB
+        # keeps nothing and runs whole, which is always sound.
+        if sum(len(quote(test)) + 1 for test in merged) > 100_000:
+            continue
+        deferred[package] = merged
+    open(work + "/kept-skipped.txt", "w").write("%d tests in %d packages kept from an earlier attempt\n" % (sum(len(tests) for tests in json.load(open(os.environ["LOOM_VERIFY_KEPT"])).values()), len(json.load(open(os.environ["LOOM_VERIFY_KEPT"])))))
 # Tests the fast gate defers are skipped in every spec of their package.
-for package, tests in (selection.get("deferred") or {}).items():
+for package, tests in deferred.items():
     if not tests:
         continue
     names = [quote(test) for test in sorted(tests)]
