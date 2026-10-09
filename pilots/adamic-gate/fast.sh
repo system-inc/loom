@@ -14,6 +14,9 @@
 #	pilots/adamic-gate/fast.sh            # the server, as LaunchAgent com.loom.fast (a copy in ~/.loom/bin)
 #	pilots/adamic-gate/fast.sh --once <sha>   # one job now, beside the server's (its .running keeps the server off it)
 #
+# Every job runs on the tools it was served with, to its verdict (#8xfsf4x): a snapshot of LOOM_BIN by content hash,
+# named in its record as loom_tools. The server starts each job as fast.sh --served <sha>, in a session of its own.
+#
 # A job is cancelled by writing ~/.loom/jobs/fast/<sha>.cancel (the watcher's skip list, developer tools): a job not
 # started never starts, and a running one's coordinator is stopped within 10 s, which drops its units still queued on
 # the pool. Its verdict reads void, cancelled, so the tip goes back to the boxes if anyone still wants it.
@@ -32,19 +35,74 @@ concurrent=${LOOM_FAST_CONCURRENT:-8}
 ceiling=${LOOM_FAST_CEILING:-1200}
 gate=${HOME}/Projects/system/adamic-gate
 mkdir -p "${jobs}"
-once=
-if [ "${1:-}" = --once ]; then
-	once=$2
-	[[ ${once} =~ ^[0-9a-f]{40}$ ]] && [ -f "${jobs}/${once}.json" ] || { echo "fast: --once takes the sha of a job in ${jobs}"; exit 2; }
-	[ -f "${jobs}/${once}.verdict" ] || [ -f "${jobs}/${once}.running" ] && { echo "fast: ${once:0:12} is already decided or running"; exit 2; }
-	touch "${jobs}/${once}.running"
-else
-	# A job left running by a server that died starts again, unless something still runs it (a --once).
-	for marker in "${jobs}"/*.running; do
-		[ -e "${marker}" ] || continue
-		pgrep -f "${jobs}/$(basename "${marker}" .running)\.work/" > /dev/null || rm -f "${marker}"
-	done
-fi
+
+# pin prints the snapshot of the tools in ${bin} a job runs on (#8xfsf4x; @system_adamic, Oct 9: candidates went back
+# to the queue mid-run because tools were promoted under them). The snapshot is ~/.loom/canary/tools-<hash>, the hash
+# canary.sh's (every regular file by name and sha256), made from the very bytes the hash read when it doesn't exist yet.
+# A run whose LOOM_BIN is already its own snapshot (a canary's) pins to itself.
+pin() {
+	python3 - "${bin}" "${HOME}/.loom/canary" <<'PY'
+import hashlib, os, sys
+root, store = sys.argv[1:]
+files = []
+for name in sorted(os.listdir(root)):
+    path = os.path.join(root, name)
+    if name.startswith(".") or name == "__pycache__" or name.endswith(".pyc") or not os.path.isfile(path):
+        continue
+    files.append((name, open(path, "rb").read(), os.stat(path).st_mode & 0o7777))
+digest = hashlib.sha256("".join("%s %s\n" % (hashlib.sha256(data).hexdigest(), name) for name, data, _ in files).encode()).hexdigest()
+snapshot = os.path.join(store, "tools-" + digest)
+if not os.path.isdir(snapshot):
+    partial = "%s.partial-%d" % (snapshot, os.getpid())
+    os.makedirs(partial)
+    for name, data, mode in files:
+        with open(os.path.join(partial, name), "wb") as out:
+            out.write(data)
+        os.chmod(os.path.join(partial, name), mode)
+    try:
+        os.rename(partial, snapshot)
+    except OSError:
+        # Another job made the same snapshot first: by its name, the same bytes.
+        for name, _, _ in files:
+            os.remove(os.path.join(partial, name))
+        os.rmdir(partial)
+print(snapshot)
+PY
+}
+
+# A job runs as its own process, --once (by hand, requeue.sh, canary.sh) or --served (the server's, which marked it
+# running): it pins the tools first and runs from that snapshot to its verdict, fast.sh itself included, so a promotion
+# changes only jobs served after it. The live set's last promoted stage (.promoted) goes with it to the record.
+once= served= pinned=
+case "${1:-}" in
+	--once | --served)
+		[[ ${2:-} =~ ^[0-9a-f]{40}$ ]] && [ -f "${jobs}/$2.json" ] || { echo "fast: $1 takes the sha of a job in ${jobs}"; exit 2; }
+		if ! snapshot=$(pin) || [ ! -f "${snapshot}/fast.sh" ] || { [ -n "${LOOM_TOOLS_PINNED:-}" ] && [ "${LOOM_TOOLS_PINNED}" != "${snapshot}" ]; }; then
+			echo "fast: ${2:0:12} couldn't pin the tools in ${bin}"
+			# The server's job is decided here, so it never sits marked running with nothing behind it.
+			[ "$1" = --served ] && echo "void: $2 fast gate on Loom's side pool: its tools couldn't be pinned (Loom's fault), so the boxes take it" > "${jobs}/$2.verdict" && rm -f "${jobs}/$2.running"
+			exit 2
+		fi
+		[ "${snapshot}" = "${bin}" ] || exec env LOOM_BIN="${snapshot}" LOOM_TOOLS_PINNED="${snapshot}" LOOM_TOOLS_PROMOTED="$(cut -d' ' -f1 "${bin}/.promoted" 2> /dev/null)" bash "${snapshot}/fast.sh" "$@"
+		pinned=${snapshot##*/tools-}
+		if [ "$1" = --once ]; then
+			once=$2
+			[ -f "${jobs}/${once}.verdict" ] || [ -f "${jobs}/${once}.running" ] && { echo "fast: ${once:0:12} is already decided or running"; exit 2; }
+			touch "${jobs}/${once}.running"
+		else
+			served=$2
+			[ -f "${jobs}/${served}.running" ] || { echo "fast: --served ${served:0:12} isn't marked running; the server marks a job before it serves it"; exit 2; }
+		fi
+		;;
+	*)
+		# A job left running by a server that died starts again, unless something still runs it: a --once or --served
+		# job runs in a session of its own and outlives the server.
+		for marker in "${jobs}"/*.running; do
+			[ -e "${marker}" ] || continue
+			pgrep -f "${jobs}/$(basename "${marker}" .running)\.work/|fast\.sh --(once|served) $(basename "${marker}" .running)" > /dev/null || rm -f "${marker}"
+		done
+		;;
+esac
 
 serve() {
 	local sha=$1 started=${SECONDS} work=${jobs}/$1.work stamp verdict line run
@@ -53,6 +111,9 @@ serve() {
 	[ -s "${work}/run.log" ] && head -1 "${work}/run.log" | awk '{print $2}' | tr -d : > "${work}/previous-run"
 	rm -f "${work}"/run.log "${work}"/reds.txt "${work}"/reds.exit "${work}"/ceiling "${work}"/kept.json "${work}"/kept-skipped.txt
 	mkdir -p "${work}"
+	# The tools this attempt runs on, named in its record: the snapshot's hash, and the stage last promoted into the set.
+	echo "${pinned} ${LOOM_TOOLS_PROMOTED:-}" > "${work}/loom-tools"
+	echo "$(date -u +%H:%M:%S) pinned: ${sha:0:12} on tools ${pinned:0:12}"
 	# An earlier attempt's proven tests carry over (#v4cm3s7; @system_adamic, Oct 9 09:23Z: a run stopped at its ceiling
 	# never discards its proven units). Its passed tests are kept by package and input hash at the gate it ran at, then
 	# matched at this attempt's gate below; one attempt back, not accumulated.
@@ -89,6 +150,13 @@ open(work + "/base", "w").write(str(job.get("base", "")))
 gate = job.get("gate") or job["sha"]
 open(work + "/gate", "w").write(gate if re.fullmatch(r"[0-9a-f]{40}", gate) else job["sha"])
 PY
+	# The job's "tools" (the adamic-gate commit its selection, phases and stage 3 run at) is pinned the same way: a job
+	# that names none takes the fast-gate branch's tip once, here, never again at each stage while the branch moves.
+	if [[ ! $(cat "${work}/tools") =~ ^[0-9a-f]{40}$ ]]; then
+		local tip
+		tip=$(git -C "${gate}" ls-remote origin refs/heads/devtools/fast-gate 2> /dev/null | cut -f1)
+		[[ ${tip} =~ ^[0-9a-f]{40}$ ]] && echo "${tip}" > "${work}/tools"
+	fi
 	if [ -s "${work}/select-mode" ]; then
 		runSelection "${sha}" "${stamp}" || return
 	fi
@@ -538,9 +606,9 @@ PY
 	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
 	# uncached_tests is the run's own mode, read from the coordinator's first line ("... units on N slots, uncached"),
 	# which push-main --fast-gate requires of a landing's Go-test record (integration, Oct 9 04:38Z).
-	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" "$(cat "${work}/gate" 2> /dev/null)" "${unplanned}" "$(cat "${work}/complete" 2> /dev/null)" <<'PY'
-import json, sys
-path, verdict, run, sha, branch, base, header, gate, unplanned, complete = sys.argv[1:]
+	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" "$(cat "${work}/gate" 2> /dev/null)" "${unplanned}" "$(cat "${work}/complete" 2> /dev/null)" "$(cat "${work}/loom-tools" 2> /dev/null)" "$(cat "${work}/tools" 2> /dev/null)" <<'PY'
+import json, re, sys
+path, verdict, run, sha, branch, base, header, gate, unplanned, complete, loomTools, gateTools = sys.argv[1:]
 record = {"finished": True, "verdict": verdict, "runner": "pool", "pool": "codex-side", "pool_run": run, "covers": "go-tests",
           "uncached_tests": header.rstrip().endswith(", uncached"), "sha": sha, "branch": branch, "base": base}
 # A gate of the tip merged onto main names both (#11ymb02), as the boxes' fast-gate.sh does, and its sha is the merge,
@@ -553,6 +621,16 @@ if unplanned.isdigit():
 # A complete job ran its phases and the stage 3 lane; the Darwin leg is a box's alone and wasn't run here.
 if complete == "yes":
     record.update({"complete": True, "darwin": "not run (pool is Linux only)"})
+# The tools the job was served with and judged on (#8xfsf4x): Loom's, by the snapshot's content hash, with the stage
+# promoted into the live set when it was served (the hash a canary pass names); and the adamic-gate commit its
+# selection and phases ran at.
+pinned = loomTools.split()
+if pinned and re.fullmatch(r"[0-9a-f]{64}", pinned[0]):
+    record["loom_tools"] = pinned[0]
+    if len(pinned) > 1 and re.fullmatch(r"[0-9a-f]{64}", pinned[1]):
+        record["loom_tools_promoted"] = pinned[1]
+if re.fullmatch(r"[0-9a-f]{40}", gateTools):
+    record["gate_tools"] = gateTools
 json.dump(record, open(path, "w"), indent=2)
 PY
 	# The record states what its tests stage did (planned_stages, steps, exits, counts, build_ok), from its own test
@@ -626,10 +704,17 @@ cancel() {
 	fi
 	mv "${jobs}/${sha}.cancel" "${jobs}/${sha}.cancelled"
 }
-if [ -n "${once}" ]; then
-	within "${once}"
+if [ -n "${once}${served}" ]; then
+	within "${once:-${served}}"
 	exit
 fi
+
+# launch starts a job the loop marked running as fast.sh --served in a session of its own, its output joining the
+# server's: it pins the tools as it starts, and the server's restart at a promotion (promote.sh) neither stops it nor
+# changes what it runs (#8xfsf4x; until then a job ran as the server's own subshell and died with it).
+launch() {
+	python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' bash "${bin}/fast.sh" --served "$1" < /dev/null &
+}
 while true; do
 	for request in "${jobs}"/*.cancel; do
 		[ -e "${request}" ] && cancel "$(basename "${request}" .cancel)"
@@ -671,7 +756,7 @@ PYTHON
 			[ "${priority}" -lt 30 ] && [ "${running}" -ge "${concurrent}" ] && break
 		fi
 		touch "${jobs}/${sha}.running"
-		within "${sha}" &
+		launch "${sha}"
 	done <<< "${waiting}"
 	sleep 10
 done

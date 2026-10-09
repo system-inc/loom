@@ -22,7 +22,7 @@ scenario() { # scenario <K or ""> <running count> <tier:count>...
 		for ((i = 0; i < ${spec#*:}; i++)); do n=$((n + 1)); echo "{\"priority\": ${spec%%:*}}" > $jobs/$(printf '%040d' $n).json; done
 	done
 }
-within() { echo "$1" >> $T/started; }
+launch() { echo "$1" >> $T/started; }
 cancel() { :; }
 pass() { source "${loop}" > $T/out.log 2>&1; wait; }
 started() { [ -s $T/started ] && wc -l < $T/started | tr -d ' ' || echo 0; }

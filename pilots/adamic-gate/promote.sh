@@ -12,6 +12,10 @@
 # (Oct 9: ff519d3 was copied in at 10:04Z, but the server had read fast.sh at 09:50Z and served the old unpack for
 # 24 minutes). Jobs a dying server left marked running are freed, as the server would (its own check races the old
 # processes' exit; at 10:28Z seven jobs sat unserved that way).
+#
+# A promotion costs no job its run (#8xfsf4x): every job runs as fast.sh --once or --served in a session of its own, from
+# the snapshot of the tools it pinned when it was served, so the restart stops only the server's loop, and the install
+# reaches only jobs served after it. A job marked running whose process still runs keeps its marker and finishes.
 set -uo pipefail
 stage=$(cd "${1:-${HOME}/.loom/stage}" && pwd) || { echo "promote: no stage directory ${1:-${HOME}/.loom/stage}"; exit 2; }
 bin=${LOOM_LIVE_BIN:-${HOME}/.loom/bin}
@@ -45,16 +49,17 @@ for file in "${snapshot}"/*; do
 	cp -p "${file}" "${bin}/${name}.promote-$$" && mv "${bin}/${name}.promote-$$" "${bin}/${name}" && echo "promote: ${name} installed"
 done
 echo "${hash} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${bin}/.promoted"
-# LOOM_PROMOTE_RESTART=0 installs without restarting the server, so jobs mid-run keep their progress: verify.sh and
-# the tools it starts take effect at each job's next attempt, while fast.sh's own changes wait for the restart, which
-# promote.sh run again (with the default) does and confirms. Until then .promoted says the restart is owed.
+# LOOM_PROMOTE_RESTART=0 installs without restarting the server: every job served from here on pins the new set,
+# fast.sh's job code included, while the server's own loop (admission, cancels) keeps its old fast.sh until the
+# restart, which promote.sh run again (with the default) does and confirms. Until then .promoted says the restart is owed.
 if [ "${LOOM_PROMOTE_RESTART:-1}" = 0 ]; then
 	echo "${hash} $(date -u +%Y-%m-%dT%H:%M:%SZ) restart owed" > "${bin}/.promoted"
-	echo "promote: installed; the fast server keeps its old fast.sh until promote.sh runs again to restart it"
+	echo "promote: installed; jobs served from now on pin it, while the fast server's own loop keeps its old fast.sh until promote.sh runs again to restart it"
 	exit 0
 fi
 # The server: unloaded (KeepAlive would start a new one beside the dying), waited out, then loaded again, so its own
-# startup check never sees the old processes. A --once job runs in its own process group and is left alone.
+# startup check never sees the old processes. A --once or --served job runs in a session of its own, from its snapshot
+# (its command line .loom/canary/tools-<hash>/fast.sh, never .loom/bin/fast.sh), and is left alone.
 plist=${HOME}/Library/LaunchAgents/com.loom.fast.plist
 launchctl bootout "gui/$(id -u)/com.loom.fast" 2> /dev/null
 for ((second = 0; second < 60; second++)); do
@@ -65,7 +70,7 @@ done
 pgrep -f "[.]loom/bin/fast.sh$" > /dev/null && { echo "promote: the old fast server is still running after 60 s; not starting a second (load it by hand: launchctl bootstrap gui/$(id -u) ${plist})"; exit 1; }
 for marker in "${jobs}"/*.running; do
 	[ -e "${marker}" ] || continue
-	pgrep -f "${jobs}/$(basename "${marker}" .running)\.work/" > /dev/null || mv "${marker}" "${marker}.promoted-$(date -u +%H%M)"
+	pgrep -f "${jobs}/$(basename "${marker}" .running)\.work/|fast\.sh --(once|served) $(basename "${marker}" .running)" > /dev/null || mv "${marker}" "${marker}.promoted-$(date -u +%H%M)"
 done
 launchctl bootstrap "gui/$(id -u)" "${plist}" || { echo "promote: launchctl couldn't load ${plist}"; exit 1; }
 sleep 3
