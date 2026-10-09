@@ -239,6 +239,15 @@ wait "${coordinator}"
 python3 -c "import json,sys; j=json.load(open(sys.argv[1])); j['units']=[u for u in j['units'] if u['id']!='build-vet']; json.dump(j,open(sys.argv[2],'w'))" "${work}/job.json" "${work}/tests-only.json"
 "${planner}" reds --job "${work}/tests-only.json" --record "${work}/record.jsonl" --tests "${work}/test.jsonl" > "${work}/reds.txt" 2>&1
 echo $? > "${work}/reds.exit"
+# A unit that passed having run none of a family it requested proved nothing: it is red, "requested tests ran: 0"
+# (@system_adamic, Oct 9 11:01Z: a void is never a pass). zerorun.py checks every passed unit's named specs against
+# the tests the run's record holds; a family that ran anywhere in the run counts.
+if python3 "${bin}/zerorun.py" "${work}" > "${work}/zerorun.txt" 2>&1; then
+	:
+elif [ -s "${work}/zerorun.txt" ] && ! grep -q unreadable "${work}/zerorun.txt"; then
+	awk -F'\t' '{print "FAIL " $3 " requested tests ran: 0 (" $2 "): " $4}' "${work}/zerorun.txt" >> "${work}/reds.txt"
+	echo 1 > "${work}/reds.exit"
+fi
 {
 	echo "${sha:0:12} on Loom's pool, the packages (${packages}):${note:+ ${note}}"
 	echo
