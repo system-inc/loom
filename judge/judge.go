@@ -245,10 +245,10 @@ func failing(outcomes []TestOutcome) []TestOutcome {
 
 // A RunVerdict is the run's decision from its units' verdicts.
 type RunVerdict struct {
-	Status   string   // green, red or void
-	Red      []string // unit keys whose verdict is the change's red
-	Excused  []string // unit keys failed as main's red, excluded from the green
-	Problems []string // why the run is void, one line each
+	Status   string   `json:"status"`   // green, red or void
+	Red      []string `json:"red"`      // unit keys whose verdict is the change's red
+	Excused  []string `json:"excused"`  // unit keys failed as main's red, excluded from the green
+	Problems []string `json:"problems"` // why the run is void, one line each
 }
 
 // Green decides a run: green only when the units' verdicts cover exactly the planned unit keys, once each, and
