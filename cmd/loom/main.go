@@ -55,6 +55,7 @@ const usage = `usage:
   loom top [--once] [--wire <url>]
   loom publish-token <name> [--days N] [--candidate]
   loom submit-token <owner> [--days N]
+  loom build-token <builder> [--days N]
 `
 
 func main() {
@@ -76,6 +77,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "submit-token" {
 		return submitToken(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "build-token" {
+		return buildToken(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "publish-token" {
 		return publishToken(arguments[1:], stdout, stderr)
@@ -526,6 +530,31 @@ func submitToken(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 3
 	}
 	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopeSubmit, Expires: time.Now().Add(time.Duration(*days) * 24 * time.Hour).Unix()})
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	fmt.Fprintln(stdout, token)
+	return 0
+}
+
+// buildToken mints a builder's build token: it writes loom-pipeline's action store (each action's outputs, its
+// manifest and refs/action/<productKey>) and nothing else. The builder (the token's run claim) is a machine's name,
+// workshop, which every ref it writes keeps, and the token expires after --days.
+func buildToken(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("build-token", flag.ContinueOnError)
+	days := flags.Int("days", 30, "days until the token expires")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 || *days < 1 {
+		fmt.Fprint(stderr, "usage: loom build-token <builder> [--days N]\n")
+		return 3
+	}
+	home, _ := os.UserHomeDir()
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopeBuild, Expires: time.Now().Add(time.Duration(*days) * 24 * time.Hour).Unix()})
 	if err != nil {
 		fmt.Fprintf(stderr, "loom: %v\n", err)
 		return 3

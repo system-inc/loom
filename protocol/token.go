@@ -31,6 +31,10 @@ const (
 	// ScopeSubmit submits a change to main and reads changes, and nothing else. Its run claim is the owner's
 	// username: the wire takes a change only when the body's owner matches it (docs/contracts.md, the API).
 	ScopeSubmit = "submit"
+	// ScopeBuild writes loom-pipeline's action store (refs/action/<productKey>, its manifest and its outputs) and
+	// nothing else; loom-wire grants it nothing. Its run claim is the builder's name (workshop), which each action
+	// ref keeps, so a conflicting second write names both builders.
+	ScopeBuild = "build"
 )
 
 // BoardRun is the run a board token names.
@@ -65,7 +69,7 @@ func MintToken(secret []byte, claims TokenClaims) (string, error) {
 }
 
 func knownScope(scope string) bool {
-	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool || scope == ScopePublish || scope == ScopePublishCandidate || scope == ScopeSubmit
+	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool || scope == ScopePublish || scope == ScopePublishCandidate || scope == ScopeSubmit || scope == ScopeBuild
 }
 
 // ReadTokenSecret reads the HMAC key from a file such as ~/.loom/token-secret. The key is the file's text
