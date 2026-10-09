@@ -23,7 +23,7 @@
 # the A/B passes, but its "on" passes shouldn't spend their time cloning).
 set -euo pipefail
 workers=$1 first=$2 until=$3 pool=$4
-runnerSha=${LOOM_RUNNER_SHA:-7f01c04925b5bcdf4c2359abcee90f0723b656867e696313db20391d08cdada7}
+runnerSha=${LOOM_RUNNER_SHA:-8a70ebce11315bce6395da08b0226f32f592cbb747d4f329438594bf7056b7f0}
 # LOOM_BOX_UNITS points a test (box_test.sh) at a scratch directory in place of ~/loom-units.
 units=${LOOM_BOX_UNITS:-${HOME}/loom-units}
 runner=${units}/loom-runner-${runnerSha:0:12}
