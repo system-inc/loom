@@ -79,8 +79,11 @@ import json, sys
 job = json.load(sys.stdin); job['name'] = 'adamic-gate-census'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/census.json"
 "${loom}" run --uncached --slots none --pool codex=1 --priority "${LOOM_PRIORITY}" --record "${work}/census-record.jsonl" "${work}/census.json" > "${work}/census.log" 2>&1
 
-# The finished record, the runs' verdicts merged (a red stays red; nothing is replaced here).
-"${bin}/publish.sh" "${sha}" "${tools}" "${pregate}/${sha}.job.json" "${pregate}/${sha}.record.jsonl" \
+# The finished record, the runs' verdicts merged (a red stays red). The Go set's units pregate.sh placed again, broken
+# for Loom's own reasons, stand in for their first attempts.
+again=()
+[ -s "${pregate}/${sha}.again-record.jsonl" ] && again=("${pregate}/${sha}.again.json" "${pregate}/${sha}.again-record.jsonl")
+"${bin}/publish.sh" "${sha}" "${tools}" "${pregate}/${sha}.job.json" "${pregate}/${sha}.record.jsonl" ${again[@]+"${again[@]}"} \
 	"${work}/phases.json" "${work}/phases-record.jsonl" "${work}/census.json" "${work}/census-record.jsonl" > "${work}/publish.log" 2>&1
 log "$(tail -1 "${work}/publish.log" | cut -c1-200) (wall $(( $(date +%s) - $(date -j -u -f %Y%m%dT%H%M%SZ "${started}" +%s) )) s)"
 git -C "${gate}" worktree remove --force "${work}/tree" 2> /dev/null

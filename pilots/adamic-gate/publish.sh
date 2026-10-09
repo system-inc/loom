@@ -37,17 +37,25 @@ if rerunOf and not baseJobs:
 if rerunRed and not why:
     sys.exit("publish: LOOM_PUBLISH_RERUN_RED needs LOOM_PUBLISH_RERUN_WHY")
 jobs = [json.load(open(pairs[at])) for at in range(0, len(pairs), 2)]
-finished, killed = [], []
+finished, killed, loomsFault = [], [], []
 for at in range(1, len(pairs), 2):
-    statuses, timedOut = {}, set()
+    statuses, timedOut, codes, results = {}, set(), {}, set()
     for line in open(pairs[at]):
         event = json.loads(line)
         if event.get("type") == "finished":
             statuses[event["unit"]] = event.get("status")
             if event.get("timedOut"):
                 timedOut.add(event["unit"])
+        if event.get("type") == "exit":
+            codes[event["unit"]] = event.get("code")
+        if event.get("type") == "uploaded" and event.get("path") == "loom-out/test.jsonl.gz":
+            results.add(event["unit"])
     finished.append(statuses)
     killed.append(timedOut)
+    # A test unit that failed for Loom's own reasons, the way reds reads it: exit 2 (a failed checkout, a full disk), or
+    # no results at all. pregate.sh places such a unit again in a later run, which stands in for it here.
+    loomsFault.append({unit for unit, status in statuses.items() if status == "failed" and unit not in timedOut
+                      and not unit.startswith(("phase-", "stage-")) and (codes.get(unit) == 2 or unit not in results)})
 replaced = []
 for index, job in enumerate(jobs):
     # Phase and stage units stand in for each other by id. A test unit's id is only its place in its own plan, so a
@@ -64,7 +72,7 @@ for index, job in enumerate(jobs):
         if rerunOf and again is not None:
             replaced.append({"unit": unit["id"], "was": status or "never finished", "run": index, "rerun": True})
             continue
-        if same and (status in (None, "broken") or (status == "failed" and unit["id"] in rerunRed)):
+        if same and (status in (None, "broken") or unit["id"] in loomsFault[index] or (status == "failed" and unit["id"] in rerunRed)):
             replaced.append({"unit": unit["id"], "was": status or "never finished", "run": index})
             continue
         kept.append(unit)

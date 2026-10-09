@@ -65,7 +65,8 @@ star() {
 }
 
 pregate() {
-	local sha=$1 started=${SECONDS} reference inputs run verdict summary pool units only scope priority
+	local sha=$1 started=${SECONDS} reference inputs run verdict summary pool units only scope priority slots unit
+	local again rerun
 	local job=${work}/${sha}.job.json record=${work}/${sha}.record.jsonl report=${work}/${sha}.reds.txt
 	echo "running" > "${verdicts}/${sha}"
 	reference=$(reference) || { void "${sha}" "no green whole gate's record to plan from"; return; }
@@ -92,8 +93,28 @@ pregate() {
 	python3 "${HOME}/.loom/bin/treetests.py" "${sha}" > "${work}/${sha}.tree-tests.txt" 2> /dev/null
 	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" ${split[@]+"${split[@]}"} > "${job}" 2> "${work}/${sha}.plan.err" || { void "${sha}" "planning failed"; return; }
 	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
-	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)" --priority "${priority}" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
-	"${planner}" reds --job "${job}" --record "${record}" --tests "${work}/${sha}.tests.jsonl" > "${report}" 2>&1
+	slots=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)
+	"${loom}" run --uncached --slots none --pool "${pool}=${slots}" --priority "${priority}" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
+	# A unit that broke for Loom's own reasons (exit 2: a failed checkout, a full disk; or no results at all) proved
+	# nothing about the change, so it is placed once more in a run of its own and read from there (Oct 9: main beb1be1b's
+	# and ac1e362f's whole gates went void on 2 and 3 checkouts GitHub turned away). Broken twice, the run is void.
+	again=() rerun=()
+	rm -f "${work}/${sha}.again.json" "${work}/${sha}.again-record.jsonl"
+	"${planner}" reds --job "${job}" --record "${record}" > "${work}/${sha}.first-reds.txt" 2>&1
+	while read -r unit; do again+=("${unit}"); done < <(grep -E '^BROKEN [^ ]+: (exited 2, Loom|no results)' "${work}/${sha}.first-reds.txt" | awk '{print $2}' | tr -d :)
+	if [ ${#again[@]} -gt 0 ]; then
+		python3 - "${job}" "${work}/${sha}.again.json" "${again[@]}" <<'PYTHON'
+import json, sys
+job, keep = json.load(open(sys.argv[1])), set(sys.argv[3:])
+job["name"] += "-again"
+job["units"] = [unit for unit in job["units"] if unit["id"] in keep]
+json.dump(job, open(sys.argv[2], "w"))
+PYTHON
+		echo "again: ${again[*]}" >> "${work}/${sha}.log"
+		"${loom}" run --uncached --slots none --pool "${pool}=$((${#again[@]} < slots ? ${#again[@]} : slots))" --priority "${priority}" --record "${work}/${sha}.again-record.jsonl" "${work}/${sha}.again.json" >> "${work}/${sha}.log" 2>&1
+		rerun=(--rerun "${work}/${sha}.again.json:${work}/${sha}.again-record.jsonl")
+	fi
+	"${planner}" reds --job "${job}" --record "${record}" ${rerun[@]+"${rerun[@]}"} --tests "${work}/${sha}.tests.jsonl" > "${report}" 2>&1
 	case $? in 0) verdict=green ;; 1) verdict=red ;; *) verdict=void ;; esac
 	# Every run teaches the times table (#2en3b4t): its leaves and parents by their own seconds on 4 CPUs, then the
 	# p90s the next plan packs by.

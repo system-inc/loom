@@ -1425,36 +1425,12 @@ func compare(arguments []string) (bool, error) {
 		machine          string
 	}
 	// A unit a later run ran again (its worker lost it) takes its events and results from that run.
-	type rerunOf struct {
-		run, token string
-		events     []protocol.Event
+	reruns, rerunOrder, err := laterRuns(rerunFlags, secret)
+	if err != nil {
+		return false, err
 	}
-	reruns := map[string]rerunOf{}
-	for _, pair := range rerunFlags {
-		rerunJob, rerunRecord, found := strings.Cut(pair, ":")
-		if !found {
-			return false, fmt.Errorf("--rerun takes <job>:<record>")
-		}
-		content, err := os.ReadFile(rerunJob)
-		if err != nil {
-			return false, err
-		}
-		var later protocol.Job
-		if err := protocol.Decode(bytes.NewReader(content), &later); err != nil {
-			return false, err
-		}
-		laterRun, _, laterEvents, err := readRecord(rerunRecord)
-		if err != nil {
-			return false, err
-		}
-		laterToken, err := protocol.MintToken(secret, protocol.TokenClaims{Run: laterRun, Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Hour).Unix()})
-		if err != nil {
-			return false, err
-		}
-		for _, unit := range later.Units {
-			reruns[unit.Id] = rerunOf{run: laterRun, token: laterToken, events: laterEvents}
-			report("RERUN %s: from run %s", unit.Id, laterRun)
-		}
+	for _, unit := range rerunOrder {
+		report("RERUN %s: from run %s", unit, reruns[unit].run)
 	}
 	var timings []unitTiming
 	loom := map[string]result{}
@@ -1699,6 +1675,8 @@ func reds(arguments []string) (string, error) {
 	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
 	lines := flags.Int("lines", 8, "output lines kept per failed test")
 	testsPath := flags.String("tests", "", "also write every unit's go test -json lines, in unit order, to this file")
+	var rerunFlags outputGlobs
+	flags.Var(&rerunFlags, "rerun", "<job>:<record> of a later run whose units stand in for the same units of this one (a broken unit placed again); repeatable")
 	if err := flags.Parse(arguments); err != nil {
 		return "", err
 	}
@@ -1726,9 +1704,22 @@ func reds(arguments []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var broken, failed, cooked []string
+	// A unit that broke for Loom's own reasons (exit 2: a failed checkout, a full disk) and was placed again in a
+	// later run reads from that run (Oct 9: main beb1be1b's and ac1e362f's whole gates went void on 2 and 3 such units).
+	reruns, rerunOrder, err := laterRuns(rerunFlags, secret)
+	if err != nil {
+		return "", err
+	}
+	var broken, failed, cooked, again []string
+	for _, unit := range rerunOrder {
+		again = append(again, fmt.Sprintf("%s: from run %s", unit, reruns[unit].run))
+	}
 	tests, killedUnits := 0, 0
 	for _, unit := range job.Units {
+		events, run, token := events, run, token
+		if rerun, ok := reruns[unit.Id]; ok {
+			events, run, token = rerun.events, rerun.run, rerun.token
+		}
 		output, exitCode, exited, tail, timedOut := "", 0, false, "", false
 		var running []string // the leaves its kill trap named, "<package> <test>"
 		for _, event := range events {
@@ -1868,6 +1859,9 @@ func reds(arguments []string) (string, error) {
 		verdict = "red"
 	}
 	fmt.Printf("run %s: %s, %d tests in %d units, %d failed, %d units broken, %d killed over budget\n", run, verdict, tests, len(job.Units), len(failed), len(broken), killedUnits)
+	for _, line := range again {
+		fmt.Println("AGAIN " + line)
+	}
 	for _, line := range broken {
 		fmt.Println("BROKEN " + line)
 	}
@@ -1912,6 +1906,48 @@ func readOutputs(content []byte) (map[string][]string, map[string]string, error)
 		}
 	}
 	return texts, actions, scanner.Err()
+}
+
+// A laterRun is the run a unit was placed again in, read whole: its id, a token to fetch its results, its events.
+type laterRun struct {
+	run, token string
+	events     []protocol.Event
+}
+
+// laterRuns reads each "<job>:<record>" of a later run, keyed by the units it ran, in the order they first appear.
+// A unit in more than one later run reads from the last.
+func laterRuns(pairs []string, secret []byte) (map[string]laterRun, []string, error) {
+	runs := map[string]laterRun{}
+	var order []string
+	for _, pair := range pairs {
+		jobPath, recordPath, found := strings.Cut(pair, ":")
+		if !found {
+			return nil, nil, fmt.Errorf("--rerun takes <job>:<record>")
+		}
+		content, err := os.ReadFile(jobPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		var later protocol.Job
+		if err := protocol.Decode(bytes.NewReader(content), &later); err != nil {
+			return nil, nil, err
+		}
+		run, _, events, err := readRecord(recordPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: run, Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Hour).Unix()})
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, unit := range later.Units {
+			if _, seen := runs[unit.Id]; !seen {
+				order = append(order, unit.Id)
+			}
+			runs[unit.Id] = laterRun{run: run, token: token, events: events}
+		}
+	}
+	return runs, order, nil
 }
 
 func readRecord(path string) (string, protocol.Verdict, []protocol.Event, error) {
