@@ -76,25 +76,28 @@ stale = []
 for package, tests in sorted((selection.get("only_tests") or {}).items()):
     for unit in job["units"]:
         unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if spec.split("=", 1)[0] != package]
-    # A name the tree at the sha holds no test of, itself or as a family's prefix, can't run: it's dropped and listed,
-    # never planned (floor1 1e8eff51's plan named three, and its record was refused for running none of them).
+    # A requested name is a family: the test itself, or its split's shards, the name plus Unit, Points or _ and a number
+    # (run.py 7adc5bf9's rule, which zerorun.py and the census read the same way; never a bare prefix, which took
+    # TestWASITargetFlags for TestWASI). A name the tree at the sha holds no member of can't run: it's dropped and
+    # listed, never planned (floor1 1e8eff51's plan named three, and its record was refused for running none of them).
     if tree:
         held = tree.get(package, set())
-        stale += [package + " " + test for test in sorted(tests) if not any(name.startswith(test) for name in held)]
-        tests = [test for test in tests if any(name.startswith(test) for name in held)]
-        wasi = sorted(name for name in held if wasiClang.fullmatch(name) and any(name.startswith(test) for test in tests))
-        if wasi:
-            # A requested family holding a shard is written as its members by name, the shards apart from the rest.
-            tests = sorted({member for test in tests for member in ([name for name in held if name.startswith(test) and not wasiClang.fullmatch(name)]
-                                                                      if any(wasiClang.fullmatch(name) and name.startswith(test) for name in held) else [test])})
+        members = {test: {name for name in held if re.fullmatch(re.escape(test) + r"((Unit|Points|_)[0-9]+)?", name)} for test in tests}
+        stale += [package + " " + test for test in sorted(tests) if not members[test]]
+        wasi = sorted(name for test in tests for name in members[test] if wasiClang.fullmatch(name))
+        # A family holding a wasm shard runs in the shards' own spec; the rest keep the family spec.
+        tests = [test for test in tests if members[test] and not any(wasiClang.fullmatch(name) for name in members[test])]
     else:
         wasi = []
     unit = min(job["units"], key=lambda unit: len(unit["argv"]))
     if tests:
-        # A requested name is a family, matched as a prefix, never an exact anchor alone (@system_adamic, Oct 9 11:01Z:
-        # the trio's internal/native requested TestNormalizeMatchesNode, the tree holds TestNormalizeMatchesNodePoints00
-        # and on, and ^(...)$ ran "no tests to run" and passed).
-        unit["argv"].append(package + "=^(" + "|".join(quote(test) for test in sorted(tests)) + ")")
+        # Never an exact anchor alone (@system_adamic, Oct 9 11:01Z: the trio's internal/native requested
+        # TestNormalizeMatchesNode, the tree holds TestNormalizeMatchesNodePoints00 and on, and ^(...)$ ran "no tests to
+        # run" and passed).
+        # A split's shards need their family's X_Setup in the same process ("run TestShardsAgree_Setup before selecting
+        # leaves"), and X_Union checks the shards' union, so both run beside the shards; zerorun.py counts only the
+        # family's own members.
+        unit["argv"].append(package + "=^(" + "|".join(quote(test) for test in sorted(tests)) + ")((Unit|Points|_)[0-9]+|_Setup|_Union)?$")
     if wasi:
         unit["argv"].append(package + "=^(" + "|".join(quote(name) for name in wasi) + ")$")
 open(work + "/stale-names.txt", "w").write("".join(name + "\n" for name in stale))

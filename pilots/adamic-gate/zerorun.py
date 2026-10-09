@@ -18,7 +18,8 @@ holds every test that ran, and every unit that reported (passed or failed) is ch
 The first is a spec that named tests, still had some left after its skip list (the kept and deferred tests), and ran
 none of them. The second and third are tests that started and never reached a pass, fail or skip: a test binary that
 died partway (@system_adamic, Oct 9 06:13Z: the trio's lint died at a watchdog with TestNodeTableIsLinkOnly's 8 shards
-started and none decided, and this exited 0). A name the tree at the job's sha doesn't hold, as a test or a family's
+started and none decided, and this exited 0). A family whose every test that reached a verdict
+skipped is noted on stderr: a skip proves nothing, but many tests skip by design on the pool. A name the tree at the job's sha doesn't hold, as a test or a family's
 prefix, can't have run anywhere: it's noted on stderr as stale, never a red (floor1 1e8eff51's plan named three, and
 push-main refused a record whose every real test passed). The tree is --tree-tests, else treetests.py at the units'
 sha in ~/Projects/system/adamic-gate; when neither can be read every name counts, as before, and stderr says so.
@@ -32,9 +33,15 @@ import subprocess
 import sys
 
 
+familySuffix = "((Unit|Points|_)[0-9]+|_Setup|_Union)?$"
+
+
 def names(pattern):
     """The literal names in ^(A|B|C)$ or a selection's ^(A|B|C), or None for any other pattern (a whole package's ".").
     A numbered stem the planner writes once, stem_(?:000|001), is stem_000 and stem_001 (main.go's unquoteAlternation)."""
+    # A selection's family spec carries its shards' suffix after the names (verify.sh writes it).
+    if pattern.endswith(familySuffix):
+        pattern = pattern[:-len(familySuffix)] + "$"
     match = re.fullmatch(r"\^\((.*)\)\$?", pattern)
     if not match:
         return None
@@ -87,10 +94,12 @@ def specs(unit):
     return out
 
 
-def ran(test_lines, tests=None, started=None):
-    """Every top-level test that reached a verdict, and every one that started, by package."""
+def ran(test_lines, tests=None, started=None, decided=None):
+    """Every top-level test that reached a verdict, every one that started, and every one that passed or failed (a skip
+    proves nothing), by package."""
     tests = {} if tests is None else tests
     started = {} if started is None else started
+    decided = {} if decided is None else decided
     for line in test_lines:
         try:
             event = json.loads(line)
@@ -100,9 +109,11 @@ def ran(test_lines, tests=None, started=None):
         if test and "/" not in test:
             if event.get("Action") in ("pass", "fail", "skip"):
                 tests.setdefault(event.get("Package", ""), set()).add(test)
+                if event.get("Action") != "skip":
+                    decided.setdefault(event.get("Package", ""), set()).add(test)
             elif event.get("Action") == "run":
                 started.setdefault(event.get("Package", ""), set()).add(test)
-    return tests, started
+    return tests, started, decided
 
 
 def treeTests(job, given):
@@ -152,21 +163,23 @@ def reported(work):
 
 
 def family(test, name):
-    """A requested name is a family (@system_adamic, Oct 9 11:01Z): the test itself, or one whose name starts with it."""
-    return test == name or test.startswith(name)
+    """A requested name is a family (@system_adamic, Oct 9 11:01Z): the test itself, or its split's shards, the name plus
+    Unit, Points or _ and a number, as run.py 7adc5bf9 reads it. Never a bare prefix: TestWASI's family is TestWASIUnit00
+    and on, never TestWASITargetFlags."""
+    return test == name or re.fullmatch(re.escape(name) + r"(Unit|Points|_)[0-9]+", test) is not None
 
 
 def sweep(work, extra=(), given=None):
     job = json.load(open(os.path.join(work, "job.json")))
     # A work directory holds test.jsonl; a published fast record (gate-logs/<sha12>/<stamp>/fast) gzips it when large.
     path = os.path.join(work, "test.jsonl")
-    tests, started = {}, {}
+    tests, started, decided = {}, {}, {}
     if os.path.exists(path):
-        ran(open(path, errors="replace"), tests, started)
+        ran(open(path, errors="replace"), tests, started, decided)
     elif os.path.exists(path + ".gz"):
-        ran(gzip.open(path + ".gz", "rt", errors="replace"), tests, started)
+        ran(gzip.open(path + ".gz", "rt", errors="replace"), tests, started, decided)
     for more in extra:
-        ran(open(more, errors="replace"), tests, started)
+        ran(open(more, errors="replace"), tests, started, decided)
     tree = treeTests(job, given)
     if tree is None:
         print("%s\tnote: the tree's tests at the job's sha couldn't be read, so every requested name counts" % work, file=sys.stderr)
@@ -176,7 +189,7 @@ def sweep(work, extra=(), given=None):
         if unit.get("id") not in finished:
             continue
         for package, pattern, skip in specs(unit):
-            verdicts, begun = tests.get(package, set()), started.get(package, set())
+            verdicts, begun, real = tests.get(package, set()), started.get(package, set()), decided.get(package, set())
             requested = names(pattern)
             if requested is None:
                 # A whole package: every test that started reached a verdict, or its binary died partway.
@@ -215,6 +228,14 @@ def sweep(work, extra=(), given=None):
                     attributed.update((package, test) for test in lost)
                     found.append("%s\t%s\t%s\trequested tests started %d, verdicts %d of: %s (%s)" % (work, unit.get("id", "?"), package,
                                  len(begunHere), len(begunHere & verdicts), name, ", ".join(lost[:6]) + (", ..." if len(lost) > 6 else "")))
+                # Every test of the family that reached a verdict skipped: it proved nothing, but many skip by design on
+                # the pool (throughput and measurement tests, 26 families on floor1 1e8eff51's record), so it's a note,
+                # never a red. TestWASI's shards, which skipped this way on every pool record, are guarded where they
+                # broke: the planner's own test of their spec and its clang.
+                decidedHere = {test for test in verdicts if family(test, name)}
+                if decidedHere and not decidedHere & real:
+                    print("%s\t%s\t%s\tnote: requested tests skipped %d of %d: %s" % (work, unit.get("id", "?"), package,
+                          len(decidedHere), len(decidedHere), name), file=sys.stderr)
     return found
 
 
