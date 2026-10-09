@@ -216,6 +216,64 @@ func main() {
 	}
 }
 
+// auditedParents are the tests whose direct subtests the whole gate's own planner runs as separate units, each
+// selectable alone (adamic's cmd/adamic-gate children(), which owns the list; keep the two in step). A test whose
+// owner declared shards (const <testName>Shards = N, children shard-NNN) is split the same way. A parent is split
+// only when it, or its children together, take longer than splitSeconds, and its children are the plain names a
+// -run can select.
+var auditedParents = map[string]bool{
+	module + "stage1/cohere/typeaware TestVolumeAgreementAndMutants": true,
+	module + "internal/oracle TestNativeAgreesWithNode":              true,
+	module + "internal/oracle TestInputAgreesWithNode":               true,
+	module + "internal/oracle TestFreshWriteProbesStayRefused":       true,
+	module + "stage1/cohere/css TestCSSPrinterAgreesWithGo":          true,
+	module + "stage1/cohere/lint TestMutants":                        true,
+	module + "stage1/cohere/lint TestVolumeMutants":                  true,
+	module + "internal/native TestNormalizeMatchesNode":              true,
+	module + "internal/native TestStringIndexMatchesNode":            true,
+}
+
+const splitSeconds = 30
+
+var shardName = regexp.MustCompile(`^shard-\d{3,}$`)
+
+// splitParents names the reference's top-level tests to plan child by child, each with its direct children
+// and their seconds: audited or sharded, over splitSeconds, with at least two children.
+func splitParents(reference map[string]result) map[string]map[string]float64 {
+	children := map[string]map[string]float64{}
+	for key, outcome := range reference {
+		packageName, test, _ := strings.Cut(key, " ")
+		parent, child, nested := strings.Cut(test, "/")
+		if !nested || strings.Contains(child, "/") {
+			continue
+		}
+		parentKey := packageName + " " + parent
+		if children[parentKey] == nil {
+			children[parentKey] = map[string]float64{}
+		}
+		children[parentKey][child] = outcome.seconds
+	}
+	split := map[string]map[string]float64{}
+	for parentKey, names := range children {
+		// A parent whose children run in parallel reports less than they took, so their sum counts too.
+		within := 0.0
+		for _, seconds := range names {
+			within += seconds
+		}
+		if len(names) < 2 || max(reference[parentKey].seconds, within) <= splitSeconds {
+			continue
+		}
+		sharded := true
+		for name := range names {
+			sharded = sharded && shardName.MatchString(name)
+		}
+		if auditedParents[parentKey] || sharded {
+			split[parentKey] = names
+		}
+	}
+	return split
+}
+
 // A result is one top-level test's terminal action and its seconds.
 type result struct {
 	action  string
@@ -225,6 +283,18 @@ type result struct {
 // readTests reads go test -json lines (gzipped or not) into each top-level test's last terminal action,
 // keyed "<package> <test>", and counts how many terminal actions each test had.
 func readTests(reader io.Reader) (map[string]result, map[string]int, error) {
+	results, counts, err := readAll(reader)
+	for key := range results {
+		if _, test, _ := strings.Cut(key, " "); strings.Contains(test, "/") {
+			delete(results, key)
+			delete(counts, key)
+		}
+	}
+	return results, counts, err
+}
+
+// readAll is readTests with every subtest kept too, keyed "<package> <test>/<subtest>".
+func readAll(reader io.Reader) (map[string]result, map[string]int, error) {
 	buffered := bufio.NewReader(reader)
 	if magic, err := buffered.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
 		decompressor, err := gzip.NewReader(buffered)
@@ -244,7 +314,7 @@ func readTests(reader io.Reader) (map[string]result, map[string]int, error) {
 			Test    string
 			Elapsed float64
 		}
-		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Test == "" || strings.Contains(event.Test, "/") {
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Test == "" {
 			continue
 		}
 		if event.Action != "pass" && event.Action != "fail" && event.Action != "skip" {
@@ -257,8 +327,8 @@ func readTests(reader io.Reader) (map[string]result, map[string]int, error) {
 	return results, counts, scanner.Err()
 }
 
-// readTestsFile reads the reference, keeping only packages that match only (a regular expression; empty
-// keeps all), so a small trial can stand in for the whole set.
+// readTestsFile reads the reference, every subtest included, keeping only packages that match only (a regular
+// expression; empty keeps all), so a small trial can stand in for the whole set.
 func readTestsFile(path string, only string) (map[string]result, error) {
 	pattern, err := regexp.Compile(only)
 	if err != nil {
@@ -269,7 +339,7 @@ func readTestsFile(path string, only string) (map[string]result, error) {
 		return nil, err
 	}
 	defer file.Close()
-	results, _, err := readTests(file)
+	results, _, err := readAll(file)
 	for key := range results {
 		packageName, _, _ := strings.Cut(key, " ")
 		if !pattern.MatchString(packageName) {
@@ -304,47 +374,90 @@ func plan(arguments []string) error {
 	} else if *target != "box" {
 		return fmt.Errorf("--target is box or codex")
 	}
-	type test struct {
-		key     string
-		seconds float64
+	// The items to pack: every top-level test whole, except a split parent, which goes child by child. A unit
+	// holding any of a parent's children also runs the parent's own time outside them (its setup), once.
+	split := splitParents(reference)
+	type item struct {
+		key, parent, child string
+		seconds            float64
 	}
-	var tests []test
+	var items []item
+	setup := map[string]float64{}
 	for key, outcome := range reference {
-		if _, excluded := exclusions[key]; !excluded {
-			tests = append(tests, test{key, outcome.seconds})
+		if _, test, _ := strings.Cut(key, " "); strings.Contains(test, "/") {
+			continue
 		}
+		if _, excluded := exclusions[key]; excluded {
+			continue
+		}
+		children, isSplit := split[key]
+		if !isSplit {
+			items = append(items, item{key: key, seconds: outcome.seconds})
+			continue
+		}
+		within := 0.0
+		for child, seconds := range children {
+			items = append(items, item{key: key, parent: key, child: child, seconds: seconds})
+			within += seconds
+		}
+		setup[key] = max(0, outcome.seconds-within)
+		fmt.Fprintf(os.Stderr, "split %s: %d children, %.0f s of its own beside them\n", key, len(children), setup[key])
 	}
-	// Longest first, each onto the unit with the least so far: the classic greedy packing.
-	sort.Slice(tests, func(left, right int) bool {
-		if tests[left].seconds != tests[right].seconds {
-			return tests[left].seconds > tests[right].seconds
+	// Longest first, each onto the unit it leaves lightest: the classic greedy packing.
+	sort.Slice(items, func(left, right int) bool {
+		if items[left].seconds != items[right].seconds {
+			return items[left].seconds > items[right].seconds
 		}
-		return tests[left].key < tests[right].key
+		return items[left].key+"/"+items[left].child < items[right].key+"/"+items[right].child
 	})
 	loads := make([]float64, *units)
-	assigned := make([]map[string][]string, *units) // package to test names
+	assigned := make([]map[string][]string, *units)   // package to whole test names
+	childrenOf := make([]map[string][]string, *units) // split parent key to child names
 	for index := range assigned {
 		assigned[index] = map[string][]string{}
+		childrenOf[index] = map[string][]string{}
 	}
-	for _, test := range tests {
-		lightest := 0
+	cost := func(index int, candidate item) float64 {
+		if candidate.parent != "" && childrenOf[index][candidate.parent] == nil {
+			return candidate.seconds + setup[candidate.parent]
+		}
+		return candidate.seconds
+	}
+	for _, candidate := range items {
+		best := 0
 		for index := range loads {
-			if loads[index] < loads[lightest] {
-				lightest = index
+			if loads[index]+cost(index, candidate) < loads[best]+cost(best, candidate) {
+				best = index
 			}
 		}
-		loads[lightest] += test.seconds
-		packageName, name, _ := strings.Cut(test.key, " ")
-		assigned[lightest][packageName] = append(assigned[lightest][packageName], name)
+		loads[best] += cost(best, candidate)
+		if candidate.parent != "" {
+			childrenOf[best][candidate.parent] = append(childrenOf[best][candidate.parent], candidate.child)
+			continue
+		}
+		packageName, name, _ := strings.Cut(candidate.key, " ")
+		assigned[best][packageName] = append(assigned[best][packageName], name)
 	}
-	// A remainder spec runs a package's tests the reference never saw (new since it), on the lightest unit:
-	// -run everything, -skip every test the plan already placed. It holds no test of its own in the plan.
+	lightest := func() int {
+		least := 0
+		for index := range loads {
+			if loads[index] < loads[least] {
+				least = index
+			}
+		}
+		return least
+	}
+	// A remainder spec runs what no record named (new since it), on the lightest unit: per package, -run
+	// everything and -skip every top-level test the plan placed; per split parent, its children the same way.
+	// It holds no test of its own in the plan.
 	remainders := make([][]string, *units)
 	if *remainder {
 		byPackage := map[string][]string{}
-		for _, test := range tests {
-			packageName, name, _ := strings.Cut(test.key, " ")
-			byPackage[packageName] = append(byPackage[packageName], regexp.QuoteMeta(name))
+		for key := range reference {
+			packageName, test, _ := strings.Cut(key, " ")
+			if !strings.Contains(test, "/") {
+				byPackage[packageName] = append(byPackage[packageName], regexp.QuoteMeta(test))
+			}
 		}
 		for key := range exclusions {
 			packageName, name, _ := strings.Cut(key, " ")
@@ -358,19 +471,30 @@ func plan(arguments []string) error {
 		}
 		sort.Strings(names)
 		for _, packageName := range names {
-			lightest := 0
-			for index := range loads {
-				if loads[index] < loads[lightest] {
-					lightest = index
-				}
-			}
 			sort.Strings(byPackage[packageName])
-			remainders[lightest] = append(remainders[lightest], packageName+"=. skip=^("+strings.Join(byPackage[packageName], "|")+")$")
+			index := lightest()
+			remainders[index] = append(remainders[index], packageName+"=. skip=^("+strings.Join(byPackage[packageName], "|")+")$")
+		}
+		parents := make([]string, 0, len(split))
+		for parentKey := range split {
+			parents = append(parents, parentKey)
+		}
+		sort.Strings(parents)
+		for _, parentKey := range parents {
+			packageName, parent, _ := strings.Cut(parentKey, " ")
+			quoted := []string{}
+			for child := range split[parentKey] {
+				quoted = append(quoted, regexp.QuoteMeta(child))
+			}
+			sort.Strings(quoted)
+			prefix := "^" + regexp.QuoteMeta(parent) + "$/"
+			index := lightest()
+			remainders[index] = append(remainders[index], packageName+"="+prefix+". skip="+prefix+"^("+strings.Join(quoted, "|")+")$")
 		}
 	}
 	job := protocol.Job{Name: "adamic-gate-pilot"}
 	for index, packages := range assigned {
-		if len(packages) == 0 && len(remainders[index]) == 0 {
+		if len(packages) == 0 && len(childrenOf[index]) == 0 && len(remainders[index]) == 0 {
 			continue
 		}
 		argv := []string{"bash", "-c", opening + unitBody, "adamic-gate-unit", *sha}
@@ -387,6 +511,21 @@ func plan(arguments []string) error {
 				quoted[position] = regexp.QuoteMeta(name)
 			}
 			argv = append(argv, packageName+"=^("+strings.Join(quoted, "|")+")$")
+		}
+		parents := make([]string, 0, len(childrenOf[index]))
+		for parentKey := range childrenOf[index] {
+			parents = append(parents, parentKey)
+		}
+		sort.Strings(parents)
+		for _, parentKey := range parents {
+			packageName, parent, _ := strings.Cut(parentKey, " ")
+			children := childrenOf[index][parentKey]
+			sort.Strings(children)
+			quoted := make([]string, len(children))
+			for position, child := range children {
+				quoted[position] = regexp.QuoteMeta(child)
+			}
+			argv = append(argv, packageName+"=^"+regexp.QuoteMeta(parent)+"$/^("+strings.Join(quoted, "|")+")$")
 		}
 		argv = append(argv, remainders[index]...)
 		job.Units = append(job.Units, protocol.JobUnit{
@@ -429,31 +568,56 @@ func warm(arguments []string) error {
 	return encoder.Encode(job)
 }
 
-// plannedTests reads the job back into each unit's "<package> <test>" keys, from its argv.
-// It also names each unit's remainder packages: the package's tests no record named, found as they run.
-func plannedTests(job protocol.Job) (map[string][]string, map[string]map[string]bool, error) {
-	planned := map[string][]string{}
-	remainders := map[string]map[string]bool{}
+// A plannedJob is a job read back from its argv: each unit's planned keys ("<package> <test>", or
+// "<package> <parent>/<child>" for a split parent), each unit's remainders (a package's, or a split parent's: the
+// tests no record named, found as they run), and the split parents.
+type plannedJob struct {
+	tests             map[string][]string
+	remainderPackages map[string]map[string]bool
+	remainderParents  map[string]map[string]bool
+	split             map[string]bool
+}
+
+var childSpec = regexp.MustCompile(`^\^(.+)\$/\^\((.*)\)\$$`)
+
+func plannedTests(job protocol.Job) (plannedJob, error) {
+	planned := plannedJob{tests: map[string][]string{}, remainderPackages: map[string]map[string]bool{}, remainderParents: map[string]map[string]bool{}, split: map[string]bool{}}
+	unquote := func(quoted string) string { return strings.ReplaceAll(quoted, `\`, "") }
 	for _, unit := range job.Units {
 		if len(unit.Argv) < 5 {
-			return nil, nil, fmt.Errorf("unit %s isn't a pilot unit", unit.Id)
+			return planned, fmt.Errorf("unit %s isn't a pilot unit", unit.Id)
 		}
 		for _, spec := range unit.Argv[5:] {
 			packageName, pattern, _ := strings.Cut(spec, "=")
-			if strings.Contains(pattern, " skip=") {
-				if remainders[unit.Id] == nil {
-					remainders[unit.Id] = map[string]bool{}
+			if run, _, isRemainder := strings.Cut(pattern, " skip="); isRemainder {
+				if parent, isParent := strings.CutSuffix(run, "$/."); isParent {
+					if planned.remainderParents[unit.Id] == nil {
+						planned.remainderParents[unit.Id] = map[string]bool{}
+					}
+					planned.remainderParents[unit.Id][packageName+" "+unquote(strings.TrimPrefix(parent, "^"))] = true
+					continue
 				}
-				remainders[unit.Id][packageName] = true
+				if planned.remainderPackages[unit.Id] == nil {
+					planned.remainderPackages[unit.Id] = map[string]bool{}
+				}
+				planned.remainderPackages[unit.Id][packageName] = true
+				continue
+			}
+			if match := childSpec.FindStringSubmatch(pattern); match != nil {
+				parent := unquote(match[1])
+				planned.split[packageName+" "+parent] = true
+				for _, quoted := range strings.Split(match[2], "|") {
+					planned.tests[unit.Id] = append(planned.tests[unit.Id], packageName+" "+parent+"/"+unquote(quoted))
+				}
 				continue
 			}
 			inner := strings.TrimSuffix(strings.TrimPrefix(pattern, "^("), ")$")
 			for _, quoted := range strings.Split(inner, "|") {
-				planned[unit.Id] = append(planned[unit.Id], packageName+" "+strings.ReplaceAll(quoted, `\`, ""))
+				planned.tests[unit.Id] = append(planned.tests[unit.Id], packageName+" "+unquote(quoted))
 			}
 		}
 	}
-	return planned, remainders, nil
+	return planned, nil
 }
 
 func compare(arguments []string) (bool, error) {
@@ -481,9 +645,22 @@ func compare(arguments []string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	planned, remainders, err := plannedTests(job)
+	planned, err := plannedTests(job)
 	if err != nil {
 		return false, err
+	}
+	// What the reference ran that a plan must cover: every top-level test, except that a split parent is
+	// covered by its direct children (and its own verdict checked across the units that ran them).
+	expected := map[string]result{}
+	for key, outcome := range reference {
+		packageName, test, _ := strings.Cut(key, " ")
+		parent, child, nested := strings.Cut(test, "/")
+		switch {
+		case !nested && !planned.split[key]:
+			expected[key] = outcome
+		case nested && !strings.Contains(child, "/") && planned.split[packageName+" "+parent]:
+			expected[key] = outcome
+		}
 	}
 	run, verdict, events, err := readRecord(*recordPath)
 	if err != nil {
@@ -494,7 +671,7 @@ func compare(arguments []string) (bool, error) {
 	report("run %s: verdict %s", run, verdict.Status)
 
 	plannedSet := map[string]string{}
-	for unit, keys := range planned {
+	for unit, keys := range planned.tests {
 		for _, key := range keys {
 			if other, twice := plannedSet[key]; twice {
 				report("PLAN: %s is in both %s and %s", key, other, unit)
@@ -531,6 +708,7 @@ func compare(arguments []string) (bool, error) {
 	}
 	var timings []unitTiming
 	loom := map[string]result{}
+	parents := map[string]result{}
 	seen := map[string]string{}
 	var first, last time.Time
 	setupPattern := regexp.MustCompile(`setup (\d+) s`)
@@ -592,12 +770,12 @@ func compare(arguments []string) (bool, error) {
 		if err != nil {
 			return false, fmt.Errorf("unit %s's results: %w", unit.Id, err)
 		}
-		results, counts, err := readTests(bytes.NewReader(content))
+		results, counts, err := readAll(bytes.NewReader(content))
 		if err != nil {
 			return false, fmt.Errorf("unit %s's results: %w", unit.Id, err)
 		}
 		mine := map[string]bool{}
-		for _, key := range planned[unit.Id] {
+		for _, key := range planned.tests[unit.Id] {
 			mine[key] = true
 			if counts[key] != 1 {
 				report("UNIT %s: %s reported %d times, want once", unit.Id, key, counts[key])
@@ -605,9 +783,21 @@ func compare(arguments []string) (bool, error) {
 			}
 		}
 		for key, outcome := range results {
-			packageName, _, _ := strings.Cut(key, " ")
-			if !mine[key] && remainders[unit.Id][packageName] && plannedSet[key] == "" {
-				plannedSet[key] = unit.Id // a test no record named, run by its package's remainder
+			packageName, test, _ := strings.Cut(key, " ")
+			parent, child, nested := strings.Cut(test, "/")
+			parentKey := packageName + " " + parent
+			if !nested && planned.split[key] {
+				// A split parent reports in every unit that ran some of its children: one verdict, failed if any.
+				if previous, ok := parents[key]; !ok || outcome.action == "fail" || previous.action == "skip" {
+					parents[key] = outcome
+				}
+				continue
+			}
+			if nested && (!planned.split[parentKey] || strings.Contains(child, "/")) {
+				continue // a subtest inside a whole test, or deeper inside a child: its test's verdict carries it
+			}
+			if !mine[key] && plannedSet[key] == "" && ((!nested && planned.remainderPackages[unit.Id][packageName]) || (nested && planned.remainderParents[unit.Id][parentKey])) {
+				plannedSet[key] = unit.Id // a test no record named, run by its remainder
 				mine[key] = true
 			}
 			if !mine[key] {
@@ -626,15 +816,26 @@ func compare(arguments []string) (bool, error) {
 
 	// The union against the reference less the exclusions: every test it ran, Loom ran. A test planned from an
 	// older record that neither side ran is gone from this sha, not missing.
-	for key := range reference {
+	for key := range expected {
 		if _, excluded := exclusions[key]; !excluded && plannedSet[key] == "" {
 			report("UNION: the reference ran %s and no unit did", key)
 			parity = false
 		}
 	}
+	for key := range planned.split {
+		want, got := reference[key], parents[key]
+		switch {
+		case got.action == "":
+			report("SPLIT: %s ran in no unit", key)
+			parity = false
+		case got.action != want.action:
+			report("DIFFER: %s (split): the whole gate %s, Loom %s", key, want.action, got.action)
+			parity = false
+		}
+	}
 	gone := 0
 	for key := range plannedSet {
-		if _, ran := reference[key]; ran {
+		if _, ran := expected[key]; ran {
 			continue
 		}
 		if _, ranHere := loom[key]; ranHere {
