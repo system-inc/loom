@@ -124,31 +124,45 @@ func keyOf(text string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// fakeRun writes what a product test's buildcache would: one product directory per name under the cache, an
-// executable and a data file in each, and buildcache's .inputs file and lock beside it.
+// fakeRun does what a product test's buildcache would: for each product, a hit when its directory is already in the
+// cache, otherwise a build (an executable and a data file, buildcache's .inputs file and lock beside it), and a
+// record line in ADAMIC_BUILD_LOG either way.
 func fakeRun(products map[string]map[string]string, runs *int) func(Action, []string) ([]byte, error) {
+	var mutex sync.Mutex
 	return func(action Action, environment []string) ([]byte, error) {
+		mutex.Lock()
+		defer mutex.Unlock()
 		*runs++
-		cache := ""
+		cache, log := "", ""
 		for _, entry := range environment {
 			if value, ok := strings.CutPrefix(entry, "ADAMIC_BUILD_CACHE_DIR="); ok {
 				cache = value
 			}
-		}
-		for product, files := range products {
-			for name, content := range files {
-				file := filepath.Join(cache, product, name)
-				os.MkdirAll(filepath.Dir(file), 0o755)
-				mode := os.FileMode(0o644)
-				if strings.HasPrefix(name, "bin/") {
-					mode = 0o755
-				}
-				os.WriteFile(file, []byte(content), mode)
+			if value, ok := strings.CutPrefix(entry, "ADAMIC_BUILD_LOG="); ok {
+				log = value
 			}
-			os.WriteFile(filepath.Join(cache, product+".inputs"), []byte("inputs of "+product), 0o644)
-			os.WriteFile(filepath.Join(cache, product+".lock"), nil, 0o644)
-			os.MkdirAll(filepath.Join(cache, ".building-"+product[:12]+"-x"), 0o755)
 		}
+		lines := ""
+		for product, files := range products {
+			outcome := "hit"
+			if _, err := os.Stat(filepath.Join(cache, product)); err != nil {
+				outcome = "miss"
+				for name, content := range files {
+					file := filepath.Join(cache, product, name)
+					os.MkdirAll(filepath.Dir(file), 0o755)
+					mode := os.FileMode(0o644)
+					if strings.HasPrefix(name, "bin/") {
+						mode = 0o755
+					}
+					os.WriteFile(file, []byte(content), mode)
+				}
+				os.WriteFile(filepath.Join(cache, product+".inputs"), []byte("inputs of "+product), 0o644)
+				os.WriteFile(filepath.Join(cache, product+".lock"), nil, 0o644)
+				os.MkdirAll(filepath.Join(cache, ".building-"+product[:12]+"-x"), 0o755)
+			}
+			lines += "build product_" + product[:4] + " " + product[:12] + " " + outcome + " 1.00\n"
+		}
+		os.WriteFile(log, []byte("census line, not a build\n"+lines), 0o644)
 		return []byte("ok"), nil
 	}
 }
@@ -164,7 +178,7 @@ func TestWorkshopBuildsAMissingActionOnceAndARunnerFetchesItIntoItsCache(t *test
 	action := Action{Package: "github.com/system-inc/adamic/bridge/tsgo", Directory: "bridge/tsgo", Test: "TestProduct_HealthyRegion"}
 	productKey := keyOf("productKey of the healthy region")
 	builder := Builder{
-		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Run: fakeRun(products, &runs),
+		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: t.TempDir(), Run: fakeRun(products, &runs),
 		Key: func(Action) (string, error) { return productKey, nil },
 	}
 	results := builder.Build([]Action{action})
@@ -176,7 +190,7 @@ func TestWorkshopBuildsAMissingActionOnceAndARunnerFetchesItIntoItsCache(t *test
 		t.Fatalf("outputs %d, runs %d", results[0].Outputs, runs)
 	}
 	// Built once: the same action again, on any builder, builds nothing.
-	again := Builder{Store: serve(t, store, "home"), Scratch: t.TempDir(), Run: fakeRun(products, &runs), Key: builder.Key}
+	again := Builder{Store: serve(t, store, "home"), Scratch: t.TempDir(), Cache: t.TempDir(), Run: fakeRun(products, &runs), Key: builder.Key}
 	if results = again.Build([]Action{action}); results[0].Outcome != "stored" || runs != 1 {
 		t.Fatalf("second build: %+v, runs %d", results, runs)
 	}
@@ -229,7 +243,7 @@ func TestASecondBuilderThatBuildsOtherBytesFailsNamingBothBuilders(t *testing.T)
 	product := keyOf("product")
 	runs := 0
 	workshop := Builder{
-		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Key: func(Action) (string, error) { return productKey, nil },
+		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: t.TempDir(), Key: func(Action) (string, error) { return productKey, nil },
 		Run: fakeRun(map[string]map[string]string{product: {"bin/tool": "built on workshop"}}, &runs),
 	}
 	action := Action{Directory: "x", Test: "TestProduct_X"}
@@ -264,21 +278,111 @@ func TestASecondBuilderThatBuildsOtherBytesFailsNamingBothBuilders(t *testing.T)
 	}
 }
 
-func TestAFailedOrEmptyProductTestUploadsNothing(t *testing.T) {
+func TestAFailedProductTestUploadsNothingAndAnEmptyOneIsStoredAsEmpty(t *testing.T) {
 	store := newFakeStore()
 	builder := Builder{
-		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Key: func(Action) (string, error) { return keyOf("k"), nil },
+		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: t.TempDir(), Key: func(Action) (string, error) { return keyOf("k"), nil },
 		Run: func(Action, []string) ([]byte, error) { return []byte("--- FAIL"), errors.New("exit status 1") },
 	}
 	if results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_X"}}); results[0].Outcome != "failed" || !strings.Contains(results[0].Error, "FAIL") {
 		t.Fatalf("%+v", results)
 	}
-	builder.Run = func(Action, []string) ([]byte, error) { return nil, nil }
-	if results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_X"}}); results[0].Outcome != "failed" || !strings.Contains(results[0].Error, "no product") {
-		t.Fatalf("%+v", results)
-	}
 	if store.writes != 0 {
 		t.Fatalf("a failed build wrote %d times", store.writes)
+	}
+	// A product test that passed and used no buildcache product is stored with no outputs, and not run again.
+	runs := 0
+	builder.Run = func(Action, []string) ([]byte, error) { runs++; return nil, nil }
+	if results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_X"}}); results[0].Outcome != "built" || results[0].Outputs != 0 {
+		t.Fatalf("%+v", results)
+	}
+	if results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_X"}}); results[0].Outcome != "stored" || runs != 1 {
+		t.Fatalf("%+v, runs %d", results, runs)
+	}
+}
+
+func TestAnUpstreamSharedByTwoActionsBuildsOnceAndGoesUpWithEach(t *testing.T) {
+	store := newFakeStore()
+	stage0, oracleA, oracleB := keyOf("stage0"), keyOf("oracle a"), keyOf("oracle b")
+	builds := map[string]int{}
+	var mutex sync.Mutex
+	cache := t.TempDir()
+	// Each action needs stage0 and its own oracle; stage0 is built by whichever runs first.
+	run := func(action Action, environment []string) ([]byte, error) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		log := ""
+		for _, entry := range environment {
+			if value, ok := strings.CutPrefix(entry, "ADAMIC_BUILD_LOG="); ok {
+				log = value
+			}
+		}
+		own := map[string]string{"TestProduct_A": oracleA, "TestProduct_B": oracleB}[action.Test]
+		lines := ""
+		for _, product := range []string{stage0, own} {
+			outcome := "hit"
+			if _, err := os.Stat(filepath.Join(cache, product)); err != nil {
+				outcome = "miss"
+				builds[product]++
+				os.MkdirAll(filepath.Join(cache, product), 0o755)
+				os.WriteFile(filepath.Join(cache, product, "out"), []byte(product), 0o644)
+			}
+			lines += "build p " + product[:12] + " " + outcome + " 1.00\n"
+		}
+		os.WriteFile(log, []byte(lines), 0o644)
+		return nil, nil
+	}
+	keys := map[string]string{"TestProduct_A": keyOf("A"), "TestProduct_B": keyOf("B")}
+	builder := Builder{
+		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: cache, Jobs: 2, Run: run,
+		Key: func(action Action) (string, error) { return keys[action.Test], nil },
+	}
+	results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_A"}, {Directory: "x", Test: "TestProduct_B"}})
+	for _, result := range results {
+		if result.Outcome != "built" || result.Products != 2 {
+			t.Fatalf("%+v", result)
+		}
+	}
+	if builds[stage0] != 1 || builds[oracleA] != 1 || builds[oracleB] != 1 {
+		t.Fatalf("builds %v", builds)
+	}
+	// Each action's manifest carries stage0, so a runner fetching only B still gets it.
+	runnerCache := t.TempDir()
+	if err := (Store{Read: builder.Store.Read}).Fetch(keys["TestProduct_B"], runnerCache); err != nil {
+		t.Fatal(err)
+	}
+	for _, product := range []string{stage0, oracleB} {
+		if _, err := os.Stat(filepath.Join(runnerCache, product, "out")); err != nil {
+			t.Fatalf("B's fetch lacks %s: %v", product[:12], err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(runnerCache, oracleA)); err == nil {
+		t.Fatal("B's fetch brought A's own product")
+	}
+}
+
+func TestTouchedRefusesAPrefixThatNamesNoProductOrTwo(t *testing.T) {
+	cache, logs := t.TempDir(), t.TempDir()
+	one := "aaaaaaaaaaaa" + strings.Repeat("1", 52)
+	two := "aaaaaaaaaaaa" + strings.Repeat("2", 52)
+	os.MkdirAll(filepath.Join(cache, one), 0o755)
+	log := filepath.Join(logs, "builds.log")
+	os.WriteFile(log, []byte("build p aaaaaaaaaaaa hit 0.01\n"), 0o644)
+	if touched, err := Touched(log, cache); err != nil || len(touched) != 1 || touched[0] != one {
+		t.Fatalf("one product: %v %v", touched, err)
+	}
+	os.MkdirAll(filepath.Join(cache, two), 0o755)
+	if _, err := Touched(log, cache); err == nil {
+		t.Fatal("an ambiguous prefix was resolved")
+	}
+	os.WriteFile(log, []byte("build p bbbbbbbbbbbb miss 0.01\n"), 0o644)
+	if _, err := Touched(log, cache); err == nil {
+		t.Fatal("a prefix with no product was resolved")
+	}
+	// Uncached builds and other lines name no product in the cache.
+	os.WriteFile(log, []byte("build p uncached off 0.01\nstore p aaaaaaaaaaaa: not in the store\n"), 0o644)
+	if touched, err := Touched(log, cache); err != nil || len(touched) != 0 {
+		t.Fatalf("no build lines: %v %v", touched, err)
 	}
 }
 
@@ -290,7 +394,7 @@ func TestAFetchRefusesAPoisonedStore(t *testing.T) {
 		productKey := keyOf("productKey")
 		runs := 0
 		builder := Builder{
-			Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Key: func(Action) (string, error) { return productKey, nil },
+			Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: t.TempDir(), Key: func(Action) (string, error) { return productKey, nil },
 			Run: fakeRun(map[string]map[string]string{product: {"bin/tool": "honest"}}, &runs),
 		}
 		results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_X"}})
@@ -361,16 +465,18 @@ func TestProduct_Tool(t *testing.T) {
 	if os.Getenv("ADAMIC_BUILD_STORE") != "off" {
 		t.Fatal("floor1 must be off for a builder")
 	}
-	directory := filepath.Join(os.Getenv("ADAMIC_BUILD_CACHE_DIR"), "0123456789abcdef")
+	key := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	directory := filepath.Join(os.Getenv("ADAMIC_BUILD_CACHE_DIR"), key)
 	os.MkdirAll(directory, 0o755)
 	os.WriteFile(filepath.Join(directory, "tool"), []byte("#!/bin/sh\n"), 0o755)
+	os.WriteFile(os.Getenv("ADAMIC_BUILD_LOG"), []byte("build tool "+key[:12]+" miss 0.10\n"), 0o644)
 }
 
 func TestProduct_Other(t *testing.T) { t.Fatal("only the asked-for product test runs") }
 `), 0o644)
 	store := newFakeStore()
 	builder := Builder{
-		Tree: tree, Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Run: GoTest(tree),
+		Tree: tree, Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: t.TempDir(), Run: GoTest(tree),
 		Key: func(Action) (string, error) { return keyOf("tool"), nil },
 	}
 	results := builder.Build([]Action{{Package: "example.com/products/pkg", Directory: "pkg", Test: "TestProduct_Tool"}})

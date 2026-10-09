@@ -25,8 +25,10 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -302,13 +304,17 @@ type ConflictError struct {
 func (conflict ConflictError) Error() string { return conflict.Message }
 
 // A Builder builds actions on one tree: Key is Planner's productKey for an action, and Run runs one product test
-// with its environment (go test, in the tree).
+// with its environment (go test, in the tree). Every action of one Build shares one buildcache directory, Cache, so
+// an upstream product several product tests need (a stage 0, a checker archive) builds once for all of them, and
+// buildcache's own lock keeps two jobs from building one key at once. Jobs actions run at a time.
 type Builder struct {
 	Tree    string
 	Store   Store
 	Key     func(action Action) (string, error)
 	Run     func(action Action, environment []string) ([]byte, error)
-	Scratch string // where each action's fresh cache directory goes
+	Cache   string // the build's buildcache directory, shared by its actions
+	Scratch string // where each action's build log goes
+	Jobs    int
 }
 
 // A Result is what happened to one action.
@@ -318,19 +324,109 @@ type Result struct {
 	Outcome  string // stored (already in the store), built, failed
 	Manifest string
 	Outputs  int
+	Products int
 	Seconds  float64
 	Error    string
 }
 
 // Build builds every action whose productKey the store doesn't hold, once each, and uploads it. An action already
 // stored builds nothing. A product test that fails, or a ref that conflicts, is that action's failure, reported, and
-// never uploaded.
+// never uploaded. Results come back in the actions' order.
 func (builder Builder) Build(actions []Action) []Result {
-	results := []Result{}
-	for _, action := range actions {
-		results = append(results, builder.build(action))
+	jobs := max(1, builder.Jobs)
+	results := make([]Result, len(actions))
+	next := make(chan int)
+	var group sync.WaitGroup
+	for range jobs {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for index := range next {
+				results[index] = builder.build(actions[index])
+			}
+		}()
 	}
+	for index := range actions {
+		next <- index
+	}
+	close(next)
+	group.Wait()
 	return results
+}
+
+// buildLinePattern is a line buildcache's record writes to ADAMIC_BUILD_LOG: build <name> <key prefix> <outcome> <s>.
+var buildLinePattern = regexp.MustCompile(`^build \S+ ([0-9a-f]{12}) (hit|miss|fetched|audited) `)
+
+// Touched reads one action's build log and names every buildcache product it used, by its full key, resolved from
+// the 12-character prefix the log carries against the product directories in cache. A prefix that names no product
+// or two is an error, never a guess.
+func Touched(log, cache string) ([]string, error) {
+	content, err := os.ReadFile(log)
+	if os.IsNotExist(err) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(cache)
+	if err != nil {
+		return nil, err
+	}
+	products := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() && len(entry.Name()) == 64 && !strings.HasPrefix(entry.Name(), ".") {
+			products = append(products, entry.Name())
+		}
+	}
+	keys := map[string]bool{}
+	for _, line := range strings.Split(string(content), "\n") {
+		match := buildLinePattern.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		found := []string{}
+		for _, product := range products {
+			if strings.HasPrefix(product, match[1]) {
+				found = append(found, product)
+			}
+		}
+		if len(found) != 1 {
+			return nil, fmt.Errorf("the build log names product %s, and the cache holds %d products with that prefix", match[1], len(found))
+		}
+		keys[found[0]] = true
+	}
+	touched := make([]string, 0, len(keys))
+	for key := range keys {
+		touched = append(touched, key)
+	}
+	sort.Strings(touched)
+	return touched, nil
+}
+
+// OutputsOf lists the files of the named buildcache products in cache, each directory's files under its key and
+// its .inputs file beside it, as one action's outputs.
+func OutputsOf(cache string, products []string) ([]Output, map[string]string, error) {
+	outputs := []Output{}
+	files := map[string]string{}
+	for _, product := range products {
+		listed, listedFiles, err := Outputs(filepath.Join(cache, product))
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, output := range listed {
+			files[product+"/"+output.Path] = listedFiles[output.Path]
+			output.Path = product + "/" + output.Path
+			outputs = append(outputs, output)
+		}
+		inputs := filepath.Join(cache, product+".inputs")
+		if content, err := os.ReadFile(inputs); err == nil {
+			sum := sha256.Sum256(content)
+			outputs = append(outputs, Output{Bytes: int64(len(content)), Path: product + ".inputs", Sha256: hex.EncodeToString(sum[:])})
+			files[product+".inputs"] = inputs
+		}
+	}
+	sort.Slice(outputs, func(left, right int) bool { return outputs[left].Path < outputs[right].Path })
+	return outputs, files, nil
 }
 
 func (builder Builder) build(action Action) Result {
@@ -355,12 +451,16 @@ func (builder Builder) build(action Action) Result {
 	case !errors.Is(err, ErrNotStored):
 		return finish("failed", err)
 	}
-	cache, err := os.MkdirTemp(builder.Scratch, "action-"+key[:12]+"-")
+	if err = os.MkdirAll(builder.Cache, 0o755); err != nil {
+		return finish("failed", err)
+	}
+	logs, err := os.MkdirTemp(builder.Scratch, "action-"+key[:12]+"-")
 	if err != nil {
 		return finish("failed", err)
 	}
-	defer os.RemoveAll(cache)
-	environment := append(GateEnvironment(), "ADAMIC_BUILD_CACHE_DIR="+cache, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on")
+	defer os.RemoveAll(logs)
+	log := filepath.Join(logs, "builds.log")
+	environment := append(GateEnvironment(), "ADAMIC_BUILD_CACHE_DIR="+builder.Cache, "ADAMIC_BUILD_LOG="+log, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on")
 	if output, err := builder.Run(action, environment); err != nil {
 		tail := output
 		if len(tail) > 4000 {
@@ -368,14 +468,17 @@ func (builder Builder) build(action Action) Result {
 		}
 		return finish("failed", fmt.Errorf("%s %s: %v\n%s", action.Directory, action.Test, err, tail))
 	}
-	outputs, files, err := Outputs(cache)
+	products, err := Touched(log, builder.Cache)
 	if err != nil {
 		return finish("failed", err)
 	}
-	if len(outputs) == 0 {
-		return finish("failed", fmt.Errorf("%s %s built no product", action.Directory, action.Test))
+	// A product test that passed and used no buildcache product is stored too, with no outputs, so the next build
+	// knows it needs nothing rather than running it again.
+	outputs, files, err := OutputsOf(builder.Cache, products)
+	if err != nil {
+		return finish("failed", err)
 	}
-	result.Outputs = len(outputs)
+	result.Products, result.Outputs = len(products), len(outputs)
 	manifest, err := builder.Store.Upload(key, outputs, files)
 	result.Manifest = manifest
 	if err != nil {

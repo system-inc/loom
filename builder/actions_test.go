@@ -115,7 +115,7 @@ func TestWorkshopRunsProductTestsUnderTheGatesEnvironment(t *testing.T) {
 	store := newFakeStore()
 	var seen []string
 	builder := Builder{
-		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Key: func(Action) (string, error) { return keyOf("k"), nil },
+		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: t.TempDir(), Key: func(Action) (string, error) { return keyOf("k"), nil },
 		Run: func(_ Action, environment []string) ([]byte, error) {
 			seen = environment
 			return nil, nil
