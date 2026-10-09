@@ -46,6 +46,11 @@ type Options struct {
 	WireInterval time.Duration
 	// WireDrainTimeout bounds how long the end of a unit waits for the wire to take its events. Zero means 30 s.
 	WireDrainTimeout time.Duration
+	// Strict runs only structured test jobs (strict.go): a unit with argv, or anything a test job doesn't take, is
+	// refused before anything runs. The Codex pool's runners serve this way.
+	Strict bool
+	// Tree is where a test job's checkout is kept across units. Empty means DefaultTree.
+	Tree string
 }
 
 func (options Options) withDefaults() Options {
@@ -185,9 +190,19 @@ func (run *unitRun) execute(runContext context.Context) string {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
+	if run.options.Strict {
+		if err := checkStrict(run.unit); err != nil {
+			run.fail(protocol.PhaseStart, err)
+			return protocol.StatusBroken
+		}
+	}
 	if err := run.makeWorkspace(); err != nil {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
+	}
+	if run.unit.Test != nil {
+		// Outputs go up whatever the tests did, as for a command.
+		return worse(run.runTest(runContext), run.uploadOutputs(runContext))
 	}
 	if err := run.fetchInputs(runContext); err != nil {
 		run.fail(protocol.PhaseFetch, err)

@@ -73,41 +73,50 @@ func lookPath(name string, path string) (string, error) {
 	return "", fmt.Errorf("%s: not found in the unit's PATH", name)
 }
 
-// runCommand starts argv in its own process group and streams its output until it exits. At the timeout
-// the whole group gets SIGTERM, then SIGKILL after KillGrace; once the leader exits, whatever it left in
-// the group is killed too, so nothing the unit started outlives it. An error means the command never
-// started; everything after a start is in the exitOutcome and the events.
+// runCommand runs the unit's argv in the workspace (or its directory) and emits its exit event. An error means
+// the command never started; everything after a start is in the exitOutcome and the events.
 func (run *unitRun) runCommand(runContext context.Context) (exitOutcome, error) {
+	directory := filepath.Join(run.workspace, filepath.FromSlash(run.unit.Directory))
+	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+		return exitOutcome{}, fmt.Errorf("directory %q isn't a directory in the workspace", run.unit.Directory)
+	}
+	outcome, state, wall, err := run.stream(runContext, run.unit.Argv, run.environment(), directory, time.Duration(run.unit.TimeoutSeconds)*time.Second)
+	if err != nil {
+		return outcome, err
+	}
+	run.emitExit(outcome, state, wall)
+	return outcome, nil
+}
+
+// stream starts argv in its own process group and streams its output as events until it exits. At the timeout
+// the whole group gets SIGTERM, then SIGKILL after KillGrace; once the leader exits, whatever it left in the group
+// is killed too, so nothing it started outlives it. An error means the command never started.
+func (run *unitRun) stream(runContext context.Context, argv []string, environment []string, directory string, limit time.Duration) (exitOutcome, *os.ProcessState, time.Duration, error) {
 	var outcome exitOutcome
-	environment := run.environment()
 	path := ""
 	for _, variable := range environment {
 		if value, found := strings.CutPrefix(variable, "PATH="); found {
 			path = value
 		}
 	}
-	executable, err := lookPath(run.unit.Argv[0], path)
+	executable, err := lookPath(argv[0], path)
 	if err != nil {
-		return outcome, err
-	}
-	directory := filepath.Join(run.workspace, filepath.FromSlash(run.unit.Directory))
-	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
-		return outcome, fmt.Errorf("directory %q isn't a directory in the workspace", run.unit.Directory)
+		return outcome, nil, 0, err
 	}
 
 	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
-		return outcome, err
+		return outcome, nil, 0, err
 	}
 	stderrReader, stderrWriter, err := os.Pipe()
 	if err != nil {
 		stdoutReader.Close()
 		stdoutWriter.Close()
-		return outcome, err
+		return outcome, nil, 0, err
 	}
 	command := &exec.Cmd{
 		Path:        executable,
-		Args:        run.unit.Argv,
+		Args:        argv,
 		Env:         environment,
 		Dir:         directory,
 		Stdout:      stdoutWriter,
@@ -121,7 +130,7 @@ func (run *unitRun) runCommand(runContext context.Context) (exitOutcome, error) 
 	if err != nil {
 		stdoutReader.Close()
 		stderrReader.Close()
-		return outcome, err
+		return outcome, nil, 0, err
 	}
 	group := command.Process.Pid
 
@@ -142,7 +151,7 @@ func (run *unitRun) runCommand(runContext context.Context) (exitOutcome, error) 
 
 	waited := make(chan error, 1)
 	go func() { waited <- command.Wait() }()
-	timeout := time.NewTimer(time.Duration(run.unit.TimeoutSeconds) * time.Second)
+	timeout := time.NewTimer(limit)
 	defer timeout.Stop()
 	heartbeat := time.NewTicker(run.options.Heartbeat / 4)
 	defer heartbeat.Stop()
@@ -198,7 +207,7 @@ waiting:
 
 	state := command.ProcessState
 	if state == nil {
-		return outcome, fmt.Errorf("waiting for the command: %w", waitError)
+		return outcome, nil, wall, fmt.Errorf("waiting for the command: %w", waitError)
 	}
 	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
 		outcome.signal = signalName(status.Signal())
@@ -206,6 +215,11 @@ waiting:
 		code := state.ExitCode()
 		outcome.code = &code
 	}
+	return outcome, state, wall, nil
+}
+
+// emitExit emits the exit event for a command stream ran.
+func (run *unitRun) emitExit(outcome exitOutcome, state *os.ProcessState, wall time.Duration) {
 	run.emitter.emit(protocol.Event{
 		Type:          "exit",
 		Code:          outcome.code,
@@ -215,7 +229,6 @@ waiting:
 		UserSeconds:   seconds(state.UserTime()),
 		SystemSeconds: seconds(state.SystemTime()),
 	})
-	return outcome, nil
 }
 
 // signalGroup signals every process in the group. A group already gone is not an error.

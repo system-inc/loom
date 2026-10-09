@@ -1,0 +1,419 @@
+package runner
+
+import (
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"context"
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/system-inc/loom/protocol"
+)
+
+// prepareScript readies the checkout for a test job: the runner's own code, compiled in, never the server's.
+//
+//go:embed prepare.sh
+var prepareScript []byte
+
+// DefaultTree is where a test job's checkout lives: one per instance, kept across units, as the instance's opening
+// clones it.
+const DefaultTree = "/tmp/adamic"
+
+// testOutputs are the only outputs a test unit may declare: what runTest writes.
+var testOutputs = map[string]bool{"loom-out/test.jsonl.gz": true, "loom-out/cpu.tsv": true}
+
+// wasiPattern is a -run pattern naming only TestWASI or its shards, which run with the WASI SDK's clang first.
+var wasiPattern = regexp.MustCompile(`^\^\(TestWASI(Unit[0-9]+)?(\|TestWASI(Unit[0-9]+)?)*\)\$?$`)
+
+// checkStrict is what a strict runner (Options.Strict, the Codex pool's) refuses before anything runs: any unit but a
+// structured test job, so nothing the server sends is ever run as a command, and a test job that brings anything
+// beyond its fields. CheckUnit has already checked the job's fields.
+func checkStrict(unit protocol.Unit) error {
+	if unit.Test == nil {
+		return fmt.Errorf("refused: a strict runner runs only a structured test job, never argv or a shell string from the server")
+	}
+	if len(unit.Environment) > 0 {
+		return fmt.Errorf("refused: a test job's environment is the runner's to make, not the server's")
+	}
+	if len(unit.Inputs) > 0 || unit.Directory != "" {
+		return fmt.Errorf("refused: a test job takes no inputs or directory; the runner fetches its commit itself")
+	}
+	for _, output := range unit.Outputs {
+		if !testOutputs[output.Glob] {
+			return fmt.Errorf("refused: a test job's outputs are loom-out/test.jsonl.gz and loom-out/cpu.tsv, not %q", output.Glob)
+		}
+	}
+	return nil
+}
+
+// goTestArguments is the go test command for one package, built here from the job's fields: each pattern is one
+// argument (-run=<pattern>), never text a shell reads, and the package comes last, checked to be an import path.
+func goTestArguments(testPackage protocol.TestPackage) []string {
+	arguments := []string{"go", "test", "-count=1", "-json", "-timeout", "3h", "-run=" + testPackage.Run}
+	if testPackage.Skip != "" {
+		arguments = append(arguments, "-skip="+testPackage.Skip)
+	}
+	return append(arguments, testPackage.Package)
+}
+
+// goBuildArguments compiles the package's tests and runs none (-exec /bin/true), so cpu.tsv can say how much of the
+// package's time was its build.
+func goBuildArguments(testPackage protocol.TestPackage) []string {
+	return []string{"go", "test", "-count=1", "-exec", "/bin/true", "-run=" + testPackage.Run, testPackage.Package}
+}
+
+// runTest runs a test job: prepare.sh fetches the commit from the public repository and readies the checkout, then each
+// package's go test runs in it, as many at once as half the CPUs, each writing its go test -json lines to a part file.
+// The parts become loom-out/test.jsonl.gz, their CPU seconds loom-out/cpu.tsv. Failed: a package's go test failed or
+// the unit ran out of time. Broken: the job was refused, the instance couldn't be readied, or its disk filled.
+func (run *unitRun) runTest(runContext context.Context) string {
+	job := run.unit.Test
+	started := time.Now()
+	deadline := started.Add(time.Duration(run.unit.TimeoutSeconds) * time.Second)
+	tree := run.options.Tree
+	if tree == "" {
+		tree = DefaultTree
+	}
+	script := filepath.Join(run.directory, "prepare.sh")
+	environmentFile := filepath.Join(run.directory, "environment")
+	if err := os.WriteFile(script, prepareScript, 0o700); err != nil {
+		run.fail(protocol.PhaseStart, err)
+		return protocol.StatusBroken
+	}
+	// Only a strict runner's instance runs one unit at a time, so only there are earlier units' leavings no one's.
+	trim := "keep"
+	if run.options.Strict {
+		trim = "trim"
+	}
+	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim}, run.environment(), run.workspace, time.Until(deadline))
+	switch {
+	case err != nil:
+		run.fail(protocol.PhaseStart, err)
+		return protocol.StatusBroken
+	case prepared.interrupted:
+		run.fail(protocol.PhaseRun, fmt.Errorf("the runner was stopped while preparing the checkout"))
+		return protocol.StatusBroken
+	case prepared.code != nil && *prepared.code == 3:
+		run.fail(protocol.PhaseStart, fmt.Errorf("refused: the test job's commit isn't what the public repository holds (prepare.sh's output says why)"))
+		return protocol.StatusBroken
+	case prepared.timedOut || prepared.code == nil || *prepared.code != 0:
+		run.fail(protocol.PhaseStart, fmt.Errorf("preparing the checkout failed (%s): the instance's, never the change's", describeOutcome(prepared)))
+		return protocol.StatusBroken
+	}
+	environment, err := run.testEnvironment(environmentFile, job)
+	if err != nil {
+		run.fail(protocol.PhaseStart, err)
+		return protocol.StatusBroken
+	}
+	// A WASI spec on an instance without the WASI SDK's builtins would run every shard on the native clang, where each
+	// skips and the unit passes; the instance can't run it, so the unit is broken and placed again.
+	for _, testPackage := range job.Packages {
+		if wasiPattern.MatchString(testPackage.Run) {
+			if err := wasiReady(environment); err != nil {
+				run.fail(protocol.PhaseStart, err)
+				return protocol.StatusBroken
+			}
+			break
+		}
+	}
+	out := filepath.Join(run.workspace, "loom-out")
+	if err := os.MkdirAll(out, 0o755); err != nil {
+		run.fail(protocol.PhaseStart, err)
+		return protocol.StatusBroken
+	}
+
+	testContext, cancel := context.WithDeadline(runContext, deadline)
+	defer cancel()
+	results := make([]packageResult, len(job.Packages))
+	slots := make(chan struct{}, max(1, runtime.NumCPU()/2))
+	var group sync.WaitGroup
+	for index, testPackage := range job.Packages {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			results[index] = run.runPackage(testContext, testPackage, packageEnvironment(environment, testPackage), tree, filepath.Join(out, fmt.Sprintf("part-%d", index)))
+		}()
+	}
+	group.Wait()
+
+	status, code := protocol.StatusPassed, 0
+	var userSeconds, systemSeconds float64
+	var cpu bytes.Buffer
+	for index, result := range results {
+		testPackage := job.Packages[index]
+		userSeconds += result.userSeconds
+		systemSeconds += result.systemSeconds
+		fmt.Fprintf(&cpu, "%s\t%.2f\t%.2f\n", testPackage.Package, result.buildSeconds, result.testSeconds)
+		if result.err != nil {
+			run.fail(protocol.PhaseRun, fmt.Errorf("%s: %w", testPackage.Package, result.err))
+			status = worse(status, protocol.StatusBroken)
+			continue
+		}
+		if result.code != 0 {
+			code = 1
+			status = worse(status, protocol.StatusFailed)
+			run.say(fmt.Sprintf("%s exited %d", testPackage.Package, result.code))
+			for _, line := range lastLines(filepath.Join(out, fmt.Sprintf("part-%d.stderr", index)), 5) {
+				run.say("  " + line)
+			}
+		}
+	}
+	timedOut := runContext.Err() == nil && testContext.Err() != nil
+	if runContext.Err() != nil {
+		run.fail(protocol.PhaseRun, fmt.Errorf("the runner was stopped before the tests finished"))
+		status = protocol.StatusBroken
+	}
+	for _, failed := range failedTests(out, len(job.Packages)) {
+		run.say("failed " + failed)
+	}
+	if err := gatherParts(out, len(job.Packages)); err != nil {
+		run.fail(protocol.PhaseRun, err)
+		status = protocol.StatusBroken
+	}
+	if err := os.WriteFile(filepath.Join(out, "cpu.tsv"), cpu.Bytes(), 0o644); err != nil {
+		run.fail(protocol.PhaseRun, err)
+		status = protocol.StatusBroken
+	}
+	// A test that ran out of disk proved nothing about the change: broken, never failed.
+	if status == protocol.StatusFailed && diskFilled(out, len(job.Packages)) {
+		run.fail(protocol.PhaseRun, fmt.Errorf("the instance's disk filled during the tests (no space left on device): the instance's, not the change's"))
+		status = protocol.StatusBroken
+	}
+	run.emitter.emit(protocol.Event{Type: "exit", Code: &code, TimedOut: timedOut, WallSeconds: seconds(time.Since(started)),
+		UserSeconds: seconds(time.Duration(userSeconds * float64(time.Second))), SystemSeconds: seconds(time.Duration(systemSeconds * float64(time.Second)))})
+	if timedOut {
+		status = worse(status, protocol.StatusFailed)
+	}
+	return status
+}
+
+// say emits one line on the runner's own stream.
+func (run *unitRun) say(text string) {
+	run.emitter.emit(protocol.Event{Type: "output", Stream: "runner", Text: "loom-runner: " + text})
+}
+
+func describeOutcome(outcome exitOutcome) string {
+	switch {
+	case outcome.timedOut:
+		return "out of the unit's time"
+	case outcome.code != nil:
+		return fmt.Sprintf("exit %d", *outcome.code)
+	default:
+		return outcome.signal
+	}
+}
+
+// testEnvironment is what every package's go test runs in: prepare.sh's environment (adamic's own env.sh and the gate
+// inputs' variables on the runner's base), and the gate's switches, which the job's fields set and nothing else does.
+func (run *unitRun) testEnvironment(environmentFile string, job *protocol.TestJob) (map[string]string, error) {
+	content, err := os.ReadFile(environmentFile)
+	if err != nil {
+		return nil, fmt.Errorf("prepare.sh left no environment: %w", err)
+	}
+	environment := map[string]string{}
+	for _, variable := range bytes.Split(content, []byte{0}) {
+		if name, value, found := strings.Cut(string(variable), "="); found && name != "" {
+			environment[name] = value
+		}
+	}
+	for name, value := range map[string]string{"ADAMIC_GATE_UNCACHED": "1", "ADAMIC_TEST_WASI": "1", "ADAMIC_ORACLE_WASI": "1", "ADAMIC_GATE_COHERE": "1"} {
+		environment[name] = value
+	}
+	if job.Sample != "" {
+		environment["ADAMIC_GATE_SAMPLE"] = job.Sample
+	}
+	if len(job.ChangedPaths) > 0 {
+		changed := filepath.Join(run.directory, "changed-paths.txt")
+		if err := os.WriteFile(changed, []byte(strings.Join(job.ChangedPaths, "\n")+"\n"), 0o644); err != nil {
+			return nil, err
+		}
+		environment["ADAMIC_GATE_CHANGED"] = changed
+	}
+	return environment, nil
+}
+
+// packageEnvironment is the environment one package's go test runs in, as KEY=value lines: a TestWASI spec puts the
+// WASI SDK's clang first on PATH, as the gate's wasi phase does; every other test keeps the native clang.
+func packageEnvironment(environment map[string]string, testPackage protocol.TestPackage) []string {
+	result := make([]string, 0, len(environment))
+	for name, value := range environment {
+		if name == "PATH" && wasiPattern.MatchString(testPackage.Run) && environment["WASI_SYSROOT"] != "" {
+			value = strings.TrimSuffix(environment["WASI_SYSROOT"], "/share/wasi-sysroot") + "/bin:" + value
+		}
+		result = append(result, name+"="+value)
+	}
+	return result
+}
+
+// wasiReady checks that the WASI SDK's clang names a compiler-rt builtins library for wasm32 that exists.
+func wasiReady(environment map[string]string) error {
+	sysroot := environment["WASI_SYSROOT"]
+	if sysroot == "" {
+		return fmt.Errorf("a WASI spec on an instance without the WASI SDK (WASI_SYSROOT unset): the instance's, not the change's")
+	}
+	clang := strings.TrimSuffix(sysroot, "/share/wasi-sysroot") + "/bin/clang"
+	named, err := exec.Command(clang, "--target=wasm32-unknown-wasi", "-rtlib=compiler-rt", "-print-libgcc-file-name").Output()
+	builtins := strings.TrimSpace(string(named))
+	if _, statError := os.Stat(builtins); err != nil || builtins == "" || statError != nil {
+		return fmt.Errorf("a WASI spec on an instance without the WASI SDK's builtins (%s names %q): the instance's, not the change's", clang, builtins)
+	}
+	return nil
+}
+
+// A packageResult is how one package's go test ended.
+type packageResult struct {
+	code                       int
+	buildSeconds, testSeconds  float64
+	userSeconds, systemSeconds float64
+	err                        error // the runner couldn't run it at all
+}
+
+// runPackage compiles the package's tests, then runs them, go test's -json lines to <part>.jsonl and its stderr to
+// <part>.stderr. Past the context's deadline the process group gets SIGTERM, then SIGKILL after KillGrace.
+func (run *unitRun) runPackage(testContext context.Context, testPackage protocol.TestPackage, environment []string, tree string, part string) packageResult {
+	var result packageResult
+	build, err := run.goCommand(testContext, goBuildArguments(testPackage), environment, tree, io.Discard, io.Discard)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	result.buildSeconds = build.UserTime().Seconds() + build.SystemTime().Seconds()
+	stdout, err := os.Create(part + ".jsonl")
+	if err != nil {
+		result.err = err
+		return result
+	}
+	defer stdout.Close()
+	stderr, err := os.Create(part + ".stderr")
+	if err != nil {
+		result.err = err
+		return result
+	}
+	defer stderr.Close()
+	tested, err := run.goCommand(testContext, goTestArguments(testPackage), environment, tree, stdout, stderr)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	result.testSeconds = tested.UserTime().Seconds() + tested.SystemTime().Seconds()
+	result.userSeconds = build.UserTime().Seconds() + tested.UserTime().Seconds()
+	result.systemSeconds = build.SystemTime().Seconds() + tested.SystemTime().Seconds()
+	result.code = tested.ExitCode()
+	if result.code < 0 {
+		result.code = 1 // killed by a signal: at the deadline, or by the runner's stop
+	}
+	return result
+}
+
+// goCommand runs argv (go, from the environment's PATH) in its own process group in directory and waits for it.
+func (run *unitRun) goCommand(commandContext context.Context, argv []string, environment []string, directory string, stdout io.Writer, stderr io.Writer) (*os.ProcessState, error) {
+	path := ""
+	for _, variable := range environment {
+		if value, found := strings.CutPrefix(variable, "PATH="); found {
+			path = value
+		}
+	}
+	executable, err := lookPath(argv[0], path)
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(commandContext, executable, argv[1:]...)
+	command.Args[0] = argv[0]
+	command.Env, command.Dir, command.Stdout, command.Stderr = environment, directory, stdout, stderr
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGTERM) }
+	command.WaitDelay = run.options.KillGrace
+	if err := command.Start(); err != nil {
+		return nil, err
+	}
+	command.Wait()
+	signalGroup(command.Process.Pid, syscall.SIGKILL)
+	return command.ProcessState, nil
+}
+
+// gatherParts writes every part's go test lines, in package order, to test.jsonl.gz.
+func gatherParts(out string, parts int) error {
+	file, err := os.Create(filepath.Join(out, "test.jsonl.gz"))
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	compressed, _ := gzip.NewWriterLevel(file, gzip.BestCompression)
+	for index := range parts {
+		part, err := os.Open(filepath.Join(out, fmt.Sprintf("part-%d.jsonl", index)))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(compressed, part)
+		part.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return compressed.Close()
+}
+
+// failedTests names each top-level test the parts saw fail, as "<package> <test>".
+func failedTests(out string, parts int) []string {
+	var failed []string
+	seen := map[string]bool{}
+	for index := range parts {
+		file, err := os.Open(filepath.Join(out, fmt.Sprintf("part-%d.jsonl", index)))
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 1<<20), 16<<20)
+		for scanner.Scan() {
+			var event struct{ Action, Package, Test string }
+			if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Action == "fail" && event.Test != "" && !strings.Contains(event.Test, "/") {
+				if name := event.Package + " " + event.Test; !seen[name] {
+					seen[name] = true
+					failed = append(failed, name)
+				}
+			}
+		}
+		file.Close()
+	}
+	return failed
+}
+
+// diskFilled says whether a package ran out of disk: its output says so, or the disk is still nearly full.
+func diskFilled(out string, parts int) bool {
+	for index := range parts {
+		for _, suffix := range []string{".jsonl", ".stderr"} {
+			if content, err := os.ReadFile(filepath.Join(out, fmt.Sprintf("part-%d%s", index, suffix))); err == nil && bytes.Contains(content, []byte("no space left on device")) {
+				return true
+			}
+		}
+	}
+	var stat syscall.Statfs_t
+	return syscall.Statfs(out, &stat) == nil && stat.Bavail*uint64(stat.Bsize) < 512<<20
+}
+
+// lastLines is a file's last n lines.
+func lastLines(path string, n int) []string {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(string(content), "\n"), "\n")
+	return lines[max(0, len(lines)-n):]
+}

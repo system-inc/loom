@@ -2,11 +2,12 @@
 // each. It exits 0 when the unit passed, 1 when it failed and 2 when it is broken or couldn't be read.
 //
 //	loom-runner run [--workspace <directory>] [--keep] <unit.json | https URL | ->
-//	loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--workspace <directory>] [--log <file>]
+//	loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--strict] [--tree <directory>] [--workspace <directory>] [--log <file>]
 //	loom-runner version
 //
 // serve asks a pool for units and runs them until its deadline, each unit posting its own events to the
-// wire. Its events go to --log, never stdout: it prints one summary line when it ends, since that line is
+// wire. With --strict (the Codex pool's) it runs only structured test jobs and refuses every other unit before
+// anything runs (README.md, "What a strict worker does"). Its events go to --log, never stdout: it prints one summary line when it ends, since that line is
 // all a Codex turn should show. It exits 0 at the deadline or on SIGTERM, and 2 when the pool refuses it.
 package main
 
@@ -26,7 +27,7 @@ import (
 
 const usage = `usage:
   loom-runner run [--workspace <directory>] [--keep] <unit.json | https URL | ->
-  loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--workspace <directory>] [--log <file>]
+  loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--strict] [--tree <directory>] [--workspace <directory>] [--log <file>]
   loom-runner version
 `
 
@@ -100,6 +101,8 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	until := flags.Duration("until", 0, "how long to serve; no unit is taken in its last minute")
 	workspace := flags.String("workspace", "", "where to make each unit's workspace (default $TMPDIR)")
 	logPath := flags.String("log", "", "append every unit's events here, one JSON line each (default nowhere)")
+	strict := flags.Bool("strict", false, "run only structured test jobs of the public adamic repository; refuse argv")
+	tree := flags.String("tree", runner.DefaultTree, "where a test job's checkout is kept across units")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -124,7 +127,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Token:    *token,
 		Worker:   *worker,
 		Deadline: time.Now().Add(*until),
-		Unit:     runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr},
+		Unit:     runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr, Strict: *strict, Tree: *tree},
 		Report:   stderr,
 	})
 	fmt.Fprintln(stdout, summary)
