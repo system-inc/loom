@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -99,5 +101,77 @@ func TestAWholeGateOnAnyBoxIsReadFromItsClaim(t *testing.T) {
 	reader.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
 	if line := lineOn("threadripper"); line != nil {
 		t.Fatalf("a dead claim still shows %+v", line)
+	}
+}
+
+// Home runs the whole gate's loop and fast gates beside it: a fast gate there reads its own step and how long ago it
+// last wrote (Oct 9: 14383e9d ran 3 hours on Home slot 1 and the board said "starting", since Home was asked about
+// its whole gate only).
+func TestAFastGateOnHomeReadsItsStepAndItsAge(t *testing.T) {
+	state := t.TempDir()
+	os.MkdirAll(filepath.Join(state, "running"), 0o755)
+	os.WriteFile(filepath.Join(state, "slots"), []byte("home B\n"), 0o644)
+	os.WriteFile(filepath.Join(state, "running", "3"), []byte("cloud/land-x 14383e9d94a34563fbca B home B\n"), 0o644)
+	reader := NewReader(state, t.TempDir())
+	reader.Run = func(_ context.Context, box string, _ string, arguments ...string) (string, error) {
+		output := "cores|64\n"
+		if box == "home" && len(arguments) > 0 && arguments[0] == "full" {
+			output += "full|aaaaaaaaaaaa-20261009T000000Z|no|green: full gate of aaaaaaaaaaaa|tests-1.stderr|900\n"
+		}
+		for _, argument := range arguments {
+			if argument == "14383e9d94a3" {
+				output += "gate|14383e9d94a3|1|running: fast gate of 9a338e03|test.jsonl|11040\n"
+			}
+		}
+		return output, nil
+	}
+	for _, machine := range reader.Read(context.Background()).Machines {
+		for _, line := range machine.Lines {
+			if machine.Name == "home" && line.Slot == 1 {
+				if line.Kind != "fast" || line.Step != "tests 3h04m ago" || line.State != "gating" {
+					t.Fatalf("home slot 1: %+v", line)
+				}
+				return
+			}
+		}
+	}
+	t.Fatal("no home slot 1")
+}
+
+// The box script itself, on this machine against a ~/fast-gate made here: a fast gate's slot, status, newest file and
+// its age, and with "full" first the shas after it still answered.
+func TestTheBoxScriptReportsEachGateWithItsAge(t *testing.T) {
+	home := t.TempDir()
+	run := filepath.Join(home, "fast-gate", "out", "0123456789ab-20261009T000000Z")
+	os.MkdirAll(run, 0o755)
+	os.WriteFile(filepath.Join(run, "box.txt"), []byte("home slot=2\n"), 0o644)
+	os.WriteFile(filepath.Join(run, "status.txt"), []byte("running: fast gate of 0123456789ab\n"), 0o644)
+	os.WriteFile(filepath.Join(run, "test.jsonl"), []byte("{}\n"), 0o644)
+	old := time.Now().Add(-125 * time.Second)
+	os.Chtimes(filepath.Join(run, "test.jsonl"), old, old)
+	command := exec.Command("bash", "-c", boxScript, "gate-lines", "full", "0123456789ab", "ffffffffffff")
+	command.Env = append(os.Environ(), "HOME="+home)
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gate, missing string
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "gate|0123456789ab|") {
+			gate = line
+		}
+		if strings.HasPrefix(line, "gate|ffffffffffff|") {
+			missing = line
+		}
+	}
+	fields := strings.Split(gate, "|")
+	if len(fields) != 6 || fields[2] != "2" || fields[4] != "test.jsonl" || fields[3] != "running: fast gate of 0123456789ab" {
+		t.Fatalf("the gate's line: %q in %q", gate, output)
+	}
+	if age, _ := strconv.Atoi(fields[5]); age < 120 || age > 140 {
+		t.Fatalf("its age: %q", fields[5])
+	}
+	if len(strings.Split(missing, "|")) != 6 {
+		t.Fatalf("a sha with no run: %q", missing)
 	}
 }

@@ -7,6 +7,7 @@ package gatelines
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path"
@@ -201,19 +202,24 @@ func starred(branch string, globs []string) bool {
 	return false
 }
 
-// boxScript reports, for each 12-character sha given, its newest run directory's status line, slot and the
-// file most recently written there. With "full" first it reports the whole gate's newest run instead.
+// boxScript reports, for each 12-character sha given, its newest run directory's status line, slot, the file most
+// recently written there and how many seconds ago it was written (the box's own clock, so no skew). With "full" first
+// it reports the whole gate's newest run too, then the shas after it: Home runs the whole gate's loop and fast gates
+// beside it (Oct 9: a fast gate on Home slot 1 read "starting" for 3 hours, because Home was asked about its whole
+// gate only).
 const boxScript = `cores=$(nproc --all 2>/dev/null || sysctl -n hw.ncpu)
 echo "cores|${cores}"
+age() { local m; [ -e "$1" ] && m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null) && echo $(( $(date +%s) - m )); }
 if [ "${1:-}" = full ]; then
+  shift
   d=$(ls -td ~/full-gate/out/*/ 2>/dev/null | head -1)
-  [ -n "${d}" ] || exit 0
-  d=${d%/}
-  name=$(basename "${d}")
-  running=no; tmux has-session -t "full-${name%%-*}" 2>/dev/null && running=yes
-  newest=$(ls -t "${d}" | grep -vE '^(status.txt|full.json|driver.log|run.sh)$' | head -1)
-  echo "full|${name}|${running}|$(head -1 "${d}/status.txt" 2>/dev/null)|${newest}"
-  exit 0
+  if [ -n "${d}" ]; then
+    d=${d%/}
+    name=$(basename "${d}")
+    running=no; tmux has-session -t "full-${name%%-*}" 2>/dev/null && running=yes
+    newest=$(ls -t "${d}" | grep -vE '^(status.txt|full.json|driver.log|run.sh)$' | head -1)
+    echo "full|${name}|${running}|$(head -1 "${d}/status.txt" 2>/dev/null)|${newest}|$([ -n "${newest}" ] && age "${d}/${newest}")"
+  fi
 fi
 for s in "$@"; do
   d=$(ls -td ~/fast-gate/out/${s}-*/ 2>/dev/null | head -1)
@@ -221,7 +227,7 @@ for s in "$@"; do
   d=${d%/}
   slot=$(grep -o 'slot=[0-9]*' "${d}/box.txt" 2>/dev/null | cut -d= -f2)
   newest=$(ls -t "${d}" | grep -vE '^(status.txt|box.txt|fast.json|changed-paths.txt)$' | head -1)
-  echo "gate|${s}|${slot}|$(head -1 "${d}/status.txt" 2>/dev/null)|${newest}"
+  echo "gate|${s}|${slot}|$(head -1 "${d}/status.txt" 2>/dev/null)|${newest}|$([ -n "${newest}" ] && age "${d}/${newest}")"
 done
 `
 
@@ -242,6 +248,24 @@ func stepOf(file string) string {
 	stem := strings.TrimSuffix(strings.TrimSuffix(file, ".log"), ".stderr")
 	stem, _, _ = strings.Cut(stem, "-")
 	return stem
+}
+
+// stepAt is the step behind the newest file and how long ago the gate wrote it, so a step that has gone quiet shows
+// its age: "tests 14s ago", "products 3h04m ago".
+func stepAt(file string, age string) string {
+	step := stepOf(file)
+	seconds, err := strconv.Atoi(strings.TrimSpace(age))
+	if file == "" || err != nil || seconds < 0 {
+		return step
+	}
+	elapsed := time.Duration(seconds) * time.Second
+	switch {
+	case elapsed < time.Minute:
+		return fmt.Sprintf("%s %ds ago", step, seconds)
+	case elapsed < time.Hour:
+		return fmt.Sprintf("%s %dm ago", step, seconds/60)
+	}
+	return fmt.Sprintf("%s %dh%02dm ago", step, seconds/3600, seconds%3600/60)
 }
 
 // stateOf reads a status line: green, red, crash (void, or a box that lacked a tool), or gating.
@@ -300,15 +324,14 @@ func (reader *Reader) Read(readContext context.Context) Lines {
 			var arguments []string
 			if _, whole := held[box.Name]; whole || box.Name == "home" {
 				arguments = append(arguments, "full")
-			} else {
-				for _, found := range byBox[box.Name] {
-					arguments = append(arguments, found.sha[:min(12, len(found.sha))])
-				}
-				// A gate that ended lately is asked about too, for its final verdict.
-				for key, ended := range reader.ended {
-					if strings.HasPrefix(key, box.Name+" ") && now.Sub(ended.at) < reader.Linger {
-						arguments = append(arguments, ended.line.Sha)
-					}
+			}
+			for _, found := range byBox[box.Name] {
+				arguments = append(arguments, found.sha[:min(12, len(found.sha))])
+			}
+			// A gate that ended lately is asked about too, for its final verdict.
+			for key, ended := range reader.ended {
+				if strings.HasPrefix(key, box.Name+" ") && now.Sub(ended.at) < reader.Linger && ended.line.Kind == "fast" {
+					arguments = append(arguments, ended.line.Sha)
 				}
 			}
 			output, err := reader.Run(callContext, box.Name, boxScript, arguments...)
@@ -323,16 +346,20 @@ func (reader *Reader) Read(readContext context.Context) Lines {
 		if machine.Aliases == nil {
 			machine.Aliases = []string{}
 		}
-		statuses := map[string][3]string{} // sha12 to slot, status, newest file
+		statuses := map[string][4]string{} // sha12 to slot, status, newest file, its age in seconds
 		var full []string
 		for _, line := range strings.Split(reports[index].output, "\n") {
 			fields := strings.Split(line, "|")
+			// A box still on the script before the age was added reports one field fewer.
+			if (fields[0] == "gate" || fields[0] == "full") && len(fields) == 5 {
+				fields = append(fields, "")
+			}
 			switch {
 			case len(fields) == 2 && fields[0] == "cores":
 				reader.cores[box.Name], _ = strconv.Atoi(fields[1])
-			case len(fields) == 5 && fields[0] == "gate":
-				statuses[fields[1]] = [3]string{fields[2], fields[3], fields[4]}
-			case len(fields) == 5 && fields[0] == "full":
+			case len(fields) == 6 && fields[0] == "gate":
+				statuses[fields[1]] = [4]string{fields[2], fields[3], fields[4], fields[5]}
+			case len(fields) == 6 && fields[0] == "full":
 				full = fields[1:]
 			}
 		}
@@ -376,7 +403,7 @@ func (reader *Reader) Read(readContext context.Context) Lines {
 			}
 			since := found.since.UTC().Format(time.RFC3339)
 			line := Line{Slot: slot, Class: found.class, State: stateOf(status[1]), Kind: "fast", Branch: found.branch, Sha: short,
-				Step: stepOf(status[2]), Since: &since, Star: starred(found.branch, globs), Detail: status[1]}
+				Step: stepAt(status[2], status[3]), Since: &since, Star: starred(found.branch, globs), Detail: status[1]}
 			if line.State == "gating" {
 				line.Detail = ""
 			}
@@ -385,8 +412,8 @@ func (reader *Reader) Read(readContext context.Context) Lines {
 				classes[slot] = found.slotClass
 			}
 		}
-		if len(full) == 4 {
-			line := Line{Slot: 1, Class: "whole", Kind: "full", Branch: "main", State: stateOf(full[2]), Step: stepOf(full[3]), Detail: full[2]}
+		if len(full) == 5 {
+			line := Line{Slot: 1, Class: "whole", Kind: "full", Branch: "main", State: stateOf(full[2]), Step: stepAt(full[3], full[4]), Detail: full[2]}
 			line.Sha, _, _ = strings.Cut(full[0], "-")
 			if claimed, whole := held[box.Name]; whole {
 				at := claimed.UTC().Format(time.RFC3339)
