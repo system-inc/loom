@@ -237,7 +237,65 @@ send "${work}/build-message.txt"
 # Then the tests' whole red list.
 wait "${coordinator}"
 python3 -c "import json,sys; j=json.load(open(sys.argv[1])); j['units']=[u for u in j['units'] if u['id']!='build-vet']; json.dump(j,open(sys.argv[2],'w'))" "${work}/job.json" "${work}/tests-only.json"
-"${planner}" reds --job "${work}/tests-only.json" --record "${work}/record.jsonl" --tests "${work}/test.jsonl" > "${work}/reds.txt" 2>&1
+# Weather is absorbed at the unit (#98cgqyc; @system_adamic, Oct 9 11:21Z: a unit's infra break never voids its job).
+# A unit that broke for Loom's own reasons (exit 2, no results, killed in its opening) or was killed at its budget
+# without a failing test proved nothing about the change: it is placed again in a run of its own, up to two more
+# times, and the red list reads it from its last run while every other unit keeps its verdict. Broken all three
+# times, the job is void and the red list names the unit and the workers it broke on. (The pool can't exclude a
+# worker, so "again" means another placement, almost always on another of the pool's instances.)
+reruns=()
+for round in 1 2; do
+	"${planner}" reds --job "${work}/tests-only.json" --record "${work}/record.jsonl" ${reruns[@]+"${reruns[@]}"} > "${work}/reds-round-${round}.txt" 2>&1
+	again=$(python3 - "${work}/reds-round-${round}.txt" <<'PY'
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+weather = {re.match(r"BROKEN ([^ :]+):", line).group(1) for line in lines if re.match(r"BROKEN [^ :]+: (exited 2, Loom|no results|killed in its opening)", line)}
+killed = {line.split()[1].rstrip(":") for line in lines if line.startswith("KILLED ")}
+# A unit with a test that failed by name is red on that test, never weather.
+named = {match.group(1) for line in lines for match in [re.match(r"FAIL github\.com/\S+ \S+ \(([^)]+)\)", line)] if match}
+print(" ".join(sorted(weather | (killed - named))))
+PY
+)
+	[ -n "${again}" ] || break
+	python3 - "${work}/tests-only.json" "${work}/again-${round}.json" "${round}" ${again} <<'PY'
+import json, sys
+job, round, keep = json.load(open(sys.argv[1])), sys.argv[3], set(sys.argv[4:])
+job["name"] += "-again"
+job["units"] = [unit for unit in job["units"] if unit["id"] in keep]
+for unit in job["units"]:
+    # The unit knows it was placed again (and which round), for its log and for a planted proof's unit.
+    unit.setdefault("environment", {})["LOOM_AGAIN"] = round
+    unit["needs"] = [need for need in unit.get("needs") or [] if need in keep]
+    if not unit["needs"]:
+        unit.pop("needs", None)
+json.dump(job, open(sys.argv[2], "w"))
+PY
+	echo "again, round ${round}: ${again}" >> "${work}/run.log"
+	count=$(echo ${again} | wc -w | tr -d ' ')
+	"${loom}" run --uncached --slots none --pool "${pool}=${count}" --priority "${LOOM_PRIORITY:-0}" --record "${work}/again-${round}-record.jsonl" "${work}/again-${round}.json" >> "${work}/run.log" 2>&1
+	reruns+=(--rerun "${work}/again-${round}.json:${work}/again-${round}-record.jsonl")
+done
+"${planner}" reds --job "${work}/tests-only.json" --record "${work}/record.jsonl" ${reruns[@]+"${reruns[@]}"} --tests "${work}/test.jsonl" > "${work}/reds.txt" 2>&1
+status=$?
+# A unit still broken after its placements names the workers it broke on, so a void points at the unit, not the pool.
+python3 - "${work}" >> "${work}/reds.txt" <<'PY'
+import glob, json, os, re, sys
+work = sys.argv[1]
+broken = [re.match(r"BROKEN ([^ :]+):", line).group(1) for line in open(os.path.join(work, "reds.txt")) if re.match(r"BROKEN [^ :]+:", line)]
+machines = {}
+for path in [os.path.join(work, "record.jsonl")] + sorted(glob.glob(os.path.join(work, "again-*-record.jsonl"))):
+    for line in open(path) if os.path.exists(path) else []:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        event = event.get("event", event)
+        if event.get("type") == "started" and event.get("unit") in broken:
+            machines.setdefault(event["unit"], []).append(event.get("machine", "?"))
+for unit in broken:
+    print("BROKEN %s on %d placements, workers: %s" % (unit, len(machines.get(unit, [])), ", ".join(machines.get(unit, [])) or "none started"))
+PY
+(exit "${status}")
 echo $? > "${work}/reds.exit"
 # A unit that passed having run none of a family it requested proved nothing: it is red, "requested tests ran: 0"
 # (@system_adamic, Oct 9 11:01Z: a void is never a pass). zerorun.py checks every passed unit's named specs against

@@ -45,6 +45,14 @@ for file in "${snapshot}"/*; do
 	cp -p "${file}" "${bin}/${name}.promote-$$" && mv "${bin}/${name}.promote-$$" "${bin}/${name}" && echo "promote: ${name} installed"
 done
 echo "${hash} $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${bin}/.promoted"
+# LOOM_PROMOTE_RESTART=0 installs without restarting the server, so jobs mid-run keep their progress: verify.sh and
+# the tools it starts take effect at each job's next attempt, while fast.sh's own changes wait for the restart, which
+# promote.sh run again (with the default) does and confirms. Until then .promoted says the restart is owed.
+if [ "${LOOM_PROMOTE_RESTART:-1}" = 0 ]; then
+	echo "${hash} $(date -u +%Y-%m-%dT%H:%M:%SZ) restart owed" > "${bin}/.promoted"
+	echo "promote: installed; the fast server keeps its old fast.sh until promote.sh runs again to restart it"
+	exit 0
+fi
 # The server: unloaded (KeepAlive would start a new one beside the dying), waited out, then loaded again, so its own
 # startup check never sees the old processes. A --once job runs in its own process group and is left alone.
 plist=${HOME}/Library/LaunchAgents/com.loom.fast.plist
