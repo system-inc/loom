@@ -70,6 +70,25 @@ else
 fi
 goset=$!
 "${loom}" run --uncached --slots none --pool codex=40 --priority "${LOOM_PRIORITY}" --record "${work}/phases-record.jsonl" "${work}/phases.json" > "${work}/phases.log" 2>&1
+# A phase unit broken for Loom's own reasons (exit 2: a full disk, a failed tools checkout; or never finished) is placed
+# once more, as pregate.sh does for the Go set (#2wafg5y: main b524594354a2's record went void on two wasi units whose
+# instances filled their disk). publish.sh takes the -again run's units in place of the first attempts.
+phasesAgain=()
+rm -f "${work}/phases-again.json" "${work}/phases-again-record.jsonl"
+"${planner}" reds --job "${work}/phases.json" --record "${work}/phases-record.jsonl" > "${work}/phases-first-reds.txt" 2>&1
+again=() && while read -r unit; do again+=("${unit}"); done < <(grep -E '^BROKEN [^ ]+: (the stage broke \(exited true, code 2|the stage broke \(exited false|no results)' "${work}/phases-first-reds.txt" | awk '{print $2}' | tr -d :)
+if [ ${#again[@]} -gt 0 ]; then
+	python3 - "${work}/phases.json" "${work}/phases-again.json" "${again[@]}" <<'PYTHON'
+import json, sys
+job, keep = json.load(open(sys.argv[1])), set(sys.argv[3:])
+job["name"] += "-again"
+job["units"] = [unit for unit in job["units"] if unit["id"] in keep]
+json.dump(job, open(sys.argv[2], "w"))
+PYTHON
+	log "phases placed again: ${again[*]}"
+	"${loom}" run --uncached --slots none --pool "codex=${#again[@]}" --priority "${LOOM_PRIORITY}" --record "${work}/phases-again-record.jsonl" "${work}/phases-again.json" >> "${work}/phases.log" 2>&1
+	phasesAgain=("${work}/phases-again.json" "${work}/phases-again-record.jsonl")
+fi
 wait "${goset}"
 
 # The census over the merged go test lines, by hash from the public store.
@@ -97,7 +116,7 @@ job = json.load(sys.stdin); job['name'] = 'adamic-gate-census'; json.dump(job, o
 again=()
 [ -s "${pregate}/${sha}.again-record.jsonl" ] && again=("${pregate}/${sha}.again.json" "${pregate}/${sha}.again-record.jsonl")
 "${bin}/publish.sh" "${sha}" "${tools}" "${pregate}/${sha}.job.json" "${pregate}/${sha}.record.jsonl" ${again[@]+"${again[@]}"} \
-	"${work}/phases.json" "${work}/phases-record.jsonl" "${work}/census.json" "${work}/census-record.jsonl" > "${work}/publish.log" 2>&1
+	"${work}/phases.json" "${work}/phases-record.jsonl" ${phasesAgain[@]+"${phasesAgain[@]}"} "${work}/census.json" "${work}/census-record.jsonl" > "${work}/publish.log" 2>&1
 log "$(tail -1 "${work}/publish.log" | cut -c1-200) (wall $(( $(date +%s) - $(date -j -u -f %Y%m%dT%H%M%SZ "${started}" +%s) )) s)"
 git -C "${gate}" worktree remove --force "${work}/tree" 2> /dev/null
 git -C "${gate}" worktree remove --force "${work}/tools" 2> /dev/null
