@@ -95,9 +95,11 @@ for member in json.load(sys.stdin):
 		# Codex words its refusal many ways ("approval review rejected", "the prior automatic approval rejection still
 		# applies", "approval review's rejection remains unresolved"; Oct 9 17:08Z, three members re-sent and refused
 		# again), and a worker the pool retired by name is refused with 403 on every turn. Each resend spends a turn, on an
-		# account whose ceiling is shared, so either leaves the member alone.
+		# account whose ceiling is shared, so either leaves the member alone. By 20:20Z the wording had moved on ("automatic
+		# approval review blocked this worker", "I can't execute a worker that accepts unspecified remote jobs", "I haven't
+		# run it"): all 29 members re-sent between 19:50 and 20:25Z had refused, each re-sent about every 5 minutes.
 		summary=$(./node_modules/.bin/ahra ai summary "${id}" 2> /dev/null)
-		if grep -qiE "approval.{0,20}reject|is retired from this pool" <<< "${summary}"; then
+		if grep -qiE "approval.{0,20}reject|approval review|can.t (execute|run)|(has|was|did) not run|(hasn|wasn|haven).t run|no command (was )?ran|is retired from this pool" <<< "${summary}"; then
 			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: left alone, $(grep -qi "is retired from this pool" <<< "${summary}" && echo "the pool retired its worker" || echo "Codex's approval review rejected the runner")"
 			continue
 		fi
