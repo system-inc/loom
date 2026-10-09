@@ -22,7 +22,7 @@ type Finding struct {
 	UnitKey string `json:"unitKey,omitempty"`
 	Package string `json:"package"`
 	Path    string `json:"path"`
-	Sha256  string `json:"sha256"`
+	Sha256  string `json:"sha256"` // a gitlink's is its recorded commit
 }
 
 // traceCall is one strace-format syscall line: an optional pid ("123 " or "[pid 123] "), the call, its arguments and
@@ -164,6 +164,10 @@ func CheckReads(tree, gateTools string, unit Unit, compilerPackages []string, tr
 	for _, file := range strings.Split(strings.TrimSuffix(string(listing), "\x00"), "\x00") {
 		tracked[file] = true
 	}
+	gitlinks, err := Gitlinks(tree)
+	if err != nil {
+		return nil, err
+	}
 	root, err := filepath.EvalSymlinks(tree)
 	if err != nil {
 		return nil, err
@@ -172,16 +176,32 @@ func CheckReads(tree, gateTools string, unit Unit, compilerPackages []string, tr
 	seen := map[string]bool{}
 	for _, path := range traced {
 		relative, ok := inTree(root, tree, path)
-		if !ok || !tracked[relative] || declared[relative] || seen[relative] {
+		if !ok || declared[relative] {
+			continue
+		}
+		// A read inside a submodule that no closure holds reads the gitlink: the submodule at its recorded commit is
+		// what a reads line can declare.
+		for gitlink := range gitlinks {
+			if strings.HasPrefix(relative, gitlink+"/") {
+				relative = gitlink
+			}
+		}
+		if !tracked[relative] || declared[relative] || seen[relative] {
 			continue
 		}
 		seen[relative] = true
-		content, err := os.ReadFile(filepath.Join(tree, filepath.FromSlash(relative)))
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", relative, err)
+		digest := ""
+		if commit, found := gitlinks[relative]; found {
+			digest = commit
+		} else {
+			content, err := os.ReadFile(filepath.Join(tree, filepath.FromSlash(relative)))
+			if err != nil {
+				return nil, fmt.Errorf("read %s: %w", relative, err)
+			}
+			sum := sha256.Sum256(content)
+			digest = hex.EncodeToString(sum[:])
 		}
-		sum := sha256.Sum256(content)
-		findings = append(findings, Finding{Package: unit.Package, Path: relative, Sha256: hex.EncodeToString(sum[:])})
+		findings = append(findings, Finding{Package: unit.Package, Path: relative, Sha256: digest})
 	}
 	sort.Slice(findings, func(left, right int) bool { return findings[left].Path < findings[right].Path })
 	return findings, nil

@@ -63,14 +63,15 @@ func readCheckFixture(t *testing.T, executors string) (tree, gateTools string) {
 
 func findingPaths(t *testing.T, tree, gateTools string, compilers []string, traced []string) []string {
 	t.Helper()
-	unit := Unit{Kind: "test", Package: "example.com/readcheck/p", Directory: "p"}
+	unit := Unit{Kind: "test", Package: packageOf(t, tree), Directory: "p"}
 	findings, err := CheckReads(tree, gateTools, unit, compilers, traced)
 	if err != nil {
 		t.Fatal(err)
 	}
 	paths := []string{}
 	for _, finding := range findings {
-		if !Sha256Hex(finding.Sha256) || finding.Package != unit.Package {
+		// A file's is its sha256; a gitlink's, its recorded commit.
+		if !(Sha256Hex(finding.Sha256) || len(finding.Sha256) == 40 && Sha256Hex(finding.Sha256+strings.Repeat("0", 24))) || finding.Package != unit.Package {
 			t.Errorf("finding %+v lacks its content hash or package", finding)
 		}
 		paths = append(paths, finding.Path)
@@ -109,4 +110,61 @@ func TestCheckReadsFindsOnlyReadsOutsideTheDeclaredInputs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A submodule is read as its gitlink: a reads line naming the gitlink hashes its recorded commit (not the directory),
+// a read inside it with that line is declared, without it is a finding on the gitlink, and a closure file inside it
+// stays declared by its closure either way.
+func TestASubmoduleIsReadAsItsGitlink(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "always")
+	root := t.TempDir()
+	git := func(directory string, arguments ...string) {
+		t.Helper()
+		if output, err := exec.Command("git", append([]string{"-C", directory, "-c", "user.name=t", "-c", "user.email=t@t"}, arguments...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", arguments, err, output)
+		}
+	}
+	sub, tree, gateTools := filepath.Join(root, "sub"), filepath.Join(root, "tree"), filepath.Join(root, "tools")
+	writeFiles(t, sub, map[string]string{"go.mod": "module example.com/shim\n\ngo 1.22\n", "shim.go": "package shim\n", "data.txt": "data\n"})
+	git(root, "init", "-q", sub)
+	git(sub, "add", ".")
+	git(sub, "commit", "-q", "-m", "one")
+	writeFiles(t, tree, map[string]string{
+		"go.mod":      "module example.com/gitlink\n\ngo 1.22\n\nrequire example.com/shim v0.0.0\n\nreplace example.com/shim => ./sub\n",
+		"p/p.go":      "package p\n\nimport _ \"example.com/shim\"\n",
+		"p/p_test.go": "package p\n\nimport \"testing\"\n\nfunc TestP(t *testing.T) {}\n",
+	})
+	git(root, "init", "-q", tree)
+	git(tree, "submodule", "add", "-q", sub, "sub")
+	git(tree, "add", ".")
+	for _, check := range []struct {
+		executors string
+		want      []string
+	}{{"reads p sub\n", []string{}}, {"# none\n", []string{"sub"}}} {
+		writeFiles(t, gateTools, map[string]string{"cloud/fast-gate/executors.txt": check.executors})
+		traced := []string{filepath.Join(tree, "sub/shim.go"), filepath.Join(tree, "sub/data.txt")}
+		if got := findingPaths(t, tree, gateTools, nil, traced); !reflect.DeepEqual(got, check.want) {
+			t.Errorf("with %q: findings %v, want %v", check.executors, got, check.want)
+		}
+	}
+	writeFiles(t, gateTools, map[string]string{"cloud/fast-gate/executors.txt": "reads p sub\n"})
+	reads, err := DeclaredReads(tree, gateTools, "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadsHash(tree, reads); err != nil || !reflect.DeepEqual(reads, []string{"sub"}) {
+		t.Fatalf("reads %v hashed with %v, want the gitlink hashed by its commit", reads, err)
+	}
+}
+
+// packageOf is the import path of the fixture's package p.
+func packageOf(t *testing.T, tree string) string {
+	t.Helper()
+	module, err := modulePath(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return module + "/p"
 }

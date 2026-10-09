@@ -91,10 +91,20 @@ func fnmatch(pattern, name string) bool {
 	return err == nil && matched
 }
 
-// ReadsHash is the contract's reads part over the given files: a hash of their sorted (path, sha256).
+// ReadsHash is the contract's reads part over the given files: a hash of their sorted (path, sha256). A read that
+// names a submodule (executors.txt names cohere by its gitlink's exact path) is the submodule at its recorded commit,
+// so it hashes as "gitlink <commit>".
 func ReadsHash(tree string, reads []string) (string, error) {
+	gitlinks, err := Gitlinks(tree)
+	if err != nil {
+		return "", err
+	}
 	pairs := make([][2]string, 0, len(reads))
 	for _, read := range reads {
+		if commit, found := gitlinks[read]; found {
+			pairs = append(pairs, [2]string{read, "gitlink " + commit})
+			continue
+		}
 		content, err := os.ReadFile(filepath.Join(tree, filepath.FromSlash(read)))
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", read, err)
@@ -108,4 +118,21 @@ func ReadsHash(tree string, reads []string) (string, error) {
 	}
 	sum := sha256.Sum256(canonical)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// Gitlinks is the tree's submodules: each gitlink's path to the commit the tree records for it.
+func Gitlinks(tree string) (map[string]string, error) {
+	output, err := exec.Command("git", "-C", tree, "ls-files", "-s", "-z").Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files -s in %s: %w", tree, err)
+	}
+	gitlinks := map[string]string{}
+	for _, entry := range strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00") {
+		// <mode> <object> <stage>\t<path>
+		head, path, found := strings.Cut(entry, "\t")
+		if fields := strings.Fields(head); found && len(fields) == 3 && fields[0] == "160000" {
+			gitlinks[path] = fields[1]
+		}
+	}
+	return gitlinks, nil
 }
