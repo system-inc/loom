@@ -931,9 +931,11 @@ func reds(arguments []string) (string, error) {
 	recordPath := flags.String("record", "", "the run's record, from loom run --record")
 	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
 	lines := flags.Int("lines", 8, "output lines kept per failed test")
+	testsPath := flags.String("tests", "", "also write every unit's go test -json lines, in unit order, to this file")
 	if err := flags.Parse(arguments); err != nil {
 		return "", err
 	}
+	var combined bytes.Buffer
 	jobFile, err := os.Open(*jobPath)
 	if err != nil {
 		return "", err
@@ -991,6 +993,15 @@ func reds(arguments []string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("unit %s's results: %w", unit.Id, err)
 		}
+		if *testsPath != "" {
+			decompressor, err := gzip.NewReader(bytes.NewReader(content))
+			if err != nil {
+				return "", fmt.Errorf("unit %s's results: %w", unit.Id, err)
+			}
+			if _, err := io.Copy(&combined, decompressor); err != nil {
+				return "", fmt.Errorf("unit %s's results: %w", unit.Id, err)
+			}
+		}
 		mine := 0
 		keys := make([]string, 0, len(actions))
 		for key := range actions {
@@ -1035,6 +1046,11 @@ func reds(arguments []string) (string, error) {
 		}
 		if exitCode != 0 && mine == 0 {
 			broken = append(broken, fmt.Sprintf("%s: exited %d with no failed test (last output %q)", unit.Id, exitCode, strings.TrimSpace(tail)))
+		}
+	}
+	if *testsPath != "" {
+		if err := os.WriteFile(*testsPath, combined.Bytes(), 0o644); err != nil {
+			return "", err
 		}
 	}
 	verdict := "green"
