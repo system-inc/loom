@@ -17,10 +17,15 @@
 # A job is cancelled by writing ~/.loom/jobs/fast/<sha>.cancel (the watcher's skip list, developer tools): a job not
 # started never starts, and a running one's coordinator is stopped within 10 s, which drops its units still queued on
 # the pool. Its verdict reads void, cancelled, so the tip goes back to the boxes if anyone still wants it.
+#
+# Every job runs under a ceiling (#x80gpc0; @system_adamic, Oct 9: 20 minutes for a fast gate, never a job that runs
+# away). Past it, every coordinator the job started is stopped, which drops its units still queued on the pool, and
+# the verdict says so: a red already in hand stays red, anything else is void with the ceiling as its reason.
 set -uo pipefail
 
 jobs=${LOOM_FAST_JOBS:-${HOME}/.loom/jobs/fast}
 concurrent=${LOOM_FAST_CONCURRENT:-8}
+ceiling=${LOOM_FAST_CEILING:-1200}
 gate=${HOME}/Projects/system/adamic-gate
 mkdir -p "${jobs}"
 once=
@@ -40,7 +45,7 @@ fi
 serve() {
 	local sha=$1 started=${SECONDS} work=${jobs}/$1.work stamp verdict line run
 	stamp=$(date -u +%Y%m%dT%H%M%SZ)
-	rm -f "${work}"/run.log "${work}"/reds.txt "${work}"/reds.exit
+	rm -f "${work}"/run.log "${work}"/reds.txt "${work}"/reds.exit "${work}"/ceiling
 	mkdir -p "${work}"
 	python3 - "${jobs}/${sha}.json" "${work}" <<'PY'
 import json, re, shlex, sys
@@ -219,9 +224,33 @@ for line in open(sys.argv[1]):
 	rm -f "${index}"
 }
 
+# within serves one job under the ceiling: a watchdog that, once the job has run `ceiling` seconds, marks it and stops
+# every coordinator whose record lies in its work directory (the selection's, the tests', the phases'). Whatever path
+# the job then takes to finish, finish reads the mark.
+within() {
+	local sha=$1 work=${jobs}/$1.work watchdog
+	(
+		sleep "${ceiling}"
+		[ -f "${jobs}/${sha}.running" ] || exit 0
+		touch "${work}/ceiling"
+		pkill -TERM -f "loom-pregate run .*${work}/" && echo "$(date -u +%H:%M:%S) ceiling: ${sha:0:12} stopped at ${ceiling} s"
+	) &
+	watchdog=$!
+	serve "${sha}"
+	pkill -P "${watchdog}" 2> /dev/null
+	kill "${watchdog}" 2> /dev/null
+}
+
 # finish publishes the record and then writes the verdict, so the watcher never reads a verdict without its log.
 finish() {
 	local sha=$1 stamp=$2 verdict=$3 run=$4 work=${jobs}/$1.work record index gitDirectory tree commit
+	# A job stopped at its ceiling (within) says so: its red stands, and a void names the ceiling, not Loom's breakage.
+	if [ -f "${work}/ceiling" ]; then
+		case "${verdict%%:*}" in
+			red) verdict="${verdict} (stopped at its $((ceiling / 60))-minute ceiling)" ;;
+			*) verdict="void: ${sha} fast gate on Loom's side pool stopped at its $((ceiling / 60))-minute ceiling (#x80gpc0) before every unit reported, so the boxes take it (run ${run})" ;;
+		esac
+	fi
 	record=$(mktemp -d)
 	echo "${verdict}" > "${record}/status.txt"
 	cp "${work}/reds.txt" "${record}/reds.txt" 2> /dev/null
@@ -261,7 +290,7 @@ cancel() {
 	mv "${jobs}/${sha}.cancel" "${jobs}/${sha}.cancelled"
 }
 if [ -n "${once}" ]; then
-	serve "${once}"
+	within "${once}"
 	exit
 fi
 while true; do
@@ -275,7 +304,7 @@ while true; do
 		[ -f "${jobs}/${sha}.verdict" ] || [ -f "${jobs}/${sha}.running" ] || [ -f "${jobs}/${sha}.cancelled" ] && continue
 		[ "$(find "${jobs}" -maxdepth 1 -name '*.running' | wc -l)" -ge "${concurrent}" ] && break
 		touch "${jobs}/${sha}.running"
-		serve "${sha}" &
+		within "${sha}" &
 	done
 	sleep 10
 done
