@@ -6,7 +6,7 @@
 # runner is left alone: sending again only spends a turn on the same refusal.
 set -uo pipefail
 ahra=/Users/kirkouimet/Projects/ahra
-runner=${LOOM_RUNNER_SHA:-c1825196c9c8d1da3e89b74ce39e050fe9f0cc6ed5fe242703af8662dea2ae52}
+runner=${LOOM_RUNNER_SHA:-7f01c04925b5bcdf4c2359abcee90f0723b656867e696313db20391d08cdada7}
 # A new runner reaches one side instance first (the staged-rollout law). ~/.loom/runner-staging holds the new
 # runner's sha256, then the member it went to: the next side member whose turn ends takes it, keeps it on every
 # later turn, and no other member does. After a green unit on that worker, the sha becomes LOOM_RUNNER_SHA's default.
