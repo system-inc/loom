@@ -823,3 +823,27 @@ func TestKeepLeavesTheWorkspaceAndOtherwiseItIsGone(t *testing.T) {
 		}
 	}
 }
+
+// A unit that stays silent past Heartbeat gets the runner's own line saying it's still running, on the runner
+// stream, and keeps getting one; its exit is untouched.
+func TestHeartbeatWhileSilent(t *testing.T) {
+	options := testOptions(t)
+	options.Heartbeat = 200 * time.Millisecond
+	unit := testUnit("sh", "-c", "sleep 1")
+	result, events, _ := runUnit(t, unit, options)
+	if result.Status != "passed" {
+		t.Fatalf("status %s", result.Status)
+	}
+	beats := 0
+	for _, event := range events {
+		if event.Type == "output" && event.Stream == "runner" {
+			if !strings.HasPrefix(event.Text, "loom-runner: still running after") {
+				t.Fatalf("heartbeat text %q", event.Text)
+			}
+			beats++
+		}
+	}
+	if beats < 2 {
+		t.Fatalf("%d heartbeats in a silent second at 200 ms, want several", beats)
+	}
+}

@@ -26,6 +26,17 @@ type emitter struct {
 	wire       *poster.Poster
 	now        func() time.Time
 	writeError error
+	lastEmit   time.Time // when the last event left, so a silent unit can be told from a lost runner
+}
+
+// silentFor is how long since the last event left.
+func (emitter *emitter) silentFor() time.Duration {
+	emitter.mutex.Lock()
+	defer emitter.mutex.Unlock()
+	if emitter.lastEmit.IsZero() {
+		return 0
+	}
+	return emitter.now().Sub(emitter.lastEmit)
 }
 
 func (emitter *emitter) emit(event protocol.Event) {
@@ -43,6 +54,7 @@ func (emitter *emitter) emit(event protocol.Event) {
 		panic(err)
 	}
 	emitter.sequence++
+	emitter.lastEmit = emitter.now()
 	if _, err := emitter.writer.Write(line.Bytes()); err != nil && emitter.writeError == nil {
 		emitter.writeError = err
 	}

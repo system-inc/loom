@@ -36,6 +36,9 @@ type Options struct {
 	Client *http.Client
 	// KillGrace is how long a timed-out process group has between SIGTERM and SIGKILL. Zero means 5 s.
 	KillGrace time.Duration
+	// Heartbeat is how long a unit may go silent before the runner says it's still running, an output event
+	// on the runner stream, so whoever watches can tell a quiet unit from a runner that's gone. Zero means 2 min.
+	Heartbeat time.Duration
 	// OutputGrace is how long the runner keeps reading output after the command exits and its group is
 	// killed, for a process that left the group and still holds the pipes. Zero means 2 s.
 	OutputGrace time.Duration
@@ -59,6 +62,9 @@ func (options Options) withDefaults() Options {
 		transport := http.DefaultTransport.(*http.Transport).Clone()
 		transport.ResponseHeaderTimeout = time.Minute
 		options.Client = &http.Client{Transport: transport}
+	}
+	if options.Heartbeat == 0 {
+		options.Heartbeat = 2 * time.Minute
 	}
 	if options.KillGrace == 0 {
 		options.KillGrace = 5 * time.Second

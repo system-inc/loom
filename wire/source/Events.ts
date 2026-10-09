@@ -92,7 +92,8 @@ const typeFields: Record<string, Record<string, { check: FieldCheck; required: b
         inputs: { check: isInputHashes, required: false },
     },
     output: {
-        stream: { check: isOneOf('stdout', 'stderr'), required: true },
+        // runner is the runner's own line about the unit (its heartbeat while the unit is silent), never the unit's.
+        stream: { check: isOneOf('stdout', 'stderr', 'runner'), required: true },
         text: { check: isString, required: false },
         replaced: { check: isBoolean, required: false },
     },

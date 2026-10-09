@@ -144,6 +144,8 @@ func (run *unitRun) runCommand(runContext context.Context) (exitOutcome, error) 
 	go func() { waited <- command.Wait() }()
 	timeout := time.NewTimer(time.Duration(run.unit.TimeoutSeconds) * time.Second)
 	defer timeout.Stop()
+	heartbeat := time.NewTicker(run.options.Heartbeat / 4)
+	defer heartbeat.Stop()
 	stopped := runContext.Done()
 	var escalate <-chan time.Time
 	var waitError error
@@ -163,6 +165,10 @@ waiting:
 			escalate = time.After(run.options.KillGrace)
 		case <-escalate:
 			signalGroup(group, syscall.SIGKILL)
+		case <-heartbeat.C:
+			if run.emitter.silentFor() >= run.options.Heartbeat {
+				run.emitter.emit(protocol.Event{Type: "output", Stream: "runner", Text: fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds())})
+			}
 		}
 	}
 	wall := time.Since(started)
