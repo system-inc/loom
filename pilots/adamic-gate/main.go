@@ -300,8 +300,10 @@ done > "${out}/cpu.tsv"
 grep -h '"Action":"fail"' "${out}"/part-*.jsonl | grep -o '"Package":"[^"]*","Test":"[^"/]*"' | sort -u | sed 's/^/loom-pilot: failed /'
 echo "loom-pilot: tests took $(( SECONDS - started )) s in all"
 # A test that ran out of disk proved nothing about the change: the unit is broken (exit 2), never red. A disk full
-# enough can't keep the error in the logs either, so a disk still under 512 MB free after a red counts too.
-if [ "${status}" != 0 ] && { cat "${out}"/part-*.jsonl "${out}"/part-*.stderr 2> /dev/null | grep -q "no space left on device" || [ "$(freeMegabytes)" -lt 512 ]; }; then
+# enough can't keep the error in the logs either, so a disk still under 512 MB free after a red counts too. grep reads
+# the files itself: under pipefail, cat piped to grep -q dies of SIGPIPE when the match comes early in a large log,
+# and the check read false (Oct 9: canary 8's lint tests-22 failed building its oracle on a full disk and read red).
+if [ "${status}" != 0 ] && { grep -qs "no space left on device" "${out}"/part-*.jsonl "${out}"/part-*.stderr || [ "$(freeMegabytes)" -lt 512 ]; }; then
   echo "loom-pilot: the instance's disk filled during the tests (no space left on device): Loom's fault, not the change's"
   df -h "${HOME}" /tmp
   exit 2

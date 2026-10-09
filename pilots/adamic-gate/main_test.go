@@ -855,3 +855,26 @@ func TestABrokenSubmoduleIsMadeAgain(t *testing.T) {
 		t.Fatalf("a broken submodule: exit %d %q", code, output)
 	}
 }
+
+func TestAFullDiskEarlyInALargeLogIsLoomsNotARed(t *testing.T) {
+	start := strings.Index(unitBody, "# A test that ran out of disk proved nothing")
+	end := strings.Index(unitBody[start:], "\nfi\n")
+	if start < 0 || end < 0 {
+		t.Fatal("the full-disk check isn't in unitBody")
+	}
+	check := unitBody[start : start+end+len("\nfi\n")]
+	out := t.TempDir()
+	// The error first, then 26 MB of output: grep -q matches long before a pipe's writer could finish.
+	log := "{\"Action\":\"output\",\"Output\":\"compile: writing output: no space left on device\\n\"}\n" +
+		strings.Repeat("{\"Action\":\"output\",\"Output\":\"filler line to make the file large\"}\n", 400000)
+	if err := os.WriteFile(filepath.Join(out, "part-1.jsonl"), []byte(log), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "set -uo pipefail\nfreeMegabytes() { echo 9999; }\nstatus=1\n" + check + "exit \"${status}\"\n"
+	command := exec.Command("bash", "-c", script)
+	command.Env = append(os.Environ(), "out="+out, "HOME="+out)
+	output, _ := command.CombinedOutput()
+	if code := command.ProcessState.ExitCode(); code != 2 || !strings.Contains(string(output), "the instance's disk filled") {
+		t.Fatalf("exit %d, want 2 naming the full disk: %q", code, output)
+	}
+}
