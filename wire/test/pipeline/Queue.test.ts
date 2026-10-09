@@ -278,6 +278,20 @@ describe('the queue', function () {
         expect((await postPlan(queue, sha(1), units)).status).toBe(200);
         expect((await postPlan(queue, sha(1), [units[0]])).status).toBe(409);
         expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: unknown[] }).futures).toEqual([]);
+        // The judge's listing: the planned future with its change and exactly the planned units.
+        expect(await (await queue.fetch('https://queue/futures?state=planned')).json()).toEqual({
+            futures: [
+                {
+                    future: sha(1),
+                    base: main,
+                    attempt: 1,
+                    change: { change: id, sha: sha(1), base: main, owner: 'system_adamic_compiler' },
+                    units: units.map(function (unit) {
+                        return { unitKey: unit.unitKey, name: unit.name, keyParts: unit.keyParts, decision: 'run', reused: null };
+                    }),
+                },
+            ],
+        });
         expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'testing', units: { planned: 2, passed: 0 } });
         // A planned future is the judge's: today's gate's whole verdict no longer decides it.
         expect((await postWhole(queue, id, sha(1), 'passed', null)).status).toBe(409);
@@ -306,6 +320,10 @@ describe('the queue', function () {
         expect((await postBatch(queue, sha(1), voided)).status).toBe(200);
         expect(await landings(queue)).toEqual([]);
         expect(await (await queue.fetch(`https://queue/verdicts/${keys[1]}`)).json()).toMatchObject({ unitKey: keys[1], status: 'void', run: 'run-1' });
+        // A void run leaves the future for the judge's next attempt.
+        expect(((await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: { attempt: number }[] }).futures.map(function (future) {
+            return future.attempt;
+        })).toEqual([2]);
         // The rerun is green, with one unit failed as main's red, which the judge excuses.
         const green = batch(id, sha(1), 'run-2', [record(id, keys[0] ?? '', 'run-2', 'passed', null), record(id, keys[1] ?? '', 'run-2', 'failed', 'mainRed')], 'green', [keys[1] ?? '']);
         const decided = await postBatch(queue, sha(1), green);
@@ -314,6 +332,7 @@ describe('the queue', function () {
         expect((await postBatch(queue, sha(1), { ...green, run: 'run-3' })).status).toBe(422);
         expect(await (await queue.fetch(`https://queue/verdicts/${keys[1]}`)).json()).toMatchObject({ status: 'failed', cause: 'mainRed', run: 'run-2' });
         expect(await landings(queue)).toEqual([{ change: id, future: sha(1), base: main, owner: 'system_adamic_compiler', run: 'run-2' }]);
+        expect(((await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: unknown[] }).futures).toEqual([]);
         expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ units: { planned: 2, passed: 1, failed: 1 } });
         // Replay rebuilds the index and the landing order from the log alone.
         const replayed = await replay(await logOf(queue));
@@ -456,10 +475,10 @@ describe('a landing order', function () {
             const units = new Map(
                 verdicts.map(function (verdict, index) {
                     const key = String(index).repeat(64);
-                    return [key, { unitKey: key, name: `u${index}`, decision: 'run' as const, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
+                    return [key, { unitKey: key, name: `u${index}`, keyParts: {}, decision: 'run' as const, reused: null, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
                 }),
             );
-            return { tree: sha(1), base: main, changes: [], units: units, whole: null, decided: { run: 'r', status: 'green' } };
+            return { tree: sha(1), base: main, changes: [], units: units, whole: null, decided: { run: 'r', status: 'green' }, voids: 0 };
         };
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'failed', 'mainRed')]))).toBe(true);
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'void', 'infra')]))).toBe(false);

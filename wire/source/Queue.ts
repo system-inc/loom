@@ -115,7 +115,9 @@ export interface Decision {
 export interface UnitEntry {
     unitKey: string;
     name: string;
+    keyParts: Record<string, unknown>;
     decision: 'reuse' | 'run';
+    reused: string | null;
     verdict: UnitVerdict | null;
 }
 
@@ -132,6 +134,8 @@ export interface FutureEntry {
     // The run that decided the future and how: a judge's batch, today's gate's whole verdict, or a plan that reused
     // every unit. A void lets the next run decide it.
     decided: { run: string; status: Decision['status'] } | null;
+    // How many runs have decided it void: the judge's next run is attempt voids + 1.
+    voids: number;
 }
 
 export interface ChangeEntry {
@@ -455,7 +459,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'future.built') {
         const tree = event.subject.future ?? '';
         const changes = event.data.changes as string[];
-        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, whole: null, decided: null });
+        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, whole: null, decided: null, voids: 0 });
         for (const change of changes) {
             const member = state.changes.get(change);
             if (member !== undefined) {
@@ -472,7 +476,9 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             future.units.set(event.subject.unitKey ?? '', {
                 unitKey: event.subject.unitKey ?? '',
                 name: event.data.name as string,
+                keyParts: event.data.keyParts as Record<string, unknown>,
                 decision: event.data.decision as UnitEntry['decision'],
+                reused: (event.data.reused ?? null) as string | null,
                 // The same key is the same verdict, so a reused one decides this tree too.
                 verdict: reused === null ? null : { ...reused, future: future.tree },
             });
@@ -497,11 +503,13 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
         }
         else if (event.data.decision !== undefined && future !== undefined) {
             future.decided = { run: event.subject.run ?? '', status: (event.data.decision as Decision).status };
+            future.voids += future.decided.status === 'void' ? 1 : 0;
         }
         else if (event.data.verdict !== undefined && future !== undefined) {
             const verdict = event.data.verdict as Verdict;
             future.whole = verdict;
             future.decided = { run: verdict.run, status: decisionOf(verdict.status) };
+            future.voids += future.decided.status === 'void' ? 1 : 0;
             if (entry !== undefined) {
                 entry.verdict = verdict as unknown as Record<string, unknown>;
                 entry.state = entry.state === 'queued' ? 'testing' : entry.state;
@@ -812,7 +820,7 @@ export class Queue extends DurableObject<Env> {
             return url.searchParams.get('owners') === '1' ? this.ownerEvents(request) : this.events(request);
         }
         if (path === '/futures' && method === 'GET') {
-            return this.unplannedFutures(url);
+            return this.listFutures(url);
         }
         if (path === '/landings' && method === 'GET') {
             return this.landings();
@@ -1289,24 +1297,45 @@ export class Queue extends DurableObject<Env> {
     }
 
     // The futures waiting for the planner: no plan and no verdict yet, every change in them on its way.
-    private async unplannedFutures(url: URL): Promise<Response> {
-        if (url.searchParams.get('state') !== 'unplanned') {
-            return jsonResponse(400, { error: 'state=unplanned is the one listing' });
+    // The futures waiting for the planner (state=unplanned: no plan, no verdict) or for the judge (state=planned: a
+    // plan and no decision but void), oldest first, every change in them on its way and tested in them.
+    private async listFutures(url: URL): Promise<Response> {
+        const wanted = url.searchParams.get('state');
+        if (wanted !== 'unplanned' && wanted !== 'planned') {
+            return jsonResponse(400, { error: 'state is unplanned (for the planner) or planned (for the judge)' });
         }
         const state = await this.current();
-        const futures = [...state.futures.values()]
+        const current = [...state.futures.values()].filter(function (future) {
+            return future.changes.every(function (change) {
+                const entry = state.changes.get(change);
+                return isLive(entry) && entry?.future === future.tree;
+            });
+        });
+        if (wanted === 'unplanned') {
+            const futures = current
+                .filter(function (future) {
+                    return future.units === null && future.decided === null;
+                })
+                .map(function (future) {
+                    return { future: future.tree, tree: future.tree, base: future.base, changes: future.changes };
+                });
+            return jsonResponse(200, { futures: futures });
+        }
+        const futures = current
             .filter(function (future) {
-                return (
-                    future.units === null &&
-                    future.decided === null &&
-                    future.changes.every(function (change) {
-                        const entry = state.changes.get(change);
-                        return isLive(entry) && entry?.future === future.tree;
-                    })
-                );
+                return future.units !== null && (future.decided === null || future.decided.status === 'void');
             })
             .map(function (future) {
-                return { future: future.tree, tree: future.tree, base: future.base, changes: future.changes };
+                const record = state.changes.get(future.changes[future.changes.length - 1] ?? '')?.record;
+                return {
+                    future: future.tree,
+                    base: future.base,
+                    attempt: future.voids + 1,
+                    change: { change: record?.change, sha: record?.sha, base: record?.base, owner: record?.owner },
+                    units: [...(future.units?.values() ?? [])].map(function (unit) {
+                        return { unitKey: unit.unitKey, name: unit.name, keyParts: unit.keyParts, decision: unit.decision, reused: unit.reused };
+                    }),
+                };
             });
         return jsonResponse(200, { futures: futures });
     }
