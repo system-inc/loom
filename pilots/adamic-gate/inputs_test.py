@@ -13,6 +13,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import inputs  # noqa: E402
+import keptunits  # noqa: E402
 
 module = inputs.module
 
@@ -167,6 +168,59 @@ class Inputs(unittest.TestCase):
             inputs.rerunPlan(git(self.repository, "rev-parse", "HEAD~0"), self.base, {}, [self.job], tempfile.mkdtemp(), self.repository)
         with self.assertRaises(ValueError):
             inputs.rerunPlan(self.base, elsewhere, {}, [self.job], tempfile.mkdtemp(), self.repository)
+
+
+class KeptProducts(unittest.TestCase):
+    """A product an earlier attempt proved is kept by its package's hash (kept, kept-match) and leaves the plan
+    (keptunits.py); one moved input of its package, or of the gate's toolchain, brings it back (#g4jyja4)."""
+
+    gateInputs = "a" * 64
+    setUp, write, commit = Inputs.setUp, Inputs.write, Inputs.commit
+
+    def lines(self):
+        events = [("a", "TestProduct_A", "pass"), ("a", "TestProduct_Flaky", "pass"), ("a", "TestProduct_Flaky", "fail"),
+                  ("b", "TestProduct_B", "pass"), ("b", "TestProduct_B/sub", "pass"), ("b", "TestProduct_Skip", "skip")]
+        return [json.dumps({"Package": module + package, "Test": test, "Action": action}) for package, test, action in events]
+
+    def plan(self, sha, gateInputs=None):
+        """The units a requeue at sha still places, from what the base's attempt proved."""
+        kept = inputs.keptTests(self.base, self.gateInputs, self.lines(), self.repository)
+        standing = inputs.keptMatch(sha, gateInputs or self.gateInputs, kept, self.repository)
+        job = {"units": [testUnit("product-a", module + "a=^(TestProduct_A)$"), testUnit("product-b", module + "b=^(TestProduct_B)$"),
+                         testUnit("product-flaky", module + "a=^(TestProduct_Flaky)$"), testUnit("product-skip", module + "b=^(TestProduct_Skip)$")]}
+        keptunits.prune(job, standing)
+        return sorted(unit["id"] for unit in job["units"]), standing
+
+    def test_an_unmoved_package_keeps_its_passed_products_and_never_a_failed_or_skipped_one(self):
+        placed, standing = self.plan(self.base)
+        self.assertEqual(placed, ["product-flaky", "product-skip"])
+        self.assertEqual(standing, {module + "a": ["TestProduct_A"], module + "b": ["TestProduct_B"]})
+
+    def test_a_moved_test_file_reruns_its_packages_kept_product(self):
+        self.write({"a/a_test.go": "package a\n// TestProduct_A changed\n"})
+        placed, standing = self.plan(self.commit())
+        self.assertEqual(placed, ["product-a", "product-flaky", "product-skip"])
+        self.assertNotIn(module + "a", standing)
+
+    def test_moved_testdata_reruns_its_packages_kept_product(self):
+        self.write({"b/testdata/fixture.json": "{}\n"})
+        placed, _ = self.plan(self.commit())
+        self.assertEqual(placed, ["product-b", "product-flaky", "product-skip"])
+
+    def test_a_shared_change_reruns_every_kept_product(self):
+        self.write({"b/b.go": "package b\n// changed\n"})
+        placed, standing = self.plan(self.commit())
+        self.assertEqual(placed, ["product-a", "product-b", "product-flaky", "product-skip"])
+        self.assertEqual(standing, {})
+
+    def test_new_gate_inputs_rerun_every_kept_product(self):
+        placed, _ = self.plan(self.base, gateInputs="b" * 64)
+        self.assertEqual(placed, ["product-a", "product-b", "product-flaky", "product-skip"])
+
+    def test_review_evidence_keeps_every_product(self):
+        self.write({"review/x/notes.md": "n\n"})
+        placed, _ = self.plan(self.commit())
+        self.assertEqual(placed, ["product-flaky", "product-skip"])
 
 
 if __name__ == "__main__":
