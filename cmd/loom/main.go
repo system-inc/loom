@@ -147,7 +147,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return fail(err)
 		}
 		for _, wanted := range pools {
-			machine := &coordinator.PoolMachine{Pool: wanted.name, Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform}
+			machine := &coordinator.PoolMachine{Pool: wanted.name, Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
 			poolMachines[machine.Name()] = true
 			for range wanted.slots {
 				slots = append(slots, machine)

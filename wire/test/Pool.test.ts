@@ -167,6 +167,26 @@ describe('a pool', function () {
         expect((await next(pool, member, 'instance-1')).status).toBe(204);
     });
 
+    it("lists one run's units still queued, oldest first, and none once a worker takes them", async function () {
+        const pool = freshPool();
+        await waitOf(pool, 100);
+        const coordinator = await token(freshRun(), 'coordinator');
+        const member = await token(pool, 'pool');
+        const listed = freshRun();
+        const other = freshRun();
+        await postUnits(pool, coordinator, [poolUnit(listed, 'b'), poolUnit(other, 'a'), poolUnit(listed, 'a')]);
+        const queued = function (body: string): Promise<Response> {
+            return call(`/pools/${pool}/queued`, { method: 'POST', bearer: coordinator, body: body });
+        };
+        expect(await (await queued(JSON.stringify({ run: listed }))).json()).toEqual({ units: ['b', 'a'] });
+        expect(await (await next(pool, member, 'instance-1')).json()).toMatchObject({ run: listed, unit: 'b' });
+        expect(await (await queued(JSON.stringify({ run: listed }))).json()).toEqual({ units: ['a'] });
+        expect(await (await queued(JSON.stringify({ run: freshRun() }))).json()).toEqual({ units: [] });
+        for (const body of ['nope', '{}', '{"run":"-bad"}', `{"run":"${listed}","extra":1}`]) {
+            expect((await queued(body)).status, body).toBe(400);
+        }
+    });
+
     it('lists the workers seen in the last ten minutes, to a coordinator or a board token', async function () {
         const pool = freshPool();
         await waitOf(pool, 50);
@@ -253,6 +273,7 @@ describe('a pool', function () {
         for (const bearer of [member, await token(run, 'runner'), await token(run, 'viewer'), await boardToken()]) {
             expect((await postUnits(pool, bearer, [poolUnit(run, 'a')])).status).toBe(403);
             expect((await call(`/pools/${pool}/cancel`, { method: 'POST', bearer: bearer, body: JSON.stringify({ run: run }) })).status).toBe(403);
+            expect((await call(`/pools/${pool}/queued`, { method: 'POST', bearer: bearer, body: JSON.stringify({ run: run }) })).status).toBe(403);
         }
         for (const bearer of [member, await token(run, 'runner'), await token(run, 'viewer')]) {
             expect((await call(`/pools/${pool}`, { bearer: bearer })).status).toBe(403);

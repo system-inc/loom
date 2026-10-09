@@ -36,6 +36,7 @@ type fakeWire struct {
 	cache    map[string]protocol.CacheEntry
 	machines []BoardMachine
 	pools    map[string][]protocol.Unit // each pool's queue
+	swallow  int                        // the next asks to take a unit lose it, as an ask whose turn ended does
 	reading  map[string]int             // reads of each run's log in flight
 	mostRead int                        // the most reads of one run's log ever in flight at once
 	server   *httptest.Server
@@ -102,6 +103,21 @@ func newFakeWire(t *testing.T) *fakeWire {
 			}
 			wire.pools[parts[1]] = append(wire.pools[parts[1]], posted.Units...)
 			json.NewEncoder(writer).Encode(map[string]int{"queued": len(wire.pools[parts[1]])})
+		case len(parts) == 3 && parts[0] == "pools" && parts[2] == "queued":
+			var asked struct {
+				Run string `json:"run"`
+			}
+			if claims.Scope != protocol.ScopeCoordinator || protocol.Decode(bytes.NewReader(body), &asked) != nil {
+				http.Error(writer, "a coordinator token and a run", http.StatusForbidden)
+				return
+			}
+			units := []string{}
+			for _, unit := range wire.pools[parts[1]] {
+				if unit.Run == asked.Run {
+					units = append(units, unit.Unit)
+				}
+			}
+			json.NewEncoder(writer).Encode(map[string][]string{"units": units})
 		case len(parts) >= 3 && parts[0] == "runs" && claims.Run != parts[1]:
 			http.Error(writer, "other run", http.StatusForbidden)
 		case len(parts) == 3 && parts[2] == "plan":
@@ -237,7 +253,15 @@ func (wire *fakeWire) serveNext(writer http.ResponseWriter, claims protocol.Toke
 		wire.mutex.Lock()
 		if queue := wire.pools[pool]; len(queue) > 0 {
 			wire.pools[pool] = queue[1:]
+			swallowed := wire.swallow > 0
+			if swallowed {
+				wire.swallow--
+			}
 			wire.mutex.Unlock()
+			if swallowed {
+				writer.WriteHeader(http.StatusNoContent)
+				return
+			}
 			json.NewEncoder(writer).Encode(queue[0])
 			return
 		}

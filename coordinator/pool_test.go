@@ -148,3 +148,31 @@ func TestAPoolUnitNobodyTakesLeavesAStoppedRunVoid(t *testing.T) {
 		t.Fatalf("queued %+v", queue)
 	}
 }
+
+func TestAPoolUnitHandedToAnAskNobodyHearsIsQueuedAgainAndFinishes(t *testing.T) {
+	wire := newFakeWire(t)
+	wire.swallow = 1
+	servePool(t, wire, "codex", 1)
+	var log strings.Builder
+	pool := &PoolMachine{Pool: "codex", Wire: wire.server.URL, Secret: testSecret, Version: runner.Version,
+		GoPlatform: runtime.GOOS + "/" + runtime.GOARCH, NeverStarted: 300 * time.Millisecond, QueueCheck: 50 * time.Millisecond, Log: &log}
+	unit := poolUnit("lost", "echo lost")
+	unit.TimeoutSeconds = 30
+	result := run(t, config(wire, pool), unit)
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	if !strings.Contains(log.String(), "lost: queued again on pool codex") {
+		t.Fatalf("the requeue wasn't logged: %q", log.String())
+	}
+	// It was one attempt: the unit never started the first time, so the record has one started event.
+	starts := 0
+	for _, event := range unitEventsOf(result.Events, "lost") {
+		if event.Type == "started" {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("%d started events: %+v", starts, unitEventsOf(result.Events, "lost"))
+	}
+}

@@ -133,14 +133,14 @@ export function checkPoolAsk(body: string): PoolAsk | string {
     return { worker: parsed.worker, cpus: cpus };
 }
 
-// The cancel body is exactly {"run"}.
-export function checkPoolCancel(body: string): string | { run: string } {
+// A cancel's or a queued's body is exactly {"run"}.
+export function checkPoolRun(body: string): string | { run: string } {
     let parsed: unknown;
     try {
         parsed = JSON.parse(body);
     }
     catch {
-        return 'the cancel is not JSON';
+        return 'the body is not JSON';
     }
     if (!isPlainObject(parsed)) {
         return 'the body is a JSON object';
@@ -204,6 +204,9 @@ export class Pool extends DurableObject<Env> {
         }
         if (operation === '/cancel' && request.method === 'POST') {
             return this.cancel(request);
+        }
+        if (operation === '/queued' && request.method === 'POST') {
+            return this.queued(request);
         }
         if (operation === '/status' && request.method === 'GET') {
             return jsonResponse(200, { queued: this.queuedCount(), workers: this.workers() });
@@ -329,12 +332,35 @@ export class Pool extends DurableObject<Env> {
         if (body === null) {
             return jsonResponse(413, { error: `a cancel is at most ${MaximumAskBodyBytes} bytes` });
         }
-        const cancel = checkPoolCancel(body);
+        const cancel = checkPoolRun(body);
         if (typeof cancel === 'string') {
             return jsonResponse(400, { error: cancel });
         }
         const dropped = this.sql.exec('DELETE FROM units WHERE run = ? RETURNING position', cancel.run).toArray();
         return jsonResponse(200, { dropped: dropped.length });
+    }
+
+    // ---------- Queued ----------
+
+    // The run's units still in the queue, oldest first. A coordinator tells a unit waiting its turn from one a worker
+    // took and never started (handed to an ask whose turn had ended), and queues that one again.
+    private async queued(request: Request): Promise<Response> {
+        const body = await readBodyText(request, MaximumAskBodyBytes);
+        if (body === null) {
+            return jsonResponse(413, { error: `a queued is at most ${MaximumAskBodyBytes} bytes` });
+        }
+        const queued = checkPoolRun(body);
+        if (typeof queued === 'string') {
+            return jsonResponse(400, { error: queued });
+        }
+        const rows = this.sql
+            .exec<{ unit: string }>('SELECT unit FROM units WHERE run = ? ORDER BY position', queued.run)
+            .toArray();
+        return jsonResponse(200, {
+            units: rows.map(function (row) {
+                return row.unit;
+            }),
+        });
     }
 
     // ---------- Workers ----------

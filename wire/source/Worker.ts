@@ -354,7 +354,7 @@ function forwardToPool(environment: Env, pool: string, operation: string, reques
     return environment.Pools.get(environment.Pools.idFromName(pool)).fetch(inner);
 }
 
-// A pool (docs/protocol.md, The pool). The units, the cancel and the pool's state belong to no one run, so any
+// A pool (docs/protocol.md, The pool). The units, the cancel, the queued and the pool's state belong to no one run, so any
 // run's coordinator token reaches them, and a board token may watch. Only the pool's own pool token asks for next.
 async function handlePool(request: Request, environment: Env, pool: string, operation: string): Promise<Response> {
     if (operation === '') {
@@ -367,7 +367,7 @@ async function handlePool(request: Request, environment: Env, pool: string, oper
         }
         return forwardToPool(environment, pool, 'status', request);
     }
-    if (operation !== 'units' && operation !== 'next' && operation !== 'cancel') {
+    if (operation !== 'units' && operation !== 'next' && operation !== 'cancel' && operation !== 'queued') {
         return jsonResponse(404, { error: 'no such endpoint' });
     }
     if (request.method !== 'POST') {

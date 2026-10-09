@@ -26,6 +26,11 @@ import (
 // The coordinator's late clock starts when it places a unit, so a unit's time in the queue counts against
 // its timeout and grace: give a pool no more slots than it has workers serving.
 //
+// A unit can also leave the queue and never start: the wire answers an ask whose serve turn ended as it waited
+// (Oct 8, p2's tests-08 sat 80 minutes that way). Run asks the pool which of the run's units are still queued; one
+// that has left it with no event from its runner for NeverStarted is queued again. It posted nothing, so the next
+// worker's events conflict with none.
+//
 // The record renumbers each attempt's events and relays them to the wire, which already holds a pool unit's
 // events from its runner; the relay's copies are identical, so the wire drops them as replays. A re-placed
 // unit is different: a runner always numbers from 0, the wire already holds the unit's earlier sequences,
@@ -50,9 +55,25 @@ type PoolMachine struct {
 	// Client makes the calls to the wire. Nil means a client without an overall timeout, since reading the
 	// event log waits up to 20 s for each answer; each request carries its own deadline instead.
 	Client *http.Client
+	// NeverStarted is how long a unit may be gone from the queue with no event from its runner before it is
+	// queued again; 0 means two minutes. QueueCheck is how often a unit that hasn't started looks; 0 means 30 s.
+	NeverStarted time.Duration
+	QueueCheck   time.Duration
+	// Log, when set, hears each unit queued again.
+	Log io.Writer
 
 	mutex     sync.Mutex
-	followers map[string]*runFollower // by run
+	followers map[string]*runFollower   // by run
+	queued    map[string]queuedSnapshot // by run, the last look at its units still queued
+}
+
+// maximumRequeues bounds how often one attempt queues its unit again before it gives the unit up as dropped.
+const maximumRequeues = 5
+
+// A queuedSnapshot is one look at a run's units still in the pool's queue, shared by every slot waiting on the run.
+type queuedSnapshot struct {
+	at    time.Time
+	units map[string]bool
 }
 
 func (machine *PoolMachine) Name() string {
@@ -92,11 +113,19 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 	if _, err := wire.call(runContext, http.MethodPost, "/pools/"+machine.Pool+"/units", token, body); err != nil {
 		return fmt.Errorf("queuing on pool %s: %w", machine.Pool, err)
 	}
+	check := time.NewTicker(machine.queueCheck())
+	defer check.Stop()
+	heard := false
+	var leftQueue time.Time // when a look first found the unit gone from the queue, zero while it waits there
+	requeues := 0
 	for {
 		machine.mutex.Lock()
 		lines, failure := stream.lines, stream.failure
 		stream.lines = nil
 		machine.mutex.Unlock()
+		if len(lines) > 0 {
+			heard = true
+		}
 		for _, line := range lines {
 			if _, err := events.Write(line.text); err != nil {
 				return err
@@ -110,10 +139,85 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 		}
 		select {
 		case <-stream.signal:
+		case <-check.C:
+			if heard {
+				continue
+			}
+			queued, err := machine.queuedUnits(runContext, wire, token, unit.Run)
+			switch {
+			case err != nil:
+				// No answer says nothing about the unit; the next look asks again.
+			case queued[unit.Unit]:
+				leftQueue = time.Time{}
+			case leftQueue.IsZero():
+				leftQueue = time.Now()
+			case time.Since(leftQueue) >= machine.neverStarted():
+				if requeues == maximumRequeues {
+					return fmt.Errorf("taken off pool %s's queue %d times and never started", machine.Pool, requeues+1)
+				}
+				if _, err := wire.call(runContext, http.MethodPost, "/pools/"+machine.Pool+"/units", token, body); err != nil {
+					return fmt.Errorf("queuing again on pool %s: %w", machine.Pool, err)
+				}
+				requeues++
+				if machine.Log != nil {
+					fmt.Fprintf(machine.Log, "%s: queued again on pool %s, taken %.0f s ago by a worker that never started it\n", unit.Unit, machine.Pool, time.Since(leftQueue).Seconds())
+				}
+				leftQueue = time.Time{}
+			}
 		case <-runContext.Done():
 			return fmt.Errorf("given up on pool %s; the unit may still be queued or running there", machine.Pool)
 		}
 	}
+}
+
+func (machine *PoolMachine) neverStarted() time.Duration {
+	if machine.NeverStarted > 0 {
+		return machine.NeverStarted
+	}
+	return 2 * time.Minute
+}
+
+func (machine *PoolMachine) queueCheck() time.Duration {
+	if machine.QueueCheck > 0 {
+		return machine.QueueCheck
+	}
+	return 30 * time.Second
+}
+
+// queuedUnits is the run's units still in the pool's queue. A look younger than half a check is shared, so a run's
+// waiting slots ask the pool about once a check between them, not once each.
+func (machine *PoolMachine) queuedUnits(callContext context.Context, wire *wireClient, token string, run string) (map[string]bool, error) {
+	machine.mutex.Lock()
+	snapshot, ok := machine.queued[run]
+	machine.mutex.Unlock()
+	if ok && time.Since(snapshot.at) < machine.queueCheck()/2 {
+		return snapshot.units, nil
+	}
+	body, err := json.Marshal(map[string]string{"run": run})
+	if err != nil {
+		return nil, err
+	}
+	answer, err := wire.call(callContext, http.MethodPost, "/pools/"+machine.Pool+"/queued", token, body)
+	if err != nil {
+		return nil, err
+	}
+	var listed struct {
+		Units []string `json:"units"`
+	}
+	if err := protocol.Decode(bytes.NewReader(answer), &listed); err != nil {
+		return nil, fmt.Errorf("pool %s's queued units: %w", machine.Pool, err)
+	}
+	units := map[string]bool{}
+	for _, id := range listed.Units {
+		units[id] = true
+	}
+	machine.mutex.Lock()
+	if machine.queued == nil {
+		machine.queued = map[string]queuedSnapshot{}
+	}
+	machine.queued[run] = queuedSnapshot{at: time.Now(), units: units}
+	machine.mutex.Unlock()
+	return units, nil
 }
 
 func (machine *PoolMachine) client() *http.Client {
