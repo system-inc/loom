@@ -28,6 +28,9 @@ const (
 	// (refs/build-candidate, refs/gocache-candidate), never refs/build or refs/gocache, which only main's own gate
 	// writes (@system_adamic_developer_tools, Oct 9): what a candidate built can only ever mislead another candidate.
 	ScopePublishCandidate = "publish-candidate"
+	// ScopeSubmit submits a change to main and reads changes, and nothing else. Its run claim is the owner's
+	// username: the wire takes a change only when the body's owner matches it (docs/contracts.md, the API).
+	ScopeSubmit = "submit"
 )
 
 // BoardRun is the run a board token names.
@@ -62,7 +65,7 @@ func MintToken(secret []byte, claims TokenClaims) (string, error) {
 }
 
 func knownScope(scope string) bool {
-	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool || scope == ScopePublish || scope == ScopePublishCandidate
+	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool || scope == ScopePublish || scope == ScopePublishCandidate || scope == ScopeSubmit
 }
 
 // ReadTokenSecret reads the HMAC key from a file such as ~/.loom/token-secret. The key is the file's text

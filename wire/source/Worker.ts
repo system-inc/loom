@@ -33,7 +33,7 @@ const CandidateRefSuffix = '-candidate';
 const watcherScopes: TokenScope[] = ['coordinator', 'board'];
 const subprotocolTokenPrefix = 'token.';
 
-interface Grant {
+export interface Grant {
     scopes: TokenScope[];
     // The scopes whose token may come as ?token=. The page and its WebSocket come from a browser, which can't
     // set an Authorization header, and so does a viewer's blob download link.
@@ -58,8 +58,9 @@ function offeredSubprotocols(request: Request): string[] {
         });
 }
 
-// Finds the token, checks it, and checks its scope and run. Returns the claims or the refusal.
-async function authorize(
+// Finds the token, checks it, and checks its scope and run. Returns the claims or the refusal. loom-pipeline
+// (source/Pipeline.ts) checks its tokens here too, so there is one verifier.
+export async function authorize(
     request: Request,
     environment: Env,
     run: string | null,

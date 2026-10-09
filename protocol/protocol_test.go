@@ -222,6 +222,11 @@ func TestTokenVector(t *testing.T) {
 	if claims, verifyError := VerifyToken(secret, pool, now); err != nil || verifyError != nil || claims.Scope != ScopePool || claims.Run != "codex" {
 		t.Fatalf("a pool token: %v %v %+v", err, verifyError, claims)
 	}
+	// A submit token names its owner, and the Worker spells the scope the same way.
+	submit, err := MintToken(secret, TokenClaims{Run: "system_adamic_loom_web", Scope: ScopeSubmit, Expires: 4102444800})
+	if claims, verifyError := VerifyToken(secret, submit, now); err != nil || verifyError != nil || claims.Scope != "submit" || claims.Run != "system_adamic_loom_web" {
+		t.Fatalf("a submit token: %v %v %+v", err, verifyError, claims)
+	}
 }
 
 func TestVerdictIsLowercaseWithEmptyListsAsArrays(t *testing.T) {

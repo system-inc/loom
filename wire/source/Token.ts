@@ -5,8 +5,9 @@
 // The scope strings are the protocol's own spelling, so they stay lowercase here. A board token's run is
 // `board`, and it reaches only the board's endpoints. A pool token's run is the pool's name (a run id the wire
 // takes), and it reaches only that pool's next.
-export type TokenScope = 'runner' | 'viewer' | 'coordinator' | 'board' | 'pool' | 'publish' | 'publish-candidate';
-export const TokenScopes: readonly TokenScope[] = ['runner', 'viewer', 'coordinator', 'board', 'pool', 'publish', 'publish-candidate'];
+// A submit token's run is its owner's username, and it reaches only the change endpoints.
+export type TokenScope = 'runner' | 'viewer' | 'coordinator' | 'board' | 'pool' | 'publish' | 'publish-candidate' | 'submit';
+export const TokenScopes: readonly TokenScope[] = ['runner', 'viewer', 'coordinator', 'board', 'pool', 'publish', 'publish-candidate', 'submit'];
 
 export interface TokenClaims {
     run: string;

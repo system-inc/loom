@@ -15,5 +15,5 @@
         "skipLibCheck": true,
         "noEmit": true
     },
-    "include": ["source/**/*.ts", "test/**/*.ts", "vitest.config.ts"]
+    "include": ["source/**/*.ts", "test/**/*.ts", "vitest.config.ts", "vitest.pipeline.config.ts"]
 }

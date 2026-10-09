@@ -1,5 +1,5 @@
 import { cloudflareTest } from '@cloudflare/vitest-plugin';
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
     plugins: [
@@ -11,4 +11,6 @@ export default defineConfig({
             },
         }),
     ],
+    // loom-pipeline's tests run against its own Worker, in vitest.pipeline.config.ts.
+    test: { exclude: [...configDefaults.exclude, 'test/pipeline/**'] },
 });

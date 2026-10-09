@@ -1,0 +1,14 @@
+// loom-pipeline: the deterministic path from a submitted change to main (the gospel on #system_adamic_loom; the
+// contracts in docs/contracts.md). Its own Worker beside loom-wire, which stays frozen until cutover, sharing this
+// directory's token, event and HTTP code. Each part adds its own bindings here: Queue its Durable Object and
+// migration. LOOM_TOKEN_SECRET is the same secret as loom-wire's: wrangler secret put LOOM_TOKEN_SECRET --config pipeline.jsonc
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "loom-pipeline",
+    "main": "source/Pipeline.ts",
+    "account_id": "8863664b1d7b406f63020b58b45764c5",
+    "compatibility_date": "2026-10-01",
+    "workers_dev": true,
+    "preview_urls": false,
+    "observability": { "enabled": true }
+}
