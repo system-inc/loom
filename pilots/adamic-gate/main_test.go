@@ -698,3 +698,79 @@ func TestOnlyTestsPlansTheSelectionWithItsProductsAndSetups(t *testing.T) {
 		t.Fatalf("planned %v, want %v", got, want)
 	}
 }
+
+// TestWASI's shards run in a spec of their own, and that spec, only that one, gets the WASI SDK's clang first on PATH
+// (Oct 9: once TestWASI split into TestWASIUnit00 and on, the shards rode with native tests on native clang and all 36
+// skipped on every pool record). Its mutant, the shards left in the native spec, fails here.
+func TestWASIShardsRunInASpecOfTheirOwnWithTheWASIClang(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	for _, test := range []string{"TestWASIUnit00", "TestWASIUnit01", "TestWASITargetFlags", "TestOther"} {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sinternal/native","Test":"%s","Elapsed":5}`+"\n", module, test)
+	}
+	writer.Close()
+	path := filepath.Join(t.TempDir(), "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--units", "1"})
+	write.Close()
+	os.Stdout = stdout
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(&printed, &job); err != nil {
+		t.Fatal(err)
+	}
+	var specs []string
+	for _, unit := range job.Units {
+		for _, spec := range unit.Argv {
+			if strings.HasPrefix(spec, module+"internal/native=") {
+				specs = append(specs, strings.TrimPrefix(spec, module+"internal/native="))
+			}
+		}
+	}
+	wasiSpecs := 0
+	for _, pattern := range specs {
+		if pattern == "^(TestWASIUnit00|TestWASIUnit01)$" {
+			wasiSpecs++
+		} else if strings.Contains(pattern, "TestWASIUnit") && !strings.Contains(pattern, "skip=") {
+			t.Fatalf("a WASI shard rides with native tests: %q", pattern)
+		}
+	}
+	if wasiSpecs != 1 {
+		t.Fatalf("specs %q: want one of exactly the WASI shards", specs)
+	}
+	// The unit body's own PATH line, run as the unit runs it, on each kind of spec.
+	var line string
+	for _, candidate := range strings.Split(unitBody, "\n") {
+		if strings.Contains(candidate, "${WASI_SYSROOT%/share/wasi-sysroot}/bin") {
+			line = strings.TrimSpace(candidate)
+		}
+	}
+	if line == "" {
+		t.Fatal("no WASI PATH line in the unit body")
+	}
+	for pattern, wantWASI := range map[string]bool{
+		"^(TestWASI)$": true, "^(TestWASIUnit00|TestWASIUnit01)$": true, "^(TestWASIUnit00)": true,
+		"^(TestWASIUnit00|TestOther)$": false, "^(TestWASITargetFlags)$": false, ".": false,
+	} {
+		script := "pattern='" + pattern + "' WASI_SYSROOT=/sdk/share/wasi-sysroot PATH=/native\n" + line + "\necho \"${PATH}\""
+		output, err := exec.Command("bash", "-c", script).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v %s", pattern, err, output)
+		}
+		if got := strings.TrimSpace(string(output)) == "/sdk/bin:/native"; got != wantWASI {
+			t.Fatalf("%s: PATH %q, want the WASI clang first: %v", pattern, strings.TrimSpace(string(output)), wantWASI)
+		}
+	}
+}

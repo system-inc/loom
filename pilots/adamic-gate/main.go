@@ -41,6 +41,10 @@ var exclusions = map[string]string{
 	module + "internal/native TestWASI": "it needs the wasm SDK's clang first, which v1 doesn't set up",
 }
 
+// wasiClang names internal/native's tests that run with the WASI SDK's clang first on PATH: TestWASI, and since its
+// split the shards TestWASIUnit00 and on. TestWASITargetFlags and the other TestWASI-named tests keep the native clang.
+var wasiClang = regexp.MustCompile(`^TestWASI(Unit[0-9]+)?$`)
+
 // A unit's script is an opening, which readies a tree at the sha with the whole gate's environment, then
 // unitBody. boxOpening uses the slot's own warm checkout on our boxes (tree-N, safe because the unit holds that
 // slot's lock). Its arguments are the sha and one "<package>=<-run pattern>" per package.
@@ -245,9 +249,10 @@ for spec in "${specs[@]}"; do printf '%s\t%s\n' "${index}" "${spec}"; index=$((i
     index=${1%%	*} spec=${1#*	}
     package=${spec%%=*} pattern=${spec#*=} skip=""
     case "${pattern}" in *" skip="*) skip=${pattern#* skip=} pattern=${pattern%% skip=*} ;; esac
-    # TestWASI runs alone with the WASI SDK'"'"'s clang first on PATH, as the gate'"'"'s wasi phase runs it; every other
-    # test keeps the native clang (internal/native/wasm_test.go says so).
-    [ "${pattern}" = "^(TestWASI)\$" ] && [ -n "${WASI_SYSROOT:-}" ] && export PATH="${WASI_SYSROOT%/share/wasi-sysroot}/bin:${PATH}"
+    # TestWASI and its shards TestWASIUnit00 and on run in a spec of their own with the WASI SDK'"'"'s clang first on PATH,
+    # as the gate'"'"'s wasi phase runs them; every other test keeps the native clang (internal/native/wasm_test.go says so).
+    # Oct 9: once TestWASI split, a spec of exactly ^(TestWASI)$ never came, and all 36 shards skipped on every pool record.
+    [[ ${pattern} =~ ^\^\(TestWASI(Unit[0-9]+)?(\|TestWASI(Unit[0-9]+)?)*\)\$?$ ]] && [ -n "${WASI_SYSROOT:-}" ] && export PATH="${WASI_SYSROOT%/share/wasi-sysroot}/bin:${PATH}"
     echo "${package}" > "${out}/part-${index}.package"
     cd "${tree}" && go test -count=1 -exec /bin/true -run "${pattern}" "${package}" > /dev/null 2>&1
     times > "${out}/part-${index}.build"
@@ -1214,13 +1219,20 @@ func plan(arguments []string) error {
 		sort.Strings(names)
 		for _, packageName := range names {
 			tests := packages[packageName]
-			// TestWASI needs the WASI clang, which the unit body puts on PATH for its spec alone.
-			for position, name := range tests {
-				if packageName+" "+name == module+"internal/native TestWASI" {
-					tests = append(tests[:position:position], tests[position+1:]...)
-					argv = append(argv, packageName+"=^(TestWASI)$")
-					break
+			// TestWASI and its shards need the WASI clang, which the unit body puts on PATH for their spec alone.
+			if packageName == module+"internal/native" {
+				var native, wasi []string
+				for _, name := range tests {
+					if wasiClang.MatchString(name) {
+						wasi = append(wasi, name)
+					} else {
+						native = append(native, name)
+					}
 				}
+				if len(wasi) > 0 {
+					argv = append(argv, packageName+"=^("+alternation(wasi)+")$")
+				}
+				tests = native
 			}
 			if len(tests) == 0 {
 				continue
