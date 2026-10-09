@@ -33,7 +33,7 @@ for ((minute = 0; ; minute++)); do
 	for lock in "${HOME}"/fast-gate/lock "${HOME}"/fast-gate/lock-2 "${HOME}"/fast-gate/lock-3; do
 		[ -e "${lock}" ] && ! flock -n "${lock}" true && busy=$((busy + 1))
 	done
-	awk -v load="${load}" 'BEGIN { exit !(load < 4) }' && [ "${busy}" = 0 ] && break
+	awk -v current="${load}" 'BEGIN { exit !(current < 4) }' && [ "${busy}" = 0 ] && break
 	[ "${minute}" -ge 120 ] && { log "no quiet window in two hours (load ${load}, ${busy} slots busy)"; exit 1; }
 	sleep 60
 done
