@@ -2,7 +2,8 @@
 """zerorun.py: the specs in a fast job that named tests and ran none of them (@system_adamic, Oct 9 11:01Z: a unit
 that ran "no tests to run" read as passed, and a void is never a pass).
 
-	zerorun.py <work directory>...     # a fast job's work directory: its job.json and its test.jsonl
+	zerorun.py <work directory>...     # a fast job's work directory, or a published fast record's checkout: job.json,
+	                                   # record.jsonl and test.jsonl (each may be .gz)
 	zerorun.py --tests <file> ... <work directory>   # also counts tests these go test -json files ran (a split, a rerun)
 
 A unit spec "<package>=^(A|B)$ skip=^(C)$" asks go test for the tests its run pattern matches, less those its skip
@@ -15,6 +16,7 @@ deferred tests), and ran none of them is zero-run. One line per zero-run spec:
 A whole package (run pattern ".") is never zero-run here: go test with -run . on a package with tests always runs one.
 Exit 1 when any spec is zero-run, 0 when none is, 2 when a work directory can't be read.
 """
+import gzip
 import json
 import os
 import re
@@ -64,7 +66,11 @@ def passed(work):
     """The units the run's own record says passed: only they can be a false green (a unit that never ran is a void)."""
     units = set()
     path = os.path.join(work, "record.jsonl")
-    for line in open(path, errors="replace") if os.path.exists(path) else []:
+    if not os.path.exists(path) and os.path.exists(path + ".gz"):
+        lines = gzip.open(path + ".gz", "rt", errors="replace")
+    else:
+        lines = open(path, errors="replace") if os.path.exists(path) else []
+    for line in lines:
         try:
             event = json.loads(line)
         except ValueError:
@@ -77,8 +83,14 @@ def passed(work):
 
 def sweep(work, extra=()):
     job = json.load(open(os.path.join(work, "job.json")))
+    # A work directory holds test.jsonl; a published fast record (gate-logs/<sha12>/<stamp>/fast) gzips it when large.
     path = os.path.join(work, "test.jsonl")
-    tests = ran(open(path, errors="replace") if os.path.exists(path) else [])
+    if os.path.exists(path):
+        tests = ran(open(path, errors="replace"))
+    elif os.path.exists(path + ".gz"):
+        tests = ran(gzip.open(path + ".gz", "rt", errors="replace"))
+    else:
+        tests = {}
     for more in extra:
         for package, extra_tests in ran(open(more, errors="replace")).items():
             tests.setdefault(package, set()).update(extra_tests)
