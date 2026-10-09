@@ -1114,9 +1114,12 @@ func plan(arguments []string) error {
 		sort.Strings(names)
 		for _, name := range names {
 			id := fmt.Sprintf("product-%02d", len(job.Units))
+			// A product runs to completion, never killed at the test units' 90 s: killing it would leave every test in its
+			// package unrun, worse for truth than slowness (@system_adamic's ruling, Oct 9 06:40Z, until #c5k975w closes).
+			// Ten minutes is the ceiling, so a hung build reds instead of stalling the run; over 60 s it is listed and filed.
 			productTimeout := 3*3600 + 600
 			if *budget > 0 {
-				productTimeout = int(math.Ceil(*budget * 1.5))
+				productTimeout = 600
 			}
 			job.Units = append(job.Units, protocol.JobUnit{
 				Id: id, Argv: []string{"bash", "-c", opening + unitBody, "adamic-gate-unit", *sha, packageName + "=^(" + regexp.QuoteMeta(name) + ")$"},
@@ -1919,7 +1922,7 @@ func reds(arguments []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var broken, failed, cooked, again, notRun []string
+	var broken, failed, cooked, again, notRun, slowProducts []string
 	for _, unit := range rerunOrder {
 		again = append(again, fmt.Sprintf("%s: from run %s", unit, reruns[unit].run))
 	}
@@ -1944,7 +1947,7 @@ func reds(arguments []string) (string, error) {
 		if rerun, ok := reruns[unit.Id]; ok {
 			events, run, token = rerun.events, rerun.run, rerun.token
 		}
-		output, exitCode, exited, tail, timedOut := "", 0, false, "", false
+		output, exitCode, exited, tail, timedOut, wall := "", 0, false, "", false, 0.0
 		var running []string // the leaves its kill trap named, "<package> <test>"
 		began := false       // the opening finished and the tests started: unitBody's first line was written
 		for _, event := range events {
@@ -1958,6 +1961,7 @@ func reds(arguments []string) (string, error) {
 					exitCode = *event.Code
 				}
 				timedOut = event.TimedOut
+				wall = event.WallSeconds
 			case "output":
 				tail = event.Text
 				began = began || testsBegan.MatchString(event.Text)
@@ -1971,6 +1975,12 @@ func reds(arguments []string) (string, error) {
 					output = event.Sha256
 				}
 			}
+		}
+		// A product over 60 s is listed beside the verdict on every run (the ruling's second guard), never a red unless
+		// it failed or hit its ceiling.
+		if strings.HasPrefix(unit.Id, "product-") && exited && !timedOut && wall > 60 && len(unit.Argv) > 5 {
+			packageName, pattern, _ := strings.Cut(unit.Argv[5], "=")
+			slowProducts = append(slowProducts, fmt.Sprintf("%s %s %s: %.0f s", unit.Id, packageName, strings.TrimSuffix(strings.TrimPrefix(pattern, "^("), ")$"), wall))
 		}
 		// A stage or phase unit has no go test lines: run.py's (or go build's and vet's) exit is its verdict.
 		if strings.HasPrefix(unit.Id, "stage-") || strings.HasPrefix(unit.Id, "phase-") {
@@ -2111,6 +2121,9 @@ func reds(arguments []string) (string, error) {
 	}
 	for _, line := range broken {
 		fmt.Println("BROKEN " + line)
+	}
+	for _, line := range slowProducts {
+		fmt.Println("PRODUCT OVER 60 S " + line)
 	}
 	for _, line := range cooked {
 		fmt.Println("KILLED " + line + ": over budget, P0")

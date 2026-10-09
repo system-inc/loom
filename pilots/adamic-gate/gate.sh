@@ -43,7 +43,13 @@ tools=$(git -C "${gate}" ls-remote origin refs/heads/devtools/fast-gate | cut -f
 git -C "${gate}" fetch -q origin "${sha}" "${tools}"
 for pair in "tree:${sha}" "tools:${tools}"; do
 	name=${pair%%:*} commit=${pair#*:}
-	[ -d "${work}/${name}" ] || git -C "${gate}" worktree add -q --detach "${work}/${name}" "${commit}"
+	# A worktree left by a run that was stopped is moved to this run's commit, never reused as it stood (Oct 9: main
+	# d25a7da5's rerun kept tools 2a5656d9, whose run.py couldn't list phases, after developer tools' fix c3d0aa9e).
+	if [ -d "${work}/${name}" ]; then
+		git -C "${work}/${name}" switch -q --detach "${commit}"
+	else
+		git -C "${gate}" worktree add -q --detach "${work}/${name}" "${commit}"
+	fi
 done
 python3 "${work}/tools/cloud/fast-gate/run.py" --full --list-units --tree "${work}/tree" > "${work}/units.txt" 2> "${work}/list-units.err" || { log "run.py --list-units failed: $(tail -1 "${work}/list-units.err")"; }
 reference=$(ls -t "${HOME}"/.loom/pregate/reference-*.jsonl.gz | head -1)

@@ -112,16 +112,20 @@ def main():
                 parents.add(event["Package"] + " " + "/".join(parts[:end]))
         leaves = {key for key in seconds if key not in parents}
         for key in sorted(leaves):
-            if seconds[key][0] > arguments.over and key not in named:
+            if seconds[key][0] > arguments.over and key not in named and " TestProduct_" not in key:
                 package, test = key.split(" ", 1)
                 slow.append(("", package, test, seconds[key][0]))
+    # A product over 60 s, on every run, complete or not: it runs to completion under a 10-minute ceiling now, so its
+    # slowness is filed to #c5k975w once per family (@system_adamic's ruling, Oct 9 06:40Z), never a red of its own.
+    products = [("", *key.split(" ", 1), value[0]) for key, value in sorted(seconds.items())
+                if " TestProduct_" in key and "/" not in key.split(" ", 1)[1] and value[0] > arguments.over]
     # Only main's runs file: a candidate's kill is the candidate's, and its owner hears it in the red list. And a leaf
     # whose package moved on main since the run's sha is stale (@system_adamic, Oct 9: a run that predated lint's re-cut
     # #155 and json's setup fix #192 filed their old shards): it waits for a run that has the change.
     git("fetch", "-q", "origin", "main")
     if git("merge-base", "--is-ancestor", arguments.sha, "origin/main").returncode != 0:
         print("p0: %s isn't on main; nothing filed" % arguments.sha[:12])
-        killed, slow = [], []
+        killed, slow, products = [], [], []
     moved = {}
 
     def stale(package):
@@ -132,11 +136,11 @@ def main():
 
     families = {}  # (package, stem, cause) -> [(unit, test, seconds)]
     skipped = {}
-    for unit, package, test, over in killed + slow:
+    for unit, package, test, over in killed + slow + products:
         if stale(package):
             skipped.setdefault(package, stale(package))
             continue
-        cause = "slow" if over else "killed"
+        cause = "product" if test.startswith("TestProduct_") and over else "slow" if over else "killed"
         families.setdefault(familyOf(package, test) + (cause,), []).append((unit, test, over))
     for package, change in sorted(skipped.items()):
         print("p0: stale, not filed: %s moved on main since %s (%s)" % (package, arguments.sha[:12], change))
@@ -149,7 +153,7 @@ def main():
         listing = "\n".join("- %s%s" % (test, " (%.0f s)" % over if over else " (unit %s)" % unit) for unit, test, over in members[:60])
         if len(members) > 60:
             listing += "\n- and %d more" % (len(members) - 60)
-        what = ("%d leaves over %.0f s, the longest %.0f s" % (len(members), arguments.over, max(over for _, _, over in members)) if cause == "slow"
+        what = ("%d leaves over %.0f s, the longest %.0f s" % (len(members), arguments.over, max(over for _, _, over in members)) if cause in ("slow", "product")
                 else "%d leaves running at a 90 s kill" % len(members))
         note = "Loom's run %s (%s): %s %s*: %s.\n%s" % (arguments.run, arguments.sha[:12], relative, stem, what, listing)
         if key in filed:
@@ -167,7 +171,9 @@ def main():
                 notes.add(mark)
             continue
         owner = members_of(package, stem)
-        if cause == "slow":
+        if cause == "product":
+            title = "Product: %s* (%s), %s cold on Loom; build it under 60 s" % (stem, relative, what)
+        elif cause == "slow":
             title = "Grain: %s* (%s), %s on Loom; under 60 s" % (stem, relative, what)
         else:
             title = "P0: %s* (%s), %s on Loom; fix or split under 60 s" % (stem, relative, what)
@@ -176,7 +182,7 @@ def main():
                 "not the tests'. Loom closes this task itself after two runs in a row with every leaf of the family under 60 s.")
         # New tasks go under #1pckk0k, "Grain, next block" (@system_adamic, Oct 9 06:27Z): the block rule closes #5g5151k
         # and #fvmyvy8 to new blockers. LOOM_P0_PARENT names another, and an empty one files nothing new.
-        parent = os.environ.get("LOOM_P0_PARENT", "1pckk0k")
+        parent = "c5k975w" if cause == "product" else os.environ.get("LOOM_P0_PARENT", "1pckk0k")
         if not parent:
             print("p0: not filed, LOOM_P0_PARENT is empty: %s (%s)" % (key, what))
             continue
@@ -188,7 +194,7 @@ def main():
     for key, entry in list(filed.items()):
         if len(key.split(" ")) == 2:
             # A leaf filed one by one before families (Oct 9, still being worked): closed on its own seconds.
-            if key in seconds and not any(key == package + " " + test for _, package, test, _ in killed + slow):
+            if key in seconds and not any(key == package + " " + test for _, package, test, _ in killed + slow + products):
                 measured = [seconds[key]]
             else:
                 continue

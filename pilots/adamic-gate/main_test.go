@@ -480,7 +480,8 @@ func TestEveryUnitHoldingAShardRunsItsSetup(t *testing.T) {
 }
 
 // A package's TestProduct_ tests are units of their own, planned first, and every test unit holding that package's
-// tests needs them; a package with none adds no needs, and no test unit runs a product (#8gw478y).
+// tests needs them; a package with none adds no needs, and no test unit runs a product (#8gw478y). A product runs to
+// completion under a 10-minute ceiling, never the test units' 90 s kill (@system_adamic's ruling, Oct 9).
 func TestProductsAreUnitsTheirPackagesTestUnitsNeed(t *testing.T) {
 	var reference bytes.Buffer
 	writer := gzip.NewWriter(&reference)
@@ -512,7 +513,7 @@ func TestProductsAreUnitsTheirPackagesTestUnitsNeed(t *testing.T) {
 	if err := protocol.Decode(&printed, &job); err != nil {
 		t.Fatal(err)
 	}
-	if job.Units[0].Id != "product-00" || job.Units[0].Argv[5] != module+"a=^(TestProduct_Corpus)$" || job.Units[0].TimeoutSeconds != 90 {
+	if job.Units[0].Id != "product-00" || job.Units[0].Argv[5] != module+"a=^(TestProduct_Corpus)$" || job.Units[0].TimeoutSeconds != 600 {
 		t.Fatalf("the first unit isn't the product: %s %v %d", job.Units[0].Id, job.Units[0].Argv[5:], job.Units[0].TimeoutSeconds)
 	}
 	if _, err := protocol.Expand(job); err != nil {
