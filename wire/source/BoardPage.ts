@@ -221,6 +221,9 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
     var machines = [];
     var gate = null;
     var pulse = null;
+    // Each Codex pool's workers, read from the pool every few seconds: one line each on the board.
+    var poolNames = ['codex', 'codex-side'];
+    var pools = {};
     var seenFailures = new Set();
     var firstPaint = true;
     var attempt = 0;
@@ -304,9 +307,40 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
             }
             return found;
         }
+        // A pool is one box, its workers one line each: idle until a run's active unit names the worker.
+        var workerLines = new Map();
+        poolNames.forEach(function (name) {
+            var status = pools[name];
+            if (!status) { return; }
+            // A worker that asked in the last ten minutes, or any worker a live run's unit names: one running a long unit
+            // asks nothing until it ends, and the pool keeps it for four hours for this.
+            var running = new Set();
+            runs.forEach(function (run) {
+                if (!run.verdict) { (run.active || []).forEach(function (active) { running.add(String(active.machine).toLowerCase()); }); }
+            });
+            var workers = (status.workers || []).filter(function (worker) {
+                return Date.now() - Date.parse(worker.seenAt) < 10 * 60 * 1000 || running.has(worker.worker.toLowerCase());
+            }).sort(function (left, right) { return left.worker.localeCompare(right.worker); });
+            var cores = workers.reduce(function (sum, worker) { return sum + (worker.cpus || 0); }, 0);
+            var box = { name: name + ' workers', aliases: [], cores: cores, lines: [], pool: true, queued: status.queued || 0 };
+            workers.forEach(function (worker) {
+                var asked = Date.parse(worker.seenAt);
+                var line = { slot: -2, class: '', state: 'idle', kind: 'worker', branch: '', sha: '', step: '', since: '', star: false,
+                    label: worker.worker.slice(0, 12),
+                    detail: worker.worker + ' \u00B7 asked ' + (isNaN(asked) ? '?' : duration((Date.now() - asked) / 1000)) + ' ago' + (worker.took ? ' \u00B7 last took ' + worker.took : '') };
+                box.lines.push(line);
+                workerLines.set(worker.worker.toLowerCase(), line);
+            });
+            boxes.push(box);
+        });
         runs.forEach(function (run) {
             if (run.verdict) { return; }
             (run.active || []).forEach(function (active) {
+                var worker = workerLines.get(String(active.machine).toLowerCase());
+                if (worker) {
+                    Object.assign(worker, { state: 'loom', kind: 'loom', branch: run.job, sha: active.unit, step: run.run, since: active.since, detail: '' });
+                    return;
+                }
                 var box = boxFor(active.machine);
                 // A Loom unit takes the machine's idle line if it has one, so the line count stays the slot count.
                 box.lines = box.lines.filter(function (line) { return !(line.slot === 0 && line.state === 'idle'); });
@@ -327,7 +361,8 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
             head.appendChild(element('span', 'box-meta', meta));
             var busy = box.lines.filter(function (line) { return line.state !== 'idle'; }).length;
             var slots = box.lines.filter(function (line) { return line.slot !== 0; }).length;
-            head.appendChild(element('span', 'box-busy', slots ? busy + ' of ' + slots + ' busy' : 'idle'));
+            var load = box.pool ? busy + ' of ' + slots + ' workers busy' + (box.queued ? ', ' + box.queued + ' queued' : '') : (slots ? busy + ' of ' + slots + ' busy' : 'idle');
+            head.appendChild(element('span', 'box-busy', load));
             node.appendChild(head);
             box.lines.forEach(function (line) {
                 var row = element('div', 'line');
@@ -336,7 +371,7 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
                 row.dataset.star = line.star ? 'yes' : 'no';
                 row.dataset.live = line.since ? 'yes' : 'no';
                 row.appendChild(element('span', 'glyph', glyphs[line.state] || '?'));
-                var label = line.slot > 0 ? 'slot ' + line.slot + (line.class ? ' \u00B7 ' + line.class : '') : (line.slot < 0 ? 'loom' : '');
+                var label = line.label || (line.slot > 0 ? 'slot ' + line.slot + (line.class ? ' \u00B7 ' + line.class : '') : (line.slot < 0 ? 'loom' : ''));
                 row.appendChild(element('span', 'slot-label', label));
                 var what = element('span', 'what');
                 what.title = line.state;
@@ -606,8 +641,21 @@ h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacin
         once();
     }
 
+    // The pools' workers, every 5 s with the board token; a pool that doesn't answer keeps its last reading.
+    function readPools() {
+        if (!token) { return; }
+        poolNames.forEach(function (name) {
+            fetch('/pools/' + encodeURIComponent(name), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+                .then(function (response) { return response.ok ? response.json() : null; })
+                .then(function (status) { if (status) { pools[name] = status; schedule(); } })
+                .catch(function () {});
+        });
+    }
+
     renderPulse();
     setInterval(tick, 1000);
+    readPools();
+    setInterval(readPools, 5000);
     connect();
 })();
 </script>

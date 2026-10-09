@@ -10,8 +10,9 @@ import { jsonResponse, readBodyText } from './Http';
 
 // How long a next waits for a unit before answering 204, so an idle instance asks about three times a minute.
 export const PoolWaitMilliseconds = 20_000;
-// GET /pools/<pool> lists the workers seen this recently.
-export const WorkerWindowMilliseconds = 10 * 60 * 1000;
+// GET /pools/<pool> lists the workers seen this recently: four hours, the longest a unit runs, since a worker running
+// one asks nothing until it ends. A reader tells live from gone by seenAt and the runs' active units.
+export const WorkerWindowMilliseconds = 4 * 60 * 60 * 1000;
 export const MaximumUnitsBodyBytes = 16 * 1024 * 1024;
 // A unit is one SQLite row, and a row holds at most 2 MB; a unit past this is refused by name, not by SQLite.
 export const MaximumPoolUnitBytes = 1024 * 1024;
@@ -365,7 +366,7 @@ export class Pool extends DurableObject<Env> {
 
     // ---------- Workers ----------
 
-    // Every worker seen in the last ten minutes, by name; older ones are forgotten here, lazily.
+    // Every worker seen in the last four hours, by name; older ones are forgotten here, lazily.
     private workers(): PoolWorker[] {
         this.sql.exec('DELETE FROM workers WHERE seenAt <= ?', Date.now() - WorkerWindowMilliseconds);
         return this.sql

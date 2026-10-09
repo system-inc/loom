@@ -65,7 +65,7 @@ async function waitOf(pool: string, milliseconds: number): Promise<void> {
 describe('a pool', function () {
     it('waits 20 s in production', function () {
         expect(PoolWaitMilliseconds).toBe(20_000);
-        expect(WorkerWindowMilliseconds).toBe(10 * 60 * 1000);
+        expect(WorkerWindowMilliseconds).toBe(4 * 60 * 60 * 1000);
     });
 
     it('queues units in the order given and hands them out first in, first out, exactly as given', async function () {
@@ -187,7 +187,7 @@ describe('a pool', function () {
         }
     });
 
-    it('lists the workers seen in the last ten minutes, to a coordinator or a board token', async function () {
+    it('lists the workers seen in the last four hours, to a coordinator or a board token', async function () {
         const pool = freshPool();
         await waitOf(pool, 50);
         const coordinator = await token(freshRun(), 'coordinator');
