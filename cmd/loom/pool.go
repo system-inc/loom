@@ -210,7 +210,7 @@ func cancelPoolRun(client *http.Client, wire string, secret []byte, pool string,
 //
 //	loom pool token <pool> [--hours 24]            a pool token for its instances
 //	loom pool publish-runner                       the linux runner, built at this checkout's version, in the public store
-//	loom pool prompt <pool> --runner <sha256> [--until 55m] [--before <sha256>]
+//	loom pool prompt <pool> --runner <sha256> [--until 55m] [--before <sha256> | --strict]
 //	                                               the turn brief that starts one instance's serve
 func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pool "+arguments[0], flag.ContinueOnError)
@@ -220,6 +220,7 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	runnerHash := flags.String("runner", "", "the runner binary's sha256 in the public store (from publish-runner)")
 	until := flags.String("until", "55m", "how long one serve turn runs before it exits for the next turn")
 	before := flags.String("before", "", "a script's sha256 in the public store that readies the instance before serve asks for a unit")
+	strict := flags.Bool("strict", false, "the instance serves with --strict: only structured test jobs, never a before script")
 	source := flags.String("source", defaultSource(), "this repository's checkout")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		fmt.Fprint(stderr, usage)
@@ -284,12 +285,17 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprint(stderr, "loom: --before takes a sha256\n")
 			return 3
 		}
+		// A strict worker runs nothing the server sends as code (runner/README.md), and a before script is exactly that.
+		if *strict && *before != "" {
+			fmt.Fprint(stderr, "loom: a strict worker takes no --before script: its runner readies the checkout itself\n")
+			return 3
+		}
 		token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopePool, Expires: time.Now().Add(time.Duration(*hours) * time.Hour).Unix()})
 		if err != nil {
 			fmt.Fprintf(stderr, "loom: %v\n", err)
 			return 3
 		}
-		fmt.Fprint(stdout, servePrompt(*wire, flags.Arg(0), token, *runnerHash, *until, *before))
+		fmt.Fprint(stdout, servePrompt(*wire, flags.Arg(0), token, *runnerHash, *until, *before, *strict))
 	}
 	return 0
 }
@@ -297,8 +303,13 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 // servePrompt is the whole of one instance's turn: fetch the runner by hash, check it, serve until the deadline
 // with every unit's output in a file, and show only serve's one summary line. A before script, fetched and checked
 // the same way, readies the instance first, so a cold one's setup never runs inside a unit's budget; a failure to
-// fetch or run it never costs the turn its serve, since each unit's own opening still checks what it needs.
-func servePrompt(wire string, pool string, token string, runnerHash string, until string, before string) string {
+// fetch or run it never costs the turn its serve, since each unit's own opening still checks what it needs. A strict
+// brief serves with --strict, so the instance runs only structured test jobs (#1pe3ndh), and has no before script.
+func servePrompt(wire string, pool string, token string, runnerHash string, until string, before string, strict bool) string {
+	strictFlag := ""
+	if strict {
+		strictFlag = " --strict"
+	}
 	readying, explained := "", ""
 	if before != "" {
 		// Codex's approval review refused the first turn that ran a before script unexplained (Oct 9, loom-side-codex-7:
@@ -322,7 +333,7 @@ func servePrompt(wire string, pool string, token string, runnerHash string, unti
 		"if [ ! -x \"$runner\" ]; then curl -fsS -o \"$runner.partial\" https://adamic-store.kirkouimet.com/blobs/" + runnerHash + "; " +
 		"echo \"" + runnerHash + "  $runner.partial\" | sha256sum -c --quiet; chmod 755 \"$runner.partial\"; mv \"$runner.partial\" \"$runner\"; fi\n" +
 		"(umask 077 && printf '%s\\n' '" + token + "' > /tmp/loom-pool-token)\n" +
-		"\"$runner\" serve --pool " + strings.TrimSuffix(wire, "/") + "/pools/" + pool + " --token-file /tmp/loom-pool-token" +
+		"\"$runner\" serve" + strictFlag + " --pool " + strings.TrimSuffix(wire, "/") + "/pools/" + pool + " --token-file /tmp/loom-pool-token" +
 		" --worker \"$(hostname)\" --until " + until + " --workspace /tmp/loom-units --log /tmp/loom-serve.log 2>> /tmp/loom-serve.err\n" +
 		"```\n"
 }

@@ -94,7 +94,7 @@ func TestPoolCancelDropsTheRunsUnitsWithACoordinatorTokenForThatRun(t *testing.T
 
 // The Codex opening hands serve its pool token in a file serve removes, never on serve's command line.
 func TestTheServePromptKeepsTheTokenOffTheCommandLine(t *testing.T) {
-	prompt := servePrompt("https://wire", "codex", "secret.token", strings.Repeat("a", 64), "55m", "")
+	prompt := servePrompt("https://wire", "codex", "secret.token", strings.Repeat("a", 64), "55m", "", false)
 	for _, line := range strings.Split(prompt, "\n") {
 		if strings.Contains(line, " serve --pool ") && (strings.Contains(line, "secret.token") || !strings.Contains(line, "--token-file /tmp/loom-pool-token")) {
 			t.Fatalf("serve's line: %s", line)
@@ -105,5 +105,18 @@ func TestTheServePromptKeepsTheTokenOffTheCommandLine(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "(umask 077 && printf '%s\\n' 'secret.token' > /tmp/loom-pool-token)") {
 		t.Fatalf("the prompt doesn't write the token file:\n%s", prompt)
+	}
+}
+
+func TestAStrictServePromptServesStrictAndRunsNoBeforeScript(t *testing.T) {
+	prompt := servePrompt("https://wire", "codex-strict", "secret.token", strings.Repeat("a", 64), "55m", "", true)
+	if !strings.Contains(prompt, "serve --strict --pool https://wire/pools/codex-strict --token-file /tmp/loom-pool-token") {
+		t.Fatalf("the strict prompt doesn't serve with --strict:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "loom-before") {
+		t.Fatalf("the strict prompt runs a before script:\n%s", prompt)
+	}
+	if plain := servePrompt("https://wire", "codex", "secret.token", strings.Repeat("a", 64), "55m", "", false); strings.Contains(plain, "--strict") {
+		t.Fatalf("a plain prompt serves with --strict:\n%s", plain)
 	}
 }
