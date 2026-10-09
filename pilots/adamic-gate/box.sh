@@ -24,7 +24,8 @@
 set -euo pipefail
 workers=$1 first=$2 until=$3 pool=$4
 runnerSha=${LOOM_RUNNER_SHA:-7f01c04925b5bcdf4c2359abcee90f0723b656867e696313db20391d08cdada7}
-units=${HOME}/loom-units
+# LOOM_BOX_UNITS points a test (box_test.sh) at a scratch directory in place of ~/loom-units.
+units=${LOOM_BOX_UNITS:-${HOME}/loom-units}
 runner=${units}/loom-runner-${runnerSha:0:12}
 if [ ! -x "${runner}" ]; then
 	curl -fsS -o "${runner}.partial" "https://adamic-store.kirkouimet.com/blobs/${runnerSha}"
@@ -55,12 +56,24 @@ for ((index = 0; index < workers; index++)); do
 	mkdir -p "${worker}/tmp"
 	# The private /tmp is bound in a namespace where the worker is root, then a nested namespace maps it back to its
 	# own uid before the runner starts.
+	#
+	# A unit sees nothing of the box user's own (#mtxysfp, Oct 9 21:30Z): the mapped user is the box user, so with only
+	# /tmp bound a unit could read ~/.ssh, ~/.adamic-build-cache-token (it writes and deletes the build-cache Worker) and
+	# ~/.loom, and on WSL the Windows drives under /mnt. So what the worker needs is bound into /tmp/.box first (the
+	# runner, the pool token, the warm-up script and node read-only, the worker's own directory for its logs), then an
+	# empty tmpfs goes over the home and over /mnt, and everything after reads from /tmp/.box.
 	setsid nohup nice -n 19 ionice -c 3 taskset -c "${cores}" unshare -Urm sh -c '
-		mount --bind "$1/tmp" /tmp && mkdir -p /tmp/warm && cd /tmp/warm &&
-		unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="${10}/bin:${PATH}" bash "$9" > "$1/before.log" 2>&1 &&
-		{ [ -z "${11}" ] || exit 0; } && cd / && exec unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="${10}/bin:${PATH}" \
-			"$4" serve --pool "$5" --token "$(cat "$6")" --worker "$7" --until "$8" --workspace /tmp/loom-units --log "$1/serve.log"
-	' box "${worker}" "$(id -u)" "$(id -g)" "${runner}" "${pool}" "${units}/pool-token" "${name}" "${until}" "${units}/before.sh" "${units}/node" "${LOOM_BOX_WARM_ONLY:-}" \
+		mount --bind "$1/tmp" /tmp && mkdir -p /tmp/.box/node /tmp/.box/worker /tmp/warm &&
+		for file in runner pool-token before.sh; do : > "/tmp/.box/${file}"; done &&
+		mount --bind "$4" /tmp/.box/runner && mount --bind "$6" /tmp/.box/pool-token && mount --bind "$9" /tmp/.box/before.sh &&
+		mount --bind "${10}" /tmp/.box/node && mount --bind "$1" /tmp/.box/worker &&
+		for path in runner pool-token before.sh node; do mount -o remount,bind,ro "/tmp/.box/${path}" || exit 2; done &&
+		mount -t tmpfs -o size=1m,mode=755 none "${12}" && { [ ! -d /mnt ] || mount -t tmpfs -o size=1m,mode=755 none /mnt; } &&
+		cd /tmp/warm &&
+		unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="/tmp/.box/node/bin:${PATH}" bash /tmp/.box/before.sh > /tmp/.box/worker/before.log 2>&1 &&
+		{ [ -z "${11}" ] || exit 0; } && cd / && exec unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="/tmp/.box/node/bin:${PATH}" \
+			/tmp/.box/runner serve --pool "$5" --token "$(cat /tmp/.box/pool-token)" --worker "$7" --until "$8" --workspace /tmp/loom-units --log /tmp/.box/worker/serve.log
+	' box "${worker}" "$(id -u)" "$(id -g)" "${runner}" "${pool}" "${units}/pool-token" "${name}" "${until}" "${units}/before.sh" "${units}/node" "${LOOM_BOX_WARM_ONLY:-}" "${HOME}" \
 		>> "${worker}/serve.out" 2>&1 < /dev/null &
 	echo "box: ${name} serving on cores ${cores} until ${until}"
 done
