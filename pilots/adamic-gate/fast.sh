@@ -167,17 +167,39 @@ PY
 	finish "${sha}" "${stamp}" "${verdict}" "${run}"
 }
 
-# runSelection runs the gate's own selection on one side instance (select.sh), then makes the job from its select.json:
-# the packages, the env with the selection directory recreated on every test instance at the same path, and the
-# select.json itself for verify.sh's only_tests and deferred. A selection that exits 1 with no select.json is the
-# change's red; anything else that leaves none is void.
+# runSelection runs the gate's own selection on a warm gate box (select-box.sh), or failing that on one side instance
+# (select.sh), then makes the job from its select.json: the packages, the env with the selection directory recreated on
+# every test instance at the same path, and the select.json itself for verify.sh's only_tests and deferred. A pool
+# selection that exits 1 with no select.json is the change's red; anything else that leaves none is void.
 runSelection() {
-	local sha=$1 stamp=$2 work=${jobs}/$1.work run token hash
+	local sha=$1 stamp=$2 work=${jobs}/$1.work
 	# An earlier attempt's selection never stands in for this one's: a selection that fails or uploads nothing left the
 	# old select.json in place, and the job ran on it (Oct 9 11:26Z: gocacheprog 77dcb095's new selection landed on a
 	# black hole and failed in 0.2 s, and its 10:54Z selection, made before the job had a merge gate, named the tip's
 	# changed paths while the env unpacked under the gate: 10,390 json tests failed).
-	rm -f "${work}/select.tgz" "${work}/select/select.json" "${work}/select-events.jsonl"
+	rm -f "${work}/select.tgz" "${work}/select/select.json" "${work}/select-events.jsonl" "${work}/select-run.log"
+	# A warm gate box selects first (#7cmv2g3; @system_adamic, Oct 9 17:43Z: 318eef6a's select took 94 s of its 176 on a
+	# cold Codex instance): the same run.py --select at the same tools, on a tree of the box's own, in seconds, held to 30 s
+	# (select-box.sh). Its select.tgz lands where the pool unit's does. Anything else, a red included, is the pool's to
+	# decide, as before. select-run.log names the box, which placed.py counts as the selection placed.
+	local box selectStarted=${SECONDS}
+	if [ -x "${bin}/select-box.sh" ] && box=$("${bin}/select-box.sh" "$(cat "${work}/gate")" "$(cat "${work}/base")" "$(cat "${work}/base_name")" "$(cat "${work}/tools")" "${work}/select.tgz" 2> "${work}/select-box.log") &&
+		mkdir -p "${work}/select" && tar -xzf "${work}/select.tgz" -C "${work}/select" && [ -f "${work}/select/select.json" ]; then
+		echo "box ${box}: selected in $((SECONDS - selectStarted)) s (select-box.sh)" > "${work}/select-run.log"
+	else
+		rm -f "${work}/select.tgz" "${work}/select/select.json"
+		box=""
+		selectOnPool "${sha}" "${stamp}" || return 1
+	fi
+	selectionMade "${sha}"
+	# Select's wall in the server's log, wherever it ran, so a job's phases can be read from fast.log alone.
+	echo "$(date -u +%H:%M:%S) select: ${sha:0:12} in $((SECONDS - selectStarted)) s on ${box:-the pool ($(head -1 "${work}/select-run.log" | awk '{print $2}' | tr -d :))}"
+}
+
+# selectOnPool runs the selection as one unit on the pool (select.sh), and leaves its select.tgz unpacked in
+# <work>/select, or finishes the job: red when the gate's selection refused the change, void when Loom broke it.
+selectOnPool() {
+	local sha=$1 stamp=$2 work=${jobs}/$1.work run token hash
 	"${bin}/adamic-gate" unit --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --id select --body "${bin}/select.sh" --output loom-out/select.tgz --output loom-out/select.stdout -- "$(cat "${work}/base")" "$(cat "${work}/base_name")" "$(cat "${work}/tools")" > "${work}/select-job.json" 2> "${work}/select-plan.log" || {
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the selection couldn't be planned, so the boxes take it" ""
 		return 1
@@ -219,6 +241,11 @@ print(' '.join(lines[start:start + 2]) if start is not None else 'see the select
 		fi
 		return 1
 	fi
+}
+
+# selectionMade makes the job from <work>/select/select.json, wherever the selection ran.
+selectionMade() {
+	local sha=$1 work=${jobs}/$1.work
 	python3 - "${work}" "${sha}" <<'PY'
 import base64, json, os, re, shlex, sys
 work, sha = sys.argv[1], sys.argv[2]

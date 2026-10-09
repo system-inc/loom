@@ -68,7 +68,12 @@ def main():
             names = None
         # Only units this attempt's plan names count, the selection as one: a long-lived count once read 309 of 24 on
         # the trio (Oct 9 10:11Z), so placed is held to what the plan can hold.
-        placed = (1 if selectRun and started.get(selectRun) else 0) + (len(started.get(testRun, set()) & names) if names else 0)
+        # A selection made on a gate box (select-box.sh, #7cmv2g3) has no run: its log's "box <name>:" line is it placed.
+        try:
+            onBox = open(os.path.join(work, "select-run.log")).readline().startswith("box ")
+        except OSError:
+            onBox = False
+        placed = (1 if (selectRun and started.get(selectRun)) or onBox else 0) + (len(started.get(testRun, set()) & names) if names else 0)
         total = (1 if selecting else 0) + len(names) if names is not None else placed + 1
         placed = min(placed, total)
         line = "%d %d\n" % (placed, total)
