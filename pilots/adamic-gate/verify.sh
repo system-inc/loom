@@ -142,20 +142,23 @@ unit = {"id": "build-vet", "argv": ["bash", "-c", opening + body, "adamic-build-
 def unsized(spec):
     pattern = spec.split("=", 1)[1] if "=" in spec else ""
     return pattern == "." or pattern.startswith(". skip=") or "$/." in pattern
+# (Its loop names its unit "crowd", never "unit": the build-vet unit above is held in "unit" until it's inserted below,
+# and a loop that rebound it put the last test unit there twice and dropped build-vet, Oct 9 10:14 to 10:21Z.)
 extra = []
-for unit in job["units"]:
-    specs = unit["argv"][5:]
+for crowd in job["units"]:
+    specs = crowd["argv"][5:]
     remainders = [spec for spec in specs if unsized(spec)]
     for index, spec in enumerate(remainders[1:], start=1):
-        moved = json.loads(json.dumps(unit))
-        moved["id"] = "%s-r%d" % (unit["id"], index)
-        moved["argv"] = unit["argv"][:5] + [spec]
-        moved.pop("needs", None) if not unit.get("needs") else None
+        moved = json.loads(json.dumps(crowd))
+        moved["id"] = "%s-r%d" % (crowd["id"], index)
+        moved["argv"] = crowd["argv"][:5] + [spec]
         extra.append(moved)
     if len(remainders) > 1:
-        unit["argv"] = unit["argv"][:5] + [spec for spec in specs if spec not in remainders[1:]]
+        crowd["argv"] = crowd["argv"][:5] + [spec for spec in specs if spec not in remainders[1:]]
 job["units"] += extra
-crowded = [unit["id"] for unit in job["units"] if sum(1 for spec in unit["argv"][5:] if unsized(spec)) > 1]
+crowded = [crowd["id"] for crowd in job["units"] if sum(1 for spec in crowd["argv"][5:] if unsized(spec)) > 1]
+if len({crowd["id"] for crowd in job["units"]} | {unit["id"]}) != len(job["units"]) + 1:
+    sys.exit("verify: two units share an id after the split")
 if crowded:
     sys.exit("verify: units still hold more than one unsized package: %s" % ", ".join(crowded))
 job["name"] = "adamic-verify"
