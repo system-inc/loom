@@ -46,6 +46,14 @@ scenario phases-twice-void "phase-fast=noupload" "phase-fast=nofinish"
 runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-twice-void 'grep -q "^void: the phases unit left no status.txt (run stub-run-2); its first attempt left no status.txt (run stub-run-1 on m10)" $work/phases-status && [ "$(cat $T/calls)" = 2 ]'
 scenario phases-cancel-no-retry "phase-fast=noupload"
 touch $jobs/$sha.cancelled; runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-cancel-no-retry 'grep -q "^void: " $work/phases-status && [ "$(cat $T/calls)" = 1 ]'
+# A phase run.py calls red with an empty log for that phase was killed at its limit: placed once more.
+scenario phases-killed-build-retry-green "" "" ""
+mkdir -p $T/k/phase && echo "red: x fast gate, first failure at build after 186.1 s, under load" > $T/k/phase/status.txt && : > $T/k/phase/build.log && tar -czf $T/phase-1.tgz -C $T/k phase
+runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-killed-build-retry-green 'grep -q "^green: phases passed" $work/phases-status && [ "$(cat $T/calls)" = 3 ]'
+# The same red with a failure in its log is the change's: never placed again.
+scenario phases-build-red-stands "" ""
+mkdir -p $T/k/phase && echo "red: x fast gate, first failure at build after 20.0 s" > $T/k/phase/status.txt && echo "./x.go:1: undefined: y" > $T/k/phase/build.log && tar -czf $T/phase-1.tgz -C $T/k phase
+runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-build-red-stands 'grep -q "^red: x fast gate, first failure at build" $work/phases-status && [ "$(cat $T/calls)" = 2 ] && [ "$(python3 -c "import json; print(json.load(open(\"$T/job-2.json\"))[\"name\"])")" != adamic-gate-fast-phases ]'
 scenario phases-green-once "" ""
 runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-green-once 'grep -q "^green: phases passed" $work/phases-status && [ "$(cat $T/calls)" = 2 ] && git --git-dir=$T/origin.git show "gate-logs/111111111111/20261009T000000Z/fast-phases:box.txt" | grep -qv "placed twice"'
 echo "failures: $failures"

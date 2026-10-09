@@ -1,3 +1,3 @@
 #!/bin/bash
-# Stub curl: a PUT succeeds; a blob GET prints the phases tarball.
-case "$*" in *"-X PUT"*) exit 0 ;; *blobs*) cat $STUB/phase.tgz ;; *) exit 1 ;; esac
+# Stub curl: a PUT succeeds; a blob GET prints the phases tarball for this attempt (phase-<n>.tgz, else phase.tgz).
+case "$*" in *"-X PUT"*) exit 0 ;; *blobs*) n=$(cat $STUB/calls); cat $STUB/phase-$n.tgz 2> /dev/null || cat $STUB/phase.tgz ;; *) exit 1 ;; esac

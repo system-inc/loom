@@ -269,7 +269,7 @@ job = json.load(sys.stdin); job['name'] = 'adamic-gate-fast-phases'; json.dump(j
 	# naming both (#ber4297; @system_adamic, Oct 9 14:21Z: the trio's phases voided on one coordinator stop and waited on
 	# a hand rerun). The Go tests' verdicts are untouched: the same test.jsonl is the input both times. Never past the
 	# job's ceiling or its cancel. The pool hands the unit to whichever worker asks next, so each attempt names its machine.
-	local attempt suffix broken first=""
+	local attempt suffix broken phase first=""
 	for attempt in 1 2; do
 		suffix=$([ "${attempt}" = 1 ] || echo "-${attempt}")
 		"${bin}/loom-pregate" run --uncached --slots none --pool codex-side=1 --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/phases-record${suffix}.jsonl" "${work}/phases.json" > "${work}/phases-run${suffix}.log" 2>&1
@@ -295,6 +295,10 @@ for line in open(sys.argv[1]):
 		elif grep -q '"type":"exit".*"code":2' "${work}/phases-record${suffix}.jsonl"; then
 			# run.py's own word, unless the unit said the fault was Loom's (exit 2).
 			broken="exited 2, Loom's fault"
+		elif phase=$(sed -nE '1s/^red: .*first failure at ([a-z]+) after.*/\1/p' "${out}/phase/status.txt") && [ -n "${phase}" ] && [ -f "${out}/phase/${phase}.log" ] && [ ! -s "${out}/phase/${phase}.log" ]; then
+			# A phase run.py calls failed with nothing in its log was killed at its limit, no failure line: a cold, loaded
+			# instance (Oct 9 14:33Z: the star's merged phases, build killed at 186 s under load 8.1, build.log empty).
+			broken="was killed at ${phase} with no failure line"
 		fi
 		[ -z "${broken}" ] && break
 		[ -f "${work}/ceiling" ] || [ -f "${jobs}/${sha}.cancelled" ] && break
