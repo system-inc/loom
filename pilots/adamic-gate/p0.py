@@ -206,9 +206,13 @@ def main():
         entry["last"] = arguments.run
         entry["under"] = entry.get("under", 0) + 1 if all(outcome == "pass" and value < 60 for value, outcome in measured) else 0
         if entry["under"] >= 2:
+            del filed[key]
+            # One task may hold several families (cohere folded estree's three into one, Oct 9): it closes with the last.
+            if any(other["task"] == entry["task"] for other in filed.values()):
+                print("clean twice, its task %s waits on its other families: %s" % (entry["task"], key))
+                continue
             tasks("done", entry["task"], "Every leaf under 60 s on two runs in a row on Loom (last %s)." % arguments.run, dry=arguments.dry)
             print("closed %s: %s" % (entry["task"], key))
-            del filed[key]
     if not arguments.dry:
         json.dump(filed, open(state + ".partial", "w"), indent=1)
         os.replace(state + ".partial", state)
