@@ -320,7 +320,8 @@ func codexPreamble(gateInputs string) string {
 // buildVetBody is the gate's build and vet as one stage unit: go build ./... and go vet ./... on the tree the
 // opening readied. A stage unit reports no tests: compare and reds judge it by its exit, 0 green, 1 the change's
 // red, anything else Loom's.
-const buildVetBody = `cd "${tree}" || exit 2
+const buildVetBody = `[ -n "${tree:-}" ] && [ -d "${tree}/.git" ] && [ -n "${out:-}" ] || { echo "loom-build: no tree to build (the opening never ran): Loom's fault"; exit 2; }
+cd "${tree}" || exit 2
 go build ./... > "${out}/build.log" 2>&1; build=$?
 go vet ./... > "${out}/vet.log" 2>&1; vet=$?
 if [ "${build}" = 0 ]; then echo "loom-stage: go build ./... passed"; else echo "loom-stage: go build ./... FAILED (exit ${build})"; head -40 "${out}/build.log"; fi
@@ -789,9 +790,33 @@ type plannedJob struct {
 
 var childSpec = regexp.MustCompile(`^\^(.+)\$/\^\((.*)\)\$$`)
 
+// unquoteAlternation reads back an alternation of regexp.QuoteMeta'd names: it splits on each unescaped |, and a
+// backslash keeps the character after it, so a name holding | or \ itself (cohere's selector cases, a NUL key
+// test) comes back whole.
+func unquoteAlternation(quoted string) []string {
+	var names []string
+	var name strings.Builder
+	escaped := false
+	for _, character := range quoted {
+		switch {
+		case escaped:
+			name.WriteRune(character)
+			escaped = false
+		case character == '\\':
+			escaped = true
+		case character == '|':
+			names = append(names, name.String())
+			name.Reset()
+		default:
+			name.WriteRune(character)
+		}
+	}
+	return append(names, name.String())
+}
+
 func plannedTests(job protocol.Job) (plannedJob, error) {
 	planned := plannedJob{tests: map[string][]string{}, remainderPackages: map[string]map[string]bool{}, remainderParents: map[string]map[string]bool{}, split: map[string]bool{}}
-	unquote := func(quoted string) string { return strings.ReplaceAll(quoted, `\`, "") }
+	unquote := func(quoted string) string { return strings.Join(unquoteAlternation(quoted), "|") }
 	for _, unit := range job.Units {
 		if strings.HasPrefix(unit.Id, "stage-") {
 			continue // a stage unit runs no tests of the plan
@@ -818,14 +843,14 @@ func plannedTests(job protocol.Job) (plannedJob, error) {
 			if match := childSpec.FindStringSubmatch(pattern); match != nil {
 				parent := unquote(match[1])
 				planned.split[packageName+" "+parent] = true
-				for _, quoted := range strings.Split(match[2], "|") {
-					planned.tests[unit.Id] = append(planned.tests[unit.Id], packageName+" "+parent+"/"+unquote(quoted))
+				for _, name := range unquoteAlternation(match[2]) {
+					planned.tests[unit.Id] = append(planned.tests[unit.Id], packageName+" "+parent+"/"+name)
 				}
 				continue
 			}
 			inner := strings.TrimSuffix(strings.TrimPrefix(pattern, "^("), ")$")
-			for _, quoted := range strings.Split(inner, "|") {
-				planned.tests[unit.Id] = append(planned.tests[unit.Id], packageName+" "+unquote(quoted))
+			for _, name := range unquoteAlternation(inner) {
+				planned.tests[unit.Id] = append(planned.tests[unit.Id], packageName+" "+name)
 			}
 		}
 	}
