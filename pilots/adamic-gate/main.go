@@ -166,14 +166,12 @@ for tools in "${HOME}/.adamic-tools" "${HOME}/adamic-tools"; do
     rm -f /tmp/adamic-setup-done
   fi
 done
-# The marker holds the hash of the setup.sh that made it, so a changed setup runs again once on every instance (Oct 9
-# 18:29Z: gocacheprog landed in setup.sh at 17:21Z, but instances set up before it kept an env.sh without GOCACHEPROG,
-# and its shared cache never reached the pool).
-setupHash=$(sha256sum "${tree}/cloud/setup.sh" 2> /dev/null | cut -c1-64)
-if [ ! -f /tmp/adamic-setup-done ] || [ "$(cat /tmp/adamic-setup-done)" != "${setupHash}" ]; then
-  [ -f /tmp/adamic-setup-done ] && echo "loom-pilot: cloud/setup.sh changed since this instance's setup; running it again"
-  (cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && echo "${setupHash}" > /tmp/adamic-setup-done || { echo "loom-pilot: setup failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
-  grep -m1 "shared cache" /tmp/adamic-setup.log | sed 's/^/loom-pilot: setup: /'
+# The marker is set once per instance: a full setup re-run inside a unit's opening warms the whole module (go build
+# ./..., -a when uncached), minutes and gigabytes, and it failed on most instances when tried (Oct 9 19:06Z, canary 9b:
+# 7 units exit 2, "setup failed" right after "shared cache ready"). Bringing a changed setup's pieces (gocacheprog) to
+# instances already set up is the build owner's to do without that warm.
+if [ ! -f /tmp/adamic-setup-done ]; then
+  (cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && touch /tmp/adamic-setup-done || { echo "loom-pilot: setup failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
 fi
 for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do [ -f "${environment}" ] && { source "${environment}"; break; }; done
 (cd / && go list ${stdProbe} > /dev/null 2>&1) || { echo "loom-pilot: the Go toolchain lacks its standard library after setup"; rm -f /tmp/adamic-setup-done; exit 2; }
