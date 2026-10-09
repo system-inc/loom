@@ -1,5 +1,6 @@
-// A pool: one Durable Object per pool name, holding a first-in, first-out queue of units in its SQLite storage for
-// machines Loom can't ssh into (docs/protocol.md, The pool). The coordinator puts units in; each instance's
+// A pool: one Durable Object per pool name, holding a queue of units in its SQLite storage for machines Loom can't
+// ssh into (docs/protocol.md, The pool). Units go out highest priority first, and first in, first out within one
+// priority, so the star's units pass main's and main's pass a side candidate's on one shared pool. The coordinator puts units in; each instance's
 // `loom-runner serve` asks for its next one and waits up to 20 s for it. A waiting ask is a promise this object
 // holds, resolved the moment units arrive, oldest ask first, so nothing polls. The Worker has already checked the
 // token; this object trusts it.
@@ -18,6 +19,8 @@ export const MaximumUnitsBodyBytes = 16 * 1024 * 1024;
 export const MaximumPoolUnitBytes = 1024 * 1024;
 export const MaximumAskBodyBytes = 64 * 1024;
 export const MaximumWorkerNameLength = 256;
+// A priority is a whole number in this range; 0, the default, is the lowest a coordinator sends without asking.
+export const MaximumPoolPriority = 1000;
 
 const textEncoder = new TextEncoder();
 
@@ -26,6 +29,12 @@ export interface PoolUnit {
     run: string;
     unit: string;
     json: string;
+}
+
+// A batch as queued: its units and the priority they all share.
+export interface PoolBatch {
+    units: PoolUnit[];
+    priority: number;
 }
 
 export interface PoolAsk {
@@ -54,10 +63,10 @@ function isCount(value: unknown): value is number {
     return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
-// The body is exactly {"units": [...]}, each a whole protocol.Unit. The wire reads only its run and unit id; the
-// rest is the runner's to check, and goes out exactly as it came in. Go marshals an empty slice as null, so null is
-// none.
-export function checkPoolUnits(body: string): PoolUnit[] | string {
+// The body is exactly {"units": [...]} and an optional "priority", each unit a whole protocol.Unit. The wire reads
+// only its run and unit id; the rest is the runner's to check, and goes out exactly as it came in. Go marshals an
+// empty slice as null, so null is none, and leaves a zero priority off.
+export function checkPoolUnits(body: string): PoolBatch | string {
     let parsed: unknown;
     try {
         parsed = JSON.parse(body);
@@ -68,12 +77,20 @@ export function checkPoolUnits(body: string): PoolUnit[] | string {
     if (!isPlainObject(parsed)) {
         return 'the body is a JSON object';
     }
-    const keys = Object.keys(parsed);
-    if (keys.length !== 1 || keys[0] !== 'units') {
-        return 'the body has exactly units';
+    for (const key of Object.keys(parsed)) {
+        if (key !== 'units' && key !== 'priority') {
+            return `unknown field ${JSON.stringify(key)}; the body has units and an optional priority`;
+        }
+    }
+    if (!('units' in parsed)) {
+        return 'the body has units';
+    }
+    const priority = parsed.priority ?? 0;
+    if (!isCount(priority) || priority > MaximumPoolPriority) {
+        return `priority is a whole number from 0 to ${MaximumPoolPriority}`;
     }
     if (parsed.units === null) {
-        return [];
+        return { units: [], priority: priority };
     }
     if (!Array.isArray(parsed.units)) {
         return 'units is a list';
@@ -99,7 +116,7 @@ export function checkPoolUnits(body: string): PoolUnit[] | string {
         }
         units.push({ run: unit.run, unit: unit.unit, json: json });
     }
-    return units;
+    return { units: units, priority: priority };
 }
 
 // The ask is exactly {"worker", "cpus"}: a worker name, and the cores it has. A zero cpus may be left off, as Go's
@@ -183,7 +200,8 @@ export class Pool extends DurableObject<Env> {
                 position INTEGER PRIMARY KEY,
                 run TEXT NOT NULL,
                 unit TEXT NOT NULL,
-                json TEXT NOT NULL
+                json TEXT NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS unitsByRun ON units (run);
             CREATE TABLE IF NOT EXISTS workers (
@@ -193,6 +211,16 @@ export class Pool extends DurableObject<Env> {
                 took TEXT NOT NULL DEFAULT ''
             );
         `);
+        // A pool made before priorities has units without the column; it is added in place, its units at 0.
+        const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(units)').toArray();
+        if (
+            !columns.some(function (column) {
+                return column.name === 'priority';
+            })
+        ) {
+            this.sql.exec('ALTER TABLE units ADD COLUMN priority INTEGER NOT NULL DEFAULT 0');
+        }
+        this.sql.exec('CREATE INDEX IF NOT EXISTS unitsByPriority ON units (priority DESC, position)');
     }
 
     override async fetch(request: Request): Promise<Response> {
@@ -217,19 +245,25 @@ export class Pool extends DurableObject<Env> {
 
     // ---------- Units ----------
 
-    // The units join the end of the queue in the order given, all or none, then go straight to whoever waits.
+    // The units join the end of their priority's queue in the order given, all or none, then go straight to whoever waits.
     private async acceptUnits(request: Request): Promise<Response> {
         const body = await readBodyText(request, MaximumUnitsBodyBytes);
         if (body === null) {
             return jsonResponse(413, { error: `the units are at most ${MaximumUnitsBodyBytes} bytes` });
         }
-        const units = checkPoolUnits(body);
-        if (typeof units === 'string') {
-            return jsonResponse(400, { error: units });
+        const batch = checkPoolUnits(body);
+        if (typeof batch === 'string') {
+            return jsonResponse(400, { error: batch });
         }
         this.ctx.storage.transactionSync(() => {
-            for (const unit of units) {
-                this.sql.exec('INSERT INTO units (run, unit, json) VALUES (?, ?, ?)', unit.run, unit.unit, unit.json);
+            for (const unit of batch.units) {
+                this.sql.exec(
+                    'INSERT INTO units (run, unit, json, priority) VALUES (?, ?, ?, ?)',
+                    unit.run,
+                    unit.unit,
+                    unit.json,
+                    batch.priority,
+                );
             }
         });
         this.handOut();
@@ -240,12 +274,13 @@ export class Pool extends DurableObject<Env> {
         return this.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM units').one().count;
     }
 
-    // Takes the first unit off the queue for this worker and records it as the one the worker last took.
+    // Takes the next unit off the queue for this worker, the highest priority's oldest, and records it as the one the
+    // worker last took.
     private take(worker: string): string | null {
         return this.ctx.storage.transactionSync(() => {
             const first = this.sql
                 .exec<{ position: number; unit: string; json: string }>(
-                    'SELECT position, unit, json FROM units ORDER BY position LIMIT 1',
+                    'SELECT position, unit, json FROM units ORDER BY priority DESC, position LIMIT 1',
                 )
                 .toArray()[0];
             if (first === undefined) {

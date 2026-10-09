@@ -36,6 +36,7 @@ type fakeWire struct {
 	cache    map[string]protocol.CacheEntry
 	machines []BoardMachine
 	pools    map[string][]protocol.Unit // each pool's queue
+	priority map[string][]int           // each pool's batches' priorities, in the order they came
 	swallow  int                        // the next asks to take a unit lose it, as an ask whose turn ended does
 	ghosts   int                        // the next units taken go to a worker that says started, then is gone
 	reading  map[string]int             // reads of each run's log in flight
@@ -45,7 +46,7 @@ type fakeWire struct {
 
 func newFakeWire(t *testing.T) *fakeWire {
 	wire := &fakeWire{plans: map[string]protocol.Plan{}, lines: map[string][]protocol.Event{}, verdict: map[string]protocol.Verdict{},
-		blobs: map[string][]byte{}, cache: map[string]protocol.CacheEntry{}, pools: map[string][]protocol.Unit{}, reading: map[string]int{}}
+		blobs: map[string][]byte{}, cache: map[string]protocol.CacheEntry{}, pools: map[string][]protocol.Unit{}, priority: map[string][]int{}, reading: map[string]int{}}
 	wire.server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		claims, err := protocol.VerifyToken(testSecret, strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "), time.Now())
 		if err != nil {
@@ -96,13 +97,15 @@ func newFakeWire(t *testing.T) *fakeWire {
 				return
 			}
 			var posted struct {
-				Units []protocol.Unit `json:"units"`
+				Units    []protocol.Unit `json:"units"`
+				Priority int             `json:"priority"`
 			}
 			if err := protocol.Decode(bytes.NewReader(body), &posted); err != nil {
 				http.Error(writer, err.Error(), http.StatusBadRequest)
 				return
 			}
 			wire.pools[parts[1]] = append(wire.pools[parts[1]], posted.Units...)
+			wire.priority[parts[1]] = append(wire.priority[parts[1]], posted.Priority)
 			json.NewEncoder(writer).Encode(map[string]int{"queued": len(wire.pools[parts[1]])})
 		case len(parts) == 3 && parts[0] == "pools" && parts[2] == "queued":
 			var asked struct {

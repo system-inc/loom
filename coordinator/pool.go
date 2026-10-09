@@ -41,6 +41,9 @@ import (
 type PoolMachine struct {
 	// Pool is the pool's name on the wire, such as codex.
 	Pool string
+	// Priority ranks this machine's units on the pool, 0 to 1000: the pool hands out the highest first, and first in,
+	// first out within one priority.
+	Priority int
 	// Label names the machine in the record and on the board; empty means "pool:<pool>".
 	Label string
 	// Wire is the Worker's origin, the coordinator's Config.Wire.
@@ -66,6 +69,12 @@ type PoolMachine struct {
 	mutex     sync.Mutex
 	followers map[string]*runFollower   // by run
 	queued    map[string]queuedSnapshot // by run, the last look at its units still queued
+}
+
+// A poolBatch is the body of a pool's units call: the units and the priority they share, left off at 0.
+type poolBatch struct {
+	Units    []protocol.Unit `json:"units"`
+	Priority int             `json:"priority,omitempty"`
 }
 
 // silentBeats is how many of its runner's heartbeats a started unit may go silent before its worker counts as gone.
@@ -109,7 +118,7 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 	// Following starts before the unit is queued, so none of its events can come before the follower looks.
 	stream := machine.subscribe(unit.Run, unit.Unit, token)
 	defer machine.unsubscribe(unit.Run, unit.Unit, stream)
-	body, err := json.Marshal(map[string][]protocol.Unit{"units": {unit}})
+	body, err := json.Marshal(poolBatch{Units: []protocol.Unit{unit}, Priority: machine.Priority})
 	if err != nil {
 		return err
 	}

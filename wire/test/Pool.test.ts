@@ -90,6 +90,59 @@ describe('a pool', function () {
         expect((await poolState(pool, coordinator)).queued).toBe(0);
     });
 
+    it('hands out the highest priority first, and first in, first out within one priority', async function () {
+        const pool = freshPool();
+        const coordinator = await token(freshRun(), 'coordinator');
+        const member = await token(pool, 'pool');
+        const side = freshRun();
+        const main = freshRun();
+        const star = freshRun();
+        // A batch without a priority is 0, as Go's omitempty leaves a zero off; a null batch is still none.
+        await postUnits(pool, coordinator, [poolUnit(side, 'a'), poolUnit(side, 'b')]);
+        await postUnits(pool, coordinator, JSON.stringify({ units: [poolUnit(main, 'a')], priority: 20 }));
+        await postUnits(pool, coordinator, JSON.stringify({ units: [poolUnit(star, 'a'), poolUnit(star, 'b')], priority: 30 }));
+        await postUnits(pool, coordinator, JSON.stringify({ units: [poolUnit(main, 'b')], priority: 20 }));
+        expect(await (await postUnits(pool, coordinator, '{"units":null,"priority":30}')).json()).toEqual({ queued: 6 });
+        const order: string[] = [];
+        for (let index = 0; index < 4; index++) {
+            const taken = (await (await next(pool, member, 'instance-1')).json()) as { run: string; unit: string };
+            order.push(`${[side, main, star].indexOf(taken.run)}:${taken.unit}`);
+        }
+        expect(order).toEqual(['2:a', '2:b', '1:a', '1:b']);
+        // A later star unit passes the side units still waiting.
+        await postUnits(pool, coordinator, JSON.stringify({ units: [poolUnit(star, 'c')], priority: 30 }));
+        for (const expected of [[star, 'c'], [side, 'a'], [side, 'b']]) {
+            expect(await (await next(pool, member, 'instance-1')).json()).toMatchObject({ run: expected[0], unit: expected[1] });
+        }
+    });
+
+    it('adds the priority column to a pool made before priorities, its queued units at 0', async function () {
+        const pool = freshPool();
+        const coordinator = await token(freshRun(), 'coordinator');
+        const member = await token(pool, 'pool');
+        const old = freshRun();
+        const star = freshRun();
+        const unit = poolUnit(old, 'a');
+        await runInDurableObject(env.Pools.get(env.Pools.idFromName(pool)), function (instance, state) {
+            state.storage.sql.exec(`
+                DROP TABLE units;
+                CREATE TABLE units (position INTEGER PRIMARY KEY, run TEXT NOT NULL, unit TEXT NOT NULL, json TEXT NOT NULL);
+            `);
+            state.storage.sql.exec('INSERT INTO units (run, unit, json) VALUES (?, ?, ?)', old, 'a', JSON.stringify(unit));
+            // The constructor is what a deploy runs on the live object.
+            new (instance.constructor as new (state: DurableObjectState, environment: Env) => unknown)(state, env);
+            const columns = state.storage.sql.exec<{ name: string }>('PRAGMA table_info(units)').toArray();
+            expect(
+                columns.map(function (column) {
+                    return column.name;
+                }),
+            ).toContain('priority');
+        });
+        await postUnits(pool, coordinator, JSON.stringify({ units: [poolUnit(star, 'a')], priority: 30 }));
+        expect(await (await next(pool, member, 'instance-1')).json()).toMatchObject({ run: star, unit: 'a' });
+        expect(await (await next(pool, member, 'instance-1')).json()).toEqual(unit);
+    });
+
     it('answers 204 when no unit arrives within the wait', async function () {
         const pool = freshPool();
         await waitOf(pool, 200);
@@ -242,6 +295,11 @@ describe('a pool', function () {
             JSON.stringify({ units: [good, { ...good, unit: '' }] }),
             JSON.stringify({ units: [good, { ...good, unit: 'u'.repeat(257) }] }),
             JSON.stringify({ units: [good, { run: run }] }),
+            JSON.stringify({ priority: 3 }),
+            JSON.stringify({ units: [good], priority: -1 }),
+            JSON.stringify({ units: [good], priority: 1.5 }),
+            JSON.stringify({ units: [good], priority: '30' }),
+            JSON.stringify({ units: [good], priority: 1001 }),
         ]) {
             const response = await postUnits(pool, coordinator, body);
             expect(response.status, body).toBe(400);

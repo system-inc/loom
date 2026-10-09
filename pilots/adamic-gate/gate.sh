@@ -6,9 +6,14 @@
 # (--list-units, --phase), the census over the merged go test lines, and publishes the finished record (publish.sh).
 #
 #	pilots/adamic-gate/gate.sh <sha>       # a copy in ~/.loom/bin; main.sh runs it for every new main
+#
+# LOOM_PRIORITY ranks every unit of the gate on the shared pool (@system_adamic, Oct 9 03:37Z): the star's candidates
+# 30 (pregate.sh), main's own gate 20 (main.sh, and the default here), side candidates 0. A pool hands out the
+# highest first, so a lower run yields each worker the star needs as its unit ends.
 set -uo pipefail
 sha=$1
 [[ ${sha} =~ ^[0-9a-f]{40}$ ]] || { echo "gate: a full sha, please"; exit 2; }
+export LOOM_PRIORITY=${LOOM_PRIORITY:-20}
 bin=${HOME}/.loom/bin gate=${HOME}/Projects/system/adamic-gate work=${HOME}/.loom/gate/${sha}
 planner=${bin}/adamic-gate loom=${bin}/loom-pregate
 mkdir -p "${work}"
@@ -44,10 +49,10 @@ import json, sys
 job = json.load(sys.stdin); job['name'] = 'adamic-gate-phases'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/phases.json"
 
 # The Go set and the phases side by side, each on the star's pool.
-log "Go set and $(wc -l < "${work}/units.txt") phase units, tools ${tools:0:12}"
+log "Go set and $(wc -l < "${work}/units.txt") phase units, tools ${tools:0:12}, priority ${LOOM_PRIORITY}"
 LOOM_PREGATE_WHOLE=1 "${bin}/pregate.sh" --once "${sha}" > "${work}/goset.out" 2>&1 &
 goset=$!
-"${loom}" run --uncached --slots none --pool codex=40 --record "${work}/phases-record.jsonl" "${work}/phases.json" > "${work}/phases.log" 2>&1
+"${loom}" run --uncached --slots none --pool codex=40 --priority "${LOOM_PRIORITY}" --record "${work}/phases-record.jsonl" "${work}/phases.json" > "${work}/phases.log" 2>&1
 wait "${goset}"
 
 # The census over the merged go test lines, by hash from the public store.
@@ -68,7 +73,7 @@ echo "census ${hash}" > "${work}/census-units.txt"
 	--phases "${tools}" --phase-units "${work}/census-units.txt" 2> /dev/null | python3 -c "
 import json, sys
 job = json.load(sys.stdin); job['name'] = 'adamic-gate-census'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/census.json"
-"${loom}" run --uncached --slots none --pool codex=1 --record "${work}/census-record.jsonl" "${work}/census.json" > "${work}/census.log" 2>&1
+"${loom}" run --uncached --slots none --pool codex=1 --priority "${LOOM_PRIORITY}" --record "${work}/census-record.jsonl" "${work}/census.json" > "${work}/census.log" 2>&1
 
 # The finished record, the runs' verdicts merged (a red stays red; nothing is replaced here).
 "${bin}/publish.sh" "${sha}" "${tools}" "${pregate}/${sha}.job.json" "${pregate}/${sha}.record.jsonl" \

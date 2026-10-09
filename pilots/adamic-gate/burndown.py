@@ -2,6 +2,7 @@
 """burndown.py: step 79's burn-down (#5g5151k), every leaf over 60 s on Loom's own 4-CPU Codex times, by owner.
 
 	pilots/adamic-gate/burndown.py <merged go test -json lines> [--over 60] [--run <name>] > burndown.md
+	pilots/adamic-gate/burndown.py <merged go test -json lines> --line --run <sha12>   # one status line, 160 at most
 
 A leaf is a test with no subtest of its own in the record. Its seconds run from its last run or cont event to its
 pass or fail (a t.Parallel test's pause isn't its work), never a parent's Elapsed. Ownership is by package, refined by
@@ -49,11 +50,32 @@ def instant(value):
     return datetime.datetime.fromisoformat(value[:19])
 
 
+# statusLine is the burn-down as #5g5151k's status: the count and seconds over the budget, then each owner's, most
+# seconds first, cut to fit 160 characters with the run last (the witness's grain curve reads the leading count).
+def statusLine(byOwner, rows, arguments):
+    head = "%d leaves over %.0f s, %.0f s:" % (len(rows), arguments.over, sum(row[1] for row in rows))
+    tail = " (%s)" % arguments.run if arguments.run else ""
+    owners = sorted(byOwner, key=lambda name: -sum(row[1] for row in byOwner[name]))
+    parts = ["%s %d/%.0f s" % (owner, len(byOwner[owner]), sum(row[1] for row in byOwner[owner])) for owner in owners]
+    line = head
+    for index, part in enumerate(parts):
+        candidate = line + (" " if index == 0 else ", ") + part
+        rest = len(parts) - index - 1
+        if len(candidate + (", +%d more" % rest if rest else "") + tail) > 160:
+            line += ", +%d more" % (len(parts) - index)
+            break
+        line = candidate
+    if not parts:
+        line = "0 leaves over %.0f s" % arguments.over
+    return line + tail
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("record")
     parser.add_argument("--over", type=float, default=60.0)
     parser.add_argument("--run", default="")
+    parser.add_argument("--line", action="store_true", help="one line for #5g5151k's status feed, at most 160 characters")
     arguments = parser.parse_args()
     started, ended, outcome, names = {}, {}, {}, collections.defaultdict(set)
     for line in open(arguments.record, errors="replace"):
@@ -84,6 +106,9 @@ def main():
     byOwner = collections.defaultdict(list)
     for row in rows:
         byOwner[row[0]].append(row)
+    if arguments.line:
+        print(statusLine(byOwner, rows, arguments))
+        return 0
     print("# Step 79 burn-down%s: leaves over %.0f s on a 4-CPU Codex instance\n" % (" (" + arguments.run + ")" if arguments.run else "", arguments.over))
     print("%d leaves, %.0f s, by Loom's own leaf times (last run or cont to its end).\n" % (len(rows), sum(row[1] for row in rows)))
     print("| owner | leaves over %.0f s | seconds | longest |" % arguments.over)

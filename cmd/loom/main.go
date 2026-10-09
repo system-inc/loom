@@ -1,7 +1,7 @@
 // Command loom is the coordinator: it runs a job file on Loom's slots and prints the verdict. It exits 0 when
 // the run is green, 1 when red, 2 when void, and 3 when the run couldn't be set up.
 //
-//	loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
+//	loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--priority <n>] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
 //	loom board [--days <n>]   prints the board's address with a board token
 //	loom pool status <name>   prints a pool's queue and the workers serving it
 //
@@ -13,7 +13,9 @@
 //
 // --pool adds slots on a pool beside the others: units queued on the wire for machines Loom can't ssh into
 // (Codex instances running loom-runner serve). The staged-rollout law doesn't reach a pool, since Loom
-// doesn't install its runner, and a green there unlocks no box.
+// doesn't install its runner, and a green there unlocks no box. --priority ranks the run's units on every pool it
+// uses: a pool hands out the highest first, so the star's candidates (30) pass main's own gate (20), and main's
+// pass a side candidate's (10). A unit already running finishes; the star takes each worker as its unit ends.
 package main
 
 import (
@@ -42,7 +44,7 @@ import (
 )
 
 const usage = `usage:
-  loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
+  loom run [--uncached] [--local <slots> | --slots <file>] [--pool <name>=<slots>]... [--priority <n>] [--yield-to <gate slots>] [--record <file>] [--wire <url>] <job.json>
   loom board [--days <n>] [--wire <url>]
   loom pool status [--wire <url>] <name>
   loom pool token <pool> [--hours N]
@@ -88,8 +90,13 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	yieldTo := flags.String("yield-to", "", "the gate's slot table: Loom uses a box's slots only while the gate's table doesn't hold them")
 	var pools poolSlotsFlag
 	flags.Var(&pools, "pool", "also place units on a pool on the wire, <name>=<slots>; repeatable")
+	priority := flags.Int("priority", 0, "the run's units' priority on its pools, 0 to 1000, highest handed out first")
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 1 {
 		fmt.Fprint(stderr, usage)
+		return 3
+	}
+	if *priority < 0 || *priority > 1000 {
+		fmt.Fprintf(stderr, "loom: --priority is 0 to 1000, not %d\n", *priority)
 		return 3
 	}
 	home, _ := os.UserHomeDir()
@@ -147,7 +154,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return fail(err)
 		}
 		for _, wanted := range pools {
-			machine := &coordinator.PoolMachine{Pool: wanted.name, Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
+			machine := &coordinator.PoolMachine{Pool: wanted.name, Priority: *priority, Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
 			poolMachines[machine.Name()] = true
 			for range wanted.slots {
 				slots = append(slots, machine)

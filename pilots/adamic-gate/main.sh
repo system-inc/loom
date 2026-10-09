@@ -15,7 +15,7 @@ while true; do
 	tip=$(git -C "${gate}" ls-remote origin refs/heads/main 2> /dev/null | cut -f1)
 	if [[ ${tip} =~ ^[0-9a-f]{40}$ ]] && [ ! -f "${state}/${tip}.done" ]; then
 		echo "$(date -u +%H:%M:%S) main ${tip:0:12}: the whole gate on the pool"
-		"${HOME}/.loom/bin/gate.sh" "${tip}" > "${state}/${tip}.out" 2>&1
+		LOOM_PRIORITY=20 "${HOME}/.loom/bin/gate.sh" "${tip}" > "${state}/${tip}.out" 2>&1
 		work=${HOME}/.loom/pregate
 		if [ -s "${work}/${tip}.record.jsonl" ]; then
 			gzip -dc "${work}/${tip}.tests.jsonl.gz" > "${state}/${tip}.tests.jsonl" 2> /dev/null ||

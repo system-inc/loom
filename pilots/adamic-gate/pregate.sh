@@ -65,7 +65,7 @@ star() {
 }
 
 pregate() {
-	local sha=$1 started=${SECONDS} reference inputs run verdict summary pool units only scope
+	local sha=$1 started=${SECONDS} reference inputs run verdict summary pool units only scope priority
 	local job=${work}/${sha}.job.json record=${work}/${sha}.record.jsonl report=${work}/${sha}.reds.txt
 	echo "running" > "${verdicts}/${sha}"
 	reference=$(reference) || { void "${sha}" "no green whole gate's record to plan from"; return; }
@@ -73,6 +73,9 @@ pregate() {
 	# LOOM_PREGATE_WHOLE=1 asks for the whole set on the star's pool for a candidate no train branch names yet (a
 	# lane's next star, such as compiler's V2 on Oct 9).
 	split=()
+	# Its units' rank on the shared pool: the caller's (gate.sh passes main's 20 or the star's 30), else the star's 30
+	# for a train tip and 0 for a side candidate, the rank the runs queued before priorities hold.
+	priority=${LOOM_PRIORITY:-$(star "${sha}" && echo 30 || echo 0)}
 	if [ "${LOOM_PREGATE_WHOLE:-}" = 1 ] || star "${sha}"; then
 		pool=codex units=$((starSlots * 2)) only="" scope="the whole Go test set"
 		# Child by child, sized by Loom's own 4-CPU times where it has them (~/.loom/loom-times.tsv, compare --times of
@@ -84,7 +87,7 @@ pregate() {
 	fi
 	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" ${split[@]+"${split[@]}"} > "${job}" 2> /dev/null || { void "${sha}" "planning failed"; return; }
 	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
-	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
+	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)" --priority "${priority}" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
 	"${planner}" reds --job "${job}" --record "${record}" --tests "${work}/${sha}.tests.jsonl" > "${report}" 2>&1
 	case $? in 0) verdict=green ;; 1) verdict=red ;; *) verdict=void ;; esac
 	# Every run teaches the times table (#2en3b4t): its leaves and parents by their own seconds on 4 CPUs, then the
@@ -92,11 +95,17 @@ pregate() {
 	if [ -s "${work}/${sha}.tests.jsonl" ]; then
 		python3 "${HOME}/.loom/bin/times.py" update "${work}/${sha}.tests.jsonl" --sha "${sha}" --run "$(head -1 "${report}" | awk '{print $2}' | tr -d :)" &&
 			python3 "${HOME}/.loom/bin/times.py" tsv > "${HOME}/.loom/loom-times.tsv.partial" && mv "${HOME}/.loom/loom-times.tsv.partial" "${HOME}/.loom/loom-times.tsv"
-		# The burn-down line after every run that times leaves (the witness's grain curve reads it, @system_adamic):
-		# its summary table on #5g5151k, the whole list kept beside the run.
+		# The burn-down after every run that times leaves, by itself, never when someone remembers it (@system_adamic):
+		# one line on #5g5151k's status feed, which the witness's grain curve reads, and the summary table as a comment
+		# for the owners; the whole list kept beside the run.
 		python3 "${HOME}/.loom/bin/burndown.py" "${work}/${sha}.tests.jsonl" --run "${sha:0:12} ${scope}, run $(head -1 "${report}" | awk '{print $2}' | tr -d :)" > "${work}/${sha}.burndown.md"
+		python3 "${HOME}/.loom/bin/burndown.py" "${work}/${sha}.tests.jsonl" --line --run "${sha:0:12}, ${verdict} run" > "${work}/${sha}.burndown-status.txt"
 		sed '/^## /,$d' "${work}/${sha}.burndown.md" > "${work}/${sha}.burndown-line.md"
-		(cd /Users/kirkouimet/Projects/ahra && ./node_modules/.bin/ahra tasks comment 5g5151k --role Agent --text-file "${work}/${sha}.burndown-line.md" > /dev/null 2>&1 || true)
+		(
+			cd /Users/kirkouimet/Projects/ahra &&
+				./node_modules/.bin/ahra tasks status 5g5151k "$(cat "${work}/${sha}.burndown-status.txt")" --auto >> "${work}/burndown-post.log" 2>&1
+			./node_modules/.bin/ahra tasks comment 5g5151k --role Agent --text-file "${work}/${sha}.burndown-line.md" > /dev/null 2>&1 || true
+		)
 		gzip -9f "${work}/${sha}.tests.jsonl"
 	fi
 	run=$(head -1 "${report}" | awk '{print $2}' | tr -d :)
@@ -150,7 +159,7 @@ while true; do
 	# A star candidate gets the whole gate on the pool (gate.sh: Go set, phases, census, a landing record the loops and
 	# push-main read since the promotion); any other candidate, the red-prone packages' pre-gate.
 	if [ -n "${next}" ] && star "${next}"; then
-		"${HOME}/.loom/bin/gate.sh" "${next}"
+		LOOM_PRIORITY=30 "${HOME}/.loom/bin/gate.sh" "${next}"
 	elif [ -n "${next}" ]; then
 		pregate "${next}"
 	fi

@@ -118,6 +118,23 @@ func TestThreeUnitsOnPoolSlotsAreGreenAndTheWireHoldsTheRecord(t *testing.T) {
 	}
 }
 
+func TestAPoolMachinesPriorityRidesWithEveryUnitItQueues(t *testing.T) {
+	wire := newFakeWire(t)
+	servePool(t, wire, "codex", 2)
+	slots := poolSlots(wire, 2)
+	slots[0].(*PoolMachine).Priority = 30
+	result := run(t, config(wire, slots...), poolUnit("a", "echo a"), poolUnit("b", "echo b"), poolUnit("c", "echo c"))
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	wire.mutex.Lock()
+	priorities := wire.priority["codex"]
+	wire.mutex.Unlock()
+	if !reflect.DeepEqual(priorities, []int{30, 30, 30}) {
+		t.Fatalf("the pool's batches came with priorities %v, not 30 each", priorities)
+	}
+}
+
 func TestAPlantedFailureOnAPoolUnitTurnsTheRunRed(t *testing.T) {
 	wire := newFakeWire(t)
 	servePool(t, wire, "codex", 2)
