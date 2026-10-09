@@ -723,7 +723,9 @@ func plan(arguments []string) error {
 		for _, candidate := range items {
 			if candidate.seconds+setup[candidate.parent] > capacity {
 				alone = append(alone, candidate)
-				fmt.Fprintf(os.Stderr, "over budget: %s%s, %.0f s by Loom's times, a unit of its own\n", candidate.key, map[bool]string{true: "/" + candidate.child, false: ""}[candidate.parent != ""], candidate.seconds)
+				// The cost that didn't fit: the item's own seconds and, for a split parent's child, the parent's own time
+				// outside its children, which any unit holding a child pays.
+				fmt.Fprintf(os.Stderr, "over budget: %s%s, %.0f s by Loom's times (%.0f s its own, %.0f s its parent's), a unit of its own\n", candidate.key, map[bool]string{true: "/" + candidate.child, false: ""}[candidate.parent != ""], candidate.seconds+setup[candidate.parent], candidate.seconds, setup[candidate.parent])
 				continue
 			}
 			kept = append(kept, candidate)
