@@ -108,6 +108,10 @@ if [ "$(freeMegabytes)" -lt "${LOOM_MINIMUM_FREE_MB:-1500}" ]; then
 fi
 free=$(freeMegabytes)
 [ "${free:-0}" -ge "${LOOM_MINIMUM_FREE_MB:-1500}" ] || { echo "loom-pilot: only ${free} MB free on the instance after trimming its caches: Loom's fault"; df -h "${HOME}" /tmp; du -xsh /tmp/* 2> /dev/null | sort -h | tail -8; exit 2; }
+# A tree to clone needs about 3.4 GB with its submodules: an instance that can't hold one says so before the checkout,
+# never partway through it (Oct 9: a8ff7263308d had 2 MB after the trims, cloned anyway, and failed writing cohere's
+# TypeScript baselines; its unit never reported and trio 75d5288e voided at the ceiling).
+[ -d "${tree}/.git" ] || [ "${free:-0}" -ge "${LOOM_TREE_FREE_MB:-4500}" ] || { echo "loom-pilot: only ${free} MB free, too little to clone a tree: Loom's fault"; df -h "${HOME}" /tmp; exit 2; }
 # Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only. The rewrite rides in the
 # environment, never ~/.gitconfig: some instances mount it read-only, and there every cohere checkout went to ssh and
 # failed (V3 8880e6bc's pre-gate, Oct 9: four units broken on "could not lock config file").
