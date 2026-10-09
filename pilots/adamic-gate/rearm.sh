@@ -48,9 +48,20 @@ cd "${ahra}" || exit 1
 ceiling=$(cat "${HOME}/.loom/codex-ceiling" 2> /dev/null || echo 80)
 running=0
 for fleet in loom-pool loom-side loom-star; do
+	# Only a turn young enough to be serving counts: a serve turn ends by its 115-minute deadline, but Codex leaves some
+	# sessions reading Running for hours after they died (Oct 9 17:30Z: 43 of loom-star's "running" members had sat
+	# Running since 11:07 to 12:05Z with no activity, so the ceiling counted them, held every finished member, and the
+	# pool drained to one asking worker).
 	count=$(./node_modules/.bin/ahra ai fleet "${fleet}" --json 2> /dev/null | python3 -c "
-import json, sys
-print(sum(1 for member in json.load(sys.stdin) if member.get('session', {}).get('status') == 'Running'))" 2> /dev/null || echo 0)
+import calendar, json, sys, time
+live = 0
+for member in json.load(sys.stdin):
+    since = (member.get('statusSince') or {}).get('since') or ''
+    if member.get('session', {}).get('status') != 'Running' or not since:
+        continue
+    if time.time() - calendar.timegm(time.strptime(since[:19], '%Y-%m-%dT%H:%M:%S')) < 130 * 60:
+        live += 1
+print(live)" 2> /dev/null || echo 0)
 	running=$((running + count))
 done
 # loom-star's members all serve the star's pool (@system_adamic, Oct 9 10:52Z: double the live star pool, measured in
