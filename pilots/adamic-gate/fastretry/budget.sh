@@ -51,13 +51,14 @@ run() { # run <script> [LOOM_FAST_BUDGET value]: every wait bounded at 20 s
 today() { printf '%s\n' plan --target codex --remainder --gate-inputs inputs-hash --reference $home/.loom/pregate/reference-2222222222222222222222222222222222222222.jsonl.gz --sha $sha --units 12 --only 'pkg/(a|b)' --tree-tests $work/tree-tests.txt; }
 spec() { python3 -c 'import json, sys; job = json.load(open(sys.argv[1])); print("\n".join(" ".join([unit["id"], json.dumps(unit.get("needs"))] + unit["argv"][5:]) for unit in job["units"]))' $work/job.json; }
 
-# A: unset, the planner gets exactly today's arguments; empty is unset.
-scenario; run $stubs/verify.sh; check off-argv-is-today '[ "$(cat $T/argv)" = "$(today)" ]'
+# A: off, the planner gets exactly today's arguments; empty is off; unset is on at 60 (budget mode lands on).
+scenario; run $stubs/verify.sh off; check off-argv-is-today '[ "$(cat $T/argv)" = "$(today)" ]'
 scenario; run $stubs/verify.sh ""; check empty-argv-is-today '[ "$(cat $T/argv)" = "$(today)" ]'
+scenario; run $stubs/verify.sh; check unset-is-on-at-60 'grep -qx -- --budget $T/argv && [ "$(grep -A1 -x -- --budget $T/argv | tail -1)" = 60 ]'
 # A': unset, the job is byte for byte the baseline's, even with a budgeted attempt's only-tests.json left in the work
 # directory (a re-plan reuses it).
 scenario; echo '{"pkg/a":["TestA"]}' > $work/only-tests.json; run $stubs/baseline.sh; cp $work/job.json $T/baseline-job.json; cp $T/argv $T/baseline-argv
-run $stubs/verify.sh; check off-job-is-the-baselines 'cmp -s $work/job.json $T/baseline-job.json && cmp -s $T/argv $T/baseline-argv'
+run $stubs/verify.sh off; check off-job-is-the-baselines 'cmp -s $work/job.json $T/baseline-job.json && cmp -s $T/argv $T/baseline-argv'
 # B: 60, the planner gets today's arguments, then the budget, Loom's times and the selection's family members.
 scenario; run $stubs/verify.sh 60
 check budget-argv '[ "$(cat $T/argv)" = "$(today; printf "%s\n" --budget 60 --unit-setup 10 --split-all --loom-times $home/.loom/loom-times.tsv --only-tests $work/only-tests.json)" ]'

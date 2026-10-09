@@ -12,9 +12,9 @@
 # (package -> the only tests to run) and deferred (package -> tests to skip) shape every unit.
 #
 # LOOM_FAST_BUDGET, seconds a test unit may take, plans the tests budgeted like main's whole gate (@system_adamic, Oct
-# 9 07:21Z: one gate, one rule). Unset or empty, the plan is a fixed count of units, as it has run since the budgeted
-# version was held back on its first dry run (f18497c to be20c4b, on held/budgeted-fast-gate; #3sjs0rn brings it back
-# behind this switch, Oct 9).
+# 9 07:21Z: one gate, one rule). Unset, it is 60: budget mode lands on (@system_adamic, Oct 9 17:05Z, after Kirk's
+# ruling that the caches land on, since an off-by-default landing only adds a flip we'd make anyway). "off" or empty
+# plans a fixed count of units, as it ran from f18497c's dry run until #3sjs0rn brought the budgeted planner back.
 #
 # Side work runs only on the side pool (LOOM_VERIFY_POOL, default codex-side): the star's pool never holds it
 # (@system_adamic, Oct 8 23:59Z). <slots> caps how much of it one run takes (default 5). Nothing builds on
@@ -24,6 +24,8 @@ set -uo pipefail
 # after main's tip passes through them).
 export LOOM_BIN=${LOOM_BIN:-${HOME}/.loom/bin}
 bin=${LOOM_BIN}
+export LOOM_FAST_BUDGET=${LOOM_FAST_BUDGET-60}
+[ "${LOOM_FAST_BUDGET}" = off ] && LOOM_FAST_BUDGET=""
 sha=$1 packages=$2 requester=$3 slots=${4:-5} note=${5:-} pool=${LOOM_VERIFY_POOL:-codex-side}
 work=${LOOM_VERIFY_WORK:-${HOME}/.loom/verify/${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "${work}"
@@ -49,12 +51,12 @@ fi
 git -C "${gate}" fetch -q origin "${sha}" 2> /dev/null
 python3 "${bin}/treetests.py" "${sha}" > "${work}/tree-tests.txt" 2> /dev/null || : > "${work}/tree-tests.txt"
 treeTests=() && [ -s "${work}/tree-tests.txt" ] && treeTests=(--tree-tests "${work}/tree-tests.txt")
-# Budgeted (LOOM_FAST_BUDGET set), the planner sizes units by the budget, killed at one and a half times it, with
+# Budgeted (LOOM_FAST_BUDGET seconds, the default), the planner sizes units by the budget, killed at one and a half times it, with
 # Loom's own times, and a selection's only tests are packed exactly: the planner plans only the names it is given, plus
 # their products and setups (--only-tests). Held back on its first dry run (f18497c: floor1 88bd168f's selection planned
 # as 1,449 units and 133,676 s of predicted work, against about 8,000 s as 13 units, its untimed tests sized about 15
-# times pessimistic), so it runs only where the switch is set (#3sjs0rn, Oct 9). Unset or empty, nothing here changes
-# the plan: no argument, the same stderr, the same message.
+# times pessimistic), and came back behind a switch (#3sjs0rn, Oct 9). Off, nothing here changes the plan: no argument,
+# the same stderr, the same message.
 budget=() planErrors=/dev/null
 if [ -n "${LOOM_FAST_BUDGET:-}" ]; then
 	[[ ${LOOM_FAST_BUDGET} =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "verify: LOOM_FAST_BUDGET is seconds a unit may take, not ${LOOM_FAST_BUDGET}"; exit 1; }
