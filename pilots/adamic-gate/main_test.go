@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/system-inc/loom/protocol"
 )
@@ -124,15 +125,24 @@ func TestABudgetSetsTheUnitCountAndAnOverBudgetTestRunsAlone(t *testing.T) {
 	read, write, _ := os.Pipe()
 	stdout := os.Stdout
 	os.Stdout = write
+	// The job is read as plan writes it: three units of the opening outgrow a pipe's buffer (Oct 9 18:3xZ: the root
+	// trim made the opening longer, and plan blocked on a full pipe with nothing reading it).
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
 	// No package setup here: the arithmetic below is the unit count's alone.
 	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--package-setup", "0"})
 	write.Close()
+	<-done
 	os.Stdout = stdout
 	if err != nil {
 		t.Fatal(err)
 	}
 	var job protocol.Job
-	if err := protocol.Decode(read, &job); err != nil {
+	if err := protocol.Decode(&printed, &job); err != nil {
 		t.Fatal(err)
 	}
 	timeouts, huge := []int{}, ""
@@ -1318,5 +1328,44 @@ func TestAChangedPackagesTestsArePackedWithHeadroom(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("units %v, want %v", got, want)
+	}
+}
+
+func TestTheOpeningTrimsTheRootToItsFloor(t *testing.T) {
+	start := strings.Index(codexOpening, "rootFree() {")
+	end := strings.Index(codexOpening[start:], "[ \"$(freeMegabytes)\" -ge 3000 ]")
+	if start < 0 || end < 0 {
+		t.Fatal("the root trim isn't in codexOpening")
+	}
+	trim := codexOpening[start : start+end]
+	run := func(floor string) (string, string) {
+		home := t.TempDir()
+		old, fresh := filepath.Join(home, ".cache", "adamic-build", "old"), filepath.Join(home, ".cache", "adamic-build", "fresh")
+		goBuild := filepath.Join(home, ".cache", "go-build")
+		for _, directory := range []string{old, fresh, goBuild} {
+			if err := os.MkdirAll(directory, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		hourAndMore := time.Now().Add(-2 * time.Hour)
+		os.Chtimes(old, hourAndMore, hourAndMore)
+		command := exec.Command("bash", "-c", "set -uo pipefail\n"+trim)
+		command.Env = append(os.Environ(), "HOME="+home, "LOOM_ROOT_FLOOR_MB="+floor)
+		output, _ := command.CombinedOutput()
+		var left []string
+		for _, directory := range []string{old, fresh, goBuild} {
+			if _, err := os.Stat(directory); err == nil {
+				left = append(left, filepath.Base(directory))
+			}
+		}
+		return strings.Join(left, " "), string(output)
+	}
+	// Below the floor: the product cache's old entry goes, its fresh one stays, and go's build cache goes too.
+	if left, output := run("999999999"); left != "fresh" || !strings.Contains(output, "trimmed the product cache") || !strings.Contains(output, "dropped go's build cache") {
+		t.Fatalf("below the floor: left %q, %q", left, output)
+	}
+	// Above the floor: nothing is touched and nothing is said.
+	if left, output := run("1"); left != "old fresh go-build" || output != "" {
+		t.Fatalf("above the floor: left %q, %q", left, output)
 	}
 }

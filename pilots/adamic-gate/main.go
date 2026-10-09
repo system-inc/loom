@@ -102,6 +102,22 @@ find /tmp -maxdepth 1 -name 'loom-unit-*' ! -path "$(dirname "${PWD}")" ! -path 
 # unit reads a lane tree, and only the newest tools checkout is likely to be wanted again.
 rm -rf /tmp/adamic-stage3-lane-* 2> /dev/null
 ls -1dt /tmp/adamic-gate-tools/*/ 2> /dev/null | tail -n +2 | while read -r stale; do rm -rf "${stale}"; done
+# The root holds the toolchains (12 GB), the product cache and go's build cache, and a warm instance left 3.6 to 5.8 GB
+# of its 32 GB free before a unit began (#xp3f0ht, Oct 9 18:28Z), less than one lint unit writes: every canary today
+# failed on it. So before a unit the root is trimmed to a floor: first the product cache's entries no unit made in the
+# last hour (the product cache grows with every sha, and nothing else trims it), then go's build cache.
+rootFree() { df -Pm "${HOME}" | awk 'NR == 2 {print $4}'; }
+rootFloor=${LOOM_ROOT_FLOOR_MB:-12000}
+if [ "$(rootFree)" -lt "${rootFloor}" ] && [ -d "${HOME}/.cache/adamic-build" ]; then
+  trimmed=$(rootFree)
+  find "${HOME}/.cache/adamic-build" -mindepth 1 -maxdepth 1 -mmin +60 -exec rm -rf {} + 2> /dev/null
+  echo "loom-pilot: trimmed the product cache's entries older than an hour: ${trimmed} MB free, now $(rootFree)"
+fi
+if [ "$(rootFree)" -lt "${rootFloor}" ] && [ -d "${HOME}/.cache/go-build" ]; then
+  trimmed=$(rootFree)
+  rm -rf "${HOME}/.cache/go-build"
+  echo "loom-pilot: dropped go's build cache: ${trimmed} MB free, now $(rootFree)"
+fi
 [ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
 # A home kept under /tmp shares the 8.8 GB with the tree (Oct 9: a8ff7263308d held /tmp/loom-home at 5.4 GB and
 # /tmp/adamic at 3.4 GB, 0 MB free, and voided every select unit it took for 20 minutes, each in under a second). The
