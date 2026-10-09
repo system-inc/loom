@@ -260,7 +260,12 @@ within() {
 		pkill -TERM -f "loom-pregate run .*${work}/" && echo "$(date -u +%H:%M:%S) ceiling: ${sha:0:12} stopped at ${ceiling} s"
 	) &
 	watchdog=$!
+	# The units-placed signal for developer tools' watcher (#3tj643t): <sha>.placed, "<placed> <total>", while the job runs.
+	rm -f "${jobs}/${sha}.placed"
+	python3 "${HOME}/.loom/bin/placed.py" "${jobs}" "${sha}" > /dev/null 2>&1 &
+	local placed=$!
 	serve "${sha}"
+	kill "${placed}" 2> /dev/null
 	pkill -P "${watchdog}" 2> /dev/null
 	kill "${watchdog}" 2> /dev/null
 }
