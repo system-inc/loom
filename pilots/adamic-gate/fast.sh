@@ -237,6 +237,12 @@ for line in open(sys.argv[1]):
 # the job then takes to finish, finish reads the mark.
 within() {
 	local sha=$1 work=${jobs}/$1.work watchdog
+	# The star's jobs (priority 30 and up) get 30 minutes tonight (@system_adamic, Oct 9 09:23Z): their units on the
+	# 12- and 36-unit plans run up to about 16 minutes, slow and not runaway. A stopgap recorded on #vh41fpz, back to
+	# 20 when the budgeted planner lands. The job's own priority is read here, before serve writes it.
+	local priority
+	priority=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("priority", 0))' "${jobs}/${sha}.json" 2> /dev/null || echo 0)
+	[ "${priority:-0}" -ge 30 ] 2> /dev/null && ceiling=${LOOM_FAST_STAR_CEILING:-1800}
 	(
 		sleep "${ceiling}"
 		[ -f "${jobs}/${sha}.running" ] || exit 0
