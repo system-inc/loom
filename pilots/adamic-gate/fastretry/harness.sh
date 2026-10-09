@@ -16,7 +16,7 @@ check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1: calls $(cat $T/
 scenario() { # scenario <name> <plan lines...>
 	T=$(mktemp -d) && export STUB=$T && cp "$stubs/phase.tgz" $T/ && printf '%s\n' "${@:2}" > $T/plan
 	jobs=$T/jobs bin=$T/bin gate=$T/gate sha=1111111111111111111111111111111111111111 work=$T/jobs/$sha.work
-	mkdir -p $work $bin && ln -s "$here/stub-pregate" $bin/loom-pregate && ln -s "$here/stub-gate" $bin/adamic-gate
+	mkdir -p $work $bin && ln -s "$here/stub-pregate" $bin/loom-pregate && ln -s "$here/stub-gate" $bin/adamic-gate && ln -s "$here/../completion.py" $bin/completion.py
 	git init -q --bare $T/origin.git && git init -q $gate && git -C $gate remote add origin $T/origin.git
 	for f in tools base gate; do echo 2222222222222222222222222222222222222222 > $work/$f; done
 	echo 40 > $work/priority; echo yes > $work/complete; echo '{"Action":"pass"}' > $work/test.jsonl
@@ -57,10 +57,11 @@ runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-build-red-stands
 scenario phases-green-once "" ""
 runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-green-once 'grep -q "^green: phases passed" $work/phases-status && [ "$(cat $T/calls)" = 2 ] && git --git-dir=$T/origin.git show "gate-logs/111111111111/20261009T000000Z/fast-phases:box.txt" | grep -qv "placed twice"'
 # finish: a merge-gated record's fast.json names the merge its units ran as its sha, beside candidate and gated, so
-# push-main pairs it with the phases record run.py writes for that same tree.
+# push-main pairs it with the phases record run.py writes for that same tree; and it states its tests stage (completion.py).
 scenario finish-names-the-merge
-echo 3333333333333333333333333333333333333333 > $work/gate; echo "run stub-run-1: 1 units on 1 slots, uncached" > $work/run.log
+echo 3333333333333333333333333333333333333333 > $work/gate; echo "run stub-run-1: 1 units on 1 slots, uncached" > $work/run.log; echo passed > $work/build.verdict
+printf '%s\n' '{"Package":"p","Test":"TestA","Action":"pass"}' '{"Package":"p","Test":"TestB","Action":"skip"}' > $work/test.jsonl
 LOOM_FAST_PUBLISH=0 ceiling=1800 finish $sha 20261009T000000Z "green: stub" stub-run-1 > $T/out.log 2>&1
-check finish-names-the-merge 'python3 -c "import json,glob,sys; r=json.load(open(glob.glob(\"$work/record-*/fast.json\")[0])); sys.exit(0 if (r[\"sha\"], r[\"candidate\"], r[\"gated\"]) == (\"3\"*40, \"1\"*40, \"3\"*40) else 1)"'
+check finish-names-the-merge 'python3 -c "import json,glob,sys; r=json.load(open(glob.glob(\"$work/record-*/fast.json\")[0])); sys.exit(0 if (r[\"sha\"], r[\"candidate\"], r[\"gated\"]) == (\"3\"*40, \"1\"*40, \"3\"*40) and r[\"planned_stages\"] == [\"tests\"] and r[\"stages_exit\"] == {\"tests\": 0} and (r[\"pass\"], r[\"skip\"], r[\"fail\"]) == (1, 1, 0) and r[\"build_ok\"] else 1)"'
 echo "failures: $failures"
 exit $((failures > 0))

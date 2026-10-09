@@ -510,6 +510,9 @@ if complete == "yes":
     record.update({"complete": True, "darwin": "not run (pool is Linux only)"})
 json.dump(record, open(path, "w"), indent=2)
 PY
+	# The record states what its tests stage did (planned_stages, steps, exits, counts, build_ok), from its own test
+	# lines and events: push-main lands only what a record says ran (integration, Oct 9 14:55Z).
+	python3 "${bin}/completion.py" "${record}" "${verdict%%:*}" "$(cat "${work}/build.verdict" 2> /dev/null)"
 	find "${record}" -type f -size +5M -name '*.jsonl' -exec gzip -9 {} \;
 	local recordPath=gate-logs/${sha:0:12}/${stamp}/fast
 	if [ "${LOOM_FAST_PUBLISH:-1}" = 0 ]; then
