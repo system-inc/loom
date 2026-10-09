@@ -332,7 +332,8 @@ if [ "${vet}" = 0 ]; then echo "loom-stage: go vet ./... passed"; else echo "loo
 // phaseBody runs one phase of the whole gate, or one unit of a phase, through the gate's own run.py from the tools
 // commit (run.py --full --phase, developer tools' file), so Loom never keeps a copy of the gate's logic. The tools
 // tree is a worktree of the instance's clone at the tools sha, made once per sha. run.py's out directory comes back
-// whole as phase.tar.gz; its exit is the unit's, and only a missing tools tree is Loom's fault (exit 2).
+// whole as phase.tar.gz; its exit is the unit's, and only a missing tools tree is Loom's fault (exit 2). The phase
+// census takes the sha256 of the pool's merged go test record in the public store as its unit name.
 const phaseBody = `toolsSha=$1 phase=$2 unitName=${3:-}
 [ -n "${tree:-}" ] && [ -d "${tree}/.git" ] && [ -n "${out:-}" ] || { echo "loom-phase: no tree (the opening never ran): Loom's fault"; exit 2; }
 gateTools=/tmp/adamic-gate-tools/${toolsSha:0:12}
@@ -344,7 +345,13 @@ if [ ! -f "${gateTools}/cloud/fast-gate/run.py" ]; then
 fi
 export ADAMIC_GATE_UNCACHED=1 ADAMIC_TEST_WASI=1 ADAMIC_ORACLE_WASI=1 ADAMIC_GATE_COHERE=1
 echo "loom-phase: $(hostname) ${phase}${unitName:+ ${unitName}} at ${sha:0:12}, tools ${toolsSha:0:12}, setup $(( SECONDS - started )) s"
-python3 "${gateTools}/cloud/fast-gate/run.py" --full --phase "${phase}" ${unitName:+--unit "${unitName}"} --tree "${tree}" --sha "${sha}" --base "${sha}" --tools "${gateTools}" --out "${out}/phase" > "${out}/phase.log" 2>&1
+if [ "${phase}" = census ]; then
+  # census <sha256>: the whole gate's census over the merged go test record of the pool's runs, fetched by hash.
+  curl -fsS --retry 3 -o "${out}/merged.jsonl" "https://adamic-store.kirkouimet.com/blobs/${unitName}" && echo "${unitName}  ${out}/merged.jsonl" | sha256sum -c --quiet || { echo "loom-phase: merged record ${unitName} unreadable: Loom's fault"; exit 2; }
+  python3 "${gateTools}/cloud/fast-gate/run.py" --full --census "${out}/merged.jsonl" --tree "${tree}" --sha "${sha}" --base "${sha}" --tools "${gateTools}" --out "${out}/phase" > "${out}/phase.log" 2>&1
+else
+  python3 "${gateTools}/cloud/fast-gate/run.py" --full --phase "${phase}" ${unitName:+--unit "${unitName}"} --tree "${tree}" --sha "${sha}" --base "${sha}" --tools "${gateTools}" --out "${out}/phase" > "${out}/phase.log" 2>&1
+fi
 code=$?
 tar -C "${out}" -czf "${out}/phase.tar.gz" phase phase.log
 echo "loom-phase: $(head -1 "${out}/phase/status.txt" 2> /dev/null || echo "no status.txt") (exit ${code}, $(( SECONDS - started )) s in all)"
@@ -1302,7 +1309,8 @@ func reds(arguments []string) (string, error) {
 				}
 			}
 		}
-		if strings.HasPrefix(unit.Id, "stage-") {
+		// A stage or phase unit has no go test lines: run.py's (or go build's and vet's) exit is its verdict.
+		if strings.HasPrefix(unit.Id, "stage-") || strings.HasPrefix(unit.Id, "phase-") {
 			switch {
 			case exited && exitCode == 0:
 			case exited && exitCode == 1:
