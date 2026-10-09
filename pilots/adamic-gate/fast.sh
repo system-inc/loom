@@ -45,8 +45,15 @@ fi
 serve() {
 	local sha=$1 started=${SECONDS} work=${jobs}/$1.work stamp verdict line run
 	stamp=$(date -u +%Y%m%dT%H%M%SZ)
-	rm -f "${work}"/run.log "${work}"/reds.txt "${work}"/reds.exit "${work}"/ceiling
+	rm -f "${work}"/run.log "${work}"/reds.txt "${work}"/reds.exit "${work}"/ceiling "${work}"/kept.json "${work}"/kept-skipped.txt
 	mkdir -p "${work}"
+	# An earlier attempt's proven tests carry over (#v4cm3s7; @system_adamic, Oct 9 09:23Z: a run stopped at its ceiling
+	# never discards its proven units). Its passed tests are kept by package and input hash at the gate it ran at, then
+	# matched at this attempt's gate below; one attempt back, not accumulated.
+	if [ -s "${work}/test.jsonl" ] && [[ $(cat "${work}/gate" 2> /dev/null) =~ ^[0-9a-f]{40}$ ]]; then
+		python3 "${HOME}/.loom/bin/inputs.py" kept --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/test.jsonl" > "${work}/kept-previous.json" 2> /dev/null || rm -f "${work}/kept-previous.json"
+		mv "${work}/test.jsonl" "${work}/test-previous.jsonl"
+	fi
 	python3 - "${jobs}/${sha}.json" "${work}" <<'PY'
 import json, re, shlex, sys
 job = json.load(open(sys.argv[1]))
@@ -77,7 +84,10 @@ PY
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the job names no Go package, so the boxes take it" ""
 		return
 	fi
-	LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "$(cat "${work}/gate")" "$(cat "${work}/packages")" none auto > "${work}/verify.log" 2>&1
+	if [ -s "${work}/kept-previous.json" ]; then
+		python3 "${HOME}/.loom/bin/inputs.py" kept-match --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/kept-previous.json" > "${work}/kept.json" 2> /dev/null || rm -f "${work}/kept.json"
+	fi
+	LOOM_VERIFY_KEPT=$([ -s "${work}/kept.json" ] && echo "${work}/kept.json") LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "$(cat "${work}/gate")" "$(cat "${work}/packages")" none auto > "${work}/verify.log" 2>&1
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
 	rm -f "${work}/phases-status" "${work}/phases-ref"
@@ -265,6 +275,8 @@ finish() {
 		unplanned=$(python3 "${HOME}/.loom/bin/treetests.py" "$(cat "${work}/gate" 2> /dev/null || echo "${sha}")" 2> /dev/null | cut -d' ' -f1 | sort -u | comm -23 - <(sort -u "${work}/planned-packages.txt") | wc -l | tr -d ' ')
 		[ -n "${unplanned}" ] && [ "${unplanned}" != 0 ] && verdict="${verdict}; unplanned: ${unplanned} packages, not run"
 	fi
+	# Tests kept from an earlier attempt are named in the verdict, so a green never hides that it rests on one.
+	[ -s "${work}/kept-skipped.txt" ] && verdict="${verdict}; $(head -1 "${work}/kept-skipped.txt")"
 	# A job stopped at its ceiling (within) says so: its red stands, and a void names the ceiling, not Loom's breakage.
 	if [ -f "${work}/ceiling" ]; then
 		case "${verdict%%:*}" in
@@ -288,6 +300,7 @@ finish() {
 	# The job and the run's own record, so a fast record can be a rerun's base: inputs.py hashes every unit from its
 	# argv and keeps the verdicts the record holds (#8f8f5y9, for push-main's rerun over a moved main, #mbexftz).
 	[ -s "${work}/job.json" ] && cp "${work}/job.json" "${record}/job.json"
+	[ -s "${work}/kept.json" ] && cp "${work}/kept.json" "${record}/kept.json"
 	[ -s "${work}/record.jsonl" ] && cp "${work}/record.jsonl" "${record}/record.jsonl"
 	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
 	# uncached_tests is the run's own mode, read from the coordinator's first line ("... units on N slots, uncached"),
