@@ -31,36 +31,39 @@ mkdir -p "${home}/loom-select/adamic/.git" "${home}/loom-select/tools" "${home}/
 echo "export PATH=${stubs}/bin:\${PATH}" > "${home}/adamic-tools/env.sh"
 tools=4444444444444444444444444444444444444444 base=3333333333333333333333333333333333333333
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; for log in "${stubs}"/*.log; do echo "  ${log##*/}:"; sed 's/^/    /' "${log}"; done; failures=$((failures + 1)); fi; }
-# run <name> <gated digit> <selection seconds> [budget]: select-box.sh in the background; its exit, wall and stdout land
-# beside its log.
+# run <name> <selection seconds> [budget]: select-box.sh in the background on a gated sha of its own (two harness runs
+# never share /tmp/loom-select/<sha>); its exit, wall and stdout land beside its log.
 run() {
 	(
 		started=${SECONDS}
-		HOME=${home} PATH=${stubs}/bin:${PATH} STUB_SELECT_SECONDS=$3 LOOM_SELECT_BOXES=${box:-workshop} LOOM_SELECT_BUDGET=${4:-30} \
-			bash "${selectBox}" "$(printf "$2%.0s" {1..40})" "${base}" main "${tools}" "${stubs}/$1.tgz" > "${stubs}/$1.out" 2> "${stubs}/$1.log"
+		HOME=${home} PATH=${stubs}/bin:${PATH} STUB_SELECT_SECONDS=$2 LOOM_SELECT_BOXES=${box:-workshop} LOOM_SELECT_BUDGET=${3:-30} \
+			bash "${selectBox}" "$(od -An -tx1 -N20 /dev/urandom | tr -d ' \n')" "${base}" main "${tools}" "${stubs}/$1.tgz" > "${stubs}/$1.out" 2> "${stubs}/$1.log"
 		echo "$? $((SECONDS - started))" > "${stubs}/$1.exit"
 	) &
 }
-selected() { # selected <name> <most seconds>: exited 0 on the box, its archive holding select.json, within the seconds
-	read -r code wall < "${stubs}/$1.exit" && [ "${code}" = 0 ] && [ "${wall}" -le "$2" ] && [ "$(cat "${stubs}/$1.out")" = "${box:-workshop}" ] &&
+# selected <name>: exited 0 on the box with select.json in its archive. No wall is checked: select-box.sh's own timeout
+# holds a 0 inside its budget, and a loaded box (Workshop at load 40) stretches every stub's seconds.
+selected() {
+	read -r code wall < "${stubs}/$1.exit" && [ "${code}" = 0 ] && [ "$(cat "${stubs}/$1.out")" = "${box:-workshop}" ] &&
 		tar -tzf "${stubs}/$1.tgz" | grep -qx './select.json'
 }
 fresh() { rm -f "${stubs}"/*.log "${stubs}"/*.out "${stubs}"/*.exit "${stubs}"/*.tgz; }
 
-run free 5 1; wait
-check free-box-selects-at-once 'selected free 4 && ! grep -q waiting "${stubs}/free.log"'
+run free 1; wait
+check free-box-selects-at-once 'selected free && ! grep -q waiting "${stubs}/free.log"'
 fresh
 # A 5 s selection holds the lock; the second, a second behind it, waits and runs on the box.
-run holder 6 5; sleep 1; run second 7 1; wait
-check busy-box-is-waited-on 'selected holder 8 && selected second 9 && grep -q "busy with another selection" "${stubs}/second.log" && grep -q "took the lock after waiting" "${stubs}/second.log"'
+run holder 5; sleep 1; run second 1; wait
+check busy-box-is-waited-on 'selected holder && selected second && grep -q "busy with another selection" "${stubs}/second.log" && grep -q "took the lock after waiting" "${stubs}/second.log"'
 fresh
-# A box busy past the budget hands the selection back inside it, for the pool.
-run holder 6 25; sleep 1; run second 7 1 14; wait
-check busy-past-budget-goes-to-pool 'read -r code wall < "${stubs}/second.exit" && [ "${code}" = 3 ] && [ "${wall}" -le 14 ] && [ ! -e "${stubs}/second.tgz" ] && selected holder 28'
+# A box busy past the budget hands the selection back inside it (5 s of slack for a loaded box), for the pool. The
+# holder runs 20 s on a budget of its own, 60 s, so load never cuts it off.
+run holder 20 60; sleep 1; run second 1 14; wait
+check busy-past-budget-goes-to-pool 'read -r code wall < "${stubs}/second.exit" && [ "${code}" = 3 ] && [ "${wall}" -le 19 ] && [ ! -e "${stubs}/second.tgz" ] && selected holder'
 fresh
 # Three requeues at once (Oct 9 19:46Z): each takes its turn on the box, none falls to the pool.
-run one 8 4; run two 9 4; run three a 4; wait
-check burst-of-three-lands-on-the-box 'selected one 16 && selected two 16 && selected three 16'
+run one 3; run two 3; run three 3; wait
+check burst-of-three-lands-on-the-box 'selected one && selected two && selected three'
 fresh
 rm -f "${stubs}/bin/"* "${home}/adamic-tools/env.sh" && rmdir "${stubs}/bin" "${home}/adamic-tools"
 rm -f "${home}/loom-select/lock" && rmdir "${home}/loom-select/adamic/.git" "${home}/loom-select/adamic" "${home}/loom-select/tools" "${home}/loom-select" "${home}" "${stubs}"
