@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -426,7 +427,7 @@ func main() {
 		var verdict string
 		verdict, err = reds(os.Args[2:])
 		if err == nil && verdict != "green" {
-			os.Exit(map[string]int{"red": 1, "void": 3}[verdict])
+			os.Exit(map[string]int{"red": 1, "void": 3, "cooked": 4}[verdict])
 		}
 	case "compare":
 		var parity bool
@@ -601,7 +602,9 @@ func plan(arguments []string) error {
 	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
 	referencePath := flags.String("reference", "", "the whole gate's test.jsonl.gz for the same sha")
 	sha := flags.String("sha", "", "the main commit to test, the reference's own")
-	units := flags.Int("units", 10, "how many units")
+	units := flags.Int("units", 10, "how many units, unless --budget sets the count")
+	budget := flags.Float64("budget", 0, "seconds a unit may take, its setup included: units are as many as fit it, each killed at budget plus a quarter")
+	unitSetup := flags.Float64("unit-setup", 10, "with --budget, seconds a unit spends before its first test (warm instance)")
 	only := flags.String("only", "", "plan only packages matching this regular expression, for a trial")
 	target := flags.String("target", "box", "where the units run: box (a gate slot's warm tree) or codex (a Codex instance)")
 	gateInputs := flags.String("gate-inputs", "", "on codex, the hash of the gate inputs' manifest in the public store")
@@ -686,35 +689,105 @@ func plan(arguments []string) error {
 		}
 		return items[left].key+"/"+items[left].child < items[right].key+"/"+items[right].child
 	})
-	loads := make([]float64, *units)
-	assigned := make([]map[string][]string, *units)   // package to whole test names
-	childrenOf := make([]map[string][]string, *units) // split parent key to child names
-	for index := range assigned {
-		assigned[index] = map[string][]string{}
-		childrenOf[index] = map[string][]string{}
+	// With a budget, an item that alone can't fit it is the burn-down: it gets a unit of its own, run to the end with
+	// the long timeout so its verdict still counts, and is named on stderr. The rest pack into as few units as fit
+	// the budget, setup included, each killed at budget plus a quarter (cooked, never failed).
+	capacity := *budget - *unitSetup
+	var alone []item
+	if *budget > 0 {
+		if capacity <= 0 {
+			return fmt.Errorf("--budget must exceed --unit-setup")
+		}
+		kept := items[:0]
+		for _, candidate := range items {
+			if candidate.seconds+setup[candidate.parent] > capacity {
+				alone = append(alone, candidate)
+				fmt.Fprintf(os.Stderr, "over budget: %s%s, %.0f s by Loom's times, a unit of its own\n", candidate.key, map[bool]string{true: "/" + candidate.child, false: ""}[candidate.parent != ""], candidate.seconds)
+				continue
+			}
+			kept = append(kept, candidate)
+		}
+		items = kept
 	}
+	var loads []float64
+	var assigned, childrenOf []map[string][]string // per unit: package to whole test names; split parent key to child names
 	cost := func(index int, candidate item) float64 {
 		if candidate.parent != "" && childrenOf[index][candidate.parent] == nil {
 			return candidate.seconds + setup[candidate.parent]
 		}
 		return candidate.seconds
 	}
-	for _, candidate := range items {
-		best := 0
-		for index := range loads {
-			if loads[index]+cost(index, candidate) < loads[best]+cost(best, candidate) {
-				best = index
-			}
-		}
-		loads[best] += cost(best, candidate)
+	place := func(index int, candidate item) {
+		loads[index] += cost(index, candidate)
 		if candidate.parent != "" {
-			childrenOf[best][candidate.parent] = append(childrenOf[best][candidate.parent], candidate.child)
-			continue
+			childrenOf[index][candidate.parent] = append(childrenOf[index][candidate.parent], candidate.child)
+			return
 		}
 		packageName, name, _ := strings.Cut(candidate.key, " ")
-		assigned[best][packageName] = append(assigned[best][packageName], name)
+		assigned[index][packageName] = append(assigned[index][packageName], name)
+	}
+	pack := func(count int) float64 {
+		loads = make([]float64, count)
+		assigned = make([]map[string][]string, count)
+		childrenOf = make([]map[string][]string, count)
+		for index := range assigned {
+			assigned[index] = map[string][]string{}
+			childrenOf[index] = map[string][]string{}
+		}
+		heaviest := 0.0
+		for _, candidate := range items {
+			best := 0
+			for index := range loads {
+				if loads[index]+cost(index, candidate) < loads[best]+cost(best, candidate) {
+					best = index
+				}
+			}
+			place(best, candidate)
+			heaviest = max(heaviest, loads[best])
+		}
+		return heaviest
+	}
+	count := *units
+	if *budget > 0 {
+		total := 0.0
+		for _, candidate := range items {
+			total += candidate.seconds
+		}
+		count = max(1, int(math.Ceil(total/capacity)))
+		for pack(count) > capacity && count < len(items) {
+			count++
+		}
+		fmt.Fprintf(os.Stderr, "budget %.0f s: %d units within %.0f s of tests each, %d over budget alone\n", *budget, count, capacity, len(alone))
+	} else {
+		pack(count)
+	}
+	packed := len(loads)
+	for _, candidate := range alone {
+		loads = append(loads, 0)
+		assigned = append(assigned, map[string][]string{})
+		childrenOf = append(childrenOf, map[string][]string{})
+		place(len(loads)-1, candidate)
+	}
+	// A packed unit under a budget is killed at budget plus a quarter; an unbudgeted or over-budget unit runs long.
+	timeout := func(index int) int {
+		if *budget > 0 && index < packed {
+			return int(math.Ceil(*budget * 1.25))
+		}
+		return 3*3600 + 600
+	}
+	// Under a budget the remainder (tests no record timed) goes to a unit of its own with the long timeout, so an
+	// untimed test can't cook a packed unit; without one, to the lightest unit.
+	remainderUnit := -1
+	if *budget > 0 && *remainder {
+		loads = append(loads, 0)
+		assigned = append(assigned, map[string][]string{})
+		childrenOf = append(childrenOf, map[string][]string{})
+		remainderUnit = len(loads) - 1
 	}
 	lightest := func() int {
+		if remainderUnit >= 0 {
+			return remainderUnit
+		}
 		least := 0
 		for index := range loads {
 			if loads[index] < loads[least] {
@@ -726,7 +799,7 @@ func plan(arguments []string) error {
 	// A remainder spec runs what no record named (new since it), on the lightest unit: per package, -run
 	// everything and -skip every top-level test the plan placed; per split parent, its children the same way.
 	// It holds no test of its own in the plan.
-	remainders := make([][]string, *units)
+	remainders := make([][]string, len(loads))
 	if *remainder {
 		byPackage := map[string][]string{}
 		for key := range reference {
@@ -833,7 +906,7 @@ func plan(arguments []string) error {
 		}
 		argv = append(argv, remainders[index]...)
 		job.Units = append(job.Units, protocol.JobUnit{
-			Id: fmt.Sprintf("tests-%02d", index), Argv: argv, TimeoutSeconds: 3*3600 + 600,
+			Id: fmt.Sprintf("tests-%02d", index), Argv: argv, TimeoutSeconds: timeout(index),
 			Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
 			Resources: protocol.Resources{Cpus: 12},
 		})
@@ -1376,10 +1449,10 @@ func reds(arguments []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var broken, failed []string
+	var broken, failed, cooked []string
 	tests := 0
 	for _, unit := range job.Units {
-		output, exitCode, exited, tail := "", 0, false, ""
+		output, exitCode, exited, tail, timedOut := "", 0, false, "", false
 		for _, event := range events {
 			if event.Unit != unit.Id {
 				continue
@@ -1390,6 +1463,7 @@ func reds(arguments []string) (string, error) {
 				if event.Code != nil {
 					exitCode = *event.Code
 				}
+				timedOut = event.TimedOut
 			case "output":
 				tail = event.Text
 			case "uploaded":
@@ -1407,6 +1481,12 @@ func reds(arguments []string) (string, error) {
 			default:
 				broken = append(broken, fmt.Sprintf("%s: the stage broke (exited %t, code %d, last output %q)", unit.Id, exited, exitCode, strings.TrimSpace(tail)))
 			}
+			continue
+		}
+		// Killed at its budget's timeout: cooked, over budget, which is neither a red nor Loom's fault. The next plan
+		// splits it smaller (#2en3b4t).
+		if timedOut {
+			cooked = append(cooked, fmt.Sprintf("%s: killed at its %d s budget (last output %q)", unit.Id, unit.TimeoutSeconds, strings.TrimSpace(tail)))
 			continue
 		}
 		if !exited || output == "" {
@@ -1493,10 +1573,15 @@ func reds(arguments []string) (string, error) {
 		verdict = "void"
 	case len(failed) > 0:
 		verdict = "red"
+	case len(cooked) > 0:
+		verdict = "cooked"
 	}
-	fmt.Printf("run %s: %s, %d tests in %d units, %d failed, %d units broken\n", run, verdict, tests, len(job.Units), len(failed), len(broken))
+	fmt.Printf("run %s: %s, %d tests in %d units, %d failed, %d units broken, %d cooked\n", run, verdict, tests, len(job.Units), len(failed), len(broken), len(cooked))
 	for _, line := range broken {
 		fmt.Println("BROKEN " + line)
+	}
+	for _, line := range cooked {
+		fmt.Println("COOKED " + line)
 	}
 	for _, line := range failed {
 		fmt.Println("FAIL " + line)

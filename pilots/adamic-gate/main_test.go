@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,5 +102,45 @@ func TestLoomTimesAreReadByPackageAndTest(t *testing.T) {
 	}
 	if _, err := readLoomTimes(writeList(t, "loom_seconds\nx\ty\n")); err == nil {
 		t.Fatal("a malformed line was read")
+	}
+}
+
+// Under a budget, the unit count comes out of the times: an item over the budget runs alone with the long timeout,
+// and the rest pack into as few units as fit, each killed at budget plus a quarter.
+func TestABudgetSetsTheUnitCountAndAnOverBudgetTestRunsAlone(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	for name, seconds := range map[string]float64{"TestHuge": 100, "TestA": 40, "TestB": 30, "TestC": 20, "TestD": 10} {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"%s","Elapsed":%g}`+"\n", module, name, seconds)
+	}
+	writer.Close()
+	path := filepath.Join(t.TempDir(), "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10"})
+	write.Close()
+	os.Stdout = stdout
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(read, &job); err != nil {
+		t.Fatal(err)
+	}
+	timeouts, huge := []int{}, ""
+	for _, unit := range job.Units {
+		timeouts = append(timeouts, unit.TimeoutSeconds)
+		if strings.Contains(strings.Join(unit.Argv[5:], " "), "TestHuge") {
+			huge = unit.Id
+			if len(unit.Argv) != 6 {
+				t.Fatalf("the over-budget test shares its unit: %v", unit.Argv[5:])
+			}
+		}
+	}
+	// 100 s of packable tests in 50 s of room: two units of 75 s, then TestHuge alone with the long timeout.
+	if !reflect.DeepEqual(timeouts, []int{75, 75, 3*3600 + 600}) || huge != "tests-02" {
+		t.Fatalf("timeouts %v, TestHuge in %q", timeouts, huge)
 	}
 }
