@@ -26,7 +26,9 @@ const viewerScope: TokenScope[] = ['viewer'];
 const boardScope: TokenScope[] = ['board'];
 const poolScope: TokenScope[] = ['pool'];
 // A gate box writing build products to the public store holds a publish token: it writes /public and nothing else.
-const publicWriterScopes: TokenScope[] = ['coordinator', 'publish'];
+const publicWriterScopes: TokenScope[] = ['coordinator', 'publish', 'publish-candidate'];
+// A candidate's publish token writes refs in this namespace only (protocol.ScopePublishCandidate).
+const CandidateRefNamespace = 'build-candidate';
 const watcherScopes: TokenScope[] = ['coordinator', 'board'];
 const subprotocolTokenPrefix = 'token.';
 
@@ -418,6 +420,9 @@ async function handlePublicRef(request: Request, environment: Env, namespace: st
     const claims = await authorize(request, environment, null, { scopes: publicWriterScopes, queryScopes: [] });
     if (claims instanceof Response) {
         return claims;
+    }
+    if (claims.scope === 'publish-candidate' && namespace !== CandidateRefNamespace) {
+        return jsonResponse(403, { error: `a candidate's publish token writes refs/${CandidateRefNamespace} only` });
     }
     const target = (await request.text()).trim();
     if (!Sha256Pattern.test(target)) {

@@ -279,6 +279,21 @@ describe('public refs', function () {
         expect((await call(`/runs/${run}/plan`, { method: 'POST', bearer: publisher, body: '{}' })).status).toBe(403);
     });
 
+    it("lets a candidate's publish token write blobs and refs/build-candidate, never refs/build", async function () {
+        const candidate = await token('codex-unit', 'publish-candidate');
+        const body = randomBytes(512);
+        const sha256 = await sha256Hex(body);
+        expect((await call(`/public/blobs/${sha256}`, { method: 'PUT', bearer: candidate, body: body })).status).toBe(201);
+        const name = await sha256Hex(randomBytes(8));
+        expect((await call(`/public/refs/build/${name}`, { method: 'PUT', bearer: candidate, body: sha256 })).status).toBe(403);
+        expect(await env.PublicStore.head(`refs/build/${name}`)).toBeNull();
+        expect((await call(`/public/refs/build-candidate/${name}`, { method: 'PUT', bearer: candidate, body: sha256 })).status).toBe(201);
+        // main's own gate's token writes either.
+        const publisher = await token('home', 'publish');
+        expect((await call(`/public/refs/build/${name}`, { method: 'PUT', bearer: publisher, body: sha256 })).status).toBe(201);
+        expect((await call(`/runs/${freshRun()}/plan`, { method: 'POST', bearer: candidate, body: '{}' })).status).toBe(403);
+    });
+
     it('stores a ref to a held blob, refuses a dangling or changed one, and serves no reads', async function () {
         const coordinator = await token(freshRun(), 'coordinator');
         const body = randomBytes(256);

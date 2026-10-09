@@ -50,7 +50,7 @@ const usage = `usage:
   loom pool prompt <pool> --runner <sha256> [--until 55m]
   loom gate-lines [--once] [--interval <duration>] [--wire <url>]
   loom top [--once] [--wire <url>]
-  loom publish-token <name> [--days N]
+  loom publish-token <name> [--days N] [--candidate]
 `
 
 func main() {
@@ -501,8 +501,9 @@ func buildRunner(source string, version string, platform string, loomDirectory s
 func publishToken(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("publish-token", flag.ContinueOnError)
 	days := flags.Int("days", 30, "days until the token expires")
+	candidate := flags.Bool("candidate", false, "a candidate's token: public blobs and refs/build-candidate only, never refs/build")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 || *days < 1 {
-		fmt.Fprint(stderr, "usage: loom publish-token <name> [--days N]\n")
+		fmt.Fprint(stderr, "usage: loom publish-token <name> [--days N] [--candidate]\n")
 		return 3
 	}
 	home, _ := os.UserHomeDir()
@@ -511,7 +512,11 @@ func publishToken(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loom: %v\n", err)
 		return 3
 	}
-	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopePublish, Expires: time.Now().Add(time.Duration(*days) * 24 * time.Hour).Unix()})
+	scope := protocol.ScopePublish
+	if *candidate {
+		scope = protocol.ScopePublishCandidate
+	}
+	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: scope, Expires: time.Now().Add(time.Duration(*days) * 24 * time.Hour).Unix()})
 	if err != nil {
 		fmt.Fprintf(stderr, "loom: %v\n", err)
 		return 3
