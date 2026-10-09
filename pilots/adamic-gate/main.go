@@ -79,7 +79,11 @@ rm -rf "${HOME}/.cache/adamic/runtime"/.build-* 2> /dev/null
 # its budget never removes them), npm trees replaced by a new lockfile, a half-made npm cache, and other units'
 # workspaces. One unit runs at a time, so none of it is in use (Oct 9: an instance at 92% of its 8.8 GB /tmp failed
 # 236 units in a row this way).
-rm -rf /tmp/go-build* /tmp/Test* /tmp/adamic-npm/replaced-* /tmp/adamic-npm/*.staging-* 2> /dev/null
+rm -rf /tmp/go-build* /tmp/Test* /tmp/adamic-npm/replaced-* /tmp/adamic-npm/*.staging-* /tmp/loom-disk-fill-* 2> /dev/null
+# /tmp/adamic-gate is the gate's TMPDIR (cloud/setup.sh), where go and the tests make their temporary directories:
+# 2.6 to 3.2 GB of earlier units' on the two instances that failed 329 units this way (Oct 9). Setup keeps one thing
+# there, the markdown width dependencies, and that stays.
+find /tmp/adamic-gate -mindepth 1 -maxdepth 1 ! -name 'markdown-width-*' -exec rm -rf {} + 2> /dev/null
 find /tmp -maxdepth 1 -name 'loom-unit-*' ! -path "$(dirname "${PWD}")" ! -path "${PWD}" -exec rm -rf {} + 2> /dev/null
 [ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
 free=$(freeMegabytes)
