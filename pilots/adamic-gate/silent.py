@@ -14,6 +14,11 @@ A candidate is a fast job on a cloud/land- branch, or at tier 30 and up. Each pa
   and has sat over 5 minutes without being served again.
 A page goes to Loom and to the gate-lane's owner (@system_adamic_integration), naming the job, its tier and what it
 waits on. ~/.loom/silent.json remembers what was paged; a job that moves (starts, or gets a new verdict) can page again.
+
+It also pages Loom when the star's pool drains (@system_adamic, Oct 9 17:41Z: the pool sat at 1 asking worker with 961
+units queued for about 30 minutes and nothing said so): fewer than 20 workers asked within 300 s while over 100 units
+are queued, held for 5 minutes, once per drain. ~/.loom/drain.json keeps when it began; a pool back above either line
+clears it. LOOM_SILENT_POOL names a file holding `loom pool status codex` output in place of asking the wire.
 """
 
 import json
@@ -28,6 +33,38 @@ state = os.environ.get("LOOM_SILENT_STATE") or os.path.expanduser("~/.loom/silen
 ahra = "/Users/kirkouimet/Projects/ahra/node_modules/.bin/ahra"
 recipients = ["system_adamic_developer_tools_loom", "system_adamic_integration"]
 grace = 300
+drainState = os.environ.get("LOOM_SILENT_DRAIN") or os.path.expanduser("~/.loom/drain.json")
+
+
+def drained(now, dry):
+    """A page when the star's pool has been drained for 5 minutes and hasn't paged for this drain, else None."""
+    if os.environ.get("LOOM_SILENT_POOL"):
+        status = open(os.environ["LOOM_SILENT_POOL"]).read()
+    else:
+        try:
+            status = subprocess.run([os.path.expanduser("~/.loom/bin/loom"), "pool", "status", "codex"], capture_output=True,
+                                    text=True, timeout=60).stdout
+        except subprocess.TimeoutExpired:
+            return None
+    head = re.match(r"pool codex: (\d+) queued, (\d+) workers", status)
+    if not head:
+        return None
+    queued = int(head.group(1))
+    asking = sum(1 for seconds in re.findall(r"asked (\d+) s ago", status) if int(seconds) <= 300)
+    drain = json.load(open(drainState)) if os.path.exists(drainState) else {}
+    page = None
+    if asking < 20 and queued > 100:
+        drain.setdefault("since", now)
+        if now - drain["since"] >= 300 and not drain.get("paged"):
+            page = ("Pool drained: %d workers asked within 300 s with %d units queued on codex, for %d minutes. Look at rearm "
+                    "(~/.loom/rearm.log) and the fleets' live turns." % (asking, queued, (now - drain["since"]) // 60))
+            if not dry:
+                drain["paged"] = True
+    else:
+        drain = {}
+    json.dump(drain, open(drainState + ".partial", "w"))
+    os.replace(drainState + ".partial", drainState)
+    return page
 
 
 def mainReds():
@@ -99,13 +136,15 @@ def main():
         paged[key] = int(now)
         pages.append("Silent candidate: %s (%s), tier %d: %s. %s" % (job.get("branch", "?"), sha[:12], tier, what[2],
                      "Serve it (rename its .verdict) or say why it waits." if what[0] == "unrequeued" else "Place it (tier 30 and up starts past the cap) or say why it waits."))
-    for page in pages:
+    drain = drained(float(os.environ.get("LOOM_SILENT_NOW") or now), dry)
+    for page in pages + ([drain] if drain else []):
         if seed:
             continue
         if dry:
             print("dry: " + page)
             continue
-        for recipient in recipients:
+        # A drained pool is Loom's to fix, not the gate lane's.
+        for recipient in recipients[:1] if page == drain else recipients:
             subprocess.run([ahra, "os", "send", recipient, page], cwd="/Users/kirkouimet/Projects/ahra", capture_output=True, text=True)
         print(time.strftime("%H:%M:%S", time.gmtime()) + " " + page)
     if not dry:
