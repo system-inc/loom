@@ -37,12 +37,18 @@ for at in range(1, len(pairs), 2):
     finished.append(statuses)
 replaced = []
 for index, job in enumerate(jobs):
-    # Only phase and stage units stand in for each other by id: a test unit's id is its place in its own plan.
-    later = {unit["id"] for other in jobs[index + 1:] for unit in other["units"] if unit["id"].startswith(("phase-", "stage-"))}
+    # Phase and stage units stand in for each other by id. A test unit's id is only its place in its own plan, so a
+    # test unit stands in only for one with the identical command (the same plan's unit, run again).
+    later = {}
+    for other in jobs[index + 1:]:
+        for unit in other["units"]:
+            later[unit["id"]] = unit
     kept = []
     for unit in job["units"]:
         status = finished[index].get(unit["id"])
-        if unit["id"] in later and (status in (None, "broken") or (status == "failed" and unit["id"] in rerunRed)):
+        again = later.get(unit["id"])
+        same = again is not None and (unit["id"].startswith(("phase-", "stage-")) or again["argv"] == unit["argv"])
+        if same and (status in (None, "broken") or (status == "failed" and unit["id"] in rerunRed)):
             replaced.append({"unit": unit["id"], "was": status or "never finished", "run": index})
             continue
         kept.append(unit)
