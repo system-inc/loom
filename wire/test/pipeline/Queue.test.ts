@@ -41,8 +41,9 @@ async function freshQueue(answers: Record<string, GitFacts> = {}, mainRef: TestM
     await runInDurableObject(stub, function (instance: Queue) {
         instance.main = mainRef;
         instance.history = {
-            async facts(asked: string): Promise<GitFacts> {
-                return answers[asked] ?? facts();
+            // A base other than the main these tests start from is one main has moved past: nothing descends from it here.
+            async facts(asked: string, base: string): Promise<GitFacts> {
+                return answers[asked] ?? (base === main ? facts() : facts({ baseIsAncestor: false }));
             },
         };
         let tick = 0;
@@ -280,5 +281,38 @@ describe('the queue', function () {
         expect(JSON.parse(feed[0] ?? '')).toMatchObject({ type: 'change.red', subject: { change: ids[0] } });
         expect(await (await queue.fetch(`https://queue/changes/${ids[0]}`)).json()).toMatchObject({ state: 'red' });
         expect((await post(ids[0] ?? '', 'passed', null)).status).toBe(409);
+    });
+
+    it('refuses to land a change whose verdict failed, or one main moved past, and moves nothing', async function () {
+        const held = new TestMain();
+        const queue = await freshQueue({}, held);
+        const ids: string[] = [];
+        for (const seed of [5, 6]) {
+            ids.push(((await (await submit(queue, change(seed))).json()) as { change: string }).change);
+        }
+        const verdictFor = function (id: string, future: string, status: string, cause: string | null): Promise<Response> {
+            return queue.fetch('https://queue/verdicts', {
+                method: 'POST',
+                body: JSON.stringify({ change: id, verdict: { future: future, run: 'r', status: status, cause: cause, rule: 'todays-gate-v0' } }),
+            });
+        };
+        const land = function (id: string): Promise<Response> {
+            return queue.fetch('https://queue/land', { method: 'POST', body: JSON.stringify({ change: id }) });
+        };
+        // A failed verdict that isn't the change's (main already red) names a future, and still never lands.
+        expect((await verdictFor(ids[0] ?? '', sha(5), 'failed', 'mainRed')).status).toBe(200);
+        expect((await land(ids[0] ?? '')).status).toBe(409);
+        // A passed future, but main moved on before the lander came: it needs a new future, not this one.
+        expect((await verdictFor(ids[1] ?? '', sha(6), 'passed', null)).status).toBe(200);
+        held.sha = sha(77);
+        const moved = await land(ids[1] ?? '');
+        expect(moved.status).toBe(409);
+        expect(((await moved.json()) as { error: string }).error).toContain('does not descend from main');
+        expect(held.sha).toBe(sha(77));
+        expect(
+            (await logOf(queue)).map(function (event) {
+                return event.type;
+            }),
+        ).not.toContain('change.landed');
     });
 });
