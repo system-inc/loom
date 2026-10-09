@@ -1,7 +1,8 @@
 #!/bin/bash
 # rearm.sh: keep both Codex pools serving. A serve turn ends at its deadline, and some end long before it (Oct 9:
 # 13 of 40 instances "interrupted" 24 to 48 minutes into a 115-minute turn), so the pools shrink unless someone
-# sends the next turn. Run every 10 minutes (LaunchAgent com.loom.rearm), it sends the serve prompt to every
+# sends the next turn. Run every 2 minutes (LaunchAgent com.loom.rearm, StartInterval 120; at 10, 10 of the star's 72 sat
+# finished between passes, Oct 9), it sends the serve prompt to every
 # fleet member whose session has completed. A member whose last reply says Codex's approval review rejected the
 # runner is left alone: sending again only spends a turn on the same refusal.
 set -uo pipefail
