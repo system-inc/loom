@@ -61,6 +61,7 @@ const usage = `usage:
   loom publish-token <name> [--days N] [--candidate]
   loom submit-token <owner> [--days N]
   loom build-token <builder> [--days N]
+  loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>]
 `
 
 func main() {
@@ -70,6 +71,9 @@ func main() {
 func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "plan" {
 		return plan(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "reads-check" {
+		return readsCheck(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "board" {
 		return board(arguments[1:], stdout, stderr)

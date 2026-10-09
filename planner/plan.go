@@ -78,13 +78,10 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 
 // testedPackages lists the tree's module path and its packages that have tests.
 func testedPackages(tree string) (string, []listedPackage, error) {
-	moduleCommand := exec.Command("go", "list", "-m")
-	moduleCommand.Dir = tree
-	moduleOutput, err := moduleCommand.Output()
+	module, err := modulePath(tree)
 	if err != nil {
-		return "", nil, fmt.Errorf("go list -m: %w", err)
+		return "", nil, err
 	}
-	module := strings.TrimSpace(strings.SplitN(string(moduleOutput), "\n", 2)[0])
 	command := exec.Command("go", "list", "-json", "./...")
 	command.Dir = tree
 	var stderr bytes.Buffer
@@ -106,6 +103,17 @@ func testedPackages(tree string) (string, []listedPackage, error) {
 	}
 	sort.Slice(packages, func(left, right int) bool { return packages[left].ImportPath < packages[right].ImportPath })
 	return module, packages, nil
+}
+
+// modulePath is the tree's main module path.
+func modulePath(tree string) (string, error) {
+	command := exec.Command("go", "list", "-m")
+	command.Dir = tree
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("go list -m: %w", err)
+	}
+	return strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0]), nil
 }
 
 // compilerDeclarations reads the tree's cloud/fast-gate/compiler-dependencies.json: package directory to the compiler
