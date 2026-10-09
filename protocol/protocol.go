@@ -33,6 +33,10 @@ type JobUnit struct {
 	// pass may stand in for a later unit with the same key. Off by default, since a unit that reads a
 	// machine's own state (a warm checkout, say) has inputs its key can't see.
 	Cache bool `json:"cache,omitempty"`
+	// ExpectedSeconds is the planner's estimate of the unit's wall, which the coordinator places by, longest first,
+	// ahead of the wall it recorded for the same id last time: a planner that re-cuts its units every run reuses ids
+	// for different work (Oct 9, main c869cea9: units of 310 and 265 s placed last on stale times). Zero: none given.
+	ExpectedSeconds float64 `json:"expectedSeconds,omitempty"`
 }
 
 type Input struct {

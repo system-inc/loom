@@ -124,6 +124,8 @@ A unit that passed may stand in for a later unit with the same **cache key**: `p
 
 Caching is opt-in per job unit: `"cache": true` says the unit is hermetic, its result depending on nothing its key doesn't hold. It is off by default, because a unit that reads a machine's own state (a warm checkout, a build cache) has inputs its key can't see.
 
+A job unit may also say `"expectedSeconds"`: the planner's estimate of its wall. The coordinator places ready units longest first by it, and only for a unit without one by the wall that unit id recorded last run (`~/.loom/durations.tsv`), since a planner that re-cuts its units every run reuses ids for different work. It never reaches the runner and is no part of a cache key.
+
 The coordinator keeps the cache. After a unit passes it writes a `protocol.CacheEntry` (`key`, `run`, `unit`, `machine`, `runnerVersion`, `wallSeconds`, `outputs` with path, sha256 and bytes, `events`, the sha256 of the unit's event log as a blob) to `PUT /cache/<key>`. Before placing a unit it reads `GET /cache/<key>`; on a hit it posts the unit's stream itself, `cached` then `finished passed`, and the verdict lists the unit under `cached`. Only passed units are cached, an entry is written once and never replaced, and the Worker refuses an entry whose outputs or event log aren't in the store.
 
 `--uncached` bypasses the cache entirely: no reads, every unit runs. An uncached run is what lands main, and its verdict's `cached` is empty.

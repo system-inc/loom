@@ -369,6 +369,9 @@ func (coordinator *coordinator) placeReady(runContext context.Context) bool {
 }
 
 func (coordinator *coordinator) expected(state *unitState) float64 {
+	if state.planned.Unit.ExpectedSeconds > 0 {
+		return state.planned.Unit.ExpectedSeconds
+	}
 	if coordinator.config.Durations == nil {
 		return 0
 	}

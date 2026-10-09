@@ -515,6 +515,22 @@ func TestTheLongestRecordedUnitIsPlacedFirst(t *testing.T) {
 	}
 }
 
+// A unit's planned estimate outranks the wall its id recorded last time, since a re-cut plan reuses ids for other work.
+func TestThePlannersEstimateOutranksAStaleRecordedDuration(t *testing.T) {
+	wire := newFakeWire(t)
+	durations, _ := LoadDurations("")
+	durations.Set("test-job", "short", 100)
+	durations.Set("test-job", "long", 1)
+	configuration := config(wire, LocalMachine{Label: "only"})
+	configuration.Durations = durations
+	short, long := shell("short", "true"), shell("long", "true")
+	short.ExpectedSeconds, long.ExpectedSeconds = 5, 400
+	result := run(t, configuration, short, long)
+	if first := wire.events(result.Run)[0].Unit; first != "long" {
+		t.Fatalf("placed %s first", first)
+	}
+}
+
 func TestACacheablePassIsServedFromTheCacheUnlessUncached(t *testing.T) {
 	wire := newFakeWire(t)
 	unit := shell("a", "echo computed")

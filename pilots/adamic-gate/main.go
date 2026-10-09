@@ -1121,7 +1121,8 @@ func plan(arguments []string) error {
 			}
 			job.Units = append(job.Units, protocol.JobUnit{
 				Id: id, Argv: []string{"bash", "-c", opening + unitBody, "adamic-gate-unit", *sha, packageName + "=^(" + regexp.QuoteMeta(name) + ")$"},
-				TimeoutSeconds: productTimeout, Outputs: []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
+				TimeoutSeconds: productTimeout, ExpectedSeconds: max(productSeconds[packageName+" "+name], 1),
+				Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
 				Resources: protocol.Resources{Cpus: 12},
 			})
 			productUnits[packageName] = append(productUnits[packageName], id)
@@ -1198,8 +1199,14 @@ func plan(arguments []string) error {
 				needs = append(needs, productUnits[packageName]...)
 			}
 		}
+		// The coordinator places by this, longest first; the remainder unit runs what no record timed (988 s on main
+		// c869cea9), so it goes first.
+		expected := loads[index]
+		if index == remainderUnit {
+			expected = 3600
+		}
 		job.Units = append(job.Units, protocol.JobUnit{
-			Id: fmt.Sprintf("tests-%02d", index), Needs: needs, Argv: argv, TimeoutSeconds: timeout(index),
+			Id: fmt.Sprintf("tests-%02d", index), Needs: needs, Argv: argv, TimeoutSeconds: timeout(index), ExpectedSeconds: max(expected, 1),
 			Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
 			Resources: protocol.Resources{Cpus: 12},
 		})
