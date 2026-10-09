@@ -8,7 +8,9 @@ Every fast job the gate saw in the window counts. Its clock starts at submit, th
 work directory's creation (a re-tier rewrites the job file, never the work directory). It stops at the verdict that
 stands: a green or red <sha>.verdict, at that file's time; or, for a sha main already holds with no standing verdict,
 the commit time of the first main commit that holds it. A void, a cancel, a requeue or no verdict at all leaves the
-clock running to now: a change with no verdict counts as still waiting, never as missing.
+clock running to now: a change with no verdict counts as still waiting, never as missing. A job its owner withdrew
+(withdraw.sh's <sha>.withdrawn: superseded, folded into a train, no longer wanted) is answered at that moment, and is
+counted apart, so a withdrawal never passes for a verdict.
 
 It prints the headline: submit to verdict p50 and p90 over every job in the window (running ones at their age now), how
 many have no verdict, and the oldest of those. A second line splits the ones with no verdict: a job whose sha is no
@@ -62,7 +64,7 @@ def main():
     for line in listing.splitlines():
         tip, _, ref = line.partition("\t")
         heads[ref[len("refs/heads/"):]] = tip
-    clocks, open_, superseded = [], [], 0
+    clocks, open_, superseded, withdrawn = [], [], 0, 0
     for name in sorted(os.listdir(jobs)):
         if not re.fullmatch(r"[0-9a-f]{40}\.json", name):
             continue
@@ -75,6 +77,10 @@ def main():
             continue
         stopped = None
         verdict = os.path.join(jobs, sha + ".verdict")
+        if os.path.exists(os.path.join(jobs, sha + ".withdrawn")):
+            withdrawn += 1
+            clocks.append(max(0, os.path.getmtime(os.path.join(jobs, sha + ".withdrawn")) - submit))
+            continue
         if os.path.exists(verdict) and open(verdict, errors="replace").read(6).startswith(("green:", "red:")):
             stopped = os.path.getmtime(verdict)
         else:
@@ -91,9 +97,10 @@ def main():
         print("submit to verdict: no fast jobs in the last %g hours" % arguments.hours)
         return 0
     oldest = max(open_) if open_ else None
-    print("submit to verdict over the last %g hours: p50 %s, p90 %s, %d jobs, %d with no verdict%s" % (
+    print("submit to verdict over the last %g hours: p50 %s, p90 %s, %d jobs, %d with no verdict%s%s" % (
         arguments.hours, minutes(percentile(clocks, 0.5)), minutes(percentile(clocks, 0.9)), len(clocks), len(open_),
-        " (oldest %s, %s)" % (minutes(oldest[0]), oldest[1][:12]) if oldest else ""))
+        " (oldest %s, %s)" % (minutes(oldest[0]), oldest[1][:12]) if oldest else "",
+        ", %d withdrawn by their owners" % withdrawn if withdrawn else ""))
     if open_:
         print("of the %d with no verdict: %d are no longer their branch's tip (superseded by a newer cut, the change waits on in it),"
               " %d are current tips still waiting" % (len(open_), superseded, len(open_) - superseded))
