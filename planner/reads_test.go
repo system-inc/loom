@@ -91,3 +91,34 @@ func TestReadsHashMovesOnlyForReadFiles(t *testing.T) {
 		}
 	}
 }
+
+// A tracked symlink in a unit's testdata keys as its target, never followed: a dangling one keys, and retargeting it
+// moves the reads part.
+func TestASymlinkReadKeysAsItsTarget(t *testing.T) {
+	t.Parallel()
+	tree, tools := readsFixture(t)
+	link := filepath.Join(tree, "p/testdata/dangling")
+	if err := os.Symlink("nowhere", link); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command("git", "-C", tree, "add", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v %s", err, output)
+	}
+	hash := func() string {
+		reads, err := DeclaredReads(tree, tools, "p")
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := ReadsHash(tree, reads)
+		if err != nil {
+			t.Fatalf("a dangling symlink in testdata: %v", err)
+		}
+		return value
+	}
+	base := hash()
+	os.Remove(link)
+	os.Symlink("elsewhere", link)
+	if hash() == base {
+		t.Error("retargeting the symlink left the reads part where it was")
+	}
+}

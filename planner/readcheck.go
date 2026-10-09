@@ -2,11 +2,8 @@ package planner
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -194,12 +191,10 @@ func CheckReads(tree, gateTools string, unit Unit, compilerPackages []string, tr
 		if commit, found := gitlinks[relative]; found {
 			digest = commit
 		} else {
-			content, err := os.ReadFile(filepath.Join(tree, filepath.FromSlash(relative)))
+			digest, err = fileDigest(filepath.Join(tree, filepath.FromSlash(relative)))
 			if err != nil {
 				return nil, fmt.Errorf("read %s: %w", relative, err)
 			}
-			sum := sha256.Sum256(content)
-			digest = hex.EncodeToString(sum[:])
 		}
 		findings = append(findings, Finding{Package: unit.Package, Path: relative, Sha256: digest})
 	}

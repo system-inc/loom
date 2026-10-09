@@ -91,7 +91,8 @@ func fnmatch(pattern, name string) bool {
 	return err == nil && matched
 }
 
-// ReadsHash is the contract's reads part over the given files: a hash of their sorted (path, sha256). A read that
+// ReadsHash is the contract's reads part over the given files: a hash of their sorted (path, sha256). A tracked
+// symlink is its target, as git records it ("symlink <target>"), so a dangling one a test walks still keys. A read that
 // names a submodule (executors.txt names cohere by its gitlink's exact path) is the submodule at its recorded commit,
 // so it hashes as "gitlink <commit>".
 func ReadsHash(tree string, reads []string) (string, error) {
@@ -105,12 +106,11 @@ func ReadsHash(tree string, reads []string) (string, error) {
 			pairs = append(pairs, [2]string{read, "gitlink " + commit})
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(tree, filepath.FromSlash(read)))
+		digest, err := fileDigest(filepath.Join(tree, filepath.FromSlash(read)))
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", read, err)
 		}
-		sum := sha256.Sum256(content)
-		pairs = append(pairs, [2]string{read, hex.EncodeToString(sum[:])})
+		pairs = append(pairs, [2]string{read, digest})
 	}
 	canonical, err := Canonical(pairs)
 	if err != nil {
@@ -135,4 +135,25 @@ func Gitlinks(tree string) (map[string]string, error) {
 		}
 	}
 	return gitlinks, nil
+}
+
+// fileDigest is a tracked file's sha256, or "symlink <target>" for a symlink, which is never followed.
+func fileDigest(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		if err != nil {
+			return "", err
+		}
+		return "symlink " + target, nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:]), nil
 }
