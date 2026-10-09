@@ -54,6 +54,11 @@ type Config struct {
 	Log io.Writer
 	// LateGrace is how far past its timeout an attempt may run before it counts as dropped. Zero means 60 s.
 	LateGrace time.Duration
+	// PoolQueueWait is how long a pool unit may wait in the pool's queue before it starts. A pool unit's timeout and
+	// grace run from its first event, not from when it was queued: on a shared pool a lower priority's unit waits
+	// for workers, and a 90 s unit queued behind the star would otherwise be dropped before it ever ran (the budget
+	// proof on Oct 9, 04:10Z: ten packed units dropped that way). Zero means two hours.
+	PoolQueueWait time.Duration
 	// Client makes every HTTP call. Nil means one with sane timeouts.
 	Client *http.Client
 	// SlotLimit says how many of a machine's slots Loom may use right now; nil means all of them. It is asked
@@ -93,6 +98,9 @@ func Run(runContext context.Context, config Config, job protocol.Job) (Result, e
 	}
 	if config.LateGrace == 0 {
 		config.LateGrace = 60 * time.Second
+	}
+	if config.PoolQueueWait == 0 {
+		config.PoolQueueWait = 2 * time.Hour
 	}
 	if config.Client == nil {
 		config.Client = &http.Client{Timeout: 5 * time.Minute}
@@ -520,14 +528,24 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 	coordinator.machines[machine.Name()] = true
 	coordinator.mutex.Unlock()
 	limit := time.Duration(unit.TimeoutSeconds)*time.Second + coordinator.config.LateGrace
-	attemptContext, cancel := context.WithTimeout(runContext, limit)
+	_, pooled := machine.(*PoolMachine)
+	// A box starts the unit when it's placed; a pool unit may wait for a worker first, so its clock starts at its
+	// first event and its wait in the queue has an allowance of its own.
+	deadline := limit
+	if pooled {
+		deadline = coordinator.config.PoolQueueWait + limit
+	}
+	attemptContext, cancel := context.WithTimeout(runContext, deadline)
 	defer cancel()
+	var firstEvent time.Time
+	var clock *time.Timer
+	late := false
 	coordinator.mutex.Lock()
 	state.preempt = cancel
 	state.startedAt = time.Now()
 	coordinator.mutex.Unlock()
 	attempt := coordinator.record.begin(id)
-	if _, pooled := machine.(*PoolMachine); pooled {
+	if pooled {
 		attempt.continueFromOffset(&unit)
 	}
 	reader, writer := io.Pipe()
@@ -554,6 +572,19 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 			if event.Run == coordinator.run && event.Unit == id && event.Type == "finished" {
 				finishedStatus = event.Status
 			}
+			if pooled {
+				coordinator.mutex.Lock()
+				if firstEvent.IsZero() {
+					firstEvent = time.Now()
+					clock = time.AfterFunc(limit, func() {
+						coordinator.mutex.Lock()
+						late = true
+						coordinator.mutex.Unlock()
+						cancel()
+					})
+				}
+				coordinator.mutex.Unlock()
+			}
 			attempt.take(event)
 		}
 		io.Copy(io.Discard, reader)
@@ -562,6 +593,16 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 	runError := machine.Run(attemptContext, unit, writer)
 	writer.Close()
 	<-parsed
+	coordinator.mutex.Lock()
+	if clock != nil {
+		clock.Stop()
+	}
+	// A pool unit's wall is its own, from its first event: its time in the queue is the pool's, not the unit's.
+	if !firstEvent.IsZero() {
+		started = firstEvent
+	}
+	ranLate, neverStarted := late, pooled && firstEvent.IsZero()
+	coordinator.mutex.Unlock()
 	wall := time.Since(started)
 
 	coordinator.mutex.Lock()
@@ -585,6 +626,9 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 	why := "its runner ended without finishing"
 	if attemptContext.Err() != nil && runContext.Err() == nil {
 		why = fmt.Sprintf("it ran past its timeout and %v of grace", coordinator.config.LateGrace)
+		if pooled && neverStarted && !ranLate {
+			why = fmt.Sprintf("it waited %v in the pool's queue and never started", coordinator.config.PoolQueueWait)
+		}
 	}
 	if runError != nil {
 		why += fmt.Sprintf(" (%v)", runError)

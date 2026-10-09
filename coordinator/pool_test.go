@@ -135,6 +135,49 @@ func TestAPoolMachinesPriorityRidesWithEveryUnitItQueues(t *testing.T) {
 	}
 }
 
+// A pool unit's timeout runs from its first event: one that waits in the queue longer than its timeout and grace,
+// for a worker busy elsewhere, still runs and finishes (the budget proof of Oct 9 lost ten 90 s units that way).
+func TestAPoolUnitsClockStartsWhenItStartsNotWhenItIsQueued(t *testing.T) {
+	wire := newFakeWire(t)
+	settings := config(wire, poolSlots(wire, 1)...)
+	settings.LateGrace = time.Second
+	unit := poolUnit("waits", "echo ran")
+	unit.TimeoutSeconds = 2
+	// Workers arrive after 4 s, past the unit's 2 s and 1 s of grace counted from when it was queued.
+	time.AfterFunc(4*time.Second, func() { servePool(t, wire, "codex", 1) })
+	result := run(t, settings, unit)
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	// Green on its first attempt: a drop placed again would also end green, and hide the clock it came from.
+	for _, event := range result.Events {
+		if strings.Contains(event.Message, "dropped the unit") || strings.Contains(event.Message, "placed again") {
+			t.Fatalf("the queued unit was dropped before it ran: %q", event.Message)
+		}
+	}
+}
+
+// The wait has an allowance of its own: a pool unit no worker starts within it is dropped, said so, and the run is
+// void.
+func TestAPoolUnitThatWaitsPastItsQueueAllowanceIsDropped(t *testing.T) {
+	wire := newFakeWire(t)
+	settings := config(wire, poolSlots(wire, 1)...)
+	settings.PoolQueueWait = time.Second
+	result := run(t, settings, poolUnit("waits", "true"))
+	if result.Verdict.Status != "void" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	said := false
+	for _, event := range result.Events {
+		if strings.Contains(event.Message, "in the pool's queue and never started") {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("no event says the unit never started: %+v", result.Events)
+	}
+}
+
 func TestAPlantedFailureOnAPoolUnitTurnsTheRunRed(t *testing.T) {
 	wire := newFakeWire(t)
 	servePool(t, wire, "codex", 2)
