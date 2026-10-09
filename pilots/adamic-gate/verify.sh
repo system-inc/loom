@@ -75,8 +75,11 @@ if exports:
         first, rest = unit["argv"][2].split("\n", 1)
         unit["argv"][2] = first + "\n" + exports.rstrip("\n") + "\n" + rest
 script = job["units"][0]["argv"][2]
-opening = script[:script.index("export ADAMIC_GATE_UNCACHED")]
-body = '''cd "${tree}" || exit 2
+# The unit body begins at its own export of the gate's environment, the last one: a fast gate's env, injected
+# above the opening, can export ADAMIC_GATE_UNCACHED too (d56ae116's build unit lost its whole opening to that).
+opening = script[:script.rindex("export ADAMIC_GATE_UNCACHED")]
+body = '''[ -n "${tree:-}" ] && [ -d "${tree}/.git" ] && [ -n "${out:-}" ] || { echo "loom-build: no tree to build (the opening never ran): Loom's fault"; exit 2; }
+cd "${tree}" || exit 2
 echo "loom-build: tree $(git -C "${tree}" rev-parse HEAD) setup $(( SECONDS - started )) s"
 go build ./... > "${out}/build.log" 2>&1; build=$?
 go vet ./... > "${out}/vet.log" 2>&1; vet=$?
