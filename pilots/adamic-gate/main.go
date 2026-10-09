@@ -48,6 +48,7 @@ started=${SECONDS}
 suffix=$([ "${LOOM_SLOT:-1}" = 1 ] && echo "" || echo "-${LOOM_SLOT}")
 tree=${HOME}/fast-gate/tree${suffix} tools=${HOME}/fast-gate/tools${suffix} out=${PWD}/loom-out
 mkdir -p "${out}"
+freeMegabytes() { df -Pm "${HOME}" /tmp | awk 'NR > 1 {print $4}' | sort -n | head -1; }
 [ -f "${tools}/cloud/idle-preempt.sh" ] && bash "${tools}/cloud/idle-preempt.sh"
 source "${HOME}/adamic-tools/env.sh"
 export PATH="${ADAMIC_TYPESCRIPT_SOURCE:+${ADAMIC_TYPESCRIPT_SOURCE}/bin:}${HOME}/fast-gate/npm/bin:${PATH}"
@@ -66,6 +67,16 @@ started=${SECONDS}
 [ -n "${HTTPS_PROXY:-}${https_proxy:-}" ] || eval "$(tr '\0' '\n' < /proc/${PPID}/environ 2>/dev/null | grep -E '^(HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy|ALL_PROXY|all_proxy|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|REQUESTS_CA_BUNDLE|GIT_SSL_CAINFO)=' | sed -E "s/^([^=]+)=(.*)$/export \\1='\\2'/")"
 tree=/tmp/adamic out=${PWD}/loom-out
 mkdir -p "${out}"
+# A full disk must never read as a test red (Oct 9: cf04e18f's and e3f2be21's reds were all "no space left on device"
+# under ~/.cache/adamic/runtime/.build-* and ~/.cache/go-build). A Codex instance's disk is 8.8 GB, about 4 GB free
+# with the tree and the gate inputs on it. An instance runs one unit at a time, so the runtime's build directories
+# left from earlier units are no one's; go's build cache is dropped whenever under 3 GB is free; under 1.5 GB after
+# that, the unit doesn't start: exit 2, Loom's fault, placed again elsewhere.
+freeMegabytes() { df -Pm "${HOME}" /tmp | awk 'NR > 1 {print $4}' | sort -n | head -1; }
+rm -rf "${HOME}/.cache/adamic/runtime"/.build-* 2> /dev/null
+[ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
+free=$(freeMegabytes)
+[ "${free:-0}" -ge "${LOOM_MINIMUM_FREE_MB:-1500}" ] || { echo "loom-pilot: only ${free} MB free on the instance after trimming its caches: Loom's fault"; df -h "${HOME}" /tmp; exit 2; }
 # Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only.
 git config --global url."https://github.com/".insteadOf git@github.com:
 # GitHub turns away anonymous fetches when many instances check out at once (15 side instances at 00:10Z on
@@ -197,6 +208,13 @@ for build in "${out}"/part-*.build; do
 done > "${out}/cpu.tsv"
 grep -h '"Action":"fail"' "${out}"/part-*.jsonl | grep -o '"Package":"[^"]*","Test":"[^"/]*"' | sort -u | sed 's/^/loom-pilot: failed /'
 echo "loom-pilot: tests took $(( SECONDS - started )) s in all"
+# A test that ran out of disk proved nothing about the change: the unit is broken (exit 2), never red. A disk full
+# enough can't keep the error in the logs either, so a disk still under 512 MB free after a red counts too.
+if [ "${status}" != 0 ] && { cat "${out}"/part-*.jsonl "${out}"/part-*.stderr 2> /dev/null | grep -q "no space left on device" || [ "$(freeMegabytes)" -lt 512 ]; }; then
+  echo "loom-pilot: the instance's disk filled during the tests (no space left on device): Loom's fault, not the change's"
+  df -h "${HOME}" /tmp
+  exit 2
+fi
 exit "${status}"
 `
 
@@ -371,6 +389,10 @@ code=$?
 tar -C "${out}" -czf "${out}/phase.tar.gz" phase phase.log
 echo "loom-phase: $(head -1 "${out}/phase/status.txt" 2> /dev/null || echo "no status.txt") (exit ${code}, $(( SECONDS - started )) s in all)"
 [ "${code}" = 0 ] || tail -20 "${out}/phase.log"
+if [ "${code}" != 0 ] && { grep -rqs "no space left on device" "${out}/phase.log" "${out}/phase" || [ "$(freeMegabytes)" -lt 512 ]; }; then
+  echo "loom-phase: the instance's disk filled (no space left on device): Loom's fault, not the change's"
+  exit 2
+fi
 exit "${code}"
 `
 
@@ -1389,6 +1411,12 @@ func reds(arguments []string) (string, error) {
 		}
 		if !exited || output == "" {
 			broken = append(broken, fmt.Sprintf("%s: no results (exited %t, last output %q)", unit.Id, exited, strings.TrimSpace(tail)))
+			continue
+		}
+		// Exit 2 is the unit's own word that the fault is Loom's (a full disk, a failed checkout): whatever its tests
+		// said, it proved nothing about the change.
+		if exitCode == 2 {
+			broken = append(broken, fmt.Sprintf("%s: exited 2, Loom's fault (last output %q)", unit.Id, strings.TrimSpace(tail)))
 			continue
 		}
 		content, err := fetchBlob(*wire, run, token, output)
