@@ -702,6 +702,10 @@ func readTestsFile(path string, only string) (map[string]result, error) {
 	return results, err
 }
 
+// changedHeadroom is the margin a test in a package the change touched is packed with, over its predicted seconds (the
+// p90 of its last five on Loom, times.py's tsv): its code is new, so its record may understate it.
+const changedHeadroom = 1.5
+
 func plan(arguments []string) error {
 	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
 	referencePath := flags.String("reference", "", "the whole gate's test.jsonl.gz for the same sha")
@@ -720,6 +724,7 @@ func plan(arguments []string) error {
 	phaseUnits := flags.String("phase-units", "", "with --phases, the units to run: one line each, <phase> or <phase> <unit> (run.py --list-units)")
 	onlyTests := flags.String("only-tests", "", "a JSON object, package to the only top-level tests it runs (a fast gate's select.json only_tests); its products and the setups of the kept tests stay too")
 	treeTests := flags.String("tree-tests", "", "the tree's own top-level tests at the sha, \"<package> <test>\" per line (treetests.py): the plan's test list")
+	changedPackages := flags.String("changed-packages", "", "import paths the change touched, comma-separated: their tests are packed at 1.5x their predicted seconds")
 	flags.BoolVar(&splitAll, "split-all", false, "split every test with subtests over 30 s, not only the gate's audited parents")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -808,6 +813,26 @@ func plan(arguments []string) error {
 	}
 	if joined > 0 {
 		fmt.Fprintf(os.Stderr, "times: %d subtests Loom has timed joined the plan under their tests\n", joined)
+	}
+	// Headroom for the change (#6pekqxy): every test and subtest of a changed package, timed or sized, is packed at
+	// changedHeadroom times its seconds, so its split, its setups and whether it fits a budget all read the larger time.
+	// Without the list, the plan is the same as before.
+	if *changedPackages != "" {
+		changed := map[string]bool{}
+		for _, packageName := range strings.Split(*changedPackages, ",") {
+			if packageName = strings.TrimSpace(packageName); packageName != "" {
+				changed[packageName] = true
+			}
+		}
+		raised := 0
+		for key, outcome := range reference {
+			if packageName, _, _ := strings.Cut(key, " "); changed[packageName] {
+				outcome.seconds *= changedHeadroom
+				reference[key] = outcome
+				raised++
+			}
+		}
+		fmt.Fprintf(os.Stderr, "headroom: %d tests of %d changed packages packed at %gx their predicted seconds\n", raised, len(changed), changedHeadroom)
 	}
 	opening := boxOpening
 	if *target == "codex" {

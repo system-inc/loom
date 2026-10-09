@@ -981,3 +981,55 @@ func TestAFullDiskEarlyInALargeLogIsLoomsNotARed(t *testing.T) {
 		t.Fatalf("exit %d, want 2 naming the full disk: %q", code, output)
 	}
 }
+
+// A test in a package the change touched is packed at 1.5x its predicted seconds (#6pekqxy), and only there: a and b
+// each hold one 40 s test in 50 s of room; with a changed, a's test is 60 s and runs alone, b's still packs. A changed
+// list naming no package the plan holds leaves the plan byte for byte as it was.
+func TestAChangedPackagesTestsArePackedWithHeadroom(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	for _, packageName := range []string{"a", "b"} {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%s%s","Test":"TestX","Elapsed":40}`+"\n", module, packageName)
+	}
+	writer.Close()
+	path := filepath.Join(t.TempDir(), "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	planned := func(extra ...string) []byte {
+		read, write, _ := os.Pipe()
+		stdout := os.Stdout
+		os.Stdout = write
+		var printed bytes.Buffer
+		done := make(chan struct{})
+		go func() {
+			printed.ReadFrom(read)
+			close(done)
+		}()
+		err := plan(append([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--package-setup", "0"}, extra...))
+		write.Close()
+		os.Stdout = stdout
+		<-done
+		if err != nil {
+			t.Fatal(err)
+		}
+		return printed.Bytes()
+	}
+	unchanged := planned()
+	if other := planned("--changed-packages", module+"elsewhere"); !bytes.Equal(other, unchanged) {
+		t.Fatalf("a changed package the plan doesn't hold changed the plan:\n%s\nwant\n%s", other, unchanged)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(bytes.NewReader(planned("--changed-packages", module+"a")), &job); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, unit := range job.Units {
+		got[strings.Join(unit.Argv[5:], " ")] = fmt.Sprintf("%g s, killed at %d", unit.ExpectedSeconds, unit.TimeoutSeconds)
+	}
+	want := map[string]string{
+		module + "b=^(TestX)$": "40 s, killed at 90",
+		module + "a=^(TestX)$": "60 s, killed at 11400",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("units %v, want %v", got, want)
+	}
+}
