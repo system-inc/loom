@@ -130,8 +130,24 @@ free=$(freeMegabytes)
 [ "${free:-0}" -ge "${LOOM_MINIMUM_FREE_MB:-1500}" ] || { echo "loom-pilot: only ${free} MB free on the instance after trimming its caches: Loom's fault"; df -h "${HOME}" /tmp; du -xsh /tmp/* 2> /dev/null | sort -h | tail -8; exit 2; }
 # A tree to clone needs about 3.4 GB with its submodules: an instance that can't hold one says so before the checkout,
 # never partway through it (Oct 9: a8ff7263308d had 2 MB after the trims, cloned anyway, and failed writing cohere's
-# TypeScript baselines; its unit never reported and trio 75d5288e voided at the ceiling).
-[ -d "${tree}/.git" ] || [ "${free:-0}" -ge "${LOOM_TREE_FREE_MB:-4500}" ] || { echo "loom-pilot: only ${free} MB free, too little to clone a tree: Loom's fault"; df -h "${HOME}" /tmp; exit 2; }
+# TypeScript baselines; its unit never reported and trio 75d5288e voided at the ceiling). The room that counts is the
+# tree's own disk (#5pfcv0t, Oct 9 22:24Z: 5116fd40e771 had 7.7 GB on /tmp, where the tree goes, and refused 220 units
+# for its root's 3.0 GB). Short of it, the instance clears what it doesn't need before it refuses (Kirk, 22:20Z: "delete
+# stuff and clear stuff they dont need anymore as they go"), one step at a time until the tree fits, each step saying
+# what it freed: the npm cache, every tools checkout, go's build cache, the whole product cache, the gate inputs. Each is
+# made again by the next unit that needs it.
+treeFree() { df -Pm "$(dirname "${tree}")" | awk 'NR == 2 {print $4}'; }
+treeNeed=${LOOM_TREE_FREE_MB:-4500}
+for step in "/tmp/adamic-npm:the npm cache" "/tmp/adamic-gate-tools:every tools checkout" "${HOME}/.cache/go-build:go's build cache" \
+  "${HOME}/.cache/adamic-build:the product cache" "/tmp/adamic-tools/gate-inputs:the gate inputs"; do
+  [ ! -d "${tree}/.git" ] && [ "$(treeFree)" -lt "${treeNeed}" ] || break
+  path=${step%%:*} before=$(treeFree)
+  [ -e "${path}" ] || continue
+  rm -rf "${path}"
+  [ "${path}" = /tmp/adamic-tools/gate-inputs ] && rm -f /tmp/adamic-tools/gate-inputs.manifest
+  echo "loom-pilot: cleared ${step#*:} to make room for the tree: $(( $(treeFree) - before )) MB freed, now $(treeFree) MB free on $(dirname "${tree}")"
+done
+[ -d "${tree}/.git" ] || [ "$(treeFree)" -ge "${treeNeed}" ] || { echo "loom-pilot: only $(treeFree) MB free on $(dirname "${tree}"), too little to clone a tree after clearing what it could: Loom's fault"; df -h "${HOME}" /tmp; exit 2; }
 # Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only. The rewrite rides in the
 # environment, never ~/.gitconfig: some instances mount it read-only, and there every cohere checkout went to ssh and
 # failed (V3 8880e6bc's pre-gate, Oct 9: four units broken on "could not lock config file").
