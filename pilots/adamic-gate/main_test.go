@@ -202,3 +202,39 @@ func TestRedsNamesTheLeavesRunningAtAKill(t *testing.T) {
 		}
 	}
 }
+
+// The tree's own tests are the plan's list: a test gone from the tree is dropped with its subtests, and a new one is
+// sized by Loom's time, a share of what its package lost, its package's median doubled, or 30 s. A package outside
+// --only stays out (the reference arrives filtered the same way).
+func TestThePlansTestListIsTheTrees(t *testing.T) {
+	reference := map[string]result{
+		"p TestOld":    {action: "pass", seconds: 100},
+		"p TestOld/x":  {action: "pass", seconds: 90},
+		"p TestKeep":   {action: "pass", seconds: 10},
+		"q TestQOne":   {action: "pass", seconds: 4},
+		"q TestQTwo":   {action: "pass", seconds: 6},
+		"q TestQThree": {action: "pass", seconds: 8},
+	}
+	path := filepath.Join(t.TempDir(), "tree.txt")
+	tree := "p TestKeep\np TestNewOne\np TestNewTwo\nq TestQOne\nq TestQTwo\nq TestQThree\nq TestQFour\nr TestR\nskip TestOther\n"
+	if err := os.WriteFile(path, []byte(tree), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fromTheTree(reference, path, "^(p|q|r)$", map[string]float64{"p TestNewOne": 12}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]float64{"p TestKeep": 10, "p TestNewOne": 12, "p TestNewTwo": 75, "q TestQOne": 4, "q TestQTwo": 6, "q TestQThree": 8, "q TestQFour": 12, "r TestR": 30}
+	got := map[string]float64{}
+	for key, outcome := range reference {
+		got[key] = outcome.seconds
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if err := os.WriteFile(path, []byte("p TestKeep/sub\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fromTheTree(map[string]result{}, path, "", nil) == nil {
+		t.Fatal("a subtest line was taken as a top-level test")
+	}
+}

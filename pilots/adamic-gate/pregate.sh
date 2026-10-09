@@ -31,9 +31,9 @@ requests=${ADAMIC_FULL_GATE_REQUESTS:-${state}/requests}
 verdicts=${state}/pregate
 work=${HOME}/.loom/pregate
 gate=${HOME}/Projects/system/adamic-gate
-# The star's pool: 100 instances from Oct 9 03:14Z (50 from 01:39Z) (@system_adamic: under 5 minutes uncached needs the CPUs), its
+# The star's pool: 50 instances from Oct 9 04:16Z (100 from 03:14Z; @system_adamic: solve.py showed 47 reach the floor), its
 # whole-set runs planned two units a slot so the longest-first packing has small units to fill in with.
-starSlots=${LOOM_STAR_POOL_SLOTS:-100}
+starSlots=${LOOM_STAR_POOL_SLOTS:-50}
 packages=${LOOM_PREGATE_PACKAGES:-'/(stage3/fixtures|internal/fresh|internal/lower|internal/flow|internal/oracle)$'}
 mkdir -p "${verdicts}" "${work}"
 loom=${HOME}/.loom/bin/loom-pregate planner=${HOME}/.loom/bin/adamic-gate
@@ -85,7 +85,11 @@ pregate() {
 	else
 		pool=codex-side units=15 only=${packages} scope="the red-prone packages"
 	fi
-	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" ${split[@]+"${split[@]}"} > "${job}" 2> /dev/null || { void "${sha}" "planning failed"; return; }
+	# The plan's test list is the tree's own at the sha (treetests.py), so a test split since the reference is
+	# planned as the tests it became, sized, and one gone isn't planned at all.
+	git -C "${gate}" fetch -q origin "${sha}" 2> /dev/null
+	python3 "${HOME}/.loom/bin/treetests.py" "${sha}" > "${work}/${sha}.tree-tests.txt" 2> /dev/null && [ -s "${work}/${sha}.tree-tests.txt" ] && split+=(--tree-tests "${work}/${sha}.tree-tests.txt")
+	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" ${split[@]+"${split[@]}"} > "${job}" 2> "${work}/${sha}.plan.err" || { void "${sha}" "planning failed"; return; }
 	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
 	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)" --priority "${priority}" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
 	"${planner}" reds --job "${job}" --record "${record}" --tests "${work}/${sha}.tests.jsonl" > "${report}" 2>&1

@@ -634,6 +634,7 @@ func plan(arguments []string) error {
 	phasesTools := flags.String("phases", "", "also run the whole gate's other phases as units, through run.py --phase at this tools sha")
 	loomTimes := flags.String("loom-times", "", "size each test by its seconds on Loom's own units (compare --times), where it has them")
 	phaseUnits := flags.String("phase-units", "", "with --phases, the units to run: one line each, <phase> or <phase> <unit> (run.py --list-units)")
+	treeTests := flags.String("tree-tests", "", "the tree's own top-level tests at the sha, \"<package> <test>\" per line (treetests.py): the plan's test list")
 	flags.BoolVar(&splitAll, "split-all", false, "split every test with subtests over 30 s, not only the gate's audited parents")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -647,8 +648,9 @@ func plan(arguments []string) error {
 	}
 	// A test Loom has timed is packed by that time: the box's wall on 64 cores understates a parallel test on 4 CPUs
 	// (8161285a's tsprinter TestMutants: 304 s on the Threadripper, 963 s on a Codex instance).
+	timed := map[string]float64{}
 	if *loomTimes != "" {
-		timed, err := readLoomTimes(*loomTimes)
+		timed, err = readLoomTimes(*loomTimes)
 		if err != nil {
 			return err
 		}
@@ -657,6 +659,11 @@ func plan(arguments []string) error {
 				outcome.seconds = seconds
 				reference[key] = outcome
 			}
+		}
+	}
+	if *treeTests != "" {
+		if err := fromTheTree(reference, *treeTests, *only, timed); err != nil {
+			return err
 		}
 	}
 	opening := boxOpening
@@ -964,6 +971,86 @@ func plan(arguments []string) error {
 }
 
 // readLoomTimes reads compare --times' file into each test's seconds on Loom, keyed "<package> <test>".
+// fromTheTree makes the tree's own top-level tests the plan's list (#2en3b4t): a test the reference holds that the tree
+// no longer has is dropped, its subtests with it, and a test the tree has that the reference doesn't is sized and
+// packed like any other, instead of riding in a remainder unit unsized. The last green record is hours and dozens of
+// test-only landings behind main (Oct 9: 7 of the 18 tests over 180 s in a plan were already split away). A new test
+// is sized by Loom's own time for it; else, in a package that lost tests, by an even share of the lost seconds with
+// 1.5x headroom, since a split keeps the work it divides; else by twice its package's median, or 30 s in a new package.
+func fromTheTree(reference map[string]result, path string, only string, timed map[string]float64) error {
+	pattern, err := regexp.Compile(only)
+	if err != nil {
+		return fmt.Errorf("--only: %w", err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	present := map[string]bool{}
+	for number, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
+		packageName, test, found := strings.Cut(line, " ")
+		if !found || !strings.HasPrefix(test, "Test") || strings.Contains(test, "/") {
+			return fmt.Errorf("%s:%d: want \"<package> <top-level test>\"", path, number+1)
+		}
+		if pattern.MatchString(packageName) {
+			present[line] = true
+		}
+	}
+	if len(present) == 0 {
+		return fmt.Errorf("%s names no test the plan covers", path)
+	}
+	lost := map[string]float64{}
+	known := map[string][]float64{}
+	dropped := 0
+	for key, outcome := range reference {
+		packageName, test, _ := strings.Cut(key, " ")
+		top, _, _ := strings.Cut(test, "/")
+		if present[packageName+" "+top] {
+			if top == test {
+				known[packageName] = append(known[packageName], outcome.seconds)
+			}
+			continue
+		}
+		if top == test {
+			lost[packageName] += outcome.seconds
+			dropped++
+		}
+		delete(reference, key)
+	}
+	fresh := map[string][]string{}
+	for key := range present {
+		if _, held := reference[key]; !held {
+			packageName, _, _ := strings.Cut(key, " ")
+			fresh[packageName] = append(fresh[packageName], key)
+		}
+	}
+	added, byTimes := 0, 0
+	for packageName, keys := range fresh {
+		median := 0.0
+		if seconds := known[packageName]; len(seconds) > 0 {
+			sort.Float64s(seconds)
+			median = seconds[len(seconds)/2]
+		}
+		for _, key := range keys {
+			seconds, wasTimed := timed[key]
+			switch {
+			case wasTimed:
+				byTimes++
+			case lost[packageName] > 0:
+				seconds = 1.5 * lost[packageName] / float64(len(keys))
+			case median > 0:
+				seconds = 2 * median
+			default:
+				seconds = 30
+			}
+			reference[key] = result{action: "pass", seconds: seconds}
+			added++
+		}
+	}
+	fmt.Fprintf(os.Stderr, "tree: %d top-level tests; %d the reference held are gone and dropped, %d new are sized (%d by Loom's times)\n", len(present), dropped, added, byTimes)
+	return nil
+}
+
 func readLoomTimes(path string) (map[string]float64, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {

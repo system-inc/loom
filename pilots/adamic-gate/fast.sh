@@ -7,7 +7,7 @@
 #	and publishes            gate-logs/<sha12>/<stamp>/fast    the fast gate's shape, fast.json marked runner pool
 #
 # Each job is verify.sh's run on codex-side (go build and go vet as one unit, the listed packages' tests at once),
-# at most `concurrent` jobs at a time and 5 of the pool's slots each. The pool covers the Go tests only: the record
+# at most `concurrent` jobs at a time (8 since the side pool grew to 64 instances on Oct 9) and 5 of the pool's slots each. The pool covers the Go tests only: the record
 # says so ("covers": "go-tests"), and a void verdict (Loom's fault, or nothing for the pool to run) sends the tip
 # back to the boxes.
 #
@@ -20,7 +20,7 @@
 set -uo pipefail
 
 jobs=${LOOM_FAST_JOBS:-${HOME}/.loom/jobs/fast}
-concurrent=${LOOM_FAST_CONCURRENT:-2}
+concurrent=${LOOM_FAST_CONCURRENT:-8}
 gate=${HOME}/Projects/system/adamic-gate
 mkdir -p "${jobs}"
 once=

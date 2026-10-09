@@ -11,6 +11,11 @@ runner=${LOOM_RUNNER_SHA:-7f01c04925b5bcdf4c2359abcee90f0723b656867e696313db2039
 # runner's sha256, then the member it went to: the next side member whose turn ends takes it, keeps it on every
 # later turn, and no other member does. After a green unit on that worker, the sha becomes LOOM_RUNNER_SHA's default.
 staging=${HOME}/.loom/runner-staging
+# The star's pool keeps the star fleet's first LOOM_STAR_INSTANCES members (loom-pool-codex-1 to -50); the rest serve
+# side work (@system_adamic, Oct 9 04:16Z: the solver shows the star's wall is its floor on 47 instances, so the other
+# 50 cost it nothing). Each moves at its next serve turn. Re-solve each run (solve.py) and raise this when splits make
+# width matter again.
+starInstances=${LOOM_STAR_INSTANCES:-50}
 read -r staged stagedOn < "${staging}" 2> /dev/null || staged=""
 cd "${ahra}" || exit 1
 for pair in loom-pool:codex loom-side:codex-side; do
@@ -22,11 +27,18 @@ for pair in loom-pool:codex loom-side:codex-side; do
 		stagedPrompt=${HOME}/.loom/rearm-${pool}-staged.md
 		"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${staged}" --until 115m "${pool}" > "${stagedPrompt}" || stagedPrompt=""
 	fi
-	for id in $(./node_modules/.bin/ahra ai fleet "${fleet}" --json 2> /dev/null | python3 -c "
-import json, sys
+	for member in $(./node_modules/.bin/ahra ai fleet "${fleet}" --json 2> /dev/null | python3 -c "
+import json, re, sys
 for member in json.load(sys.stdin):
     if member.get('session', {}).get('status') == 'Completed':
-        print(member['id'])"); do
+        number = re.search(r'-(\d+)$', member.get('label') or '')
+        print('%s:%s' % (member['id'], number.group(1) if number else 0))"); do
+		id=${member%%:*} number=${member#*:}
+		memberPrompt=${prompt}
+		if [ "${pool}" = codex ] && [ "${number}" -gt "${starInstances}" ]; then
+			memberPrompt=${HOME}/.loom/rearm-codex-side.md
+			"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${runner}" --until 115m codex-side > "${memberPrompt}" || continue
+		fi
 		if ./node_modules/.bin/ahra ai summary "${id}" 2> /dev/null | grep -q "approval review rejected"; then
 			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: left alone, Codex's approval review rejected the runner"
 			continue
@@ -38,6 +50,6 @@ for member in json.load(sys.stdin):
 			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: next serve turn sent on the staged runner ${staged:0:12}"
 			continue
 		fi
-		./node_modules/.bin/ahra ai send "${id}" --message-file "${prompt}" > /dev/null 2>&1 && echo "$(date -u +%H:%M:%S) ${fleet} ${id}: next serve turn sent"
+		./node_modules/.bin/ahra ai send "${id}" --message-file "${memberPrompt}" > /dev/null 2>&1 && echo "$(date -u +%H:%M:%S) ${fleet} ${id}: next serve turn sent ($(basename "${memberPrompt}" .md | sed 's/^rearm-//'))"
 	done
 done
