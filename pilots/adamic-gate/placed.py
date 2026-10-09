@@ -61,13 +61,16 @@ def main():
                 cursors[run] = max(cursors.get(run, 0), record.get("position", 0))
                 if record.get("event", {}).get("type") == "started":
                     started[run].add(record["event"].get("unit"))
-        current = {runOf(os.path.join(work, log)) for log in ("select-run.log", "run.log")} - {None}
-        placed = sum(len(units) for run, units in started.items() if run in current)
+        selectRun, testRun = runOf(os.path.join(work, "select-run.log")), runOf(os.path.join(work, "run.log"))
         try:
-            planned = len(json.load(open(os.path.join(work, "job.json")))["units"]) if runOf(os.path.join(work, "run.log")) else None
+            names = {unit["id"] for unit in json.load(open(os.path.join(work, "job.json")))["units"]} if testRun else None
         except (OSError, ValueError, KeyError):
-            planned = None
-        total = (1 if selecting else 0) + planned if planned is not None else placed + 1
+            names = None
+        # Only units this attempt's plan names count, the selection as one: a long-lived count once read 309 of 24 on
+        # the trio (Oct 9 10:11Z), so placed is held to what the plan can hold.
+        placed = (1 if selectRun and started.get(selectRun) else 0) + (len(started.get(testRun, set()) & names) if names else 0)
+        total = (1 if selecting else 0) + len(names) if names is not None else placed + 1
+        placed = min(placed, total)
         line = "%d %d\n" % (placed, total)
         if placed and line != written:
             partial = os.path.join(jobs, sha + ".placed.partial")

@@ -135,6 +135,29 @@ if [ "${vet}" = 0 ]; then echo "loom-build: go vet ./... passed"; else echo "loo
 '''
 unit = {"id": "build-vet", "argv": ["bash", "-c", opening + body, "adamic-build-vet", job["units"][0]["argv"][4]],
         "timeoutSeconds": 3600, "outputs": [{"glob": "loom-out/build.log"}, {"glob": "loom-out/vet.log"}], "resources": {"cpus": 4}}
+# Never more than one unsized package in a unit (@system_adamic, Oct 9 10:13Z): a remainder spec runs every test of its
+# package (or of a split parent) the reference never sized, so two of them in one 4-CPU unit ran past the ceiling three
+# times tonight with every other unit green. Each remainder beyond a unit's first goes to a unit of its own; this run
+# sizes them for the next plan.
+def unsized(spec):
+    pattern = spec.split("=", 1)[1] if "=" in spec else ""
+    return pattern == "." or pattern.startswith(". skip=") or "$/." in pattern
+extra = []
+for unit in job["units"]:
+    specs = unit["argv"][5:]
+    remainders = [spec for spec in specs if unsized(spec)]
+    for index, spec in enumerate(remainders[1:], start=1):
+        moved = json.loads(json.dumps(unit))
+        moved["id"] = "%s-r%d" % (unit["id"], index)
+        moved["argv"] = unit["argv"][:5] + [spec]
+        moved.pop("needs", None) if not unit.get("needs") else None
+        extra.append(moved)
+    if len(remainders) > 1:
+        unit["argv"] = unit["argv"][:5] + [spec for spec in specs if spec not in remainders[1:]]
+job["units"] += extra
+crowded = [unit["id"] for unit in job["units"] if sum(1 for spec in unit["argv"][5:] if unsized(spec)) > 1]
+if crowded:
+    sys.exit("verify: units still hold more than one unsized package: %s" % ", ".join(crowded))
 job["name"] = "adamic-verify"
 job["units"].insert(0, unit)
 json.dump(job, open(work + "/job.json", "w"), indent=2)
