@@ -8,13 +8,17 @@
 #	pilots/adamic-gate/gate.sh <sha>       # a copy in ~/.loom/bin; main.sh runs it for every new main
 #
 # LOOM_PRIORITY ranks every unit of the gate on the shared pool (@system_adamic, Oct 9 03:37Z): the star's candidates
-# 30 (pregate.sh), main's own gate 20 (main.sh, and the default here), side candidates 0. A pool hands out the
-# highest first, so a lower run yields each worker the star needs as its unit ends.
+# 30 (pregate.sh), main's own gate 20 (main.sh), side candidates 0. Unset, it is 30 for a sha a cloud/land-train-*
+# branch names on origin and 20 otherwise. A pool hands out the highest first, so a lower run yields each worker the
+# star needs as its unit ends.
 set -uo pipefail
 sha=$1
 [[ ${sha} =~ ^[0-9a-f]{40}$ ]] || { echo "gate: a full sha, please"; exit 2; }
-export LOOM_PRIORITY=${LOOM_PRIORITY:-20}
 bin=${HOME}/.loom/bin gate=${HOME}/Projects/system/adamic-gate work=${HOME}/.loom/gate/${sha}
+if [ -z "${LOOM_PRIORITY:-}" ]; then
+	git -C "${gate}" ls-remote origin 'refs/heads/cloud/land-train-*' 2> /dev/null | grep -q "^${sha}" && LOOM_PRIORITY=30 || LOOM_PRIORITY=20
+fi
+export LOOM_PRIORITY
 planner=${bin}/adamic-gate loom=${bin}/loom-pregate
 mkdir -p "${work}"
 started=$(date -u +%Y%m%dT%H%M%SZ)
