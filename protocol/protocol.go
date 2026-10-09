@@ -54,7 +54,16 @@ type JobUnit struct {
 	// never green without it (Oct 9: a wasi shard on a runner without the WASI SDK skips every test and passes).
 	// Placement only: the runner never sees it, and it isn't part of the cache key.
 	Requires []string `json:"requires,omitempty"`
+	// Kind is the unit's kind from the unit key's (contract 2): test, product or phase. A unit of a kind runs under
+	// that kind's hard ceiling, its timeout no longer than KindCeilings says, so the runner kills it there at the
+	// latest, and a kill is infra, never the change's red. Empty: no kind, no ceiling, as before.
+	Kind string `json:"kind,omitempty"`
 }
+
+// KindCeilings is each kind's hard ceiling in seconds, the longest timeout a unit of it may carry (Loom, contracts
+// v1.1: a test unit is 60 s by design and killed at 90 s; a product gets 600 s). A phase gets the hour every phase
+// unit carries today, until a ruling names its own.
+var KindCeilings = map[string]int{"test": 90, "product": 600, "phase": 3600}
 
 // Toolchains are the names a unit may require and a machine may have, the unit key's tools (contract v1).
 var Toolchains = []string{"go", "clang", "node", "wasiSdk"}
@@ -239,6 +248,17 @@ func Expand(job Job) ([]PlannedUnit, error) {
 		}
 		if unit.TimeoutSeconds <= 0 {
 			return nil, fmt.Errorf("unit %s needs a positive timeoutSeconds", unit.Id)
+		}
+		if unit.Kind != "" {
+			ceiling, known := KindCeilings[unit.Kind]
+			switch {
+			case !known:
+				return nil, fmt.Errorf("unit %s's kind %q isn't test, product or phase", unit.Id, unit.Kind)
+			case unit.TimeoutSeconds > ceiling:
+				return nil, fmt.Errorf("unit %s is a %s with a %d s timeout, over its kind's ceiling of %d s", unit.Id, unit.Kind, unit.TimeoutSeconds, ceiling)
+			case unit.Test != nil && unit.Kind == "phase":
+				return nil, fmt.Errorf("unit %s is a test job, so it's a test or a product, not a phase", unit.Id)
+			}
 		}
 		for _, toolchain := range unit.Requires {
 			if !slices.Contains(Toolchains, toolchain) {

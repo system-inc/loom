@@ -84,7 +84,17 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 		"unknown need":      func(j *Job) { j.Units[0].Needs = []string{"z"} },
 		"self need":         func(j *Job) { j.Units[0].Needs = []string{"a"} },
 		"unknown toolchain": func(j *Job) { j.Units[0].Requires = []string{"wasi-sdk"} },
-		"bad hash":          func(j *Job) { j.Units[0].Inputs = []Input{{Path: "x", Sha256: "abc"}} },
+		"unknown kind":      func(j *Job) { j.Units[0].Kind = "lint" },
+		"a test over 90 s": func(j *Job) {
+			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "test", 91
+		},
+		"a product over 600 s": func(j *Job) {
+			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "product", 601
+		},
+		"a phase over an hour": func(j *Job) {
+			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "phase", 3601
+		},
+		"bad hash": func(j *Job) { j.Units[0].Inputs = []Input{{Path: "x", Sha256: "abc"}} },
 		"bad archive": func(j *Job) {
 			j.Units[0].Inputs = []Input{{Path: "x", Sha256: strings.Repeat("a", 64), Archive: "zip"}}
 		},
@@ -101,6 +111,14 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 	required.Units[0].Requires = []string{"wasiSdk", "clang"}
 	if _, err := Expand(required); err != nil {
 		t.Fatalf("a unit requiring known toolchains is refused: %v", err)
+	}
+	// Each kind at its ceiling exactly is taken; one second over is refused above.
+	for kind, ceiling := range KindCeilings {
+		atCeiling := good()
+		atCeiling.Units[0].Kind, atCeiling.Units[0].TimeoutSeconds = kind, ceiling
+		if _, err := Expand(atCeiling); err != nil {
+			t.Fatalf("a %s at its ceiling of %d s is refused: %v", kind, ceiling, err)
+		}
 	}
 	for name, breakIt := range cases {
 		job := good()
