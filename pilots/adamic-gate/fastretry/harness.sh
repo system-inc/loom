@@ -107,7 +107,7 @@ check green-at-40-stands 'grep -q "^green: " $jobs/$sha.verdict && [ ! -e $jobs/
 scenario ceiling-void; echo 40 > $work/priority; echo "{\"sha\": \"$sha\", \"priority\": 40}" > $jobs/$sha.json; touch $jobs/$sha.running $work/ceiling
 LOOM_FAST_PUBLISH=0 ceiling=1800 finish $sha 20261009T000000Z "void: $sha fast gate on Loom's side pool broke (run stub-run-1)" stub-run-1 > $T/out.log 2>&1
 check ceiling-void-at-40-again 'grep -q "^void: .*30-minute ceiling" $jobs/$sha.verdict.void-again && [ ! -e $jobs/$sha.verdict ] && served 40 && grep -q "queued once more with 0 kept tests" $T/out.log'
-# A --once run (the canary's, at tier 40) has no server behind it: its void stands for its caller to read.
+# A --once run (the canary's, at tier 50) has no server behind it: its void stands for its caller to read.
 once=$sha voided 40
 check void-at-40-once-stands 'grep -q "^void: " $jobs/$sha.verdict && [ ! -e $jobs/$sha.verdict.void-again ]'
 echo "failures: $failures"

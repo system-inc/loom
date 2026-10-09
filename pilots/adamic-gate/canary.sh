@@ -8,8 +8,10 @@
 # Main's tip M is a landing merge: its first parent the main it landed on, its second the landed tip T. The canary is
 # T's fast gate merged onto that main (gate M), the merge-gated shape every candidate's job has, so a fault anywhere in
 # select, unpack, plan, run, kept verdicts or the verdict itself shows here first (the changed-paths unpack, ff519d3,
-# broke only merge-gated jobs). It runs that directory's fast.sh --once at priority 40 on the star's pool, into its own
-# jobs directory (~/.loom/jobs/canary), and publishes nothing to gate-logs (LOOM_FAST_PUBLISH=0).
+# broke only merge-gated jobs). It runs that directory's fast.sh --once at priority 50 on the star's pool, above every
+# candidate's tier from its first unit (@system_adamic, Oct 9 17:26Z: every tool change waits on the canary, and canary
+# 8's last lint units starved 18 minutes at tier 40 behind about 340 units), into its own jobs directory
+# (~/.loom/jobs/canary), and publishes nothing to gate-logs (LOOM_FAST_PUBLISH=0).
 #
 # Pass: the verdict is green, or red only on tests in ~/.loom/canary/main-reds.txt ("<package> <test>" per line), the
 # reds @system_adamic has ruled main's own (Oct 9 11:24Z: internal/ir TestCallTargetReaders, until compiler's fix lands).
@@ -59,7 +61,7 @@ python3 - "${jobs}/${landed}.json" "${landed}" "${landedOn}" "${main}" "${gateTo
 import json, sys
 path, landed, landedOn, main, gateTools = sys.argv[1:]
 json.dump({"branch": "canary/main-" + main[:12], "sha": landed, "base": landedOn, "base_name": "main", "tools": gateTools,
-           "packages": "select", "env": {}, "gate": main, "priority": 40}, open(path, "w"))
+           "packages": "select", "env": {}, "gate": main, "priority": 50}, open(path, "w"))
 PY
 echo "canary ${stamp}: tools ${hash:0:12} (${tools}) on main ${main:0:12}, the landing ${landed:0:12} gated onto ${landedOn:0:12}"
 started=${SECONDS}
