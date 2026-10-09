@@ -26,9 +26,10 @@ window = 600
 threshold = 2
 # A machine that breaks units almost as soon as it takes them is a black hole whatever it prints (Oct 9 21:45Z: two more
 # instances, out of disk, exited every unit 2 in 0.15 s through a check worded as neither signature, 450 units each).
+# A unit that fails that fast proved nothing about the change either: no test runs in under 2 s with a tree to make.
 instantSeconds = 2
 instantThreshold = 5
-signatures = ("free on the instance after trimming", "no space left on device")
+signatures = ("free on the instance after trimming", "no space left on device", "too little to clone", "too little free")
 dry = "--dry" in sys.argv[1:]
 
 
@@ -60,7 +61,9 @@ def fullDiskBreaks(now):
             if event.get("type") == "started":
                 machines[key] = event.get("machine")
                 starts[key] = stampSeconds(event.get("time", ""))
-            elif event.get("type") == "finished" and event.get("status") == "broken":
+            # Failed as well as broken: the warm-up's own "too little to clone a tree: Loom's fault" exits finish failed,
+            # and an instance printing it ate 220 of c2 28107975's units in 0.2 s each (Oct 9 22:24Z, Operations).
+            elif event.get("type") == "finished" and event.get("status") in ("broken", "failed"):
                 ended, began, machine = stampSeconds(event.get("time", "")), starts.get(key), machines.get(key)
                 if machine and ended and began and now - ended < window and ended - began < instantSeconds:
                     instant.setdefault(machine, set()).add(key)
