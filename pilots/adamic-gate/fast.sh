@@ -68,7 +68,7 @@ PY
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the job names no Go package, so the boxes take it" ""
 		return
 	fi
-	LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "${sha}" "$(cat "${work}/packages")" none 5 > "${work}/verify.log" 2>&1
+	LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "${sha}" "$(cat "${work}/packages")" none auto > "${work}/verify.log" 2>&1
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
 	rm -f "${work}/phases-status" "${work}/phases-ref"

@@ -663,6 +663,7 @@ func plan(arguments []string) error {
 	phasesTools := flags.String("phases", "", "also run the whole gate's other phases as units, through run.py --phase at this tools sha")
 	loomTimes := flags.String("loom-times", "", "size each test by its seconds on Loom's own units (compare --times), where it has them")
 	phaseUnits := flags.String("phase-units", "", "with --phases, the units to run: one line each, <phase> or <phase> <unit> (run.py --list-units)")
+	onlyTests := flags.String("only-tests", "", "a JSON object, package to the only top-level tests it runs (a fast gate's select.json only_tests); its products and the setups of the kept tests stay too")
 	treeTests := flags.String("tree-tests", "", "the tree's own top-level tests at the sha, \"<package> <test>\" per line (treetests.py): the plan's test list")
 	flags.BoolVar(&splitAll, "split-all", false, "split every test with subtests over 30 s, not only the gate's audited parents")
 	if err := flags.Parse(arguments); err != nil {
@@ -693,6 +694,46 @@ func plan(arguments []string) error {
 	if *treeTests != "" {
 		if err := fromTheTree(reference, *treeTests, *only, timed); err != nil {
 			return err
+		}
+	}
+	// A fast gate's selection names the only tests some packages run: everything else of theirs leaves the plan before
+	// packing, so the budget packs exactly what the gate asked for. Their products stay, since the kept tests fetch them,
+	// and so does any X_Setup whose family keeps a test.
+	if *onlyTests != "" {
+		content, err := os.ReadFile(*onlyTests)
+		if err != nil {
+			return err
+		}
+		var only map[string][]string
+		if err := json.Unmarshal(content, &only); err != nil {
+			return fmt.Errorf("--only-tests: %w", err)
+		}
+		kept := map[string]map[string]bool{}
+		for packageName, tests := range only {
+			kept[packageName] = map[string]bool{}
+			for _, test := range tests {
+				kept[packageName][test] = true
+			}
+		}
+		for key := range reference {
+			packageName, test, _ := strings.Cut(key, " ")
+			names, selected := kept[packageName]
+			if !selected {
+				continue
+			}
+			top, _, _ := strings.Cut(test, "/")
+			keep := names[top] || strings.HasPrefix(top, "TestProduct_")
+			if stem, isSetup := strings.CutSuffix(top, "_Setup"); isSetup && !keep {
+				for name := range names {
+					if stem != "" && strings.HasPrefix(name, stem) {
+						keep = true
+						break
+					}
+				}
+			}
+			if !keep {
+				delete(reference, key)
+			}
 		}
 	}
 	// A subtest Loom has timed under a test the plan holds joins the plan, so a test split into subtests since the

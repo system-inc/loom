@@ -648,3 +648,53 @@ func TestThousandsOfShardsPlanUnderTheArgumentLimit(t *testing.T) {
 		t.Fatalf("the plan reads back %d tests", count)
 	}
 }
+
+// A fast gate's selection plans only the tests it names in its packages, plus their products and the setups the kept
+// shards need; other packages plan as ever.
+func TestOnlyTestsPlansTheSelectionWithItsProductsAndSetups(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	for _, test := range []string{"TestA", "TestB", "TestX_Setup", "TestX_000", "TestX_001", "TestProduct_P"} {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"%s","Elapsed":5}`+"\n", module, test)
+	}
+	fmt.Fprintf(writer, `{"Action":"pass","Package":"%sb","Test":"TestOther","Elapsed":5}`+"\n", module)
+	writer.Close()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	only := filepath.Join(directory, "only.json")
+	os.WriteFile(only, []byte(`{"`+module+`a": ["TestA", "TestX_000"]}`), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--only-tests", only})
+	write.Close()
+	os.Stdout = stdout
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(&printed, &job); err != nil {
+		t.Fatal(err)
+	}
+	planned, err := plannedTests(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, keys := range planned.tests {
+		got = append(got, keys...)
+	}
+	sort.Strings(got)
+	want := []string{module + "a TestA", module + "a TestProduct_P", module + "a TestX_000", module + "a TestX_Setup", module + "b TestOther"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("planned %v, want %v", got, want)
+	}
+}
