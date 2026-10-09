@@ -774,3 +774,41 @@ func TestWASIShardsRunInASpecOfTheirOwnWithTheWASIClang(t *testing.T) {
 		}
 	}
 }
+
+// A unit holding a WASI spec refuses, exit 2, on a runner whose WASI SDK can't name its wasm32 builtins, and runs
+// everywhere else (Oct 9: main 20d538c0's whole gate skipped all 36 TestWASIUnit shards on the native clang).
+func TestAWASISpecNeedsTheSDKsBuiltins(t *testing.T) {
+	start := strings.Index(unitBody, "# A WASI spec needs the WASI SDK's clang")
+	end := strings.Index(unitBody[start:], "\ndone\n")
+	if start < 0 || end < 0 {
+		t.Fatal("the WASI check isn't in unitBody")
+	}
+	check := unitBody[start : start+end+len("\ndone\n")]
+	sdk := t.TempDir()
+	os.MkdirAll(filepath.Join(sdk, "bin"), 0o755)
+	os.MkdirAll(filepath.Join(sdk, "share", "wasi-sysroot"), 0o755)
+	builtins := filepath.Join(sdk, "libclang_rt.builtins.a")
+	os.WriteFile(filepath.Join(sdk, "bin", "clang"), []byte("#!/bin/bash\necho "+builtins+"\n"), 0o755)
+	run := func(sysroot string, specs ...string) (int, string) {
+		script := "specs=(" + strings.Join(specs, " ") + ")\n" + check + "echo ran\n"
+		command := exec.Command("bash", "-c", script)
+		command.Env = append(os.Environ(), "WASI_SYSROOT="+sysroot)
+		output, _ := command.CombinedOutput()
+		return command.ProcessState.ExitCode(), string(output)
+	}
+	wasi := `'github.com/system-inc/adamic/internal/native=^(TestWASIUnit00|TestWASIUnit01)$'`
+	other := `'github.com/system-inc/adamic/internal/native=^(TestWASITargetFlags)$'`
+	if code, output := run(filepath.Join(sdk, "share", "wasi-sysroot"), other, wasi); code != 2 || !strings.Contains(output, "missing") {
+		t.Fatalf("builtins missing: exit %d %q", code, output)
+	}
+	os.WriteFile(builtins, []byte("!<arch>\n"), 0o644)
+	if code, output := run(filepath.Join(sdk, "share", "wasi-sysroot"), other, wasi); code != 0 || !strings.Contains(output, "ran") {
+		t.Fatalf("builtins present: exit %d %q", code, output)
+	}
+	if code, output := run("", wasi); code != 2 || !strings.Contains(output, "WASI_SYSROOT=unset") {
+		t.Fatalf("no SDK: exit %d %q", code, output)
+	}
+	if code, output := run("", other); code != 0 {
+		t.Fatalf("no WASI spec, no SDK: exit %d %q", code, output)
+	}
+}

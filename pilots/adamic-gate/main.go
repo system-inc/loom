@@ -243,6 +243,17 @@ for spec in "$@"; do
     *) specs+=("${spec}") ;;
   esac
 done
+# A WASI spec needs the WASI SDK's clang and its wasm32 builtins. A runner without them would run the shards on the
+# native clang, where every one skips and the unit passes (Oct 9: 36 TestWASIUnit skips on main 20d538c0's whole gate,
+# wasm-ld finding no libclang_rt.builtins.a under the native LLVM). It refuses instead, Loom's fault, so the unit is
+# placed again; the SDK's own clang names the file it links.
+for spec in "${specs[@]}"; do
+  wasiPattern=${spec#*=} && wasiPattern=${wasiPattern%% skip=*}
+  [[ ${wasiPattern} =~ ^\^\(TestWASI(Unit[0-9]+)?(\|TestWASI(Unit[0-9]+)?)*\)\$?$ ]] || continue
+  wasiBuiltins=$([ -n "${WASI_SYSROOT:-}" ] && "${WASI_SYSROOT%/share/wasi-sysroot}/bin/clang" --target=wasm32-unknown-wasi -rtlib=compiler-rt -print-libgcc-file-name 2> /dev/null)
+  [ -n "${wasiBuiltins}" ] && [ -f "${wasiBuiltins}" ] || { echo "loom-pilot: a WASI spec on a runner without the WASI SDK's builtins (WASI_SYSROOT=${WASI_SYSROOT:-unset}${wasiBuiltins:+, ${wasiBuiltins} missing}): Loom's fault"; exit 2; }
+  break
+done
 index=0
 for spec in "${specs[@]}"; do printf '%s\t%s\n' "${index}" "${spec}"; index=$((index + 1)); done |
   xargs -d '\n' -P "${parallel}" -I{} bash -c '
