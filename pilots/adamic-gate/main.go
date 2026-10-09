@@ -1043,13 +1043,13 @@ func plan(arguments []string) error {
 		for key := range reference {
 			packageName, test, _ := strings.Cut(key, " ")
 			if !strings.Contains(test, "/") {
-				byPackage[packageName] = append(byPackage[packageName], regexp.QuoteMeta(test))
+				byPackage[packageName] = append(byPackage[packageName], test)
 			}
 		}
 		for key := range exclusions {
 			packageName, name, _ := strings.Cut(key, " ")
 			if _, planned := byPackage[packageName]; planned && *target == "box" {
-				byPackage[packageName] = append(byPackage[packageName], regexp.QuoteMeta(name))
+				byPackage[packageName] = append(byPackage[packageName], name)
 			}
 		}
 		names := make([]string, 0, len(byPackage))
@@ -1081,7 +1081,7 @@ func plan(arguments []string) error {
 		for _, packageName := range names {
 			sort.Strings(byPackage[packageName])
 			index := holding(packageName, "")
-			remainders[index] = append(remainders[index], packageName+"=. skip=^("+strings.Join(byPackage[packageName], "|")+")$")
+			remainders[index] = append(remainders[index], packageName+"=. skip=^("+alternation(byPackage[packageName])+")$")
 		}
 		// A package the reference never ran (new since it) is named by no spec above; the unit asks go list for them.
 		unplannedUnit := lightest()
@@ -1093,14 +1093,13 @@ func plan(arguments []string) error {
 		sort.Strings(parents)
 		for _, parentKey := range parents {
 			packageName, parent, _ := strings.Cut(parentKey, " ")
-			quoted := []string{}
+			children := []string{}
 			for child := range split[parentKey] {
-				quoted = append(quoted, regexp.QuoteMeta(child))
+				children = append(children, child)
 			}
-			sort.Strings(quoted)
 			prefix := "^" + regexp.QuoteMeta(parent) + "$/"
 			index := holding(packageName, parentKey)
-			remainders[index] = append(remainders[index], packageName+"="+prefix+". skip="+prefix+"^("+strings.Join(quoted, "|")+")$")
+			remainders[index] = append(remainders[index], packageName+"="+prefix+". skip="+prefix+"^("+alternation(children)+")$")
 		}
 	}
 	job := protocol.Job{Name: "adamic-gate-pilot"}
@@ -1166,12 +1165,7 @@ func plan(arguments []string) error {
 			if len(tests) == 0 {
 				continue
 			}
-			sort.Strings(tests)
-			quoted := make([]string, len(tests))
-			for position, name := range tests {
-				quoted[position] = regexp.QuoteMeta(name)
-			}
-			argv = append(argv, packageName+"=^("+strings.Join(quoted, "|")+")$")
+			argv = append(argv, packageName+"=^("+alternation(tests)+")$")
 		}
 		parents := make([]string, 0, len(childrenOf[index]))
 		for parentKey := range childrenOf[index] {
@@ -1180,13 +1174,7 @@ func plan(arguments []string) error {
 		sort.Strings(parents)
 		for _, parentKey := range parents {
 			packageName, parent, _ := strings.Cut(parentKey, " ")
-			children := childrenOf[index][parentKey]
-			sort.Strings(children)
-			quoted := make([]string, len(children))
-			for position, child := range children {
-				quoted[position] = regexp.QuoteMeta(child)
-			}
-			argv = append(argv, packageName+"=^"+regexp.QuoteMeta(parent)+"$/^("+strings.Join(quoted, "|")+")$")
+			argv = append(argv, packageName+"=^"+regexp.QuoteMeta(parent)+"$/^("+alternation(childrenOf[index][parentKey])+")$")
 		}
 		argv = append(argv, remainders[index]...)
 		// The products of every package this unit runs tests of, as its needs.
@@ -1211,6 +1199,15 @@ func plan(arguments []string) error {
 			Resources: protocol.Resources{Cpus: 12},
 		})
 		fmt.Fprintf(os.Stderr, "tests-%02d: %d packages, %.0f s by the reference\n", index, len(packages), loads[index])
+	}
+	// No argument may pass Linux's MAX_ARG_STRLEN (128 KiB, with room for the kernel's own accounting): a unit that
+	// can't even start proves nothing, so the plan says so here instead of on the pool.
+	for _, unit := range job.Units {
+		for _, argument := range unit.Argv {
+			if len(argument) > 120*1024 {
+				return fmt.Errorf("unit %s has an argument of %d bytes, over Linux's 128 KiB limit for one argument: %.120s", unit.Id, len(argument), argument)
+			}
+		}
 	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
@@ -1425,13 +1422,37 @@ func unquoteAlternation(quoted string) []string {
 	var names []string
 	var name strings.Builder
 	escaped := false
-	for _, character := range quoted {
+	runes := []rune(quoted)
+	for index := 0; index < len(runes); index++ {
+		character := runes[index]
 		switch {
 		case escaped:
 			name.WriteRune(character)
 			escaped = false
 		case character == '\\':
 			escaped = true
+		case character == '(' && index+2 < len(runes) && runes[index+1] == '?' && runes[index+2] == ':':
+			// A stem's group (alternation writes them): stem(?:a|b) is stem+a and stem+b. QuoteMeta escapes any '(' in
+			// a name, so an unescaped one is always a group.
+			end := index + 3
+			for depth := 1; end < len(runes) && depth > 0; end++ {
+				switch {
+				case runes[end] == '\\':
+					end++
+				case runes[end] == '(':
+					depth++
+				case runes[end] == ')':
+					depth--
+				}
+			}
+			stem := name.String()
+			name.Reset()
+			alternatives := unquoteAlternation(string(runes[index+3 : end-1]))
+			for _, alternative := range alternatives[:len(alternatives)-1] {
+				names = append(names, stem+alternative)
+			}
+			name.WriteString(stem + alternatives[len(alternatives)-1])
+			index = end - 1
 		case character == '|':
 			names = append(names, name.String())
 			name.Reset()
@@ -1440,6 +1461,37 @@ func unquoteAlternation(quoted string) []string {
 		}
 	}
 	return append(names, name.String())
+}
+
+// alternation is names as one regular expression alternation, each quoted, with every run of names that share a
+// stem ending in an underscore and differ only in a numbered suffix (owners' shards, X_0001 to X_2400) written once
+// as stem(?:0001|0002|...). Linux refuses any one argument over 128 KiB (MAX_ARG_STRLEN), and listed whole, json's
+// 2,000-odd TestUpstreamRepositoryCorpusParity_ shards made one of 325 KB: main c869cea9's tests-481 and tests-483
+// broke in 0.1 s, "fork/exec /usr/bin/bash: argument list too long". unquoteAlternation reads it back.
+func alternation(names []string) string {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	shard := regexp.MustCompile(`^(.*_)([0-9]+)$`)
+	byStem := map[string][]string{}
+	for _, name := range sorted {
+		if match := shard.FindStringSubmatch(name); match != nil {
+			byStem[match[1]] = append(byStem[match[1]], match[2])
+		}
+	}
+	var parts []string
+	written := map[string]bool{}
+	for _, name := range sorted {
+		match := shard.FindStringSubmatch(name)
+		if match == nil || len(byStem[match[1]]) < 2 {
+			parts = append(parts, regexp.QuoteMeta(name))
+			continue
+		}
+		if !written[match[1]] {
+			written[match[1]] = true
+			parts = append(parts, regexp.QuoteMeta(match[1])+"(?:"+strings.Join(byStem[match[1]], "|")+")")
+		}
+	}
+	return strings.Join(parts, "|")
 }
 
 func plannedTests(job protocol.Job) (plannedJob, error) {

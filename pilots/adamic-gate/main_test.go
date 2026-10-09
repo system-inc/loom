@@ -8,6 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -446,12 +449,19 @@ func TestEveryUnitHoldingAShardRunsItsSetup(t *testing.T) {
 	if err := protocol.Decode(&printed, &job); err != nil {
 		t.Fatal(err)
 	}
+	planned, err := plannedTests(job)
+	if err != nil {
+		t.Fatal(err)
+	}
 	holding, shards := 0, 0
 	for _, unit := range job.Units {
-		specs := strings.Join(unit.Argv[5:], " ")
-		held := 0
-		for _, test := range family[1:] {
-			if strings.Contains(specs, test) {
+		held, setups := 0, 0
+		for _, key := range planned.tests[unit.Id] {
+			_, test, _ := strings.Cut(key, " ")
+			switch {
+			case test == "TestHooks_Setup":
+				setups++
+			case slices.Contains(family[1:], test):
 				held++
 			}
 		}
@@ -460,8 +470,8 @@ func TestEveryUnitHoldingAShardRunsItsSetup(t *testing.T) {
 		}
 		holding++
 		shards += held
-		if strings.Count(specs, "TestHooks_Setup") != 1 {
-			t.Fatalf("%s holds %d of the family without its setup once: %s", unit.Id, held, specs)
+		if setups != 1 {
+			t.Fatalf("%s holds %d of the family without its setup once: %v", unit.Id, held, unit.Argv[5:])
 		}
 	}
 	if holding < 2 || shards != len(family)-1 {
@@ -560,5 +570,80 @@ func TestRedsReadsAFailedProductsDependentsAsItsRed(t *testing.T) {
 	}
 	if verdict != "red" || !strings.Contains(printed.String(), "NOT RUN tests-01: not run, its product product-00 failed") || strings.Contains(printed.String(), "BROKEN tests-01") {
 		t.Fatalf("verdict %q, printed:\n%s", verdict, printed.String())
+	}
+}
+
+// alternation writes a stem's numbered shards once, and unquoteAlternation reads every name back, quoted
+// characters and groups alike.
+func TestAnAlternationOfShardsReadsBackWhole(t *testing.T) {
+	names := []string{"TestPlain", "TestX_0002", "TestX_0001", "TestX_0010", "TestOne_1", "TestMeta(a|b).c", "TestY_", "TestZ_007", "TestZ_008"}
+	pattern := alternation(names)
+	if !strings.Contains(pattern, "TestX_(?:0001|0002|0010)") || !strings.Contains(pattern, `TestMeta\(a\|b\)\.c`) || strings.Contains(pattern, "TestOne_(?:") {
+		t.Fatalf("pattern %s", pattern)
+	}
+	read := unquoteAlternation(pattern)
+	sort.Strings(read)
+	want := append([]string(nil), names...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(read, want) {
+		t.Fatalf("read back %v, want %v", read, want)
+	}
+	compiled := regexp.MustCompile("^(" + pattern + ")$")
+	for _, name := range names {
+		if !compiled.MatchString(name) {
+			t.Fatalf("%s doesn't match %s", name, pattern)
+		}
+	}
+	if compiled.MatchString("TestX_0003") || compiled.MatchString("TestMetaXa") {
+		t.Fatalf("%s matches too much", pattern)
+	}
+}
+
+// A package of 4,000 numbered shards plans into arguments a Linux exec takes: main c869cea9's json shards, listed
+// whole, made one argument of 325 KB and two units broke on "argument list too long".
+func TestThousandsOfShardsPlanUnderTheArgumentLimit(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	for shard := range 4000 {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sjson","Test":"TestUpstreamRepositoryCorpusParity_%04d","Elapsed":0.01}`+"\n", module, shard)
+	}
+	writer.Close()
+	path := filepath.Join(t.TempDir(), "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--package-setup", "5", "--remainder"})
+	write.Close()
+	os.Stdout = stdout
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(&printed, &job); err != nil {
+		t.Fatal(err)
+	}
+	planned, err := plannedTests(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, unit := range job.Units {
+		for _, argument := range unit.Argv {
+			if len(argument) > 120*1024 {
+				t.Fatalf("%s has an argument of %d bytes", unit.Id, len(argument))
+			}
+		}
+		count += len(planned.tests[unit.Id])
+	}
+	if count != 4000 {
+		t.Fatalf("the plan reads back %d tests", count)
 	}
 }
