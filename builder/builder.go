@@ -315,6 +315,7 @@ type Builder struct {
 	Cache   string // the build's buildcache directory, shared by its actions
 	Scratch string // where each action's build log goes
 	Jobs    int
+	Report  func(Result) // when set, hears each action's result as it finishes, one at a time
 }
 
 // A Result is what happened to one action.
@@ -337,12 +338,18 @@ func (builder Builder) Build(actions []Action) []Result {
 	results := make([]Result, len(actions))
 	next := make(chan int)
 	var group sync.WaitGroup
+	var reporting sync.Mutex
 	for range jobs {
 		group.Add(1)
 		go func() {
 			defer group.Done()
 			for index := range next {
 				results[index] = builder.build(actions[index])
+				if builder.Report != nil {
+					reporting.Lock()
+					builder.Report(results[index])
+					reporting.Unlock()
+				}
 			}
 		}()
 	}

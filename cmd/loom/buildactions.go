@@ -97,13 +97,15 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Scratch: *scratch,
 		Jobs:    *jobs,
 	}
+	// Each result is printed as its action finishes, so a long build shows its progress and a stopped one its record.
 	failed := 0
-	for _, result := range work.Build(actions) {
+	work.Report = func(result builder.Result) {
 		encoder.Encode(result)
 		if result.Outcome == "failed" {
 			failed++
 		}
 	}
+	work.Build(actions)
 	if failed > 0 {
 		fmt.Fprintf(stderr, "build-actions: %d of %d actions failed\n", failed, len(actions))
 		return 1

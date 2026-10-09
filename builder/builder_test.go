@@ -333,11 +333,16 @@ func TestAnUpstreamSharedByTwoActionsBuildsOnceAndGoesUpWithEach(t *testing.T) {
 		return nil, nil
 	}
 	keys := map[string]string{"TestProduct_A": keyOf("A"), "TestProduct_B": keyOf("B")}
+	reported := []string{}
 	builder := Builder{
 		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: cache, Jobs: 2, Run: run,
-		Key: func(action Action) (string, error) { return keys[action.Test], nil },
+		Key:    func(action Action) (string, error) { return keys[action.Test], nil },
+		Report: func(result Result) { reported = append(reported, result.Action.Test) },
 	}
 	results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_A"}, {Directory: "x", Test: "TestProduct_B"}})
+	if len(reported) != 2 {
+		t.Fatalf("reported %v", reported)
+	}
 	for _, result := range results {
 		if result.Outcome != "built" || result.Products != 2 {
 			t.Fatalf("%+v", result)
