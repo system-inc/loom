@@ -398,6 +398,13 @@ var shardName = regexp.MustCompile(`^shard-\d{3,}$`)
 
 // splitParents names the reference's top-level tests to plan child by child, each with its direct children
 // and their seconds: audited or sharded, over splitSeconds, with at least two children.
+// splitAll (plan --split-all, @system_adamic, Oct 9) splits any parent with subtests, audited or not; each run's
+// compare checks every child against the reference, so a child that leans on a sibling shows as a mismatch, and
+// that parent goes back to whole (unsplittable lists it).
+var splitAll bool
+
+var unsplittable = map[string]bool{}
+
 func splitParents(reference map[string]result) map[string]map[string]float64 {
 	children := map[string]map[string]float64{}
 	for key, outcome := range reference {
@@ -426,7 +433,7 @@ func splitParents(reference map[string]result) map[string]map[string]float64 {
 		for name := range names {
 			sharded = sharded && shardName.MatchString(name)
 		}
-		if auditedParents[parentKey] || sharded {
+		if (auditedParents[parentKey] || sharded || splitAll) && !unsplittable[parentKey] {
 			split[parentKey] = names
 		}
 	}
@@ -532,6 +539,7 @@ func plan(arguments []string) error {
 	gateInputs := flags.String("gate-inputs", "", "on codex, the hash of the gate inputs' manifest in the public store")
 	remainder := flags.Bool("remainder", false, "also run, per package, every test the reference doesn't name (a gate, not a parity check)")
 	stages := flags.Bool("stages", false, "also run the gate's other stages as units (today: go build and go vet)")
+	flags.BoolVar(&splitAll, "split-all", false, "split every test with subtests over 30 s, not only the gate's audited parents")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
@@ -570,9 +578,18 @@ func plan(arguments []string) error {
 			continue
 		}
 		within := 0.0
-		for child, seconds := range children {
-			items = append(items, item{key: key, parent: key, child: child, seconds: seconds})
+		for _, seconds := range children {
 			within += seconds
+		}
+		// Children that ran in parallel each carry their siblings' contention in their wall, so together they can
+		// far exceed the parent's own wall (tsprinter's 30 mutants on Home): then they're scaled to sum to it, the
+		// work actually measured. Children that ran in turn sum below it, and the rest is the parent's setup.
+		scale := 1.0
+		if within > outcome.seconds && within > 0 {
+			scale = outcome.seconds / within
+		}
+		for child, seconds := range children {
+			items = append(items, item{key: key, parent: key, child: child, seconds: seconds * scale})
 		}
 		setup[key] = max(0, outcome.seconds-within)
 		fmt.Fprintf(os.Stderr, "split %s: %d children, %.0f s of its own beside them\n", key, len(children), setup[key])
