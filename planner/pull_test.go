@@ -74,7 +74,11 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	defer queue.Close()
 	client := QueueClient{Base: queue.URL, Token: "coordinator-token"}
 	checkout := func(sha string) (string, func(), error) { return tree, func() {}, nil }
-	count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client})
+	if count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "fut-2"); err != nil || count != 1 || len(posted) != 1 || posted["fut-2"] == nil {
+		t.Fatalf("planning fut-2 alone planned %d futures (%v), posted %d", count, err, len(posted))
+	}
+	delete(posted, "fut-2")
+	count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "")
 	if err != nil || count != 2 {
 		t.Fatalf("planned %d futures (%v), want 2", count, err)
 	}

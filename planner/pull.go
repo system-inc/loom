@@ -143,7 +143,9 @@ func GitCheckout(repository string) Checkout {
 
 // PullOnce plans every unplanned future Queue serves and posts each plan back; it returns how many it planned. A
 // future that fails to plan is reported and left unplanned, never posted half-made.
-func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Tools, index VerdictIndex) (int, error) {
+// With only set, it plans that future alone (a tree sha) and leaves every other to today's gate (Queue's rule until
+// the judge's first live batch, 23:58Z).
+func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Tools, index VerdictIndex, only string) (int, error) {
 	futures, err := client.Unplanned()
 	if err != nil {
 		return 0, err
@@ -151,6 +153,9 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 	planned := 0
 	var failures []string
 	for _, future := range futures {
+		if only != "" && future.Future != only {
+			continue
+		}
 		tree, cleanup, err := checkout(future.Tree)
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))

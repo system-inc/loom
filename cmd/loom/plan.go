@@ -25,11 +25,12 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	runner := flags.String("runner", "", "the runner binary, whose sha256 is in every key")
 	interval := flags.Duration("interval", 10*time.Second, "time between pulls")
 	once := flags.Bool("once", false, "pull once and exit")
+	only := flags.String("future", "", "plan only this future (its tree sha) and leave every other unplanned")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || *repository == "" || *gateTools == "" {
-		fmt.Fprintln(stderr, "usage: loom plan --queue <url> --token-file <path> --repository <clone> --gate-tools <dir> [--gate-tools-ref <branch>] [--runner <binary>] [--interval 10s] [--once]")
+		fmt.Fprintln(stderr, "usage: loom plan --queue <url> --token-file <path> --repository <clone> --gate-tools <dir> [--gate-tools-ref <branch>] [--runner <binary>] [--interval 10s] [--once] [--future <tree sha>]")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -55,7 +56,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				continue
 			}
 		}
-		count, err := planner.PullOnce(client, planner.GitCheckout(*repository), *gateTools, tools, planner.HTTPIndex{Client: client})
+		count, err := planner.PullOnce(client, planner.GitCheckout(*repository), *gateTools, tools, planner.HTTPIndex{Client: client}, *only)
 		if count > 0 {
 			fmt.Fprintf(stdout, "planned %d futures\n", count)
 		}
