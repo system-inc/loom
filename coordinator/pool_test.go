@@ -376,3 +376,54 @@ func TestAReofferThatRacesAWorkerQueuesNothingTwice(t *testing.T) {
 		t.Fatalf("started %v, not each unit once", counts)
 	}
 }
+
+// Judge's seam: a run's log read back is the record the coordinator wrote, event for event, page by page.
+func TestReadRunEventsIsTheRecord(t *testing.T) {
+	wire := newFakeWire(t)
+	result := run(t, config(wire), shell("a", "echo a"), shell("b", "echo b"))
+	read, err := ReadRunEvents(context.Background(), wire.server.URL, testSecret, result.Run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(read, result.Events) {
+		t.Fatalf("read %d events, the record holds %d", len(read), len(result.Events))
+	}
+	if FutureRun(strings.Repeat("c", 40), 2) != "future-"+strings.Repeat("c", 40)+"-2" || !protocol.RunIdPattern.MatchString(FutureRun(strings.Repeat("c", 40), 99)) {
+		t.Fatalf("FutureRun %q isn't a run id", FutureRun(strings.Repeat("c", 40), 2))
+	}
+}
+
+// Judge's seam: a unit rerun alone goes to the pool at RerunPriority, uncached, its id its unitKey, and the caller's
+// pool keeps its own priority.
+func TestRerunAloneTakesTheTopTierAndLeavesThePoolAsItWas(t *testing.T) {
+	wire := newFakeWire(t)
+	servePool(t, wire, "codex", 1)
+	slots := poolSlots(wire, 2)
+	slots[0].(*PoolMachine).Priority = 30
+	unitKey := strings.Repeat("ab", 32)
+	// A cached pass for the same unit must not stand in for the rerun: Judge reruns to see it fail or pass again.
+	unit := poolUnit(unitKey, "echo again")
+	unit.Cache = true
+	if first := run(t, config(wire, slots...), unit); first.Verdict.Status != "green" {
+		t.Fatalf("the first run: %+v", first.Verdict)
+	}
+	wire.mutex.Lock()
+	cached, queuedBefore := len(wire.cache), len(wire.priority["codex"])
+	wire.mutex.Unlock()
+	if cached == 0 {
+		t.Fatal("the first run cached nothing, so this test couldn't see a rerun served from the cache")
+	}
+	result, err := RerunAlone(context.Background(), config(wire, slots...), unit)
+	if err != nil || result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v, %v", result.Verdict, err)
+	}
+	wire.mutex.Lock()
+	priorities := append([]int{}, wire.priority["codex"][queuedBefore:]...)
+	wire.mutex.Unlock()
+	if !reflect.DeepEqual(priorities, []int{RerunPriority}) || slots[0].(*PoolMachine).Priority != 30 {
+		t.Fatalf("queued at %v, the caller's pool now at %d", priorities, slots[0].(*PoolMachine).Priority)
+	}
+	if startedCounts(result.Events)[unitKey] != 1 || !strings.HasPrefix(result.Run, "rerun-abababababab") {
+		t.Fatalf("run %s, events %+v", result.Run, result.Events)
+	}
+}
