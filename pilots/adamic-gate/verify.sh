@@ -36,11 +36,15 @@ if [ ! -s "${reference}" ]; then
 	ref=$(git -C "${gate}" ls-remote origin "refs/heads/gate-logs/${green:0:12}/*" | awk '$2 ~ /\/full-main$/ {print $2}' | sort | tail -1)
 	git -C "${gate}" fetch -q origin "${ref}" && git -C "${gate}" show FETCH_HEAD:test.jsonl.gz > "${reference}"
 fi
-"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" > "${work}/tests.json" 2> /dev/null || { echo "verify: planning failed"; exit 1; }
-# The tree's own test list at the sha: a selected name it doesn't hold is dropped, TestWASI's shards get a spec of their
-# own, and zerorun.py reads stale names against it.
+# The tree's own test list at the sha: the plan's test list (a product new since the reference gets a unit of its own,
+# run first, and every test unit of its package needs it, as run.py's box gate runs products first: the trio f9fc14c1's
+# TestProduct_FixtureOracleHook rode in stage3/fixtures' remainder beside TestFixturesReal, which built the hook itself
+# at 40.79 s), a selected name it doesn't hold dropped, TestWASI's shards a spec of their own, and zerorun.py's stale
+# names read against it.
 git -C "${gate}" fetch -q origin "${sha}" 2> /dev/null
 python3 "${bin}/treetests.py" "${sha}" > "${work}/tree-tests.txt" 2> /dev/null || : > "${work}/tree-tests.txt"
+treeTests=() && [ -s "${work}/tree-tests.txt" ] && treeTests=(--tree-tests "${work}/tree-tests.txt")
+"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" ${treeTests[@]+"${treeTests[@]}"} > "${work}/tests.json" 2> /dev/null || { echo "verify: planning failed"; exit 1; }
 
 # The build-and-vet unit runs on the same opening as the tests, so it sees the tree they will.
 python3 - "${work}" "${LOOM_VERIFY_ENV:-}" "${LOOM_VERIFY_PACKAGES:-}" "${LOOM_VERIFY_SELECT:-}" <<'PY'

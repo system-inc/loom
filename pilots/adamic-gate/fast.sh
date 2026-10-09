@@ -49,14 +49,18 @@ fi
 serve() {
 	local sha=$1 started=${SECONDS} work=${jobs}/$1.work stamp verdict line run
 	stamp=$(date -u +%Y%m%dT%H%M%SZ)
+	# The run an earlier attempt's proof comes from, named on its kept events below.
+	[ -s "${work}/run.log" ] && head -1 "${work}/run.log" | awk '{print $2}' | tr -d : > "${work}/previous-run"
 	rm -f "${work}"/run.log "${work}"/reds.txt "${work}"/reds.exit "${work}"/ceiling "${work}"/kept.json "${work}"/kept-skipped.txt
 	mkdir -p "${work}"
 	# An earlier attempt's proven tests carry over (#v4cm3s7; @system_adamic, Oct 9 09:23Z: a run stopped at its ceiling
 	# never discards its proven units). Its passed tests are kept by package and input hash at the gate it ran at, then
 	# matched at this attempt's gate below; one attempt back, not accumulated.
 	if [ -s "${work}/test.jsonl" ] && [[ $(cat "${work}/gate" 2> /dev/null) =~ ^[0-9a-f]{40}$ ]]; then
-		python3 "${bin}/inputs.py" kept --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/test.jsonl" > "${work}/kept-previous.json" 2> /dev/null || rm -f "${work}/kept-previous.json"
-		mv "${work}/test.jsonl" "${work}/test-previous.jsonl"
+		# Only the attempt's own events: kept events it carried (tagged LoomSource) never carry again.
+		grep -v '"LoomSource"' "${work}/test.jsonl" > "${work}/test-previous.jsonl"
+		rm -f "${work}/test.jsonl"
+		python3 "${bin}/inputs.py" kept --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/test-previous.jsonl" > "${work}/kept-previous.json" 2> /dev/null || rm -f "${work}/kept-previous.json"
 	fi
 	python3 - "${jobs}/${sha}.json" "${work}" <<'PY'
 import json, re, shlex, sys
@@ -104,6 +108,42 @@ PY
 	LOOM_VERIFY_KEPT=$([ -s "${work}/kept.json" ] && echo "${work}/kept.json") LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${bin}/verify.sh" "$(cat "${work}/gate")" "$(cat "${work}/packages")" none "${width}" > "${work}/verify.log" 2>&1
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
+	# Kept proof's events join the record's test lines, each tagged with the run that proved it (@system_adamic, Oct 9
+	# 08:00: one merged log, so the census, zerorun, red-sort and push-main all see the same proof; floor1's typeaware
+	# phase groups read unknown while their sibling shards' passes sat in kept.json, out of the census's sight).
+	if [ -s "${work}/kept.json" ] && [ -s "${work}/test-previous.jsonl" ] && [ -f "${work}/test.jsonl" ]; then
+		python3 - "${work}" <<'PY' > "${work}/kept-merged.txt"
+import json, os, sys
+work = sys.argv[1]
+kept = json.load(open(os.path.join(work, "kept.json")))
+kept = {package: set(tests) for package, tests in kept.items()}
+source = open(os.path.join(work, "previous-run")).read().strip() if os.path.exists(os.path.join(work, "previous-run")) else "earlier attempt"
+fresh = set()
+for line in open(os.path.join(work, "test.jsonl"), errors="replace"):
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if event.get("Test"):
+        fresh.add((event.get("Package", ""), event["Test"].split("/")[0]))
+merged, tests = 0, set()
+with open(os.path.join(work, "test.jsonl"), "a") as out:
+    for line in open(os.path.join(work, "test-previous.jsonl"), errors="replace"):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        top = (event.get("Test") or "").split("/")[0]
+        # A test this attempt ran again keeps only its fresh events.
+        if not top or top not in kept.get(event.get("Package", ""), ()) or (event.get("Package", ""), top) in fresh:
+            continue
+        event["LoomSource"] = source
+        out.write(json.dumps(event, separators=(",", ":")) + "\n")
+        merged += 1
+        tests.add((event["Package"], top))
+print("%d kept tests merged from %s (%d events)" % (len(tests), source, merged))
+PY
+	fi
 	rm -f "${work}/phases-status" "${work}/phases-ref"
 	# A complete job runs on past a red, as a box's complete mode does: its phases run whenever the build passed.
 	if [ -s "${work}/phases-wanted" ] && { [ "$(cat "${work}/build.verdict" 2> /dev/null)|$(cat "${work}/reds.exit" 2> /dev/null)" = "passed|0" ] ||
