@@ -46,6 +46,9 @@ scenario phases-twice-void "phase-fast=noupload" "phase-fast=nofinish"
 runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-twice-void 'grep -q "^void: the phases unit left no status.txt (run stub-run-2); its first attempt left no status.txt (run stub-run-1 on m10)" $work/phases-status && [ "$(cat $T/calls)" = 2 ]'
 scenario phases-cancel-no-retry "phase-fast=noupload"
 touch $jobs/$sha.cancelled; runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-cancel-no-retry 'grep -q "^void: " $work/phases-status && [ "$(cat $T/calls)" = 1 ]'
+# A job stopped at its ceiling never sends its short record to the census: void, and no unit placed.
+scenario phases-ceiling-no-census ""
+touch $work/ceiling; runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-ceiling-no-census 'grep -q "^void: stopped at its ceiling" $work/phases-status && [ "$(cat $T/calls 2>/dev/null || echo 0)" = 0 ]'
 # A phase run.py calls red with an empty log for that phase was killed at its limit: placed once more.
 scenario phases-killed-build-retry-green "" "" ""
 mkdir -p $T/k/phase && echo "red: x fast gate, first failure at build after 186.1 s, under load" > $T/k/phase/status.txt && : > $T/k/phase/build.log && tar -czf $T/phase-1.tgz -C $T/k phase

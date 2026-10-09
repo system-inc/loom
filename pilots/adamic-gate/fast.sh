@@ -246,6 +246,13 @@ PY
 # phases-status ("void: ..." when Loom broke it) and the record's ref in phases-ref.
 runPhases() {
 	local sha=$1 stamp=$2 work=${jobs}/$1.work tools base hash token run unitHash reference record index gitDirectory tree commit out
+	# The census judges the merged go test record whole, so a job stopped at its ceiling with units unreported never
+	# reaches it: its short record would read as the candidate's missing tests (developer tools, Oct 9 16:56Z:
+	# hidden-boundaries 64a5179f's fast-phases merged 531 products and one smoke test, and deferred read 14 missing).
+	if [ -f "${work}/ceiling" ]; then
+		echo "void: stopped at its ceiling before every unit reported, so the census has no whole record to judge" > "${work}/phases-status"
+		return
+	fi
 	tools=$(cat "${work}/tools" 2> /dev/null) base=$(cat "${work}/base" 2> /dev/null)
 	[[ ${tools} =~ ^[0-9a-f]{40}$ ]] || tools=$(git -C "${gate}" ls-remote origin refs/heads/devtools/fast-gate | cut -f1)
 	[[ ${base} =~ ^[0-9a-f]{40}$ ]] && [ -s "${work}/test.jsonl" ] || { echo "void: no base or no go test record for the phases" > "${work}/phases-status"; return; }
