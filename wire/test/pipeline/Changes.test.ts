@@ -28,7 +28,7 @@ describe('submitting a change', function () {
         expect(response.status).toBe(201);
         const answer = (await response.json()) as { change: string; state: string };
         expect(answer.state).toBe('queued');
-        expect(answer.change).toMatch(/^chg_[0-9A-Z]{26}$/);
+        expect(answer.change).toMatch(/^chg_[0-9a-hjkmnp-tv-z]{26}$/);
         const sent = queue.received[0];
         expect(sent?.method).toBe('POST');
         expect(new URL(sent?.url ?? '').pathname).toBe('/changes');
@@ -51,7 +51,9 @@ describe('submitting a change', function () {
             [body({ paths: ['/etc/passwd'] }), '"/etc/passwd" is not a repository path'],
             [body({ paths: ['wire/../secrets'] }), '"wire/../secrets" is not a repository path'],
             [body({ paths: ['a', 'a'] }), 'paths names a twice'],
-            [body({ parent: 'chg_short' }), 'parent is a change id, chg_ and 26 letters or digits, or null'],
+            [body({ parent: 'chg_short' }), 'parent is a change id, chg_ and 26 lowercase base32 characters, or null'],
+            [body({ parent: 'chg_' + 'A'.repeat(26) }), 'parent is a change id, chg_ and 26 lowercase base32 characters, or null'],
+            [body({ parent: 'chg_' + 'i'.repeat(26) }), 'parent is a change id, chg_ and 26 lowercase base32 characters, or null'],
             [body({ fixesRed: 'main' }), 'fixesRed is the red main commit it fixes, 40 lowercase hex digits, or null'],
         ];
         for (const [text, reason] of refused) {
@@ -93,6 +95,7 @@ describe('reading changes', function () {
         expect(new URL(queue.received.at(-1)?.url ?? '').search).toBe('?after=0&owners=1');
         for (const [path, operation, status] of [
             ['/changes/chg_nope', 'chg_nope', 404],
+            ['/changes/' + change.toUpperCase(), change.toUpperCase().replace('CHG_', 'chg_'), 404],
             [`/changes/${change}/events?after=-1`, `${change}/events`, 400],
         ] as const) {
             expect((await handleChanges(new Request('https://pipeline.test' + path), claimsOf('board'), operation, queue)).status, path).toBe(status);

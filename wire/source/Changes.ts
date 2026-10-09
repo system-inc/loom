@@ -12,7 +12,8 @@ export const MaximumChangeBodyBytes = 1024 * 1024;
 export const MaximumChangePaths = 20_000;
 export const MaximumPathLength = 4096;
 export const QueueName = 'main';
-export const ChangeIdPattern = /^chg_[0-9A-Za-z]{26}$/;
+// Queue's change ids: chg_ and 26 characters of lowercase base32 without i, l, o or u (Queue, Oct 9).
+export const ChangeIdPattern = /^chg_[0-9a-hjkmnp-tv-z]{26}$/;
 export const ShaPattern = /^[0-9a-f]{40}$/;
 const sequencePattern = /^\d{1,15}$/;
 
@@ -89,7 +90,7 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
     }
     const parent = fields.parent ?? null;
     if (parent !== null && (typeof parent !== 'string' || !ChangeIdPattern.test(parent))) {
-        return 'parent is a change id, chg_ and 26 letters or digits, or null';
+        return 'parent is a change id, chg_ and 26 lowercase base32 characters, or null';
     }
     const fixesRed = fields.fixesRed ?? null;
     if (fixesRed !== null && (typeof fixesRed !== 'string' || !ShaPattern.test(fixesRed))) {
@@ -164,7 +165,7 @@ async function queueRequest(request: Request, claims: TokenClaims, operation: st
         }
         return new Request(`https://queue/events${afterQuery}&owners=1`);
     }
-    const match = /^(chg_[0-9A-Za-z]{26})(\/events)?$/.exec(operation);
+    const match = /^(chg_[0-9a-hjkmnp-tv-z]{26})(\/events)?$/.exec(operation);
     if (match === null) {
         return jsonResponse(404, { error: 'no such change endpoint' });
     }
@@ -186,7 +187,7 @@ interface MemoryEvent {
     data: Record<string, unknown>;
 }
 
-const base32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const base32 = '0123456789abcdefghjkmnpqrstvwxyz';
 
 async function sha256Hex(text: string): Promise<string> {
     const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
