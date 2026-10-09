@@ -74,7 +74,7 @@ first=$! && disown
 waitfor 'grep -q "^verify ${one} " "${STUBLOG}" 2> /dev/null' 20
 check served-on-As-snapshot 'grep -qx "verify ${one} set A bin ${canary}/tools-${hashA}" "${STUBLOG}"'
 # B is promoted under it, canaried as promote.sh requires: a pass and its snapshot.
-cp -Rp "${T}/B" "${canary}/tools-${hashB}" && echo '{"verdict": "green: stub canary"}' > "${canary}/pass/${hashB}"
+cp -Rp "${T}/B" "${canary}/tools-${hashB}" && echo '{"verdict": "green: stub canary", "mutants": {"stub": "ok"}}' > "${canary}/pass/${hashB}"
 LOOM_PROMOTE_RESTART=0 bash "${promote}" "${T}/B" > "${T}/promote.log" 2>&1
 check promoted-B '[ "$(cat "${live}/SET")" = B ] && [ "$(cut -d" " -f1 "${live}/.promoted")" = "${hashB}" ] && [ "$(hash "${live}")" = "${hashB}" ]'
 # The restart: the old server's group killed, then a new server, with job 2 waiting for it.

@@ -16,8 +16,9 @@
 # Pass: the verdict is green, or red only on tests in ~/.loom/canary/main-reds.txt ("<package> <test>" per line), the
 # reds @system_adamic has ruled main's own (Oct 9 11:24Z: internal/ir TestCallTargetReaders, until compiler's fix lands).
 # Void, no verdict, or any other red fails, its reds listed: main's own whole gate rarely exists for the tip it moved
-# to, so an unlisted red can't be called main's and the canary fails closed. The result is written to
-# ~/.loom/canary/<stamp>.json, and a pass also to ~/.loom/canary/pass/<tools hash>, which promote.sh requires.
+# to, so an unlisted red can't be called main's and the canary fails closed. Beside it, every gate mutant runs through
+# the same tools and must read its declared verdict (#fyvmsy8); a mutant read wrong or void holds the pass. The result
+# is written to ~/.loom/canary/<stamp>.json, and a pass also to ~/.loom/canary/pass/<tools hash>, which promote.sh requires.
 set -uo pipefail
 tools=$(cd "${1:-${HOME}/.loom/stage}" && pwd) || { echo "canary: no tools directory ${1:-${HOME}/.loom/stage}"; exit 2; }
 gate=${HOME}/Projects/system/adamic-gate
@@ -72,11 +73,58 @@ json.dump({"branch": "canary/main-" + main[:12], "sha": landed, "base": landedOn
 PY
 echo "canary ${stamp}: tools ${hash:0:12} (${tools}) on main ${main:0:12}, the landing ${landed:0:12} gated onto ${landedOn:0:12}"
 started=${SECONDS}
-LOOM_BIN=${tools} LOOM_FAST_JOBS=${jobs} LOOM_FAST_PUBLISH=0 bash "${tools}/fast.sh" --once "${landed}" > "${out}/${stamp}.log" 2>&1
+LOOM_BIN=${tools} LOOM_FAST_JOBS=${jobs} LOOM_FAST_PUBLISH=0 bash "${tools}/fast.sh" --once "${landed}" > "${out}/${stamp}.log" 2>&1 &
+# The gate-mutant suite (#fyvmsy8, @system_adamic's ruling Oct 9 06:21Z): planted candidates whose verdict a correct gate
+# already knows, each gated with these tools beside main's canary, as gate-mutant/<name> in a jobs directory of its own,
+# published nowhere and so notified to no one. The table is the box watcher's own (adamic-gate cloud/gate-mutants.tsv at
+# devtools/fast-gate's tip), so the boxes and the pool hold tools to one suite; LOOM_CANARY_MUTANTS names another file.
+# Each mutant gates against its own parent, never merged onto main, so main's drift can't move its known answer; the
+# thin one (hole 5) against its tip~10, as a canary input is. A suite that can't be read holds the canary, never skips.
+mutantJobs=${jobs}-mutants
+mkdir -p "${mutantJobs}"
+suite=${out}/${stamp}.mutants.tsv
+if [ -n "${LOOM_CANARY_MUTANTS:-}" ]; then
+	cp "${LOOM_CANARY_MUTANTS}" "${suite}" 2> /dev/null
+else
+	git -C "${gate}" fetch -q origin devtools/fast-gate && git -C "${gate}" show FETCH_HEAD:cloud/gate-mutants.tsv > "${suite}" 2> /dev/null
+fi
+while IFS=$'\t' read -r name sha step pattern; do
+	[[ ${name} == \#* || -z ${name} || ! ${sha:-} =~ ^[0-9a-f]{40}$ ]] && continue
+	git -C "${gate}" fetch -q origin "${sha}" || { echo "void: canary couldn't fetch gate mutant ${name} ${sha:0:12}" > "${mutantJobs}/${sha}.verdict"; continue; }
+	base=$(git -C "${gate}" rev-parse "${sha}~$([ "${step}" = thin ] && echo 10 || echo 1)")
+	for earlier in "${mutantJobs}/${sha}".*; do
+		[ -e "${earlier}" ] && mv "${earlier}" "${earlier}.before-${stamp}"
+	done
+	python3 - "${mutantJobs}/${sha}.json" "${name}" "${sha}" "${base}" "${gateTools}" <<'PY'
+import json, sys
+path, name, sha, base, gateTools = sys.argv[1:]
+json.dump({"branch": "gate-mutant/" + name, "sha": sha, "base": base, "base_name": "main", "tools": gateTools,
+           "packages": "select", "env": {}, "priority": 50}, open(path, "w"))
+PY
+	LOOM_BIN=${tools} LOOM_FAST_JOBS=${mutantJobs} LOOM_FAST_PUBLISH=0 bash "${tools}/fast.sh" --once "${sha}" > "${out}/${stamp}.mutant-${name}.log" 2>&1 &
+done < "${suite}"
+wait
+# Each mutant judged by the judge beside this script, never the candidate's copy: "ok", "void <cause>" or "wrong <read>".
+mutants=${out}/${stamp}.mutants.json
+python3 - "${suite}" "${mutantJobs}" "$(dirname "$0")/mutantjudge.py" "${LOOM_CANARY_MIN_TESTS:-500}" "${mutants}" <<'PY'
+import json, subprocess, sys
+suite, mutantJobs, judge, floor, path = sys.argv[1:]
+results = {}
+for line in open(suite):
+    fields = line.rstrip("\n").split("\t")
+    if line.startswith("#") or len(fields) < 2 or len(fields[1]) != 40:
+        continue
+    name, sha, step, pattern = (fields + ["", ""])[:4]
+    work = "%s/%s.work" % (mutantJobs, sha)
+    said = subprocess.run(["python3", judge, step or "tests", pattern, sha, "%s/%s.verdict" % (mutantJobs, sha), work + "/reds.txt", work + "/test.jsonl", floor],
+                          capture_output=True, text=True).stdout.strip()
+    results[name] = said or "void the judge said nothing"
+json.dump(results, open(path, "w"), indent=2)
+PY
 verdict=$(head -1 "${jobs}/${landed}.verdict" 2> /dev/null)
-python3 - "${out}/${stamp}.json" "${hash}" "${tools}" "${main}" "${landed}" "${landedOn}" "${verdict}" "$((SECONDS - started))" "${jobs}/${landed}.work/reds.txt" "${out}/main-reds.txt" "${jobs}/${landed}.work/test.jsonl" "${LOOM_CANARY_MIN_TESTS:-500}" <<'PY'
+python3 - "${out}/${stamp}.json" "${hash}" "${tools}" "${main}" "${landed}" "${landedOn}" "${verdict}" "$((SECONDS - started))" "${jobs}/${landed}.work/reds.txt" "${out}/main-reds.txt" "${jobs}/${landed}.work/test.jsonl" "${LOOM_CANARY_MIN_TESTS:-500}" "${mutants}" <<'PY'
 import json, os, re, sys
-path, hash, tools, main, landed, landedOn, verdict, seconds, reds, mainReds, testLines, floor = sys.argv[1:]
+path, hash, tools, main, landed, landedOn, verdict, seconds, reds, mainReds, testLines, floor, mutantsPath = sys.argv[1:]
 failed = []
 if os.path.exists(reds):
     # "FAIL <package> <test> (<unit>)": a numbered shard counts as its family's name.
@@ -96,8 +144,15 @@ for line in open(testLines, errors="replace") if os.path.exists(testLines) else 
         ran.add(match.group(1) + " " + match.group(2))
 if passed and len(ran) < int(floor):
     passed, reason = False, "void: ran %d tests, under the canary's %s" % (len(ran), floor)
+# Main's canary passing isn't enough: every gate mutant must read as declared, and an empty suite holds (#fyvmsy8).
+mutants = json.load(open(mutantsPath)) if os.path.exists(mutantsPath) else {}
+off = {name: said for name, said in mutants.items() if said != "ok"}
+if passed and (not mutants or off):
+    passed = False
+    reason = "the gate-mutant suite held: " + ("; ".join("%s %s" % (name, said[:120]) for name, said in sorted(off.items())) if off else "no suite was read")
 json.dump({"tools_hash": hash, "tools": tools, "main": main, "landed": landed, "landed_on": landedOn, "verdict": verdict,
-           "seconds": int(seconds), "failed": failed, "main_reds": sorted(known & set(failed)), "tests_passed": len(ran), "pass": passed, "reason": reason},
+           "seconds": int(seconds), "failed": failed, "main_reds": sorted(known & set(failed)), "tests_passed": len(ran),
+           "mutants": mutants, "pass": passed, "reason": reason},
           open(path, "w"), indent=2)
 PY
 if python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))["pass"] else 1)' "${out}/${stamp}.json"; then

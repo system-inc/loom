@@ -5,7 +5,8 @@
 #	pilots/adamic-gate/promote.sh [<stage directory>]     # default ~/.loom/stage; a copy in ~/.loom/bin
 #
 # The stage's content hash (canary.sh's: every regular file by name and sha256) must have a pass in
-# ~/.loom/canary/pass/<hash>; without one this refuses and changes nothing. With one, it installs the snapshot the
+# ~/.loom/canary/pass/<hash>, and that pass must show every gate mutant read as declared; without both this refuses
+# and changes nothing. With one, it installs the snapshot the
 # canary ran (~/.loom/canary/tools-<hash>), never the stage as it stands now, each file by fresh inode (a running bash
 # reads its script as it goes, and an overwrite in place would change the lines under it). Then it restarts the fast
 # server and confirms the code running is the code installed: every fast.sh server process started after the install
@@ -40,6 +41,13 @@ if [ ! -s "${pass}" ]; then
 	exit 1
 fi
 [ -d "${snapshot}" ] || { echo "promote: refused, the pass for ${hash:0:12} has no snapshot at ${snapshot}"; exit 1; }
+# A pass must carry the gate-mutant suite, every mutant read as declared (#fyvmsy8): canary.sh already holds a pass
+# without it, and this refuses one written before the suite ran with the canary (9e's pass has no mutants).
+held=$(python3 -c 'import json, sys
+mutants = json.load(open(sys.argv[1])).get("mutants") or {}
+off = sorted("%s %s" % (name, said[:80]) for name, said in mutants.items() if said != "ok")
+print("; ".join(off) if off else ("" if mutants else "no gate-mutant suite ran with this canary"))' "${pass}")
+[ -z "${held}" ] || { echo "promote: refused, the gate-mutant suite didn't read as declared for ${hash:0:12}: ${held}"; exit 1; }
 echo "promote: stage ${hash:0:12}, canary pass $(python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); print(r["verdict"][:120])' "${pass}")"
 installed=$(date +%s)
 for file in "${snapshot}"/*; do
