@@ -24,6 +24,10 @@ wire = os.environ.get("LOOM_WIRE", "https://loom-wire.kirk-ouimet.workers.dev")
 pool = os.environ.get("LOOM_DISKRETIRE_POOL", "codex")
 window = 600
 threshold = 2
+# A machine that breaks units almost as soon as it takes them is a black hole whatever it prints (Oct 9 21:45Z: two more
+# instances, out of disk, exited every unit 2 in 0.15 s through a check worded as neither signature, 450 units each).
+instantSeconds = 2
+instantThreshold = 5
 signatures = ("free on the instance after trimming", "no space left on device")
 dry = "--dry" in sys.argv[1:]
 
@@ -34,11 +38,19 @@ def recentEventFiles(now):
             yield path
 
 
+def stampSeconds(stamp):
+    try:
+        return calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S")) + float("0" + stamp[19:23].rstrip("Z"))
+    except ValueError:
+        return None
+
+
 def fullDiskBreaks(now):
-    """machine -> the units it broke on a full disk inside the window, as (run, unit) pairs."""
-    breaks = {}
+    """machine -> the units it broke on a full disk inside the window, as (run, unit) pairs; and machine -> the units
+    it ended broken within instantSeconds of starting them."""
+    breaks, instant = {}, {}
     for path in recentEventFiles(now):
-        machines = {}
+        machines, starts = {}, {}
         for line in open(path, errors="replace"):
             try:
                 event = json.loads(line).get("event", {})
@@ -47,16 +59,17 @@ def fullDiskBreaks(now):
             key = (event.get("run"), event.get("unit"))
             if event.get("type") == "started":
                 machines[key] = event.get("machine")
+                starts[key] = stampSeconds(event.get("time", ""))
+            elif event.get("type") == "finished" and event.get("status") == "broken":
+                ended, began, machine = stampSeconds(event.get("time", "")), starts.get(key), machines.get(key)
+                if machine and ended and began and now - ended < window and ended - began < instantSeconds:
+                    instant.setdefault(machine, set()).add(key)
             elif event.get("type") == "output" and any(signature in event.get("text", "").lower() for signature in signatures):
-                stamp = event.get("time", "")
-                try:
-                    seconds = calendar.timegm(time.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S"))
-                except ValueError:
-                    continue
+                seconds = stampSeconds(event.get("time", ""))
                 machine = machines.get(key)
-                if machine and now - seconds < window:
+                if machine and seconds and now - seconds < window:
                     breaks.setdefault(machine, set()).add(key)
-    return breaks
+    return breaks, instant
 
 
 def coordinatorToken():
@@ -72,7 +85,9 @@ def retire(machine, reason):
     request = urllib.request.Request(
         "%s/pools/%s/retire" % (wire, pool),
         data=json.dumps({"worker": machine, "reason": reason}).encode(),
-        headers={"Authorization": "Bearer " + coordinatorToken(), "Content-Type": "application/json"},
+        # Cloudflare turns away urllib's default User-Agent with 403 (Oct 9 21:33 to 21:42Z: every retire this script
+        # tried was refused that way while the same token through curl was taken).
+        headers={"Authorization": "Bearer " + coordinatorToken(), "Content-Type": "application/json", "User-Agent": "loom-diskretire/1"},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=20) as response:
@@ -82,11 +97,19 @@ def retire(machine, reason):
 def main():
     now = time.time()
     state = json.load(open(statePath)) if os.path.exists(statePath) else {}
-    for machine, units in sorted(fullDiskBreaks(now).items()):
-        if len(units) < threshold or machine in state:
+    breaks, instant = fullDiskBreaks(now)
+    found = {}
+    for machine, units in breaks.items():
+        if len(units) >= threshold:
+            found[machine] = "disk full: broke %d units in 10 minutes (%s)" % (len(units), ", ".join(sorted(unit for _, unit in units)[:4]))
+    for machine, units in instant.items():
+        if len(units) >= instantThreshold and machine not in found:
+            found[machine] = "broke %d units within %d s of taking them in 10 minutes (%s)" % (len(units), instantSeconds, ", ".join(sorted(unit for _, unit in units)[:4]))
+    for machine, why in sorted(found.items()):
+        if machine in state:
             continue
-        sample = ", ".join(sorted(unit for _, unit in units)[:4])
-        reason = "disk full: broke %d units in 10 minutes (%s), retired by diskretire.py (#0k03wz1)" % (len(units), sample)
+        units = breaks.get(machine) or instant.get(machine)
+        reason = why + ", retired by diskretire.py (#0k03wz1)"
         stamp = time.strftime("%H:%M:%S", time.gmtime())
         if dry:
             print("%s would retire %s from %s: %s" % (stamp, machine, pool, reason))
