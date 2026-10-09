@@ -585,6 +585,10 @@ PY
 )
 				if [ -n "${mains}" ]; then
 					verdict="void: ${sha} fast gate on Loom's side pool stopped at its $((ceiling / 60))-minute ceiling (#x80gpc0) before every unit reported, its only named reds main's own (${mains}), so it goes back to the pool (run ${run})"
+				# A kill isn't a proven red (provenreds.py): a ceiling stop whose only reds are units killed over budget or
+				# tests whose builds were killed goes back to the pool as void, never to the lane as the change's red.
+				elif grep -q '^FAIL ' "${work}/reds.txt" 2> /dev/null && ! python3 "${bin}/provenreds.py" "${work}/reds.txt" "${work}/test.jsonl" > /dev/null; then
+					verdict="void: ${sha} fast gate on Loom's side pool stopped at its $((ceiling / 60))-minute ceiling (#x80gpc0) before every unit reported, its only reds kills (over budget, or a build killed), so it goes back to the pool (run ${run})"
 				elif grep -q '^FAIL ' "${work}/reds.txt" 2> /dev/null; then
 					verdict="red: ${sha} fast gate on Loom's side pool, first: $(grep -m1 '^FAIL ' "${work}/reds.txt" | cut -c6- | cut -d' ' -f1-2), stopped at its $((ceiling / 60))-minute ceiling with $(grep -c '^FAIL ' "${work}/reds.txt") failed tests and units unreported (branch $(cat "${work}/branch" 2> /dev/null), run ${run})"
 				else
