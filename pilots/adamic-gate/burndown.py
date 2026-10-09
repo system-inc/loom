@@ -51,9 +51,13 @@ def instant(value):
 
 
 # statusLine is the burn-down as #5g5151k's status: the count and seconds over the budget, then each owner's, most
-# seconds first, cut to fit 160 characters with the run last (the witness's grain curve reads the leading count).
+# seconds first, cut to fit 160 characters with the run last (the witness's grain curve reads the leading count). A run
+# that didn't bring every planned unit's results counts only what came back, so its line says how many units that was
+# ("31 over 60 s in 412 of 626 units"): only a complete run's count compares with another's (@system_adamic, Oct 9).
 def statusLine(byOwner, rows, arguments):
     head = "%d leaves over %.0f s, %.0f s:" % (len(rows), arguments.over, sum(row[1] for row in rows))
+    if arguments.units_planned and arguments.units_run < arguments.units_planned:
+        head = "%d over %.0f s in %d of %d units, %.0f s:" % (len(rows), arguments.over, arguments.units_run, arguments.units_planned, sum(row[1] for row in rows))
     tail = " (%s)" % arguments.run if arguments.run else ""
     owners = sorted(byOwner, key=lambda name: -sum(row[1] for row in byOwner[name]))
     parts = ["%s %d/%.0f s" % (owner, len(byOwner[owner]), sum(row[1] for row in byOwner[owner])) for owner in owners]
@@ -66,7 +70,7 @@ def statusLine(byOwner, rows, arguments):
             break
         line = candidate
     if not parts:
-        line = "0 leaves over %.0f s" % arguments.over
+        line = head[:-1].replace(", 0 s", "")
     return line + tail
 
 
@@ -76,6 +80,8 @@ def main():
     parser.add_argument("--over", type=float, default=60.0)
     parser.add_argument("--run", default="")
     parser.add_argument("--line", action="store_true", help="one line for #5g5151k's status feed, at most 160 characters")
+    parser.add_argument("--units-run", type=int, default=0, help="the units whose results came back")
+    parser.add_argument("--units-planned", type=int, default=0, help="the units the run planned: fewer back marks the count partial")
     arguments = parser.parse_args()
     started, ended, outcome, names = {}, {}, {}, collections.defaultdict(set)
     for line in open(arguments.record, errors="replace"):

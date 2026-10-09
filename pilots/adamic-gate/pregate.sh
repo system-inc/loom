@@ -66,7 +66,7 @@ star() {
 
 pregate() {
 	local sha=$1 started=${SECONDS} reference inputs run verdict summary pool units only scope priority slots unit
-	local again rerun
+	local again rerun planned broken
 	local job=${work}/${sha}.job.json record=${work}/${sha}.record.jsonl report=${work}/${sha}.reds.txt
 	echo "running" > "${verdicts}/${sha}"
 	reference=$(reference) || { void "${sha}" "no green whole gate's record to plan from"; return; }
@@ -132,7 +132,11 @@ PYTHON
 		# one line on #5g5151k's status feed, which the witness's grain curve reads, and the summary table as a comment
 		# for the owners; the whole list kept beside the run.
 		python3 "${HOME}/.loom/bin/burndown.py" "${work}/${sha}.tests.jsonl" --run "${sha:0:12} ${scope}, run $(head -1 "${report}" | awk '{print $2}' | tr -d :)" > "${work}/${sha}.burndown.md"
-		python3 "${HOME}/.loom/bin/burndown.py" "${work}/${sha}.tests.jsonl" --line --run "${sha:0:12}, ${verdict} run" > "${work}/${sha}.burndown-status.txt"
+		# The units whose results came back, of those planned, from the reds' first line ("... in 660 units, ... 51 units
+		# broken ..."): a void run's count is partial and its line says so.
+		planned=$(head -1 "${report}" | sed -nE 's/.* in ([0-9]+) units,.*/\1/p') broken=$(head -1 "${report}" | sed -nE 's/.* ([0-9]+) units broken.*/\1/p')
+		python3 "${HOME}/.loom/bin/burndown.py" "${work}/${sha}.tests.jsonl" --line --run "${sha:0:12}, ${verdict} run" \
+			--units-planned "${planned:-0}" --units-run "$(( ${planned:-0} - ${broken:-0} ))" > "${work}/${sha}.burndown-status.txt"
 		sed '/^## /,$d' "${work}/${sha}.burndown.md" > "${work}/${sha}.burndown-line.md"
 		(
 			cd /Users/kirkouimet/Projects/ahra &&
