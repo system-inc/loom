@@ -53,6 +53,12 @@ python3 - "${work}" "${LOOM_VERIFY_ENV:-}" "${LOOM_VERIFY_PACKAGES:-}" "${LOOM_V
 import json, sys
 work, environment, listed, selected = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 job = json.load(open(work + "/tests.json"))
+# A fast gate runs the packages it names and nothing else. The planner's remainder carries "@unplanned=", which runs
+# every package go list finds that the plan doesn't name; for a whole gate that's a package new since the reference,
+# but here the plan names only the selection, so it ran about 75 packages whole in one unit (Oct 9: 6b11cbda's and
+# trio 75d5288e's units ran past the 20-minute ceiling). A listed package the reference never saw is run below.
+for unit in job["units"]:
+    unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if not spec.startswith("@unplanned=")]
 def quote(name):  # Go's regexp.QuoteMeta
     return "".join("\\" + c if c in "\\.+*?()|[]{}^$" else c for c in name)
 selection = json.load(open(selected)) if selected else {}
