@@ -397,7 +397,9 @@ func readTests(reader io.Reader) (map[string]result, map[string]int, error) {
 	return results, counts, err
 }
 
-// readAll is readTests with every subtest kept too, keyed "<package> <test>/<subtest>".
+// readAll is readTests with every subtest kept too, keyed "<package> <test>/<subtest>". A test's seconds are the
+// larger of its Elapsed and its wall from its run (or its last cont) to its end: a parent's Elapsed leaves out its parallel
+// subtests (tsprinter's TestMutants read 19 s and took 678 s, Oct 9), so its wall is its cost.
 func readAll(reader io.Reader) (map[string]result, map[string]int, error) {
 	buffered := bufio.NewReader(reader)
 	if magic, err := buffered.Peek(2); err == nil && magic[0] == 0x1f && magic[1] == 0x8b {
@@ -409,10 +411,12 @@ func readAll(reader io.Reader) (map[string]result, map[string]int, error) {
 	}
 	results := map[string]result{}
 	counts := map[string]int{}
+	started := map[string]time.Time{}
 	scanner := bufio.NewScanner(buffered)
 	scanner.Buffer(make([]byte, 0, 1<<20), 64<<20)
 	for scanner.Scan() {
 		var event struct {
+			Time    time.Time
 			Action  string
 			Package string
 			Test    string
@@ -421,11 +425,21 @@ func readAll(reader io.Reader) (map[string]result, map[string]int, error) {
 		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Test == "" {
 			continue
 		}
+		key := event.Package + " " + event.Test
+		// A parallel test pauses after it starts until its package's serial tests finish; its wall runs from
+		// its cont, not its run, or every top-level parallel test would carry the whole package's wait.
+		if event.Action == "run" || event.Action == "cont" {
+			started[key] = event.Time
+			continue
+		}
 		if event.Action != "pass" && event.Action != "fail" && event.Action != "skip" {
 			continue
 		}
-		key := event.Package + " " + event.Test
-		results[key] = result{action: event.Action, seconds: event.Elapsed}
+		seconds := event.Elapsed
+		if start, ok := started[key]; ok && !event.Time.IsZero() {
+			seconds = max(seconds, event.Time.Sub(start).Seconds())
+		}
+		results[key] = result{action: event.Action, seconds: seconds}
 		counts[key]++
 	}
 	return results, counts, scanner.Err()
