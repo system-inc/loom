@@ -47,6 +47,9 @@ import json, re, shlex, sys
 job = json.load(open(sys.argv[1]))
 work = sys.argv[2]
 open(work + "/select-mode", "w").write("yes" if job.get("packages") == "select" else "")
+# The job's rank on the pool: developer tools' watcher puts the star's at 30 (Oct 9 04:23Z); side work is 0.
+priority = job.get("priority", 0)
+open(work + "/priority", "w").write(str(priority if isinstance(priority, int) and 0 <= priority <= 1000 else 0))
 for field in ("base_name", "tools"):
     open(work + "/" + field, "w").write(str(job.get(field, "")))
 packages = [] if job.get("packages") == "select" else [package for package in job.get("packages") or [] if package]
@@ -63,7 +66,7 @@ PY
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the job names no Go package, so the boxes take it" ""
 		return
 	fi
-	LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "${sha}" "$(cat "${work}/packages")" none 5 > "${work}/verify.log" 2>&1
+	LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "${sha}" "$(cat "${work}/packages")" none 5 > "${work}/verify.log" 2>&1
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
 	case "$(cat "${work}/build.verdict" 2> /dev/null)|$(cat "${work}/reds.exit" 2> /dev/null)" in
@@ -86,7 +89,7 @@ runSelection() {
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the selection couldn't be planned, so the boxes take it" ""
 		return 1
 	}
-	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool codex-side=1 --record "${work}/select-record.jsonl" "${work}/select-job.json" > "${work}/select-run.log" 2>&1
+	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool codex-side=1 --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/select-record.jsonl" "${work}/select-job.json" > "${work}/select-run.log" 2>&1
 	run=$(head -1 "${work}/select-run.log" | awk '{print $2}' | tr -d :)
 	token=$(python3 - "${run}" <<'PY'
 import base64, hashlib, hmac, json, os, sys, time

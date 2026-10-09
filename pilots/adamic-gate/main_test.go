@@ -238,3 +238,55 @@ func TestThePlansTestListIsTheTrees(t *testing.T) {
 		t.Fatal("a subtest line was taken as a top-level test")
 	}
 }
+
+// A subtest Loom has timed under a test the plan holds joins the plan, so a test split into subtests is packed child
+// by child: tsprinter's TestExpressionsAgainstGoAndPrettier was planned whole at 486 s after its split into shards.
+func TestLoomsTimedSubtestsSplitATestTheReferenceHeldWhole(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"TestBig","Elapsed":480}`+"\n", module)
+	fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"TestSmall","Elapsed":1}`+"\n", module)
+	writer.Close()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	var table strings.Builder
+	table.WriteString("loom_seconds\twhole_gate_seconds\tunit\tpackage\ttest\n")
+	fmt.Fprintf(&table, "480\t0\ttimes\t%sa\tTestBig\n", module)
+	for shard := range 12 {
+		fmt.Fprintf(&table, "40\t0\ttimes\t%sa\tTestBig/shard-%03d\n", module, shard)
+	}
+	times := filepath.Join(directory, "times.tsv")
+	os.WriteFile(times, []byte(table.String()), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	// The job is larger than a pipe holds, so it's read as plan writes it.
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--split-all", "--loom-times", times})
+	write.Close()
+	os.Stdout = stdout
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(&printed, &job); err != nil {
+		t.Fatal(err)
+	}
+	// Twelve 40 s shards and a 1 s test in 50 s of room: thirteen units, every one packed and killed at 90 s, none of
+	// them TestBig whole at 480 s with the long timeout.
+	for _, unit := range job.Units {
+		if unit.TimeoutSeconds != 90 {
+			t.Fatalf("%s runs long (%d s): %v", unit.Id, unit.TimeoutSeconds, unit.Argv[5:])
+		}
+	}
+	if len(job.Units) != 12 && len(job.Units) != 13 {
+		t.Fatalf("%d units", len(job.Units))
+	}
+}

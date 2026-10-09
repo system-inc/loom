@@ -666,6 +666,24 @@ func plan(arguments []string) error {
 			return err
 		}
 	}
+	// A subtest Loom has timed under a test the plan holds joins the plan, so a test split into subtests since the
+	// reference (tsprinter's TestExpressionsAgainstGoAndPrettier into shard-000 and on) is packed child by child
+	// instead of whole at its old time.
+	joined := 0
+	for key, seconds := range timed {
+		packageName, test, _ := strings.Cut(key, " ")
+		top, _, isSubtest := strings.Cut(test, "/")
+		if _, held := reference[key]; held || !isSubtest {
+			continue
+		}
+		if _, parent := reference[packageName+" "+top]; parent {
+			reference[key] = result{action: "pass", seconds: seconds}
+			joined++
+		}
+	}
+	if joined > 0 {
+		fmt.Fprintf(os.Stderr, "times: %d subtests Loom has timed joined the plan under their tests\n", joined)
+	}
 	opening := boxOpening
 	if *target == "codex" {
 		opening = codexPreamble(*gateInputs) + codexOpening
@@ -783,10 +801,25 @@ func plan(arguments []string) error {
 		for _, candidate := range items {
 			total += candidate.seconds
 		}
-		count = max(1, int(math.Ceil(total/capacity)))
-		for pack(count) > capacity && count < len(items) {
-			count++
+		// The fewest units whose packing fits: doubled until one fits, then bisected, each try a whole packing, and
+		// packed once more at the count chosen. Counting up one at a time packed 23,000 items hundreds of times once
+		// the tree's own tests joined the plan (Oct 9).
+		low := max(1, int(math.Ceil(total/capacity)))
+		high := low
+		for pack(high) > capacity && high < len(items) {
+			low = high + 1
+			high = min(len(items), high*2)
 		}
+		for low < high {
+			middle := (low + high) / 2
+			if pack(middle) <= capacity {
+				high = middle
+			} else {
+				low = middle + 1
+			}
+		}
+		count = high
+		pack(count)
 		fmt.Fprintf(os.Stderr, "budget %.0f s: %d units within %.0f s of tests each, %d over budget alone\n", *budget, count, capacity, len(alone))
 	} else {
 		pack(count)

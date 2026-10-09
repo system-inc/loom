@@ -93,7 +93,7 @@ job["name"] = "adamic-verify"
 job["units"].insert(0, unit)
 json.dump(job, open(work + "/job.json", "w"), indent=2)
 PY
-"${loom}" run --uncached --slots none --pool "${pool}=${slots}" --record "${work}/record.jsonl" "${work}/job.json" > "${work}/run.log" 2>&1 &
+"${loom}" run --uncached --slots none --pool "${pool}=${slots}" --priority "${LOOM_PRIORITY:-0}" --record "${work}/record.jsonl" "${work}/job.json" > "${work}/run.log" 2>&1 &
 coordinator=$!
 
 # The build first, the moment its unit ends.

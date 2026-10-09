@@ -85,10 +85,11 @@ pregate() {
 	else
 		pool=codex-side units=15 only=${packages} scope="the red-prone packages"
 	fi
-	# The plan's test list is the tree's own at the sha (treetests.py), so a test split since the reference is
-	# planned as the tests it became, sized, and one gone isn't planned at all.
+	# The tree's own test list at the sha (treetests.py) is kept beside the job, not planned from yet: without package
+	# affinity in the packing, its thousands of small split tests scatter over every unit and each unit builds many
+	# packages (Oct 9, 04:40Z: 2,625 units for main). It joins the plan with #wa8exgw.
 	git -C "${gate}" fetch -q origin "${sha}" 2> /dev/null
-	python3 "${HOME}/.loom/bin/treetests.py" "${sha}" > "${work}/${sha}.tree-tests.txt" 2> /dev/null && [ -s "${work}/${sha}.tree-tests.txt" ] && split+=(--tree-tests "${work}/${sha}.tree-tests.txt")
+	python3 "${HOME}/.loom/bin/treetests.py" "${sha}" > "${work}/${sha}.tree-tests.txt" 2> /dev/null
 	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" ${split[@]+"${split[@]}"} > "${job}" 2> "${work}/${sha}.plan.err" || { void "${sha}" "planning failed"; return; }
 	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
 	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)" --priority "${priority}" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
