@@ -143,8 +143,8 @@ function askRun(environment: Env, run: string, operation: string, scope: TokenSc
 }
 
 // A page of ours: inline styles and script under the response's nonce, nothing from elsewhere, and only
-// this origin's own endpoints and WebSocket to talk to.
-function pageResponse(html: string, nonce: string, host: string): Response {
+// this origin's own endpoints and WebSocket to talk to. loom-pipeline serves its pages through it too.
+export function pageResponse(html: string, nonce: string, host: string): Response {
     return new Response(html, {
         headers: {
             'Content-Type': 'text/html; charset=utf-8',

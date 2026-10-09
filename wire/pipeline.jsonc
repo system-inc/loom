@@ -15,5 +15,9 @@
         // The action store (Actions.ts): refs/action/<productKey>, its manifest and the outputs, in the public bucket
         // anyone reads at adamic-store.kirkouimet.com. Only a build token writes it, through this Worker.
         { "binding": "PublicStore", "bucket_name": "adamic-public" }
-    ]
+    ],
+    "durable_objects": {
+        "bindings": [{ "name": "ChangeBoard", "class_name": "ChangeBoard" }]
+    },
+    "migrations": [{ "tag": "changeboard-v1", "new_sqlite_classes": ["ChangeBoard"] }]
 }
