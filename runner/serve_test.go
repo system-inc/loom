@@ -154,6 +154,27 @@ func TestServeRunsUnitsInOrderPostsTheirEventsAndTakesNoneInItsLastMargin(t *tes
 	}
 }
 
+// The deadline only stops serve asking: a unit taken before it runs to its own finish, however far past the deadline
+// that is (#f6r8wvp asked whether --until abandons a unit in flight; it doesn't).
+func TestServeFinishesTheUnitInHandPastItsDeadline(t *testing.T) {
+	pool := newTestPool(t)
+	pool.queue = []protocol.Unit{pool.unit("long", "sleep 2; echo long"), pool.unit("next", "echo never")}
+	started := time.Now()
+	deadline := started.Add(1500 * time.Millisecond)
+	summary, err := Serve(context.Background(), pool.serveOptions(t, deadline, time.Second, io.Discard))
+	if err != nil || summary.Units != 1 || summary.Passed != 1 || summary.Broken != 0 || summary.Stopped != "at the deadline" {
+		t.Fatalf("summary %+v, err %v", summary, err)
+	}
+	if time.Now().Before(deadline.Add(400 * time.Millisecond)) {
+		t.Fatalf("served %v; the unit should have run past the %v deadline", time.Since(started), deadline.Sub(started))
+	}
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	if events := pool.events["long"]; len(events) == 0 || events[len(events)-1].Status != protocol.StatusPassed || len(pool.queue) != 1 {
+		t.Fatalf("the wire has %+v for the unit in hand, %d queued", events, len(pool.queue))
+	}
+}
+
 func TestStoppingServeBreaksTheUnitInHandAndEnds(t *testing.T) {
 	pool := newTestPool(t)
 	pool.queue = []protocol.Unit{pool.unit("long", "sleep 100"), pool.unit("next", "true")}
