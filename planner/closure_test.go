@@ -1,6 +1,7 @@
 package planner
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,6 +13,8 @@ func closureModule(t *testing.T) string {
 	root := t.TempDir()
 	for name, text := range map[string]string{
 		"go.mod":      "module example.com/closure\n\ngo 1.22\n",
+		"go.sum":      "",
+		"go.work":     "go 1.22\n\nuse .\n",
 		"a/a.go":      "package a\n\nimport \"example.com/closure/b\"\n\nvar Answer = b.Answer\n",
 		"a/a_test.go": "package a\n\nimport (\n\t_ \"embed\"\n\t\"testing\"\n\n\t\"example.com/closure/t\"\n)\n\n//go:embed data.txt\nvar data string\n\nfunc TestA(test *testing.T) { _ = t.Helper }\n",
 		"a/data.txt":  "one\n",
@@ -56,6 +59,8 @@ func TestClosureCoversImportsTestsAndEmbeds(t *testing.T) {
 		{"t/t.go", true},      // a test-only import
 		{"a/data.txt", true},  // a file a test embeds
 		{"c/c.go", false},     // outside the closure
+		{"go.sum", true},      // the module's checksums
+		{"go.work", true},     // the workspace the go command builds in
 	} {
 		path := filepath.Join(root, filepath.FromSlash(edit.path))
 		original, err := os.ReadFile(path)
@@ -72,5 +77,40 @@ func TestClosureCoversImportsTestsAndEmbeds(t *testing.T) {
 		if moved != edit.moves {
 			t.Errorf("editing %s: closure moved %v, want %v", edit.path, moved, edit.moves)
 		}
+	}
+}
+
+// The mutant Loom asked for: a go line moved with every source and dependency file identical moves every package's
+// closure, so no verdict decided under the old go line is reused.
+func TestAGoLineChangeMovesEveryClosure(t *testing.T) {
+	t.Parallel()
+	root := closureModule(t)
+	packages := []string{"example.com/closure/a", "example.com/closure/b", "example.com/closure/c"}
+	closures := func() map[string]string {
+		result := map[string]string{}
+		for _, importPath := range packages {
+			closure, err := Closure(root, importPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result[importPath] = closure
+		}
+		return result
+	}
+	base := closures()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/closure\n\ngo 1.21\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for importPath, closure := range closures() {
+		if closure == base[importPath] {
+			t.Errorf("the go line moved and %s kept its closure", importPath)
+		}
+	}
+	files, err := ClosureFiles(root, "example.com/closure/c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"c/c.go", "go.mod", "go.sum", "go.work"}; fmt.Sprint(files) != fmt.Sprint(want) {
+		t.Errorf("c's closure files %v, want %v", files, want)
 	}
 }

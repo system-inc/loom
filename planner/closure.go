@@ -32,11 +32,14 @@ type listedPackage struct {
 	XTestGoFiles    []string
 	TestEmbedFiles  []string
 	XTestEmbedFiles []string
+	Module          *struct{ Path, GoMod string }
 }
 
 // Closure is the contract's closure part: a hash over the sorted (file, sha256) of every source file in the
-// package's import closure, its _test files and the files they embed included. A file is named by its package's
-// import path and its name in that package. The standard library is left out: the Go version in tools covers it.
+// package's import closure, its _test files and the files they embed included, and of the module files the go
+// command builds them under: each module's go.mod and go.sum, and the workspace's go.work and go.work.sum. A source
+// file is named by its package's import path and its name in that package, a module file by its module path (the
+// workspace's by "go.work"). The standard library is left out: the Go version in tools covers it.
 func Closure(tree, importPath string) (string, error) {
 	files, err := closureFiles(tree, importPath)
 	if err != nil {
@@ -117,9 +120,50 @@ func closureFiles(tree, importPath string) (map[string]string, error) {
 				files[owner+"/"+filepath.ToSlash(name)] = filepath.Join(listed.Dir, name)
 			}
 		}
+		addModuleFiles(listed, files)
 	}
 	if len(files) == 0 {
 		return nil, fmt.Errorf("go list found no files for %s", importPath)
 	}
+	if err := addWorkspaceFiles(tree, files); err != nil {
+		return nil, err
+	}
 	return files, nil
+}
+
+// addModuleFiles adds a package's module's go.mod and, beside it, its go.sum: a go line or a replace moves the build
+// even when every source file is the same.
+func addModuleFiles(listed listedPackage, files map[string]string) {
+	if listed.Module == nil || listed.Module.GoMod == "" {
+		return
+	}
+	files[listed.Module.Path+"/go.mod"] = listed.Module.GoMod
+	sum := filepath.Join(filepath.Dir(listed.Module.GoMod), "go.sum")
+	if filepath.Base(listed.Module.GoMod) == "go.mod" && fileExists(sum) {
+		files[listed.Module.Path+"/go.sum"] = sum
+	}
+}
+
+// addWorkspaceFiles adds the go.work the go command uses in the tree, and its go.work.sum, when there is one.
+func addWorkspaceFiles(tree string, files map[string]string) error {
+	command := exec.Command("go", "env", "GOWORK")
+	command.Dir = tree
+	output, err := command.Output()
+	if err != nil {
+		return fmt.Errorf("go env GOWORK: %w", err)
+	}
+	work := strings.TrimSpace(string(output))
+	if work == "" || work == "off" {
+		return nil
+	}
+	files["go.work"] = work
+	if sum := work + ".sum"; fileExists(sum) {
+		files["go.work.sum"] = sum
+	}
+	return nil
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
