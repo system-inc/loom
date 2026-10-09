@@ -111,7 +111,11 @@ runSelection() {
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the selection couldn't be planned, so the boxes take it" ""
 		return 1
 	}
-	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool codex-side=1 --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/select-record.jsonl" "${work}/select-job.json" > "${work}/select-run.log" 2>&1
+	# The star's selection goes on the star's pool, as its tests do (Oct 9 09:05Z: floor1 55f556cb's select waited on a
+	# starved side pool, with 9 of 37 workers asking).
+	local selectPool=codex-side
+	[ "$(cat "${work}/priority" 2> /dev/null || echo 0)" -ge 30 ] && selectPool=codex
+	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool "${selectPool}=1" --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/select-record.jsonl" "${work}/select-job.json" > "${work}/select-run.log" 2>&1
 	run=$(head -1 "${work}/select-run.log" | awk '{print $2}' | tr -d :)
 	token=$(python3 - "${run}" <<'PY'
 import base64, hashlib, hmac, json, os, sys, time
