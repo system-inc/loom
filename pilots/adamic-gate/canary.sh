@@ -52,7 +52,10 @@ tools=${snapshot}
 main=${LOOM_CANARY_MAIN:-$(git -C "${gate}" ls-remote origin refs/heads/main | cut -f1)}
 [[ ${main} =~ ^[0-9a-f]{40}$ ]] || { echo "canary: main ${main} isn't a full sha"; exit 2; }
 if [ -n "${LOOM_CANARY_MAIN:-}" ]; then
-	git -C "${gate}" fetch -q origin main && git -C "${gate}" merge-base --is-ancestor "${main}" FETCH_HEAD ||
+	# By the remote tip's own sha, never FETCH_HEAD: the box watcher fetches in this same repository all the time, and
+	# a FETCH_HEAD read a moment later can name another ref (Oct 9 22:37Z: two pins on main refused as off it).
+	tip=$(git -C "${gate}" ls-remote origin refs/heads/main | cut -f1)
+	[[ ${tip} =~ ^[0-9a-f]{40}$ ]] && git -C "${gate}" fetch -q origin "${tip}" && git -C "${gate}" merge-base --is-ancestor "${main}" "${tip}" ||
 		{ echo "canary: ${main:0:12} isn't on main"; exit 2; }
 fi
 git -C "${gate}" fetch -q origin "${main}" || { echo "canary: can't fetch main ${main:0:12}"; exit 2; }
@@ -86,7 +89,8 @@ suite=${out}/${stamp}.mutants.tsv
 if [ -n "${LOOM_CANARY_MUTANTS:-}" ]; then
 	cp "${LOOM_CANARY_MUTANTS}" "${suite}" 2> /dev/null
 else
-	git -C "${gate}" fetch -q origin devtools/fast-gate && git -C "${gate}" show FETCH_HEAD:cloud/gate-mutants.tsv > "${suite}" 2> /dev/null
+	suiteTip=$(git -C "${gate}" ls-remote origin refs/heads/devtools/fast-gate | cut -f1)
+	[[ ${suiteTip} =~ ^[0-9a-f]{40}$ ]] && git -C "${gate}" fetch -q origin "${suiteTip}" && git -C "${gate}" show "${suiteTip}:cloud/gate-mutants.tsv" > "${suite}" 2> /dev/null
 fi
 while IFS=$'\t' read -r name sha step pattern; do
 	[[ ${name} == \#* || -z ${name} || ! ${sha:-} =~ ^[0-9a-f]{40}$ ]] && continue
