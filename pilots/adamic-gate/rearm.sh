@@ -11,11 +11,11 @@ runner=${LOOM_RUNNER_SHA:-7f01c04925b5bcdf4c2359abcee90f0723b656867e696313db2039
 # runner's sha256, then the member it went to: the next side member whose turn ends takes it, keeps it on every
 # later turn, and no other member does. After a green unit on that worker, the sha becomes LOOM_RUNNER_SHA's default.
 staging=${HOME}/.loom/runner-staging
-# The star's pool keeps the star fleet's first LOOM_STAR_INSTANCES members (loom-pool-codex-1 to -50); the rest serve
-# side work (@system_adamic, Oct 9 04:16Z: the solver shows the star's wall is its floor on 47 instances, so the other
-# 50 cost it nothing). Each moves at its next serve turn. Re-solve each run (solve.py) and raise this when splits make
-# width matter again.
-starInstances=${LOOM_STAR_INSTANCES:-50}
+# The star's pool keeps the star fleet's first LOOM_STAR_INSTANCES members (loom-pool-codex-1 to -72); the rest serve
+# side work (@system_adamic, Oct 9 04:16Z: the star takes what reaches its floor, the rest go to side work). Re-solved
+# on the tree's own test list (04:35Z): main 11171d0c's floor is 496 s and takes 72 instances; at 50 it was 696 s.
+# Each member moves at its next serve turn. Re-solve each run (solve.py) and move this with the answer.
+starInstances=${LOOM_STAR_INSTANCES:-72}
 read -r staged stagedOn < "${staging}" 2> /dev/null || staged=""
 cd "${ahra}" || exit 1
 for pair in loom-pool:codex loom-side:codex-side; do

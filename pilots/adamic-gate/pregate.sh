@@ -31,9 +31,9 @@ requests=${ADAMIC_FULL_GATE_REQUESTS:-${state}/requests}
 verdicts=${state}/pregate
 work=${HOME}/.loom/pregate
 gate=${HOME}/Projects/system/adamic-gate
-# The star's pool: 50 instances from Oct 9 04:16Z (100 from 03:14Z; @system_adamic: solve.py showed 47 reach the floor), its
+# The star's pool: 72 instances from Oct 9 04:35Z (solve.py on the tree's test list: 72 reach main's 496 s floor), its
 # whole-set runs planned two units a slot so the longest-first packing has small units to fill in with.
-starSlots=${LOOM_STAR_POOL_SLOTS:-50}
+starSlots=${LOOM_STAR_POOL_SLOTS:-72}
 packages=${LOOM_PREGATE_PACKAGES:-'/(stage3/fixtures|internal/fresh|internal/lower|internal/flow|internal/oracle)$'}
 mkdir -p "${verdicts}" "${work}"
 loom=${HOME}/.loom/bin/loom-pregate planner=${HOME}/.loom/bin/adamic-gate
