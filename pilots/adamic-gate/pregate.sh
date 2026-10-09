@@ -97,6 +97,9 @@ pregate() {
 	case $? in 0) verdict=green ;; 1) verdict=red ;; *) verdict=void ;; esac
 	# Every run teaches the times table (#2en3b4t): its leaves and parents by their own seconds on 4 CPUs, then the
 	# p90s the next plan packs by.
+	# Each leaf killed at 90 s is filed P0 for its owner, or noted on its grain task, and Loom's own P0s close after
+	# two runs under 60 s (#kxnza1j).
+	python3 "${HOME}/.loom/bin/p0.py" "${report}" "${work}/${sha}.tests.jsonl" --run "$(head -1 "${report}" | awk '{print $2}' | tr -d :)" >> "${work}/p0.log" 2>&1
 	if [ -s "${work}/${sha}.tests.jsonl" ]; then
 		python3 "${HOME}/.loom/bin/times.py" update "${work}/${sha}.tests.jsonl" --sha "${sha}" --run "$(head -1 "${report}" | awk '{print $2}' | tr -d :)" &&
 			python3 "${HOME}/.loom/bin/times.py" tsv > "${HOME}/.loom/loom-times.tsv.partial" && mv "${HOME}/.loom/loom-times.tsv.partial" "${HOME}/.loom/loom-times.tsv"
