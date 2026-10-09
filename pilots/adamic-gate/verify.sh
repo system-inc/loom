@@ -262,6 +262,12 @@ if { [ "${build}" != 0 ] || [ "${vet}" != 0 ]; } && grep -qs "no space left on d
   df -h "${HOME}" /tmp
   exit 2
 fi
+# A failed step that said nothing names no error in the tree (Oct 9 19:12Z: canary 9c's go build exited 1 with an empty
+# log on main b8bcadb2, which canary 9b had built green): Loom's, placed again.
+if { [ "${build}" != 0 ] && [ ! -s "${out}/build.log" ]; } || { [ "${vet}" != 0 ] && [ ! -s "${out}/vet.log" ]; }; then
+  echo "loom-build: a failed step left an empty log, so nothing in the tree is named: Loom's fault, not the tree's"
+  exit 2
+fi
 [ "${build}" = 0 ] && [ "${vet}" = 0 ]
 '''
 unit = {"id": "build-vet", "argv": ["bash", "-c", opening + body, "adamic-build-vet", job["units"][0]["argv"][4]],

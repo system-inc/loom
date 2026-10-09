@@ -19,7 +19,7 @@ check() { if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1: exit $2, 
 run() { # run <go build's output> <go build's exit>
 	local tree=${T}/tree out=${T}/out
 	mkdir -p "${tree}/.git" "${out}" "${T}/bin"
-	printf '#!/bin/bash\n[ "$1" = build ] && { printf "%%s\\n" %q; exit %s; }\nexit 0\n' "$1" "$2" > "${T}/bin/go"
+	printf '#!/bin/bash\n[ "$1" = build ] && { [ -n %q ] && printf "%%s\\n" %q; exit %s; }\nexit 0\n' "$1" "$1" "$2" > "${T}/bin/go"
 	printf '#!/bin/bash\necho stub\n' > "${T}/bin/git"
 	chmod +x "${T}/bin/go" "${T}/bin/git"
 	PATH="${T}/bin:${PATH}" tree=${tree} out=${out} started=${SECONDS} bash "${T}/body.sh" > "${T}/out.log" 2>&1
@@ -28,5 +28,6 @@ run() { # run <go build's output> <go build's exit>
 check full-disk-is-looms "$(run 'link: mapping output file failed: no space left on device' 1)" 2
 check real-red-stays-red "$(run './x.go:1: undefined: y' 1)" 1
 check clean-build-passes "$(run '' 0)" 0
+check silent-failure-is-looms "$(run '' 1)" 2
 echo "failures: ${failures}"
 exit $((failures > 0))
