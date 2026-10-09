@@ -59,7 +59,8 @@ def main():
     dry, seed = "--dry" in sys.argv, "--seed" in sys.argv
     paged = json.load(open(state)) if os.path.exists(state) else {}
     now, mains, pages = time.time(), None, []
-    for name in sorted(os.listdir(jobs)):
+    names = sorted(os.listdir(jobs))
+    for name in names:
         if not re.fullmatch(r"[0-9a-f]{40}\.json", name):
             continue
         sha = name[:-5]
@@ -76,9 +77,12 @@ def main():
             continue
         what = None
         if not os.path.exists(verdict):
-            if now - os.path.getmtime(os.path.join(jobs, name)) > grace:
-                what = ("unplaced", os.path.getmtime(os.path.join(jobs, name)),
-                        "its job file is %d minutes old with no run" % ((now - os.path.getmtime(os.path.join(jobs, name))) // 60))
+            # A job served again waits from that moment, not from its job file's: fast.sh's void-again leaves
+            # <sha>.verdict.void-again and requeue.sh leaves <sha>.*.requeued-*, and either can predate the next server pass.
+            waiting = max([os.path.getmtime(os.path.join(jobs, name))] + [os.path.getmtime(os.path.join(jobs, other))
+                           for other in names if other.startswith(sha + ".") and (other.endswith(".verdict.void-again") or ".requeued-" in other)])
+            if now - waiting > grace:
+                what = ("unplaced", waiting, "it has waited %d minutes with no run" % ((now - waiting) // 60))
         elif now - os.path.getmtime(verdict) > grace:
             first = open(verdict, errors="replace").readline()
             if first.startswith("void:"):
