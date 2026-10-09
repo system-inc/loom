@@ -99,6 +99,38 @@ func TestTheRuleTable(t *testing.T) {
 	}
 }
 
+func TestStructureNotTextDecidesInfra(t *testing.T) {
+	cases := []struct {
+		name     string
+		evidence Evidence
+		status   string
+		cause    string
+		next     string
+	}{
+		{"a pass whose tests all reached pass or skip stays passed",
+			Evidence{First: Attempt{Status: Passed}, FirstTests: []TestOutcome{outcome("TestA", "pass"), outcome("TestB", "skip")}}, Passed, "", ""},
+		{"a unit run without its toolchain is void, even when it reports a pass",
+			Evidence{First: Attempt{Status: Passed}, FirstTests: []TestOutcome{outcome("TestWASIUnit07", "skip")}, MissingTools: []string{"wasiSdk"}}, Void, CauseInfra, "retry"},
+		{"a test that never reached a terminal action makes the attempt failed, not infra",
+			Evidence{First: Attempt{Status: Passed}, FirstTests: []TestOutcome{outcome("TestPlantedZAfter", "run")}}, "", "", "rerunAlone"},
+		{"an attempt reported passed with a failing test is failed",
+			Evidence{First: Attempt{Status: Passed}, FirstTests: []TestOutcome{outcome("TestA", "fail")}}, "", "", "rerunAlone"},
+		{"a panic that prints 'own work exceeded 90s' is a failure, and only the runner's exit makes a kill",
+			Evidence{First: Attempt{Status: Failed, Exit: 2}, FirstTests: []TestOutcome{outcome("TestPlantedWatchdog", "fail")}}, "", "", "rerunAlone"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			decision, err := Decide(c.evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Status != c.status || decision.Cause != c.cause || decision.Next != c.next {
+				t.Fatalf("got %+v", decision)
+			}
+		})
+	}
+}
+
 func TestAFlakeNamesTheTestsToQuarantine(t *testing.T) {
 	e := failedFirst(outcome("TestA", "fail"), outcome("TestB", "pass"))
 	e.Candidate, e.Main = rerun(Passed), rerun(Passed)

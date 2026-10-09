@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // Rule is this rule set's id and version, written into every verdict's rule field.
@@ -117,12 +118,23 @@ type Rerun struct {
 }
 
 // Evidence is everything Decide reads for one unit.
+//
+// Infra comes from structure, never from text (Loom's binding rule, from Release's mutant inventory #1c7z4dh): an
+// attempt is broken, and a kill is infra, only when the runner's own exit event says so (the signal it observed, or
+// its deadline), which the runner records as First.Status broken with FirstInfra. Decide never reads what a test
+// printed. The old path's provenreds.py reads "signal: killed" from test output, which a test can print itself (the
+// binary-dies-partway mutant panics at 50 ms saying "own work exceeded 90s" and must read red); that weakness isn't
+// carried over.
 type Evidence struct {
 	First      Attempt
-	FirstInfra string        // the infra kind when First.Status is broken
+	FirstInfra string        // the infra kind when First.Status is broken, from the runner's exit event
 	FirstTests []TestOutcome // the first attempt's test outcomes
-	Candidate  *Rerun        // the unit rerun alone on the candidate; nil until it has run
-	Main       *Rerun        // the unit rerun alone on main at the future's base; nil until it has run
+	// MissingTools names the toolchains the unit needs that its runner lacked (the wasi SDK, say). A unit run without
+	// them proves nothing, whatever it reported: its skips aren't passes, so it's void and placed again (the
+	// wasi-family-must-run mutant).
+	MissingTools []string
+	Candidate    *Rerun // the unit rerun alone on the candidate; nil until it has run
+	Main         *Rerun // the unit rerun alone on main at the future's base; nil until it has run
 	// MainRecorded is main's latest recorded verdict for this unit at the future's base, its test outcomes; nil when
 	// main has none.
 	MainRecorded []TestOutcome
@@ -141,6 +153,25 @@ type Decision struct {
 
 // Decide applies the rule table to one unit's evidence.
 func Decide(evidence Evidence) (Decision, error) {
+	if len(evidence.MissingTools) > 0 {
+		return Decision{Status: Void, Cause: CauseInfra, Infra: InfraRefused, Next: "retry",
+			Why: "run without " + strings.Join(evidence.MissingTools, ", ") + ": its skips prove nothing; place it on a fit runner"}, nil
+	}
+	// A test that never reached a terminal action (pass, fail or skip) is red, never infra: the process ended under it
+	// without the runner observing a kill, so the code ended it.
+	for _, outcome := range evidence.FirstTests {
+		switch outcome.Outcome {
+		case "pass", "fail", "skip":
+		default:
+			if evidence.First.Status != Broken {
+				evidence.First.Status = Failed
+			}
+		}
+	}
+	if evidence.First.Status == Passed && len(failing(evidence.FirstTests)) > 0 {
+		// An attempt can't pass with a failing test in it.
+		evidence.First.Status = Failed
+	}
 	switch evidence.First.Status {
 	case Passed:
 		return Decision{Decided: true, Status: Passed, Why: "first attempt passed"}, nil
