@@ -1,10 +1,14 @@
 #!/bin/bash
-# harness.sh [<fast.sh>]: fast.sh's runPhases and runStage3 against stubs (#ber4297), one scenario per case, PASS or
+# harness.sh [<fast.sh>]: fast.sh's runPhases, runStage3 and finish against stubs (#ber4297), one scenario per case, PASS or
 # FAIL each. A phases or stage 3 unit Loom broke is placed once more; a second break, a cancel or the ceiling voids; a
 # unit failing on its own is red. The mutant (both loops cut to one attempt) must fail:
 #
 #	pilots/adamic-gate/fastretry/harness.sh                       # the repo's fast.sh
-#	sed 's/for attempt in 1 2; do/for attempt in 1; do/' fast.sh > m.sh && fastretry/harness.sh m.sh   # fails 6
+#	sed 's/for attempt in 1 2; do/for attempt in 1; do/' fast.sh > m.sh && fastretry/harness.sh m.sh   # fails 7
+#	sed 's/\[ ! -e "\${jobs}\/\${sha}.verdict.void-again" \] && //' fast.sh > m.sh && fastretry/harness.sh m.sh   # fails 1
+#
+# finish's void-again cases (#snbpqyb): a void at tier 40 and up goes back on the server's waiting list once, with its
+# proven tests; the mutant above (every void at 40 placed again, the first-void check dropped) must fail.
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
 fast=${1:-${here}/../fast.sh}
@@ -66,5 +70,45 @@ echo 3333333333333333333333333333333333333333 > $work/gate; echo "run stub-run-1
 printf '%s\n' '{"Package":"p","Test":"TestA","Action":"pass"}' '{"Package":"p","Test":"TestB","Action":"skip"}' > $work/test.jsonl
 LOOM_FAST_PUBLISH=0 ceiling=1800 finish $sha 20261009T000000Z "green: stub" stub-run-1 > $T/out.log 2>&1
 check finish-names-the-merge 'python3 -c "import json,glob,sys; r=json.load(open(glob.glob(\"$work/record-*/fast.json\")[0])); sys.exit(0 if (r[\"sha\"], r[\"candidate\"], r[\"gated\"]) == (\"3\"*40, \"1\"*40, \"3\"*40) and r[\"planned_stages\"] == [\"tests\"] and r[\"stages_exit\"] == {\"tests\": 0} and (r[\"pass\"], r[\"skip\"], r[\"fail\"]) == (1, 1, 0) and r[\"build_ok\"] else 1)"'
+# finish: a void at tier 40 and up is placed again once, at the same tier (#snbpqyb; @system_adamic, Oct 9 16:00Z). Its
+# verdict goes to <sha>.verdict.void-again, the work directory and its proven tests stay for serve to carry, and the
+# server's own waiting list (its python, read from fast.sh) names the job again. A second void, tier 30, a cancel, a red
+# and a --once run each write .verdict as before.
+awk '/^	waiting=.*<<\047PYTHON\047$/{on=1; next} on && /^PYTHON$/{exit} on{print}' "$fast" > "$stubs/waiting.py"
+grep -q 'ready.append' "$stubs/waiting.py" || { echo "FAIL: no waiting list in $fast"; failures=$((failures + 1)); }
+voided() { # voided <priority> [verdict]: finish on a job that ran at <priority>, with two proven tests and one kept from before
+	scenario "voided-$1"
+	echo "$1" > $work/priority; echo "{\"sha\": \"$sha\", \"priority\": $1}" > $jobs/$sha.json; touch $jobs/$sha.running
+	printf '%s\n' '{"Package":"p","Test":"TestA","Action":"pass"}' '{"Package":"p","Test":"TestB","Action":"pass"}' '{"Package":"p","Test":"TestC","Action":"fail"}' \
+		'{"Package":"p","Test":"TestA/sub","Action":"pass"}' '{"Package":"p","Test":"TestK","Action":"pass","LoomSource":"stub-run-0"}' > $work/test.jsonl
+	cp $work/test.jsonl $T/test-before.jsonl
+	LOOM_FAST_PUBLISH=0 ceiling=1800 finish $sha 20261009T000000Z "${2:-void: $sha fast gate on Loom's side pool broke (a unit never reported: Loom's fault), so the boxes take it (run stub-run-1)}" stub-run-1 > $T/out.log 2>&1
+}
+served() { [ "$(python3 $stubs/waiting.py $jobs)" = "$sha $1" ]; }
+voided 40
+check void-again-first-void-at-40 '[ ! -e $jobs/$sha.verdict ] && [ ! -e $jobs/$sha.running ] && grep -q "^void: $sha .*Loom.s fault" $jobs/$sha.verdict.void-again && served 40 && cmp -s $work/test.jsonl $T/test-before.jsonl && grep -q "void-again: 111111111111 voided at tier 40, queued once more with 2 kept tests" $T/out.log && [ $(wc -l < $T/out.log) = 1 ]'
+# The same job voids again on its second attempt: that void stands.
+touch $jobs/$sha.running; cp $jobs/$sha.verdict.void-again $T/first-void
+LOOM_FAST_PUBLISH=0 ceiling=1800 finish $sha 20261009T001000Z "void: $sha fast gate on Loom's side pool broke again (run stub-run-2)" stub-run-2 > $T/out.log 2>&1
+check void-again-second-void-stands 'grep -q "^void: $sha .*broke again" $jobs/$sha.verdict && cmp -s $jobs/$sha.verdict.void-again $T/first-void && [ -z "$(python3 $stubs/waiting.py $jobs)" ] && ! grep -q void-again: $T/out.log'
+voided 30
+check void-at-30-stands 'grep -q "^void: " $jobs/$sha.verdict && [ ! -e $jobs/$sha.verdict.void-again ] && [ -z "$(python3 $stubs/waiting.py $jobs)" ]'
+voided 40 "void: $sha cancelled while it ran (${sha:0:12}.cancel), so the boxes take it if it's still wanted (run stub-run-1)"
+check void-cancelled-while-running-stands 'grep -q "^void: $sha cancelled while it ran" $jobs/$sha.verdict && [ ! -e $jobs/$sha.verdict.void-again ]'
+# A cancel that landed as .cancelled, its verdict reading Loom's breakage (the ceiling's rewrite, or a race with serve's check).
+scenario cancelled-file; echo 40 > $work/priority; echo "{\"sha\": \"$sha\", \"priority\": 40}" > $jobs/$sha.json; touch $jobs/$sha.running $jobs/$sha.cancelled
+LOOM_FAST_PUBLISH=0 ceiling=1800 finish $sha 20261009T000000Z "void: $sha fast gate on Loom's side pool broke (run stub-run-1)" stub-run-1 > $T/out.log 2>&1
+check void-at-40-cancelled-file-stands 'grep -q "^void: " $jobs/$sha.verdict && [ ! -e $jobs/$sha.verdict.void-again ]'
+voided 40 "red: $sha fast gate on Loom's side pool, go tests only, 1 failed; first: p TestC (branch b, run stub-run-1)"
+check red-at-40-stands 'grep -q "^red: " $jobs/$sha.verdict && [ ! -e $jobs/$sha.verdict.void-again ] && [ -z "$(python3 $stubs/waiting.py $jobs)" ]'
+voided 40 "green: $sha fast gate on Loom's side pool, go tests only (run stub-run-1)"
+check green-at-40-stands 'grep -q "^green: " $jobs/$sha.verdict && [ ! -e $jobs/$sha.verdict.void-again ]'
+# A void the ceiling wrote (stopped with units unreported, no red in hand) is Loom's too: placed again.
+scenario ceiling-void; echo 40 > $work/priority; echo "{\"sha\": \"$sha\", \"priority\": 40}" > $jobs/$sha.json; touch $jobs/$sha.running $work/ceiling
+LOOM_FAST_PUBLISH=0 ceiling=1800 finish $sha 20261009T000000Z "void: $sha fast gate on Loom's side pool broke (run stub-run-1)" stub-run-1 > $T/out.log 2>&1
+check ceiling-void-at-40-again 'grep -q "^void: .*30-minute ceiling" $jobs/$sha.verdict.void-again && [ ! -e $jobs/$sha.verdict ] && served 40 && grep -q "queued once more with 0 kept tests" $T/out.log'
+# A --once run (the canary's, at tier 40) has no server behind it: its void stands for its caller to read.
+once=$sha voided 40
+check void-at-40-once-stands 'grep -q "^void: " $jobs/$sha.verdict && [ ! -e $jobs/$sha.verdict.void-again ]'
 echo "failures: $failures"
 exit $((failures > 0))

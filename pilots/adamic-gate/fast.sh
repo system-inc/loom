@@ -552,6 +552,37 @@ PY
 		rm -f "${index}" "${record}"/* && rmdir "${record}"
 	fi
 	{ echo "${verdict}"; echo "record: ${recordPath}"; [ -s "${work}/phases-ref" ] && echo "phases: $(cat "${work}/phases-ref")"; } > "${jobs}/${sha}.verdict.partial"
+	# A void at tier 40 and up is re-placed at once, at the same tier, once (#snbpqyb; @system_adamic, Oct 9 16:00Z: the
+	# operator renamed four such voids aside by hand). Its verdict goes to <sha>.verdict.void-again instead of .verdict,
+	# so the watcher never reads a void for a job about to run again, and the loop below, which serves any job file with
+	# no .verdict, .running or .cancelled, takes it on its next pass. That file is also the job's memory: with it present
+	# a second void stands. The work directory stays as it is, so serve carries this attempt's proven tests to the next
+	# (#v4cm3s7). A cancel, a green or a red never goes again, and neither does a --once run, whose caller (the canary)
+	# reads its verdict when it exits and has no server behind it.
+	if [ -z "${once:-}" ] && [ "${verdict%%:*}" = void ] && [ "$(cat "${work}/priority" 2> /dev/null || echo 0)" -ge 40 ] 2> /dev/null &&
+		[ ! -e "${jobs}/${sha}.verdict.void-again" ] && [ ! -e "${jobs}/${sha}.cancel" ] && [ ! -e "${jobs}/${sha}.cancelled" ] && [[ ${verdict} != *" cancelled "* ]]; then
+		mv "${jobs}/${sha}.verdict.partial" "${jobs}/${sha}.verdict.void-again"
+		rm -f "${jobs}/${sha}.running"
+		# The count serve will carry: this attempt's own top-level tests that passed and never failed (inputs.py kept).
+		local kept
+		kept=$(python3 - "${work}/test.jsonl" <<'PY'
+import json, os, sys
+passed, failed = set(), set()
+for line in open(sys.argv[1], errors="replace") if os.path.exists(sys.argv[1]) else []:
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    test = event.get("Test") or ""
+    if "LoomSource" in event or not test or "/" in test or event.get("Action") not in ("pass", "fail"):
+        continue
+    (passed if event["Action"] == "pass" else failed).add((event.get("Package", ""), test))
+print(len(passed - failed))
+PY
+)
+		echo "$(date -u +%H:%M:%S) void-again: ${sha:0:12} voided at tier $(cat "${work}/priority"), queued once more with ${kept} kept tests (its void: ${sha:0:12}.verdict.void-again)"
+		return
+	fi
 	mv "${jobs}/${sha}.verdict.partial" "${jobs}/${sha}.verdict"
 	rm -f "${jobs}/${sha}.running"
 	echo "$(date -u +%H:%M:%S) ${verdict}"
