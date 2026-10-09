@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/system-inc/loom/protocol"
 )
 
 const testSha = "8161285ad449cc3a8cce6746120de2133c4a738a"
@@ -22,7 +24,7 @@ func writeList(t *testing.T, content string) string {
 
 // Each line of run.py's unit list is one pool unit, its phase and unit passed to the phase body as they were listed.
 func TestPhaseUnitsAreOnePerLineWithThePhaseAndUnitAsArguments(t *testing.T) {
-	units, err := phaseJobUnits(codexOpening, testSha, testTools, writeList(t, "build\nwasi hello_world\n\ncatalog 08\nstage3 stage3-lane\n"))
+	units, err := phaseJobUnits(codexOpening, testSha, testTools, writeList(t, "build\nwasi internal/load/testdata/0.1/compile/01_hello.ts\n\ncatalog 08\nstage3 stage3-lane\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,11 +32,14 @@ func TestPhaseUnitsAreOnePerLineWithThePhaseAndUnitAsArguments(t *testing.T) {
 	for _, unit := range units {
 		ids = append(ids, unit.Id)
 	}
-	if !reflect.DeepEqual(ids, []string{"phase-build", "phase-wasi-hello_world", "phase-catalog-08", "phase-stage3-stage3-lane"}) {
+	if _, err := protocol.Expand(protocol.Job{Name: "j", Units: units}); err != nil {
+		t.Fatalf("not a job Loom takes: %v", err)
+	}
+	if !reflect.DeepEqual(ids, []string{"phase-build", "phase-wasi-internal-load-testdata-0-1-compile-01-hello-ts", "phase-catalog-08", "phase-stage3-stage3-lane"}) {
 		t.Fatalf("ids %v", ids)
 	}
 	tail := units[1].Argv[3:]
-	if !reflect.DeepEqual(tail, []string{"adamic-gate-phase", testSha, testTools, "wasi", "hello_world"}) {
+	if !reflect.DeepEqual(tail, []string{"adamic-gate-phase", testSha, testTools, "wasi", "internal/load/testdata/0.1/compile/01_hello.ts"}) {
 		t.Fatalf("argv after the script %v", tail)
 	}
 	if units[0].Outputs[0].Glob != "loom-out/phase.tar.gz" || units[0].Resources.Cpus != 4 {
@@ -43,7 +48,7 @@ func TestPhaseUnitsAreOnePerLineWithThePhaseAndUnitAsArguments(t *testing.T) {
 }
 
 func TestAPhaseListThatIsNotRunPysShapeIsRefused(t *testing.T) {
-	for _, content := range []string{"", "build vet extra\n", "build;rm\n", "build\nbuild\n", "wasi -dash\n"} {
+	for _, content := range []string{"", "build vet extra\n", "build;rm\n", "build\nbuild\n", "wasi -dash\n", "wasi a/../../etc\n", "build/x\n"} {
 		if _, err := phaseJobUnits(codexOpening, testSha, testTools, writeList(t, content)); err == nil {
 			t.Errorf("%q accepted", content)
 		}

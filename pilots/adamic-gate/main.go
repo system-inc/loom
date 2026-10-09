@@ -799,10 +799,11 @@ func phaseJobUnits(opening string, sha string, toolsSha string, listPath string)
 		if len(fields) == 0 {
 			continue
 		}
-		if len(fields) > 2 || !phaseName.MatchString(fields[0]) || (len(fields) == 2 && !phaseName.MatchString(fields[1])) {
-			return nil, fmt.Errorf("%s:%d: a line is <phase> or <phase> <unit>, letters, digits, dots, dashes and underscores", listPath, number+1)
+		if len(fields) > 2 || !phaseName.MatchString(fields[0]) || (len(fields) == 2 && (!unitName.MatchString(fields[1]) || strings.Contains(fields[1], ".."))) {
+			return nil, fmt.Errorf("%s:%d: a line is <phase> or <phase> <unit>: a phase of letters, digits, dots, dashes and underscores, a unit of those and slashes", listPath, number+1)
 		}
-		id := "phase-" + strings.Join(fields, "-")
+		// A job's unit ids are lowercase letters, digits and dashes; the unit's own name rides in its argv as listed.
+		id := "phase-" + strings.Trim(nonIdCharacters.ReplaceAllString(strings.ToLower(strings.Join(fields, "-")), "-"), "-")
 		if seen[id] {
 			return nil, fmt.Errorf("%s:%d: %s listed twice", listPath, number+1, strings.Join(fields, " "))
 		}
@@ -817,8 +818,11 @@ func phaseJobUnits(opening string, sha string, toolsSha string, listPath string)
 	return units, nil
 }
 
-// phaseName is a phase or unit name as run.py names them (catalog entries are numbers, wasi fixtures words).
+// phaseName is a phase as run.py names it; unitName one of its units, which may be a tree path (a wasi fixture,
+// internal/load/testdata/0.1/compile/01_hello.ts) or a number (a catalog entry).
 var phaseName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var nonIdCharacters = regexp.MustCompile(`[^a-z0-9]+`)
+var unitName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,159}$`)
 
 // warm plans one warm-up unit per Codex instance in the pool: the opening (clone, the gate's setup.sh once) and
 // warmBody at the sha. Each instance holds one unit at a time, so units equal to the pool's width reach every
