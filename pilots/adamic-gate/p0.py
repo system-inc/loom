@@ -173,7 +173,13 @@ def main():
         body = (note + "\n\nOne family, one cause, one task: fix or split it until every leaf runs under 60 s on one 4-CPU Codex "
                 "instance. A kill that lands before the tests start (C emission, a sanitized build) is the build phase's (#8gw478y), "
                 "not the tests'. Loom closes this task itself after two runs in a row with every leaf of the family under 60 s.")
-        output = tasks("new", title[:200], "--parent", "5g5151k", "--priority", "Now", "--owner", owner, "--content", body, dry=arguments.dry)
+        # New tasks go under LOOM_P0_PARENT only. The block rule (@system_adamic, Oct 9 06:26Z) closes #5g5151k and #fvmyvy8
+        # to new blockers, so with no parent named a family is reported and left unfiled; notes and closings go on.
+        parent = os.environ.get("LOOM_P0_PARENT", "")
+        if not parent:
+            print("p0: not filed, no LOOM_P0_PARENT: %s (%s)" % (key, what))
+            continue
+        output = tasks("new", title[:200], "--parent", parent, "--priority", "Now", "--owner", owner, "--content", body, dry=arguments.dry)
         created = re.search(r"#(\w{6,7})", output or "")
         filed[key] = {"task": created.group(1) if created else "dry", "owner": owner, "filed": arguments.run, "under": 0, "last": arguments.run}
         print("filed %s for %s: %s (%d leaves)" % (filed[key]["task"], owner, key, len(members)))
