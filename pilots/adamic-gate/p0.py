@@ -140,7 +140,8 @@ def main():
         families.setdefault(familyOf(package, test) + (cause,), []).append((unit, test, over))
     for package, change in sorted(skipped.items()):
         print("p0: stale, not filed: %s moved on main since %s (%s)" % (package, arguments.sha[:12], change))
-    tree = tasks("tree", "5g5151k", "--depth", "4")  # a read, so it runs in a dry run too
+    # Reads, so they run in a dry run too: the grain tasks owners hold sit under both.
+    tree = tasks("tree", "5g5151k", "--depth", "4") + tasks("tree", os.environ.get("LOOM_P0_PARENT", "1pckk0k") or "1pckk0k", "--depth", "4")
     notes = set(json.load(open(noted))) if os.path.exists(noted) else set()
     for (package, stem, cause), members in sorted(families.items()):
         key = "%s %s %s" % (package, stem, cause)
@@ -158,7 +159,7 @@ def main():
             filed[key]["under"], filed[key]["last"] = 0, arguments.run
             continue
         # An open grain task that names the family (and its package) is where it goes.
-        existing = [found for found in re.findall(r"[◑○] \[\w\] (#\w+)\s+(.*)", tree) if stem in found[1] and relative.split("/")[-1] in found[1]]
+        existing = [found for found in re.findall(r"[○◐◑◓⊘] \[\w\] (#\w+)\s+(.*)", tree) if stem in found[1] and relative.split("/")[-1] in found[1]]
         if existing:
             mark = existing[0][0].lstrip("#") + " " + arguments.run
             if mark not in notes:
@@ -173,11 +174,11 @@ def main():
         body = (note + "\n\nOne family, one cause, one task: fix or split it until every leaf runs under 60 s on one 4-CPU Codex "
                 "instance. A kill that lands before the tests start (C emission, a sanitized build) is the build phase's (#8gw478y), "
                 "not the tests'. Loom closes this task itself after two runs in a row with every leaf of the family under 60 s.")
-        # New tasks go under LOOM_P0_PARENT only. The block rule (@system_adamic, Oct 9 06:26Z) closes #5g5151k and #fvmyvy8
-        # to new blockers, so with no parent named a family is reported and left unfiled; notes and closings go on.
-        parent = os.environ.get("LOOM_P0_PARENT", "")
+        # New tasks go under #1pckk0k, "Grain, next block" (@system_adamic, Oct 9 06:27Z): the block rule closes #5g5151k
+        # and #fvmyvy8 to new blockers. LOOM_P0_PARENT names another, and an empty one files nothing new.
+        parent = os.environ.get("LOOM_P0_PARENT", "1pckk0k")
         if not parent:
-            print("p0: not filed, no LOOM_P0_PARENT: %s (%s)" % (key, what))
+            print("p0: not filed, LOOM_P0_PARENT is empty: %s (%s)" % (key, what))
             continue
         output = tasks("new", title[:200], "--parent", parent, "--priority", "Now", "--owner", owner, "--content", body, dry=arguments.dry)
         created = re.search(r"#(\w{6,7})", output or "")
