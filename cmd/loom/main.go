@@ -22,6 +22,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,6 +44,7 @@ import (
 
 	"github.com/system-inc/loom/coordinator"
 	"github.com/system-inc/loom/gatelines"
+	"github.com/system-inc/loom/ownerbridge"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -54,6 +56,7 @@ const usage = `usage:
   loom pool publish-runner
   loom pool prompt <pool> --runner <sha256> [--until 55m]
   loom gate-lines [--once] [--interval <duration>] [--wire <url>]
+  loom owner-bridge [--once] [--interval <duration>] [--pipeline <url>]
   loom top [--once] [--wire <url>]
   loom publish-token <name> [--days N] [--candidate]
   loom submit-token <owner> [--days N]
@@ -70,6 +73,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "top" {
 		return top(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "owner-bridge" {
+		return ownerBridge(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "gate-lines" {
 		return gateLines(arguments[1:], stdout, stderr)
@@ -226,6 +232,66 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 
 // gateLines reads what the gate is doing from its own files and posts it to the board as the gate's lines,
 // every interval, until stopped. --once prints one reading as JSON and posts nothing.
+// ownerBridge sends each change's owner what they act on (landed, red, parked) from loom-pipeline's owners' feed,
+// with `ahra os send` from ~/Projects/ahra, once each: the last sequence sent is kept in ~/.loom/owner-bridge.seq.
+func ownerBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("owner-bridge", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	once := flags.Bool("once", false, "send what is owed once, then exit")
+	interval := flags.Duration("interval", 5*time.Second, "how often to read the feed")
+	pipeline := flags.String("pipeline", "https://loom-pipeline.kirk-ouimet.workers.dev", "loom-pipeline's origin")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
+		fmt.Fprint(stderr, usage)
+		return 3
+	}
+	home, _ := os.UserHomeDir()
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	bridge := &ownerbridge.Bridge{
+		Pipeline:  *pipeline,
+		Client:    &http.Client{Timeout: 30 * time.Second},
+		StatePath: filepath.Join(home, ".loom", "owner-bridge.seq"),
+		Token: func() string {
+			token, _ := protocol.MintToken(secret, protocol.TokenClaims{Run: "owner-bridge", Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Hour).Unix()})
+			return token
+		},
+		Send: func(owner string, text string) error {
+			command := exec.Command("./node_modules/.bin/ahra", "os", "send", owner, text, "--from", "system_adamic_loom_web")
+			command.Dir = filepath.Join(home, "Projects", "ahra")
+			if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "sent") {
+				return fmt.Errorf("ahra os send: %v: %s", err, bytes.TrimSpace(output))
+			}
+			return nil
+		},
+	}
+	runContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	for runContext.Err() == nil {
+		started := time.Now()
+		sent, err := bridge.Once(runContext)
+		if sent > 0 {
+			fmt.Fprintf(stdout, "loom owner-bridge: sent %d\n", sent)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "loom owner-bridge: %v\n", err)
+		}
+		if *once {
+			if err != nil {
+				return 1
+			}
+			return 0
+		}
+		select {
+		case <-runContext.Done():
+		case <-time.After(max(0, *interval-time.Since(started))):
+		}
+	}
+	return 0
+}
+
 func gateLines(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("gate-lines", flag.ContinueOnError)
 	flags.SetOutput(stderr)
