@@ -92,6 +92,11 @@ pregate() {
 	if [ -s "${work}/${sha}.tests.jsonl" ]; then
 		python3 "${HOME}/.loom/bin/times.py" update "${work}/${sha}.tests.jsonl" --sha "${sha}" --run "$(head -1 "${report}" | awk '{print $2}' | tr -d :)" &&
 			python3 "${HOME}/.loom/bin/times.py" tsv > "${HOME}/.loom/loom-times.tsv.partial" && mv "${HOME}/.loom/loom-times.tsv.partial" "${HOME}/.loom/loom-times.tsv"
+		# The burn-down line after every run that times leaves (the witness's grain curve reads it, @system_adamic):
+		# its summary table on #5g5151k, the whole list kept beside the run.
+		python3 "${HOME}/.loom/bin/burndown.py" "${work}/${sha}.tests.jsonl" --run "${sha:0:12} ${scope}, run $(head -1 "${report}" | awk '{print $2}' | tr -d :)" > "${work}/${sha}.burndown.md"
+		sed '/^## /,$d' "${work}/${sha}.burndown.md" > "${work}/${sha}.burndown-line.md"
+		(cd /Users/kirkouimet/Projects/ahra && ./node_modules/.bin/ahra tasks comment 5g5151k --role Agent --text-file "${work}/${sha}.burndown-line.md" > /dev/null 2>&1 || true)
 		gzip -9f "${work}/${sha}.tests.jsonl"
 	fi
 	run=$(head -1 "${report}" | awk '{print $2}' | tr -d :)

@@ -427,7 +427,7 @@ func main() {
 		var verdict string
 		verdict, err = reds(os.Args[2:])
 		if err == nil && verdict != "green" {
-			os.Exit(map[string]int{"red": 1, "void": 3, "cooked": 4}[verdict])
+			os.Exit(map[string]int{"red": 1, "void": 3}[verdict])
 		}
 	case "compare":
 		var parity bool
@@ -603,7 +603,7 @@ func plan(arguments []string) error {
 	referencePath := flags.String("reference", "", "the whole gate's test.jsonl.gz for the same sha")
 	sha := flags.String("sha", "", "the main commit to test, the reference's own")
 	units := flags.Int("units", 10, "how many units, unless --budget sets the count")
-	budget := flags.Float64("budget", 0, "seconds a unit may take, its setup included: units are as many as fit it, each killed at budget plus a quarter")
+	budget := flags.Float64("budget", 0, "seconds a unit may take, its setup included: units are as many as fit it, each killed at budget plus a half")
 	unitSetup := flags.Float64("unit-setup", 10, "with --budget, seconds a unit spends before its first test (warm instance)")
 	only := flags.String("only", "", "plan only packages matching this regular expression, for a trial")
 	target := flags.String("target", "box", "where the units run: box (a gate slot's warm tree) or codex (a Codex instance)")
@@ -768,10 +768,11 @@ func plan(arguments []string) error {
 		childrenOf = append(childrenOf, map[string][]string{})
 		place(len(loads)-1, candidate)
 	}
-	// A packed unit under a budget is killed at budget plus a quarter; an unbudgeted or over-budget unit runs long.
+	// A packed unit under a budget is killed at budget plus a half (90 s for 60, Kirk, Oct 9 03:17Z), and that kill is
+	// a red; an unbudgeted or over-budget unit runs long.
 	timeout := func(index int) int {
 		if *budget > 0 && index < packed {
-			return int(math.Ceil(*budget * 1.25))
+			return int(math.Ceil(*budget * 1.5))
 		}
 		return 3*3600 + 600
 	}
@@ -819,9 +820,30 @@ func plan(arguments []string) error {
 			names = append(names, packageName)
 		}
 		sort.Strings(names)
+		// Each remainder rides with tests it shares a test binary with: a package's on a unit already running some of
+		// its tests, a split parent's on a unit running some of its children, so no unit builds every package (Oct 9:
+		// e3f2be21's tests-17 held all 80 remainders and 6 new packages, the run's 20-minute tail). A remainder with
+		// no such unit goes to the lightest, which then carries its own package's tests.
+		holding := func(packageName string, parentKey string) int {
+			best := -1
+			for index := range loads {
+				if index >= packed && remainderUnit < 0 {
+					continue // an over-budget unit runs long already; leave it to its test
+				}
+				if (parentKey == "" && len(assigned[index][packageName]) > 0) || (parentKey != "" && len(childrenOf[index][parentKey]) > 0) {
+					if best < 0 || loads[index] < loads[best] {
+						best = index
+					}
+				}
+			}
+			if best < 0 {
+				return lightest()
+			}
+			return best
+		}
 		for _, packageName := range names {
 			sort.Strings(byPackage[packageName])
-			index := lightest()
+			index := holding(packageName, "")
 			remainders[index] = append(remainders[index], packageName+"=. skip=^("+strings.Join(byPackage[packageName], "|")+")$")
 		}
 		// A package the reference never ran (new since it) is named by no spec above; the unit asks go list for them.
@@ -840,7 +862,7 @@ func plan(arguments []string) error {
 			}
 			sort.Strings(quoted)
 			prefix := "^" + regexp.QuoteMeta(parent) + "$/"
-			index := lightest()
+			index := holding(packageName, parentKey)
 			remainders[index] = append(remainders[index], packageName+"="+prefix+". skip="+prefix+"^("+strings.Join(quoted, "|")+")$")
 		}
 	}
@@ -1483,10 +1505,11 @@ func reds(arguments []string) (string, error) {
 			}
 			continue
 		}
-		// Killed at its budget's timeout: cooked, over budget, which is neither a red nor Loom's fault. The next plan
-		// splits it smaller (#2en3b4t).
+		// Killed at its budget's kill (90 s for 60): a red, P0 for its slowest leaf's owner (Kirk, Oct 9 03:17Z, in place
+		// of the 75 s cooked rule). The next plan splits it smaller.
 		if timedOut {
-			cooked = append(cooked, fmt.Sprintf("%s: killed at its %d s budget (last output %q)", unit.Id, unit.TimeoutSeconds, strings.TrimSpace(tail)))
+			failed = append(failed, fmt.Sprintf("%s (killed at %d s, over budget)\n    last output %q", unit.Id, unit.TimeoutSeconds, strings.TrimSpace(tail)))
+			cooked = append(cooked, unit.Id)
 			continue
 		}
 		if !exited || output == "" {
@@ -1573,15 +1596,13 @@ func reds(arguments []string) (string, error) {
 		verdict = "void"
 	case len(failed) > 0:
 		verdict = "red"
-	case len(cooked) > 0:
-		verdict = "cooked"
 	}
-	fmt.Printf("run %s: %s, %d tests in %d units, %d failed, %d units broken, %d cooked\n", run, verdict, tests, len(job.Units), len(failed), len(broken), len(cooked))
+	fmt.Printf("run %s: %s, %d tests in %d units, %d failed, %d units broken, %d killed over budget\n", run, verdict, tests, len(job.Units), len(failed), len(broken), len(cooked))
 	for _, line := range broken {
 		fmt.Println("BROKEN " + line)
 	}
 	for _, line := range cooked {
-		fmt.Println("COOKED " + line)
+		fmt.Println("KILLED " + line + ": over budget, P0")
 	}
 	for _, line := range failed {
 		fmt.Println("FAIL " + line)

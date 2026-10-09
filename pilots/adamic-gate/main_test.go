@@ -106,7 +106,7 @@ func TestLoomTimesAreReadByPackageAndTest(t *testing.T) {
 }
 
 // Under a budget, the unit count comes out of the times: an item over the budget runs alone with the long timeout,
-// and the rest pack into as few units as fit, each killed at budget plus a quarter.
+// and the rest pack into as few units as fit, each killed at budget plus a half.
 func TestABudgetSetsTheUnitCountAndAnOverBudgetTestRunsAlone(t *testing.T) {
 	var reference bytes.Buffer
 	writer := gzip.NewWriter(&reference)
@@ -139,8 +139,8 @@ func TestABudgetSetsTheUnitCountAndAnOverBudgetTestRunsAlone(t *testing.T) {
 			}
 		}
 	}
-	// 100 s of packable tests in 50 s of room: two units of 75 s, then TestHuge alone with the long timeout.
-	if !reflect.DeepEqual(timeouts, []int{75, 75, 3*3600 + 600}) || huge != "tests-02" {
+	// 100 s of packable tests in 50 s of room: two units killed at 90 s, then TestHuge alone with the long timeout.
+	if !reflect.DeepEqual(timeouts, []int{90, 90, 3*3600 + 600}) || huge != "tests-02" {
 		t.Fatalf("timeouts %v, TestHuge in %q", timeouts, huge)
 	}
 }
