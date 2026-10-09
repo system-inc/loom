@@ -276,6 +276,13 @@ python3 -c "import json,sys; j=json.load(open(sys.argv[1])); j['units']=[u for u
 # worker, so "again" means another placement, almost always on another of the pool's instances.)
 reruns=()
 for round in 1 2; do
+	# No round starts past the job's ceiling or after its cancel: fast.sh's watchdog stops the run in flight, and a
+	# round placed after it would run on unbounded (#gk5fh85, #m5x7n3n; Oct 9: canary 5 hung past its ceiling in a
+	# retry round, 9cab573b retried for 45 minutes after its cancel, and stopping a round only started the next).
+	if [ -f "${work}/ceiling" ] || [ -f "${work%.work}.cancelled" ] || [ -f "${work%.work}.cancel" ]; then
+		echo "no retry round ${round}: the job is past its ceiling or cancelled" >> "${work}/run.log"
+		break
+	fi
 	"${planner}" reds --job "${work}/tests-only.json" --record "${work}/record.jsonl" ${reruns[@]+"${reruns[@]}"} > "${work}/reds-round-${round}.txt" 2>&1
 	again=$(python3 - "${work}/reds-round-${round}.txt" <<'PY'
 import re, sys
