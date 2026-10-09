@@ -85,13 +85,21 @@ def main():
     parser.add_argument("--over", type=float, default=60.0, help="in a complete run, every leaf over this many seconds is filed")
     arguments = parser.parse_args()
     filed = json.load(open(state)) if os.path.exists(state) else {}
-    killed, complete = [], False
+    killed, complete, void = [], False, False
     for line in open(arguments.reds):
+        if re.match(r"^run \S+: void\b", line):
+            void = True
         match = re.match(r"^KILLED (\S+) (\S+) (\S+): over budget, P0$", line.strip())
         if match:
             killed.append((match.group(1), match.group(2), match.group(3), None))
         if re.match(r"^run \S+: (green|red), .* 0 units broken", line):
             complete = True
+    # A void run's kills file nothing: Loom broke it, and a leaf slowed by that is Loom's (@system_adamic_runtime, Oct 9:
+    # main 60397548's void run, its products failing in 0.1 s, filed TestDecodeASCIIUnit34 and TestDecodeASCIIWASIUnit33,
+    # 12 to 21 s each from a built binary). Its passes still count toward closing Loom's own P0s.
+    if void:
+        print("p0: run %s is void; its kills file nothing" % arguments.run)
+        killed = []
     seconds = leafSeconds(arguments.tests) if os.path.exists(arguments.tests) else {}
     # Each leaf over the budget in a complete run, unless a kill names it already: (unit, package, test, seconds).
     slow = []
