@@ -18,11 +18,15 @@
 # <slots> is "auto" by default: as many as the plan has units, up to 72 on the star's pool and 20 on the side pool.
 # Nothing builds on Kirk's Mac: the binaries are the pre-gate's (pregate.sh's header says how they are made on a box).
 set -uo pipefail
+# The tools this run uses: the live set by default, a staged set under its canary (#66qvxdd: pool tools are promoted only
+# after main's tip passes through them).
+export LOOM_BIN=${LOOM_BIN:-${HOME}/.loom/bin}
+bin=${LOOM_BIN}
 sha=$1 packages=$2 requester=$3 slots=${4:-auto} note=${5:-} pool=${LOOM_VERIFY_POOL:-codex-side}
 [ "${LOOM_PRIORITY:-0}" -ge 30 ] && [ -z "${LOOM_VERIFY_POOL:-}" ] && pool=codex
 work=${LOOM_VERIFY_WORK:-${HOME}/.loom/verify/${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "${work}"
-loom=${HOME}/.loom/bin/loom-pregate planner=${HOME}/.loom/bin/adamic-gate
+loom=${bin}/loom-pregate planner=${bin}/adamic-gate
 state=${HOME}/.adamic-full-gate gate=${HOME}/Projects/system/adamic-gate
 send() {
 	[ "${requester}" = none ] && return
@@ -38,7 +42,7 @@ if [ ! -s "${reference}" ]; then
 fi
 # The tree's own test list at the sha, Loom's own times, and the gate's selection when it names only some tests.
 git -C "${gate}" fetch -q origin "${sha}" 2> /dev/null
-python3 "${HOME}/.loom/bin/treetests.py" "${sha}" > "${work}/tree-tests.txt" 2> /dev/null
+python3 "${bin}/treetests.py" "${sha}" > "${work}/tree-tests.txt" 2> /dev/null
 budget=(--budget 60 --unit-setup 10 --split-all)
 [ -s "${work}/tree-tests.txt" ] && budget+=(--tree-tests "${work}/tree-tests.txt")
 [ -s "${HOME}/.loom/loom-times.tsv" ] && budget+=(--loom-times "${HOME}/.loom/loom-times.tsv")

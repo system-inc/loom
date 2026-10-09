@@ -22,6 +22,10 @@
 # away). Past it, every coordinator the job started is stopped, which drops its units still queued on the pool, and
 # the verdict says so: a red already in hand stays red, anything else is void with the ceiling as its reason.
 set -uo pipefail
+# The tools this run uses: the live set by default, a staged set under its canary (#66qvxdd: pool tools are promoted only
+# after main's tip passes through them).
+export LOOM_BIN=${LOOM_BIN:-${HOME}/.loom/bin}
+bin=${LOOM_BIN}
 
 jobs=${LOOM_FAST_JOBS:-${HOME}/.loom/jobs/fast}
 concurrent=${LOOM_FAST_CONCURRENT:-8}
@@ -51,7 +55,7 @@ serve() {
 	# never discards its proven units). Its passed tests are kept by package and input hash at the gate it ran at, then
 	# matched at this attempt's gate below; one attempt back, not accumulated.
 	if [ -s "${work}/test.jsonl" ] && [[ $(cat "${work}/gate" 2> /dev/null) =~ ^[0-9a-f]{40}$ ]]; then
-		python3 "${HOME}/.loom/bin/inputs.py" kept --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/test.jsonl" > "${work}/kept-previous.json" 2> /dev/null || rm -f "${work}/kept-previous.json"
+		python3 "${bin}/inputs.py" kept --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/test.jsonl" > "${work}/kept-previous.json" 2> /dev/null || rm -f "${work}/kept-previous.json"
 		mv "${work}/test.jsonl" "${work}/test-previous.jsonl"
 	fi
 	python3 - "${jobs}/${sha}.json" "${work}" <<'PY'
@@ -89,9 +93,9 @@ PY
 		return
 	fi
 	if [ -s "${work}/kept-previous.json" ]; then
-		python3 "${HOME}/.loom/bin/inputs.py" kept-match --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/kept-previous.json" > "${work}/kept.json" 2> /dev/null || rm -f "${work}/kept.json"
+		python3 "${bin}/inputs.py" kept-match --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" "${work}/kept-previous.json" > "${work}/kept.json" 2> /dev/null || rm -f "${work}/kept.json"
 	fi
-	LOOM_VERIFY_KEPT=$([ -s "${work}/kept.json" ] && echo "${work}/kept.json") LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${HOME}/.loom/bin/verify.sh" "$(cat "${work}/gate")" "$(cat "${work}/packages")" none auto > "${work}/verify.log" 2>&1
+	LOOM_VERIFY_KEPT=$([ -s "${work}/kept.json" ] && echo "${work}/kept.json") LOOM_PRIORITY=$(cat "${work}/priority") LOOM_VERIFY_WORK=${work} LOOM_VERIFY_ENV=${work}/env LOOM_VERIFY_PACKAGES=${work}/package-list LOOM_VERIFY_SELECT=$([ -f "${work}/select/select.json" ] && echo "${work}/select/select.json") "${bin}/verify.sh" "$(cat "${work}/gate")" "$(cat "${work}/packages")" none auto > "${work}/verify.log" 2>&1
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
 	rm -f "${work}/phases-status" "${work}/phases-ref"
@@ -123,7 +127,7 @@ PY
 # change's red; anything else that leaves none is void.
 runSelection() {
 	local sha=$1 stamp=$2 work=${jobs}/$1.work run token hash
-	"${HOME}/.loom/bin/adamic-gate" unit --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --id select --body "${HOME}/.loom/bin/select.sh" --output loom-out/select.tgz --output loom-out/select.stdout -- "$(cat "${work}/base")" "$(cat "${work}/base_name")" "$(cat "${work}/tools")" > "${work}/select-job.json" 2> "${work}/select-plan.log" || {
+	"${bin}/adamic-gate" unit --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --id select --body "${bin}/select.sh" --output loom-out/select.tgz --output loom-out/select.stdout -- "$(cat "${work}/base")" "$(cat "${work}/base_name")" "$(cat "${work}/tools")" > "${work}/select-job.json" 2> "${work}/select-plan.log" || {
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the selection couldn't be planned, so the boxes take it" ""
 		return 1
 	}
@@ -131,7 +135,7 @@ runSelection() {
 	# starved side pool, with 9 of 37 workers asking).
 	local selectPool=codex-side
 	[ "$(cat "${work}/priority" 2> /dev/null || echo 0)" -ge 30 ] && selectPool=codex
-	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool "${selectPool}=1" --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/select-record.jsonl" "${work}/select-job.json" > "${work}/select-run.log" 2>&1
+	"${bin}/loom-pregate" run --uncached --slots none --pool "${selectPool}=1" --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/select-record.jsonl" "${work}/select-job.json" > "${work}/select-run.log" 2>&1
 	run=$(head -1 "${work}/select-run.log" | awk '{print $2}' | tr -d :)
 	token=$(python3 - "${run}" <<'PY'
 import base64, hashlib, hmac, json, os, sys, time
@@ -205,11 +209,11 @@ PY
 	curl -fsS -X PUT --data-binary @"${work}/test.jsonl" -H "Authorization: Bearer ${token}" "https://loom-wire.kirk-ouimet.workers.dev/public/blobs/${hash}" > /dev/null || { echo "void: the go test record didn't reach the public store" > "${work}/phases-status"; return; }
 	echo "fast ${hash} ${base}" > "${work}/phases-units.txt"
 	reference=$(ls -t "${HOME}"/.loom/pregate/reference-*.jsonl.gz | head -1)
-	"${HOME}/.loom/bin/adamic-gate" plan --target codex --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "$(cat "${work}/gate")" --units 1 --only '^nothing-matches$' \
+	"${bin}/adamic-gate" plan --target codex --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "$(cat "${work}/gate")" --units 1 --only '^nothing-matches$' \
 		--phases "${tools}" --phase-units "${work}/phases-units.txt" 2> "${work}/phases-plan.err" | python3 -c "
 import json, sys
 job = json.load(sys.stdin); job['name'] = 'adamic-gate-fast-phases'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/phases.json" || { echo "void: the phases couldn't be planned" > "${work}/phases-status"; return; }
-	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool codex-side=1 --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/phases-record.jsonl" "${work}/phases.json" > "${work}/phases-run.log" 2>&1
+	"${bin}/loom-pregate" run --uncached --slots none --pool codex-side=1 --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/phases-record.jsonl" "${work}/phases.json" > "${work}/phases-run.log" 2>&1
 	run=$(head -1 "${work}/phases-run.log" | awk '{print $2}' | tr -d :)
 	token=$(python3 - "${run}" <<'PY'
 import base64, hashlib, hmac, json, os, sys, time
@@ -273,7 +277,7 @@ within() {
 	watchdog=$!
 	# The units-placed signal for developer tools' watcher (#3tj643t): <sha>.placed, "<placed> <total>", while the job runs.
 	rm -f "${jobs}/${sha}.placed"
-	python3 "${HOME}/.loom/bin/placed.py" "${jobs}" "${sha}" > /dev/null 2>&1 &
+	python3 "${bin}/placed.py" "${jobs}" "${sha}" > /dev/null 2>&1 &
 	local placed=$!
 	serve "${sha}"
 	kill "${placed}" 2> /dev/null
@@ -290,11 +294,11 @@ runStage3() {
 	[[ ${tools} =~ ^[0-9a-f]{40}$ ]] || tools=$(git -C "${gate}" ls-remote origin refs/heads/devtools/fast-gate | cut -f1)
 	printf 'stage3 %s\n' stage3-apply-tests stage3-lane-tests stage3-lane > "${work}/stage3-units.txt"
 	reference=$(ls -t "${HOME}"/.loom/pregate/reference-*.jsonl.gz | head -1)
-	"${HOME}/.loom/bin/adamic-gate" plan --target codex --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "$(cat "${work}/gate")" --units 1 --only '^nothing-matches$' \
+	"${bin}/adamic-gate" plan --target codex --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "$(cat "${work}/gate")" --units 1 --only '^nothing-matches$' \
 		--phases "${tools}" --phase-units "${work}/stage3-units.txt" 2> "${work}/stage3-plan.err" | python3 -c "
 import json, sys
 job = json.load(sys.stdin); job['name'] = 'adamic-gate-fast-stage3'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/stage3.json" || { echo "void: the stage 3 lane couldn't be planned" > "${work}/phases-status"; return; }
-	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool "$([ "$(cat "${work}/priority" 2> /dev/null || echo 0)" -ge 30 ] && echo codex || echo codex-side)=3" --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/stage3-record.jsonl" "${work}/stage3.json" > "${work}/stage3-run.log" 2>&1
+	"${bin}/loom-pregate" run --uncached --slots none --pool "$([ "$(cat "${work}/priority" 2> /dev/null || echo 0)" -ge 30 ] && echo codex || echo codex-side)=3" --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/stage3-record.jsonl" "${work}/stage3.json" > "${work}/stage3-run.log" 2>&1
 	run=$(head -1 "${work}/stage3-run.log" | awk '{print $2}' | tr -d :)
 	if grep -q '"type":"exit".*"code":2' "${work}/stage3-record.jsonl" 2> /dev/null || grep -qE ': (broken|void)|never finished' "${work}/stage3-run.log"; then
 		echo "void: the stage 3 lane broke for Loom's own reasons (run ${run})" > "${work}/phases-status"
@@ -310,7 +314,7 @@ finish() {
 	# packages with tests it didn't run, so nobody reads a fast green as covering them (@system_adamic, Oct 9 09:02Z).
 	local unplanned=""
 	if [ -s "${work}/planned-packages.txt" ]; then
-		unplanned=$(python3 "${HOME}/.loom/bin/treetests.py" "$(cat "${work}/gate" 2> /dev/null || echo "${sha}")" 2> /dev/null | cut -d' ' -f1 | sort -u | comm -23 - <(sort -u "${work}/planned-packages.txt") | wc -l | tr -d ' ')
+		unplanned=$(python3 "${bin}/treetests.py" "$(cat "${work}/gate" 2> /dev/null || echo "${sha}")" 2> /dev/null | cut -d' ' -f1 | sort -u | comm -23 - <(sort -u "${work}/planned-packages.txt") | wc -l | tr -d ' ')
 		[ -n "${unplanned}" ] && [ "${unplanned}" != 0 ] && verdict="${verdict}; unplanned: ${unplanned} packages, not run"
 	fi
 	# Tests kept from an earlier attempt are named in the verdict, so a green never hides that it rests on one.
