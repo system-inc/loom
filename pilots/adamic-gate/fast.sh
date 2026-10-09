@@ -165,14 +165,18 @@ print(' '.join(lines[start:start + 2]) if start is not None else 'see the select
 		return 1
 	fi
 	python3 - "${work}" "${sha}" <<'PY'
-import base64, json, re, shlex, sys
+import base64, json, os, re, shlex, sys
 work, sha = sys.argv[1], sys.argv[2]
 selection = json.load(open(work + "/select/select.json"))
 packages = [package for package in selection.get("packages") or [] if package]
 open(work + "/packages", "w").write("^(" + "|".join(re.escape(package) for package in packages) + ")$" if packages else "")
 open(work + "/package-list", "w").write("".join(package + "\n" for package in packages))
 archive = base64.b64encode(open(work + "/select.tgz", "rb").read()).decode()
-lines = ["mkdir -p /tmp/loom-select/%s && echo %s | base64 -d | tar -xz -C /tmp/loom-select/%s" % (sha, archive, sha)]
+# The selection ran at the gated sha (the merge, #11ymb02), and its env names /tmp/loom-select/<that sha>/ (its changed
+# paths, ADAMIC_GATE_CHANGED): it unpacks there, never under the tip (Oct 9: every test reading the changed paths in
+# the star 6b11cbda's merge gate cb0a07bd failed "no such file").
+gated = open(work + "/gate").read().strip() if os.path.exists(work + "/gate") else sha
+lines = ["mkdir -p /tmp/loom-select/%s && echo %s | base64 -d | tar -xz -C /tmp/loom-select/%s" % (gated, archive, gated)]
 lines += ["export %s=%s" % (key, shlex.quote(str(value))) for key, value in sorted((selection.get("env") or {}).items()) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)]
 open(work + "/env", "w").write("\n".join(lines) + "\n")
 beyond = selection.get("executors_beyond_go_tests") or []
