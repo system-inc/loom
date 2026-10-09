@@ -271,6 +271,10 @@ finish() {
 	cp "${work}/reds.txt" "${record}/reds.txt" 2> /dev/null
 	cp "${work}/build.txt" "${record}/build-vet.txt" 2> /dev/null
 	[ -s "${work}/test.jsonl" ] && cp "${work}/test.jsonl" "${record}/test.jsonl"
+	# The job and the run's own record, so a fast record can be a rerun's base: inputs.py hashes every unit from its
+	# argv and keeps the verdicts the record holds (#8f8f5y9, for push-main's rerun over a moved main, #mbexftz).
+	[ -s "${work}/job.json" ] && cp "${work}/job.json" "${record}/job.json"
+	[ -s "${work}/record.jsonl" ] && cp "${work}/record.jsonl" "${record}/record.jsonl"
 	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
 	# uncached_tests is the run's own mode, read from the coordinator's first line ("... units on N slots, uncached"),
 	# which push-main --fast-gate requires of a landing's Go-test record (integration, Oct 9 04:38Z).
