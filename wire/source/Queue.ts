@@ -908,9 +908,12 @@ export class Queue extends DurableObject<Env> {
             if (future.units !== null) {
                 return jsonResponse(409, { error: `future ${future.tree} is planned, so the judge decides it` });
             }
-            if (future.decided !== null && future.decided.status !== 'void') {
+            // A run already decided is an answer, not a second event; a void lets the next run decide.
+            if (future.decided !== null && (future.decided.run === checked.verdict.run || future.decided.status !== 'void')) {
                 return jsonResponse(future.decided.run === checked.verdict.run ? 200 : 409, {
-                    error: `future ${future.tree} was decided ${future.decided.status} by run ${future.decided.run}`,
+                    change: checked.change,
+                    decided: future.decided,
+                    error: future.decided.run === checked.verdict.run ? undefined : `future ${future.tree} was decided ${future.decided.status} by run ${future.decided.run}`,
                 });
             }
             const subject = { change: checked.change, future: future.tree, run: checked.verdict.run };
@@ -981,7 +984,7 @@ export class Queue extends DurableObject<Env> {
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
             const existing = state.futures.get(tree);
-            if (existing?.decided !== null && existing?.decided !== undefined && existing.decided.status !== 'void') {
+            if (existing?.decided !== null && existing?.decided !== undefined && (existing.decided.run === batch.run || existing.decided.status !== 'void')) {
                 return jsonResponse(existing.decided.run === batch.run ? 200 : 409, {
                     future: tree,
                     decided: existing.decided,
@@ -1030,19 +1033,21 @@ export class Queue extends DurableObject<Env> {
             if (entry === undefined || !isLive(entry) || entry.future === null || !futureLandable(state.futures.get(entry.future))) {
                 return [];
             }
-            return [{ change: change, future: entry.future, base: entry.record.base, owner: entry.record.owner }];
+            const future = state.futures.get(entry.future);
+            return [{ change: change, future: entry.future, base: entry.record.base, owner: entry.record.owner, run: future?.decided?.run ?? '' }];
         });
         return jsonResponse(200, { landings: orders });
     }
 
-    // What the workshop pusher did with a landing order: {main, from} when main is now exactly the change's future,
-    // or {refused, main} when the fast-forward was refused (main moved past the change's base). Until restacking
-    // (#05b5c2f), a refused change is parked and its owner resubmits on main.
+    // What the pusher did with a landing order: {main, from, landed} when it moved main from `from` to `main` and the
+    // commit it landed is exactly the change's future (today's push script lands it as main's second parent, its tree
+    // the gated tree), or {refused, main} when the push was refused. Until restacking (#05b5c2f), a refused change is
+    // parked and its owner resubmits on main.
     private async reportLanding(request: Request, change: string): Promise<Response> {
         const body = await readBodyText(request, MaximumChangeBodyBytes);
         const parsed = parseJson(body ?? '');
         if (!isPlainObject(parsed) || typeof parsed.main !== 'string' || !shaPattern.test(parsed.main)) {
-            return jsonResponse(400, { error: 'the body is {main, from} after a push, or {refused, main} after a refusal' });
+            return jsonResponse(400, { error: 'the body is {main, from, landed} after a push, or {refused, main} after a refusal' });
         }
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
@@ -1064,13 +1069,13 @@ export class Queue extends DurableObject<Env> {
                 );
                 return jsonResponse(200, { change: change, state: 'parked' });
             }
-            if (parsed.main !== entry.future) {
-                return jsonResponse(409, { error: `main ${parsed.main} is not ${entry.future}, the tree that was tested` });
+            if (parsed.landed !== entry.future) {
+                return jsonResponse(409, { error: `the push landed ${String(parsed.landed)}, not ${entry.future}, the tree that was tested` });
             }
-            if (typeof parsed.from !== 'string' || !shaPattern.test(parsed.from)) {
-                return jsonResponse(400, { error: 'from is the main the push moved from, 40 lowercase hex digits' });
+            if (typeof parsed.from !== 'string' || !shaPattern.test(parsed.from) || parsed.from === parsed.main) {
+                return jsonResponse(400, { error: 'from is the main the push moved from, 40 lowercase hex digits, not the new main' });
             }
-            await this.append('change.landed', { change: change, future: entry.future }, { main: parsed.main, from: parsed.from });
+            await this.append('change.landed', { change: change, future: entry.future }, { main: parsed.main, from: parsed.from, landed: parsed.landed });
             return jsonResponse(200, { change: change, state: 'landed', landed: parsed.main });
         });
     }

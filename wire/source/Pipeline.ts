@@ -46,7 +46,9 @@ export default {
                 return jsonResponse(503, { error: "the queue isn't on the wire yet" });
             }
             const url = new URL(request.url);
-            return queue.fetch(new Request(`https://queue${path}${url.search}`, { method: request.method, headers: request.headers, body: request.body }));
+            // Only the body's type crosses: the caller's token stays at the door.
+            const headers = { 'Content-Type': request.headers.get('Content-Type') ?? 'application/json' };
+            return queue.fetch(new Request(`https://queue${path}${url.search}`, { method: request.method, headers: headers, body: request.body }));
         }
         // The action store checks its own build token, since no other scope may reach it.
         const action = await handleAction(request, environment);

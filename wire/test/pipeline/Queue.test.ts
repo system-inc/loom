@@ -197,15 +197,17 @@ describe('the queue', function () {
         expect((await postWhole(queue, id, sha(9), 'passed', null)).status).toBe(409);
         expect(await landings(queue)).toEqual([]);
         expect((await postWhole(queue, id, sha(1), 'passed', null)).status).toBe(200);
-        expect(await landings(queue)).toEqual([{ change: id, future: sha(1), base: main, owner: 'system_adamic_compiler' }]);
-        // The pusher moved main somewhere else: refused, nothing logged.
-        expect((await report(queue, id, { main: sha(2), from: main })).status).toBe(409);
-        const landed = await report(queue, id, { main: sha(1), from: main });
+        expect(await landings(queue)).toEqual([{ change: id, future: sha(1), base: main, owner: 'system_adamic_compiler', run: 'gate-logs/x/fast' }]);
+        // The same run again is an answer, not a second verdict.
+        expect((await postWhole(queue, id, sha(1), 'passed', null)).status).toBe(200);
+        // The pusher landed some other commit: refused, nothing logged.
+        expect((await report(queue, id, { main: sha(50), from: main, landed: sha(2) })).status).toBe(409);
+        const landed = await report(queue, id, { main: sha(50), from: main, landed: sha(1) });
         expect(landed.status, await landed.clone().text()).toBe(200);
-        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'landed', landed: sha(1), future: sha(1) });
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'landed', landed: sha(50), future: sha(1) });
         expect(await landings(queue)).toEqual([]);
         // A second report of the same landing is an answer, not a second event.
-        expect((await report(queue, id, { main: sha(1), from: main })).status).toBe(200);
+        expect((await report(queue, id, { main: sha(50), from: main, landed: sha(1) })).status).toBe(200);
         expect(
             (await logOf(queue)).map(function (event) {
                 return event.type;
@@ -213,7 +215,7 @@ describe('the queue', function () {
         ).toEqual(['change.submitted', 'future.built', 'verdict.decided', 'change.landed']);
         const feed = (await (await queue.fetch('https://queue/events?owners=1')).text()).trim().split('\n');
         expect(feed).toHaveLength(1);
-        expect(JSON.parse(feed[0] ?? '')).toMatchObject({ type: 'change.landed', subject: { change: id }, data: { main: sha(1), from: main } });
+        expect(JSON.parse(feed[0] ?? '')).toMatchObject({ type: 'change.landed', subject: { change: id }, data: { main: sha(50), from: main, landed: sha(1) } });
         expect((await replay(await logOf(queue))).changes.get(id)?.state).toBe('landed');
     });
 
@@ -232,7 +234,7 @@ describe('the queue', function () {
                 return order.change;
             }),
         ).toEqual([ids[3]]);
-        expect((await report(queue, ids[1] ?? '', { main: sha(2), from: main })).status).toBe(409);
+        expect((await report(queue, ids[1] ?? '', { main: sha(50), from: main, landed: sha(2) })).status).toBe(409);
         // A void lets the next run decide; a red is final.
         expect((await postWhole(queue, ids[2] ?? '', sha(3), 'passed', null, 'second')).status).toBe(200);
         expect((await postWhole(queue, ids[0] ?? '', sha(1), 'passed', null, 'second')).status).toBe(409);
@@ -311,7 +313,7 @@ describe('the queue', function () {
         expect((await postBatch(queue, sha(1), green)).status).toBe(200);
         expect((await postBatch(queue, sha(1), { ...green, run: 'run-3' })).status).toBe(422);
         expect(await (await queue.fetch(`https://queue/verdicts/${keys[1]}`)).json()).toMatchObject({ status: 'failed', cause: 'mainRed', run: 'run-2' });
-        expect(await landings(queue)).toEqual([{ change: id, future: sha(1), base: main, owner: 'system_adamic_compiler' }]);
+        expect(await landings(queue)).toEqual([{ change: id, future: sha(1), base: main, owner: 'system_adamic_compiler', run: 'run-2' }]);
         expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ units: { planned: 2, passed: 1, failed: 1 } });
         // Replay rebuilds the index and the landing order from the log alone.
         const replayed = await replay(await logOf(queue));
