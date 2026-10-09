@@ -212,6 +212,11 @@ func (run *unitRun) execute(runContext context.Context) string {
 		run.fail(protocol.PhaseFetch, err)
 		return protocol.StatusBroken
 	}
+	// A product the store can't give whole is the machine's trouble, never the change's: the unit is broken.
+	if err := run.fetchProducts(runContext); err != nil {
+		run.fail(protocol.PhaseFetch, err)
+		return protocol.StatusBroken
+	}
 	outcome, err := run.runCommand(runContext)
 	if err != nil {
 		run.fail(protocol.PhaseStart, err)

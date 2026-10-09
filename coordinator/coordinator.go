@@ -599,7 +599,7 @@ func jsonLine(event protocol.Event) (string, error) {
 func (coordinator *coordinator) unitFor(planned protocol.PlannedUnit) protocol.Unit {
 	unit := protocol.Unit{
 		Run: coordinator.run, Unit: planned.Id, Argv: planned.Unit.Argv, Test: planned.Unit.Test, BrokenExit: planned.Unit.BrokenExit, Environment: planned.Unit.Environment,
-		Directory: planned.Unit.Directory, Inputs: planned.Unit.Inputs, Outputs: planned.Unit.Outputs,
+		Directory: planned.Unit.Directory, Inputs: planned.Unit.Inputs, Outputs: planned.Unit.Outputs, Products: planned.Unit.Products, ProductStore: planned.Unit.ProductStore,
 		TimeoutSeconds: planned.Unit.TimeoutSeconds, Resources: planned.Unit.Resources, Token: coordinator.runnerToken,
 	}
 	if len(unit.Inputs) > 0 || len(unit.Outputs) > 0 {

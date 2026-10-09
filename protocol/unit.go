@@ -84,6 +84,26 @@ func CheckUnit(unit Unit) error {
 			return fmt.Errorf("output glob %q: %w", output.Glob, err)
 		}
 	}
+	if len(unit.Products) > 0 && unit.Test != nil {
+		return fmt.Errorf("a test job takes no products yet: it builds its own command, with no place for them")
+	}
+	if len(unit.Products) > 0 && unit.ProductStore == "" {
+		return fmt.Errorf("the unit has products but no productStore")
+	}
+	for _, product := range unit.Products {
+		if !Sha256Pattern.MatchString(product.Key) {
+			return fmt.Errorf("product key %q: 64 lowercase hex digits", product.Key)
+		}
+		if product.Directory == "" || !filepath.IsLocal(filepath.FromSlash(product.Directory)) {
+			return fmt.Errorf("product %s: directory %q isn't inside the workspace", product.Key, product.Directory)
+		}
+	}
+	if unit.ProductStore != "" {
+		parsed, err := url.Parse(unit.ProductStore)
+		if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+			return fmt.Errorf("productStore %q isn't an http or https url", unit.ProductStore)
+		}
+	}
 	if (len(unit.Inputs) > 0 || len(unit.Outputs) > 0) && (unit.Store == nil || unit.Store.Url == "") {
 		return fmt.Errorf("the unit has inputs or outputs but no store")
 	}

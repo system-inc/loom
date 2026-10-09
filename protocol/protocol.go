@@ -35,6 +35,12 @@ type JobUnit struct {
 	Outputs        []Output          `json:"outputs,omitempty"`
 	TimeoutSeconds int               `json:"timeoutSeconds"`
 	Resources      Resources         `json:"resources,omitempty"`
+	// Products are built actions the unit runs, fetched by key from the action store at ProductStore before the
+	// command starts (contracts v1.1): refs/action/<key> names a manifest blob, the manifest lists the outputs, and every
+	// hash is checked. A product the store can't give whole finishes the unit broken, never failed. Argv units only, for
+	// now: a test job builds its own command and has no place for them yet.
+	Products     []Product `json:"products,omitempty"`
+	ProductStore string    `json:"productStore,omitempty"`
 	// Cache says the unit is hermetic: its result depends on nothing but what its cache key holds, so a
 	// pass may stand in for a later unit with the same key. Off by default, since a unit that reads a
 	// machine's own state (a warm checkout, say) has inputs its key can't see.
@@ -52,6 +58,13 @@ type JobUnit struct {
 
 // Toolchains are the names a unit may require and a machine may have, the unit key's tools (contract v1).
 var Toolchains = []string{"go", "clang", "node", "wasiSdk"}
+
+// A Product is one built action a unit runs: its productKey (contract 2) and the directory in the workspace its outputs
+// land in, each at its manifest path.
+type Product struct {
+	Key       string `json:"key"`
+	Directory string `json:"directory"`
+}
 
 type Input struct {
 	Path    string `json:"path"`
@@ -84,9 +97,12 @@ type Unit struct {
 	Outputs        []Output          `json:"outputs,omitempty"`
 	TimeoutSeconds int               `json:"timeoutSeconds"`
 	Resources      Resources         `json:"resources,omitempty"`
-	Store          *Endpoint         `json:"store,omitempty"`
-	Wire           *Endpoint         `json:"wire,omitempty"`
-	Token          string            `json:"token,omitempty"`
+	// Products and ProductStore: the built actions the runner fetches by key before the command (JobUnit's).
+	Products     []Product `json:"products,omitempty"`
+	ProductStore string    `json:"productStore,omitempty"`
+	Store        *Endpoint `json:"store,omitempty"`
+	Wire         *Endpoint `json:"wire,omitempty"`
+	Token        string    `json:"token,omitempty"`
 	// SequenceStart is the sequence the runner's first event takes: 0 for a first attempt. A pool unit placed
 	// again continues its stream on the wire from where the record stands, since its runner posts there itself.
 	SequenceStart int `json:"sequenceStart,omitempty"`

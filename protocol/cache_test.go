@@ -22,9 +22,12 @@ var cacheKeyChanges = map[string]func(unit *Unit, runnerVersion *string, platfor
 	"test": func(u *Unit, _ *string, _ *string) {
 		u.Test = &TestJob{Repository: AdamicRepository, Sha: strings.Repeat("c", 40), Packages: []TestPackage{{Package: AdamicModule}}}
 	},
-	"environment":    func(u *Unit, _ *string, _ *string) { u.Environment["A"] = "2" },
-	"directory":      func(u *Unit, _ *string, _ *string) { u.Directory = "other" },
-	"inputs":         func(u *Unit, _ *string, _ *string) { u.Inputs[0].Sha256 = strings.Repeat("e", 64) },
+	"environment": func(u *Unit, _ *string, _ *string) { u.Environment["A"] = "2" },
+	"directory":   func(u *Unit, _ *string, _ *string) { u.Directory = "other" },
+	"inputs":      func(u *Unit, _ *string, _ *string) { u.Inputs[0].Sha256 = strings.Repeat("e", 64) },
+	"products": func(u *Unit, _ *string, _ *string) {
+		u.Products, u.ProductStore = []Product{{Key: strings.Repeat("f", 64), Directory: "product"}}, "https://store"
+	},
 	"outputs":        func(u *Unit, _ *string, _ *string) { u.Outputs[0].Glob = "out/*.txt" },
 	"timeoutSeconds": func(u *Unit, _ *string, _ *string) { u.TimeoutSeconds = 10 },
 	"runnerVersion":  func(_ *Unit, v *string, _ *string) { *v = "v2" },
@@ -58,6 +61,9 @@ func TestTheCacheKeyIgnoresWhereAUnitRan(t *testing.T) {
 	unit := cacheUnit()
 	elsewhere := cacheUnit()
 	elsewhere.Run, elsewhere.Unit, elsewhere.Token = "r-2", "other", "u"
+	// Products are content-addressed, so which store serves them says nothing about the result.
+	unit.Products, unit.ProductStore = []Product{{Key: strings.Repeat("f", 64), Directory: "product"}}, "https://store-a"
+	elsewhere.Products, elsewhere.ProductStore = []Product{{Key: strings.Repeat("f", 64), Directory: "product"}}, "https://store-b"
 	elsewhere.Store, elsewhere.Wire = &Endpoint{Url: "https://wire/runs/r-2/blobs"}, &Endpoint{Url: "https://wire/runs/r-2/events"}
 	elsewhere.Resources = Resources{Cpus: 64}
 	// The same environment written in another order is the same environment.

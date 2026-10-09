@@ -10,7 +10,7 @@ import (
 
 // cacheKeyVersion changes whenever the key's encoding does, so an old entry can never match a new key.
 // v2 added the unit's test job, v3 its brokenExit.
-const cacheKeyVersion = "loom-cache-v3"
+const cacheKeyVersion = "loom-cache-v4"
 
 // A cacheKeyPart is one thing a unit's result depends on, named so a test can drop it and watch the key go blind.
 type cacheKeyPart struct {
@@ -30,6 +30,10 @@ func cacheKeyParts(unit Unit, runnerVersion string, platform string) []cacheKeyP
 	for index, input := range unit.Inputs {
 		inputs[index] = [4]string{input.Path, input.Sha256, input.Mode, input.Archive}
 	}
+	products := make([][2]string, len(unit.Products))
+	for index, product := range unit.Products {
+		products[index] = [2]string{product.Key, product.Directory}
+	}
 	outputs := make([]string, len(unit.Outputs))
 	for index, output := range unit.Outputs {
 		outputs[index] = output.Glob
@@ -41,6 +45,7 @@ func cacheKeyParts(unit Unit, runnerVersion string, platform string) []cacheKeyP
 		{"environment", environment},
 		{"directory", unit.Directory},
 		{"inputs", inputs},
+		{"products", products},
 		{"outputs", outputs},
 		{"timeoutSeconds", unit.TimeoutSeconds},
 		{"runnerVersion", runnerVersion},
