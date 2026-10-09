@@ -1127,6 +1127,8 @@ func compare(arguments []string) (bool, error) {
 	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
 	only := flags.String("only", "", "compare only packages matching this regular expression, as plan did")
 	timesPath := flags.String("times", "", "write every test's seconds on Loom beside the whole gate's, longest first, to this file")
+	var rerunFlags outputGlobs
+	flags.Var(&rerunFlags, "rerun", "<job>:<record> of a later run whose units stand in for the same units of this one (a lost unit run again); repeatable")
 	if err := flags.Parse(arguments); err != nil {
 		return false, err
 	}
@@ -1205,6 +1207,38 @@ func compare(arguments []string) (bool, error) {
 		cpu, build, test float64
 		machine          string
 	}
+	// A unit a later run ran again (its worker lost it) takes its events and results from that run.
+	type rerunOf struct {
+		run, token string
+		events     []protocol.Event
+	}
+	reruns := map[string]rerunOf{}
+	for _, pair := range rerunFlags {
+		rerunJob, rerunRecord, found := strings.Cut(pair, ":")
+		if !found {
+			return false, fmt.Errorf("--rerun takes <job>:<record>")
+		}
+		content, err := os.ReadFile(rerunJob)
+		if err != nil {
+			return false, err
+		}
+		var later protocol.Job
+		if err := protocol.Decode(bytes.NewReader(content), &later); err != nil {
+			return false, err
+		}
+		laterRun, _, laterEvents, err := readRecord(rerunRecord)
+		if err != nil {
+			return false, err
+		}
+		laterToken, err := protocol.MintToken(secret, protocol.TokenClaims{Run: laterRun, Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Hour).Unix()})
+		if err != nil {
+			return false, err
+		}
+		for _, unit := range later.Units {
+			reruns[unit.Id] = rerunOf{run: laterRun, token: laterToken, events: laterEvents}
+			report("RERUN %s: from run %s", unit.Id, laterRun)
+		}
+	}
 	var timings []unitTiming
 	loom := map[string]result{}
 	parents := map[string]result{}
@@ -1212,6 +1246,10 @@ func compare(arguments []string) (bool, error) {
 	var first, last time.Time
 	setupPattern := regexp.MustCompile(`setup (\d+) s`)
 	for _, unit := range job.Units {
+		events, run, token := events, run, token
+		if rerun, ok := reruns[unit.Id]; ok {
+			events, run, token = rerun.events, rerun.run, rerun.token
+		}
 		timing := unitTiming{unit: unit.Id}
 		output, cpuOutput := "", ""
 		exitCode := -1
