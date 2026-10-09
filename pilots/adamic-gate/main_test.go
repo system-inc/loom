@@ -468,3 +468,97 @@ func TestEveryUnitHoldingAShardRunsItsSetup(t *testing.T) {
 		t.Fatalf("the family's %d tests over %d units: %d placed", len(family)-1, holding, shards)
 	}
 }
+
+// A package's TestProduct_ tests are units of their own, planned first, and every test unit holding that package's
+// tests needs them; a package with none adds no needs, and no test unit runs a product (#8gw478y).
+func TestProductsAreUnitsTheirPackagesTestUnitsNeed(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"TestProduct_Corpus","Elapsed":20}`+"\n", module)
+	for test := range 20 {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"TestA%02d","Elapsed":5}`+"\n", module, test)
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sb","Test":"TestB%02d","Elapsed":5}`+"\n", module, test)
+	}
+	writer.Close()
+	path := filepath.Join(t.TempDir(), "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--package-setup", "5"})
+	write.Close()
+	os.Stdout = stdout
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(&printed, &job); err != nil {
+		t.Fatal(err)
+	}
+	if job.Units[0].Id != "product-00" || job.Units[0].Argv[5] != module+"a=^(TestProduct_Corpus)$" || job.Units[0].TimeoutSeconds != 90 {
+		t.Fatalf("the first unit isn't the product: %s %v %d", job.Units[0].Id, job.Units[0].Argv[5:], job.Units[0].TimeoutSeconds)
+	}
+	if _, err := protocol.Expand(job); err != nil {
+		t.Fatal(err)
+	}
+	needing, free := 0, 0
+	for _, unit := range job.Units[1:] {
+		specs := strings.Join(unit.Argv[5:], " ")
+		if strings.Contains(specs, "TestProduct_") {
+			t.Fatalf("%s runs a product: %s", unit.Id, specs)
+		}
+		holdsA := strings.Contains(specs, module+"a=")
+		switch {
+		case holdsA && len(unit.Needs) == 1 && unit.Needs[0] == "product-00":
+			needing++
+		case !holdsA && len(unit.Needs) == 0:
+			free++
+		default:
+			t.Fatalf("%s (package a: %t) needs %v", unit.Id, holdsA, unit.Needs)
+		}
+	}
+	if needing == 0 || free == 0 {
+		t.Fatalf("%d units need the product, %d don't", needing, free)
+	}
+}
+
+// A test unit that never ran because its product failed (here, killed at its budget) is that product's red, not a unit
+// Loom broke: the run reads red, never void.
+func TestRedsReadsAFailedProductsDependentsAsItsRed(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("HOME", directory)
+	os.MkdirAll(filepath.Join(directory, ".loom"), 0o700)
+	os.WriteFile(filepath.Join(directory, ".loom", "token-secret"), []byte(strings.Repeat("s", 64)), 0o600)
+	job := filepath.Join(directory, "job.json")
+	os.WriteFile(job, []byte(`{"name": "j", "units": [{"id": "product-00", "argv": ["true"], "timeoutSeconds": 90}, {"id": "tests-01", "needs": ["product-00"], "argv": ["true"], "timeoutSeconds": 90}]}`), 0o644)
+	record := filepath.Join(directory, "record.jsonl")
+	os.WriteFile(record, []byte(strings.Join([]string{
+		`{"run": "r-1", "verdict": {"status": "void"}}`,
+		`{"run": "r-1", "unit": "product-00", "sequence": 0, "type": "started", "time": "2026-10-09T04:00:00Z"}`,
+		`{"run": "r-1", "unit": "product-00", "sequence": 1, "type": "output", "time": "2026-10-09T04:00:01Z", "stream": "stdout", "text": "loom-pilot: box setup 1 s, 2 packages at a time\n"}`,
+		`{"run": "r-1", "unit": "product-00", "sequence": 2, "type": "exit", "time": "2026-10-09T04:01:30Z", "timedOut": true}`,
+		`{"run": "r-1", "unit": "product-00", "sequence": 3, "type": "finished", "time": "2026-10-09T04:01:30Z", "status": "failed"}`,
+		`{"run": "r-1", "unit": "tests-01", "sequence": 0, "type": "error", "time": "2026-10-09T04:00:31Z", "phase": "place", "message": "not placed: it needs product-00, which ended failed"}`,
+	}, "\n")+"\n"), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	verdict, err := reds([]string{"--job", job, "--record", record})
+	os.Stdout = stdout
+	write.Close()
+	var printed bytes.Buffer
+	printed.ReadFrom(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict != "red" || !strings.Contains(printed.String(), "NOT RUN tests-01: not run, its product product-00 failed") || strings.Contains(printed.String(), "BROKEN tests-01") {
+		t.Fatalf("verdict %q, printed:\n%s", verdict, printed.String())
+	}
+}

@@ -758,6 +758,25 @@ func plan(arguments []string) error {
 		setup[key] = max(0, outcome.seconds-within)
 		fmt.Fprintf(os.Stderr, "split %s: %d children, %.0f s of its own beside them\n", key, len(children), setup[key])
 	}
+	// Products (#8gw478y, Kirk's ruling on Oct 9): a package's top-level TestProduct_<name> tests build what its other
+	// tests need and put it in the store by hash. Each runs first as a unit of its own, under the same budget and kill
+	// as any test unit, and every test unit holding that package's tests lists them in its needs, so it starts only
+	// after they pass and fetches what they made instead of paying for it.
+	productsOf := map[string][]string{} // package to its TestProduct_ tests
+	productSeconds := map[string]float64{}
+	{
+		kept := items[:0]
+		for _, candidate := range items {
+			packageName, name, _ := strings.Cut(candidate.key, " ")
+			if candidate.parent == "" && strings.HasPrefix(name, "TestProduct_") {
+				productsOf[packageName] = append(productsOf[packageName], name)
+				productSeconds[candidate.key] = candidate.seconds
+				continue
+			}
+			kept = append(kept, candidate)
+		}
+		items = kept
+	}
 	// A setup family: X_Setup and the whole tests of its package whose names start with X (X_000, X_001,
 	// XPlantedFailure, XUnion). X_Setup fills a variable its shards read in the same process, so a unit holding a shard
 	// runs X_Setup too, once, and pays its time the way a split parent's own time is paid (proof 3 on main 6d011fa2, Oct
@@ -1085,6 +1104,30 @@ func plan(arguments []string) error {
 		}
 	}
 	job := protocol.Job{Name: "adamic-gate-pilot"}
+	productUnits := map[string][]string{} // package to its product units' ids
+	productPackages := make([]string, 0, len(productsOf))
+	for packageName := range productsOf {
+		productPackages = append(productPackages, packageName)
+	}
+	sort.Strings(productPackages)
+	for _, packageName := range productPackages {
+		names := productsOf[packageName]
+		sort.Strings(names)
+		for _, name := range names {
+			id := fmt.Sprintf("product-%02d", len(job.Units))
+			productTimeout := 3*3600 + 600
+			if *budget > 0 {
+				productTimeout = int(math.Ceil(*budget * 1.5))
+			}
+			job.Units = append(job.Units, protocol.JobUnit{
+				Id: id, Argv: []string{"bash", "-c", opening + unitBody, "adamic-gate-unit", *sha, packageName + "=^(" + regexp.QuoteMeta(name) + ")$"},
+				TimeoutSeconds: productTimeout, Outputs: []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
+				Resources: protocol.Resources{Cpus: 12},
+			})
+			productUnits[packageName] = append(productUnits[packageName], id)
+			fmt.Fprintf(os.Stderr, "%s: product %s %s, %.0f s by the reference\n", id, packageName, name, productSeconds[packageName+" "+name])
+		}
+	}
 	if *phasesTools != "" {
 		units, err := phaseJobUnits(opening, *sha, *phasesTools, *phaseUnits)
 		if err != nil {
@@ -1145,8 +1188,18 @@ func plan(arguments []string) error {
 			argv = append(argv, packageName+"=^"+regexp.QuoteMeta(parent)+"$/^("+strings.Join(quoted, "|")+")$")
 		}
 		argv = append(argv, remainders[index]...)
+		// The products of every package this unit runs tests of, as its needs.
+		var needs []string
+		seen := map[string]bool{}
+		for _, spec := range argv[5:] {
+			packageName, _, _ := strings.Cut(spec, "=")
+			if !seen[packageName] {
+				seen[packageName] = true
+				needs = append(needs, productUnits[packageName]...)
+			}
+		}
 		job.Units = append(job.Units, protocol.JobUnit{
-			Id: fmt.Sprintf("tests-%02d", index), Argv: argv, TimeoutSeconds: timeout(index),
+			Id: fmt.Sprintf("tests-%02d", index), Needs: needs, Argv: argv, TimeoutSeconds: timeout(index),
 			Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
 			Resources: protocol.Resources{Cpus: 12},
 		})
@@ -1807,9 +1860,24 @@ func reds(arguments []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var broken, failed, cooked, again []string
+	var broken, failed, cooked, again, notRun []string
 	for _, unit := range rerunOrder {
 		again = append(again, fmt.Sprintf("%s: from run %s", unit, reruns[unit].run))
+	}
+	// Each unit's finished status, a later run's where it ran again: a test unit whose product failed never starts, and
+	// that is the product's red, not a unit Loom broke.
+	finishedAs := map[string]string{}
+	for _, event := range events {
+		if event.Type == "finished" {
+			finishedAs[event.Unit] = event.Status
+		}
+	}
+	for unit, rerun := range reruns {
+		for _, event := range rerun.events {
+			if event.Unit == unit && event.Type == "finished" {
+				finishedAs[unit] = event.Status
+			}
+		}
 	}
 	tests, killedUnits := 0, 0
 	for _, unit := range job.Units {
@@ -1877,6 +1945,18 @@ func reds(arguments []string) (string, error) {
 				cooked = append(cooked, unit.Id+" "+leaf)
 			}
 			continue
+		}
+		if !exited && output == "" {
+			var failedNeeds []string
+			for _, need := range unit.Needs {
+				if finishedAs[need] == protocol.StatusFailed {
+					failedNeeds = append(failedNeeds, need)
+				}
+			}
+			if len(failedNeeds) > 0 {
+				notRun = append(notRun, fmt.Sprintf("%s: not run, its product %s failed", unit.Id, strings.Join(failedNeeds, ", ")))
+				continue
+			}
 		}
 		if !exited || output == "" {
 			broken = append(broken, fmt.Sprintf("%s: no results (exited %t, last output %q)", unit.Id, exited, strings.TrimSpace(tail)))
@@ -1966,6 +2046,9 @@ func reds(arguments []string) (string, error) {
 	fmt.Printf("run %s: %s, %d tests in %d units, %d failed, %d units broken, %d killed over budget\n", run, verdict, tests, len(job.Units), len(failed), len(broken), killedUnits)
 	for _, line := range again {
 		fmt.Println("AGAIN " + line)
+	}
+	for _, line := range notRun {
+		fmt.Println("NOT RUN " + line)
 	}
 	for _, line := range broken {
 		fmt.Println("BROKEN " + line)

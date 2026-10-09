@@ -112,6 +112,11 @@ import json, sys
 job, keep = json.load(open(sys.argv[1])), set(sys.argv[3:])
 job["name"] += "-again"
 job["units"] = [unit for unit in job["units"] if unit["id"] in keep]
+# A product that passed in the first run stays passed: the units placed again need only the products placed with them.
+for unit in job["units"]:
+    unit["needs"] = [need for need in unit.get("needs") or [] if need in keep]
+    if not unit["needs"]:
+        unit.pop("needs", None)
 json.dump(job, open(sys.argv[2], "w"))
 PYTHON
 		echo "again: ${again[*]}" >> "${work}/${sha}.log"
