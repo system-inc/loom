@@ -114,10 +114,10 @@ describe("loom-pipeline's Worker", function () {
         }
         expect((await call('/changes', { method: 'POST', bearer: submitToken, body: body({ owner: 'x' }) })).status).toBe(400);
         const accepted = await call('/changes', { method: 'POST', bearer: submitToken, body: body() });
-        // Past the front door the Queue object answers. A test has no GitHub token, so git can't be asked: the queue
-        // decides nothing, logs nothing and says to try again.
-        expect(accepted.status).toBe(503);
-        expect(await accepted.json()).toEqual({ reason: 'git facts are unavailable, try again: the queue has no GitHub token to read git with' });
+        // Past the front door the Queue object answers. No GitHub credential lives in the Worker, so the change joins
+        // the line unchecked, and the bridge posts git's facts for it.
+        expect(accepted.status, await accepted.clone().text()).toBe(201);
+        expect(await accepted.json()).toMatchObject({ state: 'queued' });
         expect((await call('/runs/r1')).status).toBe(404);
         expect(await (await call('/')).text()).toContain('Loom pipeline');
     });

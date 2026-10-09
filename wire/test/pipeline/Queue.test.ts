@@ -352,6 +352,44 @@ describe('the queue', function () {
     });
 });
 
+describe('a queue with no GitHub credential', function () {
+    it('takes a change unchecked, and only git facts from the bridge clear it into a future or refuse it', async function () {
+        const queue = await freshQueue();
+        await runInDurableObject(queue, function (instance: Queue) {
+            instance.history = null;
+        });
+        const first = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
+        const second = ((await (await submit(queue, change(2))).json()) as { change: string }).change;
+        // The line's own checks need no git: the same sha twice is refused at once.
+        expect((await submit(queue, change(1))).status).toBe(422);
+        const unchecked = (await (await queue.fetch('https://queue/submissions?state=unchecked')).json()) as { changes: { change: string; sha: string }[] };
+        expect(unchecked.changes).toEqual([
+            { change: first, sha: sha(1), base: main, paths: ['internal/lower/a.go'] },
+            { change: second, sha: sha(2), base: main, paths: ['internal/lower/a.go'] },
+        ]);
+        // Nothing is planned or decided before git clears it.
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: unknown[] }).futures).toEqual([]);
+        expect((await postWhole(queue, first, sha(1), 'passed', null)).status).toBe(409);
+        const post = function (id: string, body: unknown): Promise<Response> {
+            return queue.fetch(`https://queue/submissions/${id}/facts`, { method: 'POST', body: JSON.stringify(body) });
+        };
+        expect((await post(first, { shaExists: true })).status).toBe(400);
+        expect(await (await post(first, facts())).json()).toMatchObject({ change: first, state: 'queued', future: sha(1) });
+        expect((await post(first, facts())).status).toBe(409);
+        expect(await (await post(second, facts({ baseOnMain: false }))).json()).toMatchObject({ change: second, state: 'refused' });
+        expect(await (await queue.fetch(`https://queue/changes/${second}`)).json()).toMatchObject({ state: 'refused', verdict: { reason: `base ${main} is not on main` } });
+        expect(((await (await queue.fetch('https://queue/submissions?state=unchecked')).json()) as { changes: unknown[] }).changes).toEqual([]);
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: { future: string }[] }).futures.map(function (future) {
+            return future.future;
+        })).toEqual([sha(1)]);
+        expect((await postWhole(queue, first, sha(1), 'passed', null)).status).toBe(200);
+        const replayed = await replay(await logOf(queue));
+        expect(replayed.changes.get(second)?.state).toBe('refused');
+        expect(replayed.changes.get(first)?.checked).toBe(true);
+        expect(replayed.line).toEqual([first]);
+    });
+});
+
 describe('a landing order', function () {
     it("needs the future's own verdicts to say green, not only a decision that did", function () {
         const verdictOf = function (unitKey: string, status: UnitVerdict['status'], cause: UnitVerdict['cause'], future = sha(1)): UnitVerdict {
@@ -386,6 +424,8 @@ describe("loom-pipeline's queue seams", function () {
             ['POST', `/futures/${sha(1)}/verdicts`],
             ['POST', '/verdicts'],
             ['POST', `/landings/chg_${'q'.repeat(26)}`],
+            ['GET', '/submissions?state=unchecked'],
+            ['POST', `/submissions/chg_${'q'.repeat(26)}/facts`],
         ];
         for (const [method, path] of routes) {
             const body = method === 'POST' ? '{}' : undefined;

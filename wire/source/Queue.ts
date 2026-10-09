@@ -139,6 +139,9 @@ export interface ChangeEntry {
     // The whole verdict, or the red's decision: what GET /changes/<change> shows.
     verdict: Record<string, unknown> | null;
     landed: string | null;
+    // Whether git's facts have cleared it. With no GitHub credential here, the bridge on Kirk's Mac reads them from
+    // git and posts them (POST /submissions/<change>/facts); a change has no future until they clear it.
+    checked: boolean;
 }
 
 export interface QueueState {
@@ -297,6 +300,11 @@ export function refusalOf(
     facts: GitFacts,
     state: QueueState,
 ): string | null {
+    return gitRefusalOf(request, facts) ?? lineRefusalOf(request, state);
+}
+
+// What git rules out: the sha missing, a base that isn't its ancestor or isn't on main, a path outside the diff.
+export function gitRefusalOf(request: Omit<ChangeRecord, 'change' | 'submittedAt'>, facts: GitFacts): string | null {
     if (!facts.shaExists) {
         return `sha ${request.sha} is not on GitHub`;
     }
@@ -313,6 +321,11 @@ export function refusalOf(
     if (outside.length > 0) {
         return `paths outside the diff base..sha: ${outside.join(', ')}`;
     }
+    return null;
+}
+
+// What the line rules out, with no git: an unknown parent, a stack too deep, a sha already on its way.
+export function lineRefusalOf(request: Omit<ChangeRecord, 'change' | 'submittedAt'>, state: QueueState): string | null {
     if (request.parent !== null && !state.changes.has(request.parent)) {
         return `parent ${request.parent} is not a change this queue holds`;
     }
@@ -320,8 +333,8 @@ export function refusalOf(
         return `a stack is at most ${MaximumStackDepth} deep`;
     }
     // A future is keyed by its tree, so one sha is in the line once.
-    for (const change of state.futures.get(request.sha)?.changes ?? []) {
-        if (isLive(state.changes.get(change))) {
+    for (const [change, entry] of state.changes) {
+        if (entry.record.sha === request.sha && isLive(entry)) {
             return `sha ${request.sha} is already in the line as ${change}`;
         }
     }
@@ -413,11 +426,27 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     const entry = state.changes.get(event.subject.change ?? '');
     if (event.type === 'change.submitted') {
         const record = event.data.record as ChangeRecord;
-        state.changes.set(record.change, { record: record, state: 'queued', position: state.line.length, future: null, verdict: null, landed: null });
+        state.changes.set(record.change, {
+            record: record,
+            state: 'queued',
+            position: state.line.length,
+            future: null,
+            verdict: null,
+            landed: null,
+            checked: event.data.facts !== null,
+        });
         state.line.push(record.change);
     }
     else if (event.type === 'change.refused') {
         state.refused++;
+        // A change refused once git's facts arrived leaves the line.
+        if (entry !== undefined) {
+            entry.state = 'refused';
+            entry.verdict = { reason: event.data.reason };
+            state.line = state.line.filter(function (id) {
+                return id !== entry.record.change;
+            });
+        }
     }
     else if (event.type === 'future.built') {
         const tree = event.subject.future ?? '';
@@ -427,6 +456,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             const member = state.changes.get(change);
             if (member !== undefined) {
                 member.future = tree;
+                member.checked = true;
             }
         }
     }
@@ -731,8 +761,9 @@ export function checkJudgeBatch(body: string, tree: string): JudgeBatch | string
 export class Queue extends DurableObject<Env> {
     private readonly sql: SqlStorage;
     private state: QueueState | null = null;
-    // The git facts' source. Production asks GitHub; a test sets its own on this object.
-    history: History;
+    // The git facts' source: GitHub when the Worker holds a read token, else null, and the bridge posts them later.
+    // A test sets its own on this object.
+    history: History | null;
     // The clock for an event's at, which nothing decides on. A test pins it.
     now: () => string = function () {
         return new Date().toISOString();
@@ -752,7 +783,7 @@ export class Queue extends DurableObject<Env> {
             CREATE INDEX IF NOT EXISTS eventsByChange ON events (change, seq);
         `);
         const token = (environment as unknown as { GITHUB_TOKEN?: string }).GITHUB_TOKEN ?? '';
-        this.history = new GitHubHistory(token);
+        this.history = token === '' ? null : new GitHubHistory(token);
     }
 
     override async fetch(request: Request): Promise<Response> {
@@ -773,6 +804,13 @@ export class Queue extends DurableObject<Env> {
         }
         if (path === '/landings' && method === 'GET') {
             return this.landings();
+        }
+        if (path === '/submissions' && method === 'GET') {
+            return this.uncheckedChanges(url);
+        }
+        const factsMatch = /^\/submissions\/(chg_[0-9a-z]{26})\/facts$/.exec(path);
+        if (factsMatch !== null && method === 'POST') {
+            return this.takeFacts(request, factsMatch[1] ?? '');
         }
         const futureMatch = /^\/futures\/([0-9a-f]{40})\/(plan|verdicts)$/.exec(path);
         if (futureMatch !== null && method === 'POST') {
@@ -842,27 +880,92 @@ export class Queue extends DurableObject<Env> {
             return jsonResponse(422, { reason: checked });
         }
         // Git is asked before the object's turn is taken, since asking waits on the network. When git can't be asked,
-        // nothing is decided, so nothing is logged: the submitter tries again.
-        let facts: GitFacts;
-        try {
-            facts = await this.history.facts(checked.sha, checked.base);
-        }
-        catch (error) {
-            return jsonResponse(503, { reason: `git facts are unavailable, try again: ${(error as Error).message}` });
+        // nothing is decided, so nothing is logged: the submitter tries again. With no history here, the change joins
+        // the line unchecked and git's facts come from the bridge.
+        let facts: GitFacts | null = null;
+        if (this.history !== null) {
+            try {
+                facts = await this.history.facts(checked.sha, checked.base);
+            }
+            catch (error) {
+                return jsonResponse(503, { reason: `git facts are unavailable, try again: ${(error as Error).message}` });
+            }
         }
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
-            const reason = refusalOf(checked, facts, state);
+            const reason = facts === null ? lineRefusalOf(checked, state) : refusalOf(checked, facts, state);
             if (reason !== null) {
                 await this.append('change.refused', {}, { request: checked, facts: facts, reason: reason });
                 return jsonResponse(422, { reason: reason });
             }
             const record: ChangeRecord = { change: newChangeId(), submittedAt: this.now(), ...checked };
             await this.append('change.submitted', { change: record.change }, { record: record, facts: facts });
-            // Slice 1: the change is its own future, its tree its sha. Speculation (#j3t4qbg) builds main+A+B instead.
-            await this.append('future.built', { change: record.change, future: record.sha }, { base: record.base, changes: [record.change] });
+            if (facts !== null) {
+                await this.buildFuture(record, facts);
+            }
             const entry = state.changes.get(record.change);
             return jsonResponse(201, { change: record.change, state: entry?.state ?? 'queued', position: entry?.position ?? 0 });
+        });
+    }
+
+    // Slice 1: a checked change is its own future, its tree its sha. Speculation (#j3t4qbg) builds main+A+B instead.
+    private async buildFuture(record: ChangeRecord, facts: GitFacts): Promise<void> {
+        await this.append('future.built', { change: record.change, future: record.sha }, { base: record.base, changes: [record.change], facts: facts });
+    }
+
+    // The changes waiting for git's facts, oldest first, for the bridge.
+    private async uncheckedChanges(url: URL): Promise<Response> {
+        if (url.searchParams.get('state') !== 'unchecked') {
+            return jsonResponse(400, { error: 'state=unchecked is the one listing' });
+        }
+        const state = await this.current();
+        const changes = state.line.flatMap(function (change) {
+            const entry = state.changes.get(change);
+            return entry === undefined || entry.checked || !isLive(entry)
+                ? []
+                : [{ change: change, sha: entry.record.sha, base: entry.record.base, paths: entry.record.paths }];
+        });
+        return jsonResponse(200, { changes: changes });
+    }
+
+    // Git's facts for an unchecked change, from the bridge: they clear it into its future, or refuse it by reason.
+    private async takeFacts(request: Request, change: string): Promise<Response> {
+        const body = await readBodyText(request, MaximumChangeBodyBytes);
+        const parsed = parseJson(body ?? '');
+        if (
+            !isPlainObject(parsed) ||
+            typeof parsed.shaExists !== 'boolean' ||
+            typeof parsed.baseIsAncestor !== 'boolean' ||
+            typeof parsed.baseOnMain !== 'boolean' ||
+            !Array.isArray(parsed.diffPaths) ||
+            !parsed.diffPaths.every(function (path) {
+                return typeof path === 'string';
+            })
+        ) {
+            return jsonResponse(400, { error: 'the body is git facts: {shaExists, baseIsAncestor, baseOnMain, diffPaths}' });
+        }
+        const facts: GitFacts = {
+            shaExists: parsed.shaExists,
+            baseIsAncestor: parsed.baseIsAncestor,
+            baseOnMain: parsed.baseOnMain,
+            diffPaths: [...(parsed.diffPaths as string[])].sort(),
+        };
+        return this.ctx.blockConcurrencyWhile(async () => {
+            const state = await this.current();
+            const entry = state.changes.get(change);
+            if (entry === undefined) {
+                return jsonResponse(404, { error: `no change ${change}` });
+            }
+            if (entry.checked || !isLive(entry)) {
+                return jsonResponse(409, { error: `change ${change} is already ${entry.checked ? 'checked' : entry.state}` });
+            }
+            const reason = gitRefusalOf(entry.record, facts);
+            if (reason !== null) {
+                await this.append('change.refused', { change: change }, { facts: facts, reason: reason });
+                return jsonResponse(200, { change: change, state: 'refused', reason: reason });
+            }
+            await this.buildFuture(entry.record, facts);
+            return jsonResponse(200, { change: change, state: entry.state, future: entry.future });
         });
     }
 

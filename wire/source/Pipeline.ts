@@ -17,8 +17,9 @@ export { Queue } from './Queue';
 // A change is submitted with its owner's submit token; any of these reads one, and Changes.ts says which may do what.
 const changeScopes: TokenScope[] = ['submit', 'coordinator', 'board'];
 // GET /verdicts/<unitKey>, POST /verdicts, GET /futures, POST /futures/<tree>/plan and /verdicts, GET /landings and
-// POST /landings/<change>.
-const queueSeamPattern = /^\/(?:verdicts(?:\/[0-9a-f]{64})?|futures(?:\/[0-9a-f]{40}\/(?:plan|verdicts))?|landings(?:\/chg_[0-9a-z]{26})?)$/;
+// POST /landings/<change>, GET /submissions and POST /submissions/<change>/facts.
+const queueSeamPattern =
+    /^\/(?:verdicts(?:\/[0-9a-f]{64})?|futures(?:\/[0-9a-f]{40}\/(?:plan|verdicts))?|landings(?:\/chg_[0-9a-z]{26})?|submissions(?:\/chg_[0-9a-z]{26}\/facts)?)$/;
 
 export default {
     async fetch(request: Request, environment: Env): Promise<Response> {
@@ -33,7 +34,8 @@ export default {
             return handleChanges(request, claims, changesMatch[1] ?? '', queueOf(environment));
         }
         // The coordinator's seams with the queue (contracts v1.1): the verdict index and the planner's futures, the
-        // judge's verdicts, and the landing orders the workshop pusher pulls and answers. The Queue object checks the rest.
+        // judge's verdicts, the landing orders the pusher pulls and answers, and git's facts for each submitted change
+        // (no GitHub credential lives here). The Queue object checks the rest.
         if (queueSeamPattern.test(path)) {
             const claims = await authorize(request, environment, null, { scopes: ['coordinator'], queryScopes: [] });
             if (claims instanceof Response) {
