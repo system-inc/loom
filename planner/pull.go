@@ -108,23 +108,36 @@ func (index HTTPIndex) Latest(unitKey string) (Verdict, bool, error) {
 // A Checkout gives a tree at a sha and a function that removes it.
 type Checkout func(sha string) (tree string, cleanup func(), err error)
 
-// GitCheckout checks a sha out of a local clone into a detached worktree of its own, fetching it first if absent.
+// GitCheckout checks a sha out in the clone's own working tree, fetching it first if absent, with every submodule
+// at its recorded commit (adamic's go.work and replaces reach into cohere and cohere's TypeScript, so go list needs
+// them). The clone is the planner's alone and plans one future at a time, so one tree serves every future and its
+// submodules' objects stay fetched. Submodules recorded over ssh are fetched from GitHub over https, as the runner's
+// prepare.sh does.
 func GitCheckout(repository string) Checkout {
 	return func(sha string) (string, func(), error) {
-		if exec.Command("git", "-C", repository, "cat-file", "-e", sha+"^{commit}").Run() != nil {
-			if output, err := exec.Command("git", "-C", repository, "fetch", "--quiet", "origin", sha).CombinedOutput(); err != nil {
-				return "", nil, fmt.Errorf("fetch %s: %w: %s", sha, err, output)
+		git := func(arguments ...string) error {
+			command := exec.Command("git", append([]string{"-c", "url.https://github.com/.insteadOf=git@github.com:", "-C", repository}, arguments...)...)
+			command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+			if output, err := command.CombinedOutput(); err != nil {
+				return fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
+			}
+			return nil
+		}
+		if git("cat-file", "-e", sha+"^{commit}") != nil {
+			if err := git("fetch", "--quiet", "origin", sha); err != nil {
+				return "", nil, err
 			}
 		}
-		directory, err := os.MkdirTemp("", "loom-plan-")
-		if err != nil {
-			return "", nil, err
+		for _, arguments := range [][]string{
+			{"checkout", "--quiet", "--force", "--detach", sha},
+			{"clean", "-q", "-ffdx"},
+			{"submodule", "update", "--quiet", "--init", "--recursive", "--force"},
+		} {
+			if err := git(arguments...); err != nil {
+				return "", nil, err
+			}
 		}
-		if output, err := exec.Command("git", "-C", repository, "worktree", "add", "--detach", "--quiet", directory, sha).CombinedOutput(); err != nil {
-			os.Remove(directory)
-			return "", nil, fmt.Errorf("worktree for %s: %w: %s", sha, err, output)
-		}
-		return directory, func() { exec.Command("git", "-C", repository, "worktree", "remove", "--force", directory).Run() }, nil
+		return repository, func() {}, nil
 	}
 }
 

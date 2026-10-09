@@ -61,6 +61,7 @@ const usage = `usage:
   loom publish-token <name> [--days N] [--candidate]
   loom submit-token <owner> [--days N]
   loom build-token <builder> [--days N]
+  loom coordinator-token <service> [--days N]
   loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>]
   loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--packages a,b] [--list]
 `
@@ -93,6 +94,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "submit-token" {
 		return submitToken(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "coordinator-token" {
+		return coordinatorToken(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "build-token" {
 		return buildToken(arguments[1:], stdout, stderr)
@@ -619,6 +623,31 @@ func submitToken(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 3
 	}
 	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopeSubmit, Expires: time.Now().Add(time.Duration(*days) * 24 * time.Hour).Unix()})
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	fmt.Fprintln(stdout, token)
+	return 0
+}
+
+// coordinatorToken mints a standing coordinator token for a long-lived service, like the planner's pull loop on the
+// coordinator host: it reaches every coordinator seam (Queue's futures, plans and verdict index included). The name
+// (the token's run claim) says which service holds it, and it expires after --days.
+func coordinatorToken(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("coordinator-token", flag.ContinueOnError)
+	days := flags.Int("days", 7, "days until the token expires")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 || *days < 1 {
+		fmt.Fprint(stderr, "usage: loom coordinator-token <service> [--days N]\n")
+		return 3
+	}
+	home, _ := os.UserHomeDir()
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Duration(*days) * 24 * time.Hour).Unix()})
 	if err != nil {
 		fmt.Fprintf(stderr, "loom: %v\n", err)
 		return 3
