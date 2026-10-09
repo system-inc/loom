@@ -182,6 +182,90 @@ echo "loom-pilot: tests took $(( SECONDS - started )) s in all"
 exit "${status}"
 `
 
+// abBody times one test on main, then the candidate, then main again, all on this one instance, so a warming
+// instance can't fake a ratio (the rule for timeout and stall reds, @system_adamic, Oct 9). The opening readied
+// the candidate; each run checks its commit out, builds the test binary untimed, then runs it and keeps go
+// test's own -json. The seconds are the named test's Elapsed; the CPU is the shell's children's, from times.
+const abBody = `main=$1 package=$2 pattern=$3 name=$4 candidate=${sha}
+export ADAMIC_GATE_UNCACHED=1 ADAMIC_TEST_WASI=1 ADAMIC_ORACLE_WASI=1 ADAMIC_GATE_COHERE=1
+# times in this shell, never in a subshell: its second line is the children's user and system time.
+seconds() { awk 'FNR == 2 { split($1, userpart, "m"); split($2, systempart, "m"); printf "%.2f", userpart[1] * 60 + userpart[2] + systempart[1] * 60 + systempart[2] }' "$1"; }
+run() {
+  local label=$1 commit=$2
+  retry git -C "${tree}" fetch -q origin "${commit}" && retry git -C "${tree}" switch -q --detach "${commit}" && retry git -C "${tree}" submodule update -q --init --recursive || { echo "loom-ab: checkout of ${commit} failed"; exit 2; }
+  (cd "${tree}" && go test -count=1 -exec /bin/true -run "${pattern}" "${package}" > /dev/null 2>&1)
+  times > "${out}/${label}.before"
+  local started=${SECONDS}
+  (cd "${tree}" && timeout 1500 go test -count=1 -json -timeout 24m -run "${pattern}" "${package}" > "${out}/${label}.jsonl" 2> "${out}/${label}.stderr")
+  times > "${out}/${label}.after"
+  echo "${label} ${commit} $(awk -v before="$(seconds "${out}/${label}.before")" -v after="$(seconds "${out}/${label}.after")" 'BEGIN { printf "%.2f", after - before }') $(( SECONDS - started ))" >> "${out}/cpu.txt"
+}
+run main-before "${main}"
+run candidate "${candidate}"
+run main-after "${main}"
+python3 - "${out}" "${name}" <<'PYTHON'
+import json, sys
+out, name = sys.argv[1], sys.argv[2]
+cpu = {line.split()[0]: float(line.split()[2]) for line in open(out + "/cpu.txt")}
+wall = {line.split()[0]: float(line.split()[3]) for line in open(out + "/cpu.txt")}
+result = {"test": name}
+# A parent's Elapsed leaves out its parallel subtests (tsprinter's TestMutants read 19 s while its 30 subtests took
+# about 50 s each, Oct 9), so a test with subtests is compared by the go test run's own wall time instead.
+nested = False
+for label in ("main-before", "candidate", "main-after"):
+    for line in open(out + "/" + label + ".jsonl"):
+        try:
+            nested = nested or json.loads(line).get("Test", "").startswith(name + "/")
+        except ValueError:
+            pass
+result["compareBy"] = "wall of the go test run (the test has subtests)" if nested else "the test's own Elapsed"
+for label in ("main-before", "candidate", "main-after"):
+    action, seconds = "missing (timed out or never ran)", None
+    for line in open(out + "/" + label + ".jsonl"):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("Test") == name and event.get("Action") in ("pass", "fail", "skip"):
+            action, seconds = event["Action"], event.get("Elapsed")
+    result[label] = {"action": action, "seconds": wall.get(label) if nested else seconds, "elapsed": seconds, "wallSeconds": wall.get(label), "cpuSeconds": cpu.get(label)}
+json.dump(result, open(out + "/ab.json", "w"), indent=2)
+print("loom-ab: " + json.dumps(result))
+PYTHON
+`
+
+// ab plans the one-unit A/B job: the candidate checked out by the opening, then abBody.
+func ab(arguments []string) error {
+	flags := flag.NewFlagSet("ab", flag.ContinueOnError)
+	candidate := flags.String("candidate", "", "the red commit")
+	mainSha := flags.String("main", "", "the main commit to compare against")
+	packageName := flags.String("package", "", "the test's package, an import path")
+	test := flags.String("test", "", "the test's full name, subtests after slashes (TestMutants/yield_loses_delegation)")
+	gateInputs := flags.String("gate-inputs", "", "the hash of the gate inputs' manifest in the public store")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	shaPattern := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	if !shaPattern.MatchString(*candidate) || !shaPattern.MatchString(*mainSha) || *packageName == "" || *test == "" {
+		return fmt.Errorf("ab needs a full --candidate and --main, a --package and a --test")
+	}
+	parts := strings.Split(*test, "/")
+	for index, part := range parts {
+		parts[index] = "^" + regexp.QuoteMeta(part) + "$"
+	}
+	job := protocol.Job{Name: "adamic-ab", Units: []protocol.JobUnit{{
+		Id:             "ab",
+		Argv:           []string{"bash", "-c", codexPreamble(*gateInputs) + codexOpening + abBody, "adamic-ab", *candidate, *mainSha, *packageName, strings.Join(parts, "/"), *test},
+		TimeoutSeconds: 3*1500 + 900,
+		Outputs:        []protocol.Output{{Glob: "loom-out/ab.json"}},
+		Resources:      protocol.Resources{Cpus: 4},
+	}}}
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	encoder.SetEscapeHTML(false)
+	return encoder.Encode(job)
+}
+
 // codexPreamble names the gate inputs' manifest for codexOpening; empty fetches none.
 func codexPreamble(gateInputs string) string {
 	if gateInputs != "" && !protocol.Sha256Pattern.MatchString(gateInputs) {
@@ -213,6 +297,8 @@ func main() {
 		err = plan(os.Args[2:])
 	case "warm":
 		err = warm(os.Args[2:])
+	case "ab":
+		err = ab(os.Args[2:])
 	case "reds":
 		var verdict string
 		verdict, err = reds(os.Args[2:])
