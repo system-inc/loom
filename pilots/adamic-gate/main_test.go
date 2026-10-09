@@ -401,3 +401,70 @@ func TestABudgetPacksAPackagesTestsTogether(t *testing.T) {
 		}
 	}
 }
+
+// A unit holding any of a setup family's tests (X_000, X_001, ..., XPlantedFailure) runs X_Setup too, once: its shards
+// read what X_Setup made in their own process. Without it they failed "shared setup is absent" (proof 3, Oct 9).
+func TestEveryUnitHoldingAShardRunsItsSetup(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	family := []string{"TestHooks_Setup", "TestHooksPlantedFailure"}
+	for shard := range 8 {
+		family = append(family, fmt.Sprintf("TestHooks_%03d", shard))
+	}
+	// Shards at 6 s between other tests at 7 s and 5 s: packed longest first without the family, they fall into
+	// several chunks of the package.
+	for _, test := range family {
+		elapsed := 6
+		if !strings.Contains(test, "_0") {
+			elapsed = 1
+		}
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"%s","Elapsed":%d}`+"\n", module, test, elapsed)
+	}
+	for test := range 20 {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"TestOther%02d","Elapsed":%d}`+"\n", module, test, 5+2*(test%2))
+	}
+	writer.Close()
+	path := filepath.Join(t.TempDir(), "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--package-setup", "5"})
+	write.Close()
+	os.Stdout = stdout
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(&printed, &job); err != nil {
+		t.Fatal(err)
+	}
+	holding, shards := 0, 0
+	for _, unit := range job.Units {
+		specs := strings.Join(unit.Argv[5:], " ")
+		held := 0
+		for _, test := range family[1:] {
+			if strings.Contains(specs, test) {
+				held++
+			}
+		}
+		if held == 0 {
+			continue
+		}
+		holding++
+		shards += held
+		if strings.Count(specs, "TestHooks_Setup") != 1 {
+			t.Fatalf("%s holds %d of the family without its setup once: %s", unit.Id, held, specs)
+		}
+	}
+	if holding < 2 || shards != len(family)-1 {
+		t.Fatalf("the family's %d tests over %d units: %d placed", len(family)-1, holding, shards)
+	}
+}

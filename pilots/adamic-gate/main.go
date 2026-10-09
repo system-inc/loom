@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -724,6 +725,7 @@ func plan(arguments []string) error {
 	type item struct {
 		key, parent, child string
 		seconds            float64
+		needs              string // a setup family's X_Setup key: a unit holding this test runs that one too, once
 	}
 	var items []item
 	setup := map[string]float64{}
@@ -756,6 +758,43 @@ func plan(arguments []string) error {
 		setup[key] = max(0, outcome.seconds-within)
 		fmt.Fprintf(os.Stderr, "split %s: %d children, %.0f s of its own beside them\n", key, len(children), setup[key])
 	}
+	// A setup family: X_Setup and the whole tests of its package whose names start with X (X_000, X_001,
+	// XPlantedFailure, XUnion). X_Setup fills a variable its shards read in the same process, so a unit holding a shard
+	// runs X_Setup too, once, and pays its time the way a split parent's own time is paid (proof 3 on main 6d011fa2, Oct
+	// 9: cohere/lint's TestFactoryHooks shards in units without their setup, nine reds "shared setup is absent").
+	stems := map[string][]string{} // package to the stems of its X_Setup tests
+	for _, candidate := range items {
+		packageName, name, _ := strings.Cut(candidate.key, " ")
+		if stem, isSetup := strings.CutSuffix(name, "_Setup"); isSetup && candidate.parent == "" && stem != "" {
+			stems[packageName] = append(stems[packageName], stem)
+		}
+	}
+	if len(stems) > 0 {
+		shards := map[string]int{}
+		kept := items[:0]
+		for _, candidate := range items {
+			packageName, name, _ := strings.Cut(candidate.key, " ")
+			if stem, isSetup := strings.CutSuffix(name, "_Setup"); isSetup && candidate.parent == "" && slices.Contains(stems[packageName], stem) {
+				setup[candidate.key] = candidate.seconds // paid by each unit holding a shard
+				continue
+			}
+			stem := ""
+			for _, one := range stems[packageName] {
+				if candidate.parent == "" && strings.HasPrefix(name, one) && len(one) > len(stem) {
+					stem = one
+				}
+			}
+			if stem != "" {
+				candidate.needs = packageName + " " + stem + "_Setup"
+				shards[candidate.needs]++
+			}
+			kept = append(kept, candidate)
+		}
+		items = kept
+		for key, count := range shards {
+			fmt.Fprintf(os.Stderr, "family %s: %d tests, its %.0f s setup run in every unit holding one\n", key, count, setup[key])
+		}
+	}
 	// Longest first, each onto the unit it leaves lightest: the classic greedy packing.
 	sort.Slice(items, func(left, right int) bool {
 		if items[left].seconds != items[right].seconds {
@@ -774,7 +813,7 @@ func plan(arguments []string) error {
 		}
 		kept := items[:0]
 		for _, candidate := range items {
-			if candidate.seconds+setup[candidate.parent] > capacity {
+			if candidate.seconds+setup[candidate.parent]+setup[candidate.needs] > capacity {
 				alone = append(alone, candidate)
 				// The cost that didn't fit: the item's own seconds and, for a split parent's child, the parent's own time
 				// outside its children, which any unit holding a child pays.
@@ -787,11 +826,16 @@ func plan(arguments []string) error {
 	}
 	var loads []float64
 	var assigned, childrenOf []map[string][]string // per unit: package to whole test names; split parent key to child names
+	var setupsOf []map[string]bool                 // per unit: the setup families' X_Setup keys it runs
 	cost := func(index int, candidate item) float64 {
+		seconds := candidate.seconds
 		if candidate.parent != "" && childrenOf[index][candidate.parent] == nil {
-			return candidate.seconds + setup[candidate.parent]
+			seconds += setup[candidate.parent]
 		}
-		return candidate.seconds
+		if candidate.needs != "" && !setupsOf[index][candidate.needs] {
+			seconds += setup[candidate.needs]
+		}
+		return seconds
 	}
 	place := func(index int, candidate item) {
 		loads[index] += cost(index, candidate)
@@ -800,15 +844,22 @@ func plan(arguments []string) error {
 			return
 		}
 		packageName, name, _ := strings.Cut(candidate.key, " ")
+		if candidate.needs != "" && !setupsOf[index][candidate.needs] {
+			setupsOf[index][candidate.needs] = true
+			_, setupName, _ := strings.Cut(candidate.needs, " ")
+			assigned[index][packageName] = append(assigned[index][packageName], setupName)
+		}
 		assigned[index][packageName] = append(assigned[index][packageName], name)
 	}
 	pack := func(count int) float64 {
 		loads = make([]float64, count)
 		assigned = make([]map[string][]string, count)
 		childrenOf = make([]map[string][]string, count)
+		setupsOf = make([]map[string]bool, count)
 		for index := range assigned {
 			assigned[index] = map[string][]string{}
 			childrenOf[index] = map[string][]string{}
+			setupsOf[index] = map[string]bool{}
 		}
 		heaviest := 0.0
 		for _, candidate := range items {
@@ -848,20 +899,29 @@ func plan(arguments []string) error {
 					if candidate.parent != "" && !bins[index].parents[candidate.parent] {
 						extra += setup[candidate.parent]
 					}
+					if candidate.needs != "" && !bins[index].parents[candidate.needs] {
+						extra += setup[candidate.needs]
+					}
 					if bins[index].seconds+extra+perPackage <= capacity {
 						bins[index].items = append(bins[index].items, candidate)
 						bins[index].seconds += extra
 						if candidate.parent != "" {
 							bins[index].parents[candidate.parent] = true
 						}
+						if candidate.needs != "" {
+							bins[index].parents[candidate.needs] = true
+						}
 						placed = true
 						break
 					}
 				}
 				if !placed {
-					fresh := chunk{items: []item{candidate}, seconds: candidate.seconds + setup[candidate.parent], parents: map[string]bool{}}
+					fresh := chunk{items: []item{candidate}, seconds: candidate.seconds + setup[candidate.parent] + setup[candidate.needs], parents: map[string]bool{}}
 					if candidate.parent != "" {
 						fresh.parents[candidate.parent] = true
+					}
+					if candidate.needs != "" {
+						fresh.parents[candidate.needs] = true
 					}
 					bins = append(bins, fresh)
 				}
@@ -891,9 +951,11 @@ func plan(arguments []string) error {
 		loads = make([]float64, len(unitLoads))
 		assigned = make([]map[string][]string, len(unitLoads))
 		childrenOf = make([]map[string][]string, len(unitLoads))
+		setupsOf = make([]map[string]bool, len(unitLoads))
 		for unit := range unitLoads {
 			assigned[unit] = map[string][]string{}
 			childrenOf[unit] = map[string][]string{}
+			setupsOf[unit] = map[string]bool{}
 			for _, index := range members[unit] {
 				for _, candidate := range chunks[index].items {
 					place(unit, candidate)
@@ -920,6 +982,7 @@ func plan(arguments []string) error {
 		loads = append(loads, 0)
 		assigned = append(assigned, map[string][]string{})
 		childrenOf = append(childrenOf, map[string][]string{})
+		setupsOf = append(setupsOf, map[string]bool{})
 		place(len(loads)-1, candidate)
 	}
 	// A packed unit under a budget is killed at budget plus a half (90 s for 60, Kirk, Oct 9 03:17Z), and that kill is
@@ -937,6 +1000,7 @@ func plan(arguments []string) error {
 		loads = append(loads, 0)
 		assigned = append(assigned, map[string][]string{})
 		childrenOf = append(childrenOf, map[string][]string{})
+		setupsOf = append(setupsOf, map[string]bool{})
 		remainderUnit = len(loads) - 1
 	}
 	lightest := func() int {
