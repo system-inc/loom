@@ -25,6 +25,8 @@ const coordinatorScope: TokenScope[] = ['coordinator'];
 const viewerScope: TokenScope[] = ['viewer'];
 const boardScope: TokenScope[] = ['board'];
 const poolScope: TokenScope[] = ['pool'];
+// A gate box writing build products to the public store holds a publish token: it writes /public and nothing else.
+const publicWriterScopes: TokenScope[] = ['coordinator', 'publish'];
 const watcherScopes: TokenScope[] = ['coordinator', 'board'];
 const subprotocolTokenPrefix = 'token.';
 
@@ -390,7 +392,7 @@ async function handlePublicBlob(request: Request, environment: Env, sha256: stri
     if (request.method !== 'HEAD' && request.method !== 'PUT') {
         return methodNotAllowed('HEAD, PUT');
     }
-    const claims = await authorize(request, environment, null, { scopes: coordinatorScope, queryScopes: [] });
+    const claims = await authorize(request, environment, null, { scopes: publicWriterScopes, queryScopes: [] });
     if (claims instanceof Response) {
         return claims;
     }
@@ -398,6 +400,43 @@ async function handlePublicBlob(request: Request, environment: Env, sha256: stri
         return headBlob(environment.PublicStore, sha256);
     }
     return (await putBlob(environment.PublicStore, sha256, request)).response;
+}
+
+// A named ref in the public store: refs/<namespace>/<name> holds one blob's sha256 (64 hex digits), read direct
+// and unauthenticated at adamic-store.kirkouimet.com/refs/<namespace>/<name>. The build cache keeps a product's
+// manifest under its cache key this way (@system_adamic, Oct 9). A ref is written only through here, by a
+// coordinator or publish token, and only to a blob the store already holds, so a ref never dangles. A cache key
+// is honest, so the same key always names the same product: a write that would change a ref is refused (409),
+// which also surfaces a key that isn't honest.
+export const RefNamespacePattern = /^[a-z][a-z0-9-]{0,31}$/;
+export const RefNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+
+async function handlePublicRef(request: Request, environment: Env, namespace: string, name: string): Promise<Response> {
+    if (request.method !== 'PUT') {
+        return methodNotAllowed('PUT');
+    }
+    const claims = await authorize(request, environment, null, { scopes: publicWriterScopes, queryScopes: [] });
+    if (claims instanceof Response) {
+        return claims;
+    }
+    const target = (await request.text()).trim();
+    if (!Sha256Pattern.test(target)) {
+        return jsonResponse(400, { error: 'a ref holds one blob sha256, 64 lowercase hex digits' });
+    }
+    if ((await environment.PublicStore.head(`blobs/${target}`)) === null) {
+        return jsonResponse(409, { error: `blob ${target} isn't in the store; put it before its ref` });
+    }
+    const key = `refs/${namespace}/${name}`;
+    const existing = await environment.PublicStore.get(key);
+    if (existing !== null) {
+        const held = (await existing.text()).trim();
+        if (held === target) {
+            return jsonResponse(200, { ref: key, sha256: target, created: false });
+        }
+        return jsonResponse(409, { error: `${key} already names ${held}; a ref never changes`, held });
+    }
+    await environment.PublicStore.put(key, target, { httpMetadata: { contentType: 'text/plain' } });
+    return jsonResponse(201, { ref: key, sha256: target, created: true });
 }
 
 async function handleCache(request: Request, environment: Env, key: string): Promise<Response> {
@@ -424,6 +463,15 @@ export default {
                 return jsonResponse(400, { error: 'a blob is addressed by 64 lowercase hex digits' });
             }
             return handlePublicBlob(request, environment, sha256);
+        }
+        const refMatch = /^\/public\/refs\/([^/]+)\/([^/]+)$/.exec(path);
+        if (refMatch !== null) {
+            const namespace = refMatch[1] ?? '';
+            const name = refMatch[2] ?? '';
+            if (!RefNamespacePattern.test(namespace) || !RefNamePattern.test(name)) {
+                return jsonResponse(400, { error: 'a ref is /public/refs/<namespace: lowercase>/<name: letters, digits, dot, dash, underscore>' });
+            }
+            return handlePublicRef(request, environment, namespace, name);
         }
         const blobMatch = /^\/runs\/([^/]+)\/blobs\/([^/]+)$/.exec(path);
         if (blobMatch !== null) {

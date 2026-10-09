@@ -22,6 +22,8 @@ const (
 	ScopeCoordinator = "coordinator"
 	ScopeBoard       = "board"
 	ScopePool        = "pool"
+	// ScopePublish writes the public store (blobs and refs) and nothing else: a gate box's token.
+	ScopePublish = "publish"
 )
 
 // BoardRun is the run a board token names.
@@ -56,7 +58,7 @@ func MintToken(secret []byte, claims TokenClaims) (string, error) {
 }
 
 func knownScope(scope string) bool {
-	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool
+	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool || scope == ScopePublish
 }
 
 // ReadTokenSecret reads the HMAC key from a file such as ~/.loom/token-secret. The key is the file's text

@@ -264,3 +264,40 @@ describe('the public store', function () {
         expect(await env.Store.head(`blobs/${sha256}`)).toBeNull();
     });
 });
+
+describe('public refs', function () {
+    it('lets a publish token write blobs and refs, and nothing else', async function () {
+        const publisher = await token('workshop', 'publish');
+        const body = randomBytes(512);
+        const sha256 = await sha256Hex(body);
+        expect((await call(`/public/blobs/${sha256}`, { method: 'PUT', bearer: publisher, body: body })).status).toBe(201);
+        const ref = `/public/refs/build/${await sha256Hex(randomBytes(8))}`;
+        expect((await call(ref, { method: 'PUT', bearer: publisher, body: sha256 })).status).toBe(201);
+        // A publish token reaches no run.
+        const run = freshRun();
+        expect((await call(`/runs/${run}/blobs/${sha256}`, { bearer: publisher })).status).toBe(403);
+        expect((await call(`/runs/${run}/plan`, { method: 'POST', bearer: publisher, body: '{}' })).status).toBe(403);
+    });
+
+    it('stores a ref to a held blob, refuses a dangling or changed one, and serves no reads', async function () {
+        const coordinator = await token(freshRun(), 'coordinator');
+        const body = randomBytes(256);
+        const sha256 = await sha256Hex(body);
+        const other = await sha256Hex(randomBytes(256));
+        const name = await sha256Hex(randomBytes(8));
+        const ref = `/public/refs/build/${name}`;
+        expect((await call(ref, { method: 'PUT', bearer: coordinator, body: sha256 })).status).toBe(409);
+        expect(await env.PublicStore.head(`refs/build/${name}`)).toBeNull();
+        expect((await call(`/public/blobs/${sha256}`, { method: 'PUT', bearer: coordinator, body: body })).status).toBe(201);
+        expect((await call(ref, { method: 'PUT', bearer: coordinator, body: 'not a hash' })).status).toBe(400);
+        expect((await call(ref, { method: 'PUT', bearer: await token(freshRun(), 'runner'), body: sha256 })).status).toBe(403);
+        expect((await call(ref, { method: 'PUT', bearer: coordinator, body: sha256 })).status).toBe(201);
+        expect((await (await env.PublicStore.get(`refs/build/${name}`))?.text())).toBe(sha256);
+        expect((await call(ref, { method: 'PUT', bearer: coordinator, body: sha256 + '\n' })).status).toBe(200);
+        expect((await call(ref, { method: 'PUT', bearer: coordinator, body: other })).status).toBe(409);
+        expect((await (await env.PublicStore.get(`refs/build/${name}`))?.text())).toBe(sha256);
+        expect((await call(ref, { bearer: coordinator })).status).toBe(405);
+        expect((await call('/public/refs/Build/x', { method: 'PUT', bearer: coordinator, body: sha256 })).status).toBe(400);
+        expect((await call('/public/refs/build/.hidden', { method: 'PUT', bearer: coordinator, body: sha256 })).status).toBe(400);
+    });
+});
