@@ -13,14 +13,16 @@
 # seconds (30). Boxes are tried least loaded first; one that is busy with another selection, has no tree yet (it starts
 # a clone in the background and says so) or can't fetch hands on to the next.
 #
-# The box watcher's trees (~/fast-gate/tree*, tools*) are never read or touched. Threadripper is Cloud under another
-# user, sharing its /tmp, so only one of the two is in the list.
+# The box watcher's trees (~/fast-gate/tree*, tools*) are never read or touched. Workshop alone by default (Loom, Oct 9
+# 18:1xZ: proven there at 5 to 8 s, byte-identical on 7 real jobs; Server went unreachable under cold setups beside a
+# warm clone). Home and Cloud hold warm trees too. Threadripper is Cloud under another user, sharing its /tmp, so at
+# most one of the two belongs in LOOM_SELECT_BOXES.
 set -uo pipefail
 gated=$1 base=$2 baseName=$3 tools=$4 archive=$5
 for sha in "${gated}" "${base}" "${tools}"; do
 	[[ ${sha} =~ ^[0-9a-f]{40}$ ]] || { echo "select-box: wants three full shas, got ${sha}" >&2; exit 2; }
 done
-boxes=${LOOM_SELECT_BOXES:-server home workshop cloud}
+boxes=${LOOM_SELECT_BOXES:-workshop}
 budget=${LOOM_SELECT_BUDGET:-30}
 started=${SECONDS}
 # One connection per box kept for ten minutes, so the probe and the selection skip ssh's handshake (0.7 s to 0.1 s).
@@ -38,8 +40,9 @@ flock -n 9 || { echo "select-box: $(hostname) is busy with another selection" >&
 export GIT_TERMINAL_PROMPT=0
 if [ ! -d "${tree}/.git" ]; then
 	# The first clone takes minutes, far past a selection's budget, so it runs detached under its own lock and lands
-	# whole (renamed into place only when the submodules are in), and this selection goes to the pool.
-	setsid -f bash -c 'exec 8> "$1/warm.lock"; flock -n 8 || exit 0; partial=$1/adamic.partial-$$
+	# whole (renamed into place only when the submodules are in), and this selection goes to the pool. It yields CPU and
+	# disk to the box's gates (Loom, Oct 9: never a full-speed clone beside a gate's setup).
+	setsid -f nice -n 19 ionice -c 3 bash -c 'exec 8> "$1/warm.lock"; flock -n 8 || exit 0; partial=$1/adamic.partial-$$
 		git clone -q https://github.com/system-inc/adamic.git "${partial}" && git -C "${partial}" submodule update -q --init --recursive && mv "${partial}" "$1/adamic"' \
 		warm "${root}" > "${root}/warm.log" 2>&1 < /dev/null
 	echo "select-box: $(hostname) has no tree yet; cloning it in the background" >&2

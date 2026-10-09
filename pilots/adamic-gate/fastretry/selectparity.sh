@@ -8,7 +8,7 @@
 #	pilots/adamic-gate/fastretry/selectparity.sh
 #	sed 's/git -C "${tree}" fetch -q origin "${sha}" "${base}" "${tools}" < \/dev\/null \&\& git -C "${tree}" switch -q --detach "${sha}" \&\&/true \&\&/' select-box.sh > m.sh && fastretry/selectparity.sh m.sh   # fails 1 per box: the job its tree is not at
 #
-# LOOM_SELECT_BOXES names the boxes (each tried alone); the default jobs are two of Oct 9's with the same tools, one a
+# LOOM_SELECT_BOXES names the boxes (each tried alone; the three with warm trees by default); the default jobs are two of Oct 9's with the same tools, one a
 # merge gate (75473437 gated as 60d15d6a) and one its own tip (0ff31e41). Each line says the wall, the bar is 10 s.
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
@@ -18,7 +18,7 @@ jobs=${LOOM_FAST_JOBS:-${HOME}/.loom/jobs/fast}
 picked=("$@")
 [ ${#picked[@]} -gt 0 ] || picked=(75473437eacc7be16cf50111f228e74b8491e45f 0ff31e41802d0a5bbc9fef743ee0ef02930cde5e)
 scratch=$(mktemp -d)
-for box in ${LOOM_SELECT_BOXES:-server home workshop cloud}; do
+for box in ${LOOM_SELECT_BOXES:-workshop home cloud}; do
 	for job in "${picked[@]}"; do
 		work=${jobs}/${job}.work
 		[ -f "${work}/select/select.json" ] || { echo "FAIL ${box} ${job:0:12}: no pool select.json in ${work}"; failures=$((failures + 1)); continue; }
