@@ -204,6 +204,67 @@ func TestRedsNamesTheLeavesRunningAtAKill(t *testing.T) {
 	}
 }
 
+// A unit killed in its opening, before any test began (a cold instance's setup), is broken, Loom's to place again;
+// a later run's attempt at it stands in, so the run reads green. Without that run it is void, never red.
+func TestRedsReadsAKillInTheOpeningAsLoomsAndTakesItsRerun(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("HOME", directory)
+	if err := os.MkdirAll(filepath.Join(directory, ".loom"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, ".loom", "token-secret"), []byte(strings.Repeat("s", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, content string) string {
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	job := write("job.json", `{"name": "j", "units": [{"id": "tests-0", "argv": ["true"], "timeoutSeconds": 90}]}`)
+	record := write("record.jsonl", strings.Join([]string{
+		`{"run": "r-1", "verdict": {"status": "red"}}`,
+		`{"run": "r-1", "unit": "tests-0", "sequence": 0, "type": "started", "time": "2026-10-09T04:00:00Z"}`,
+		`{"run": "r-1", "unit": "tests-0", "sequence": 1, "type": "output", "time": "2026-10-09T04:01:00Z", "stream": "stdout", "text": "loom-pilot: go lacks its standard library\n"}`,
+		`{"run": "r-1", "unit": "tests-0", "sequence": 2, "type": "exit", "time": "2026-10-09T04:01:30Z", "timedOut": true}`,
+	}, "\n")+"\n")
+	// The again-run's tests-0 began and passed with no go test lines, an empty unit, which reads as green.
+	againJob := write("again.json", `{"name": "j-again", "units": [{"id": "tests-0", "argv": ["true"], "timeoutSeconds": 90}]}`)
+	againRecord := write("again.jsonl", strings.Join([]string{
+		`{"run": "r-2", "verdict": {"status": "red"}}`,
+		`{"run": "r-2", "unit": "tests-0", "sequence": 0, "type": "started", "time": "2026-10-09T04:05:00Z"}`,
+		`{"run": "r-2", "unit": "tests-0", "sequence": 1, "type": "output", "time": "2026-10-09T04:05:01Z", "stream": "stdout", "text": "loom-pilot: box slot 1 cpus 4 tree x setup 1 s, 2 packages at a time\n"}`,
+		`{"run": "r-2", "unit": "tests-0", "sequence": 2, "type": "exit", "time": "2026-10-09T04:05:30Z", "timedOut": true}`,
+	}, "\n")+"\n")
+	run := func(arguments ...string) (string, string) {
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		stdout := os.Stdout
+		os.Stdout = writer
+		verdict, err := reds(arguments)
+		os.Stdout = stdout
+		writer.Close()
+		var printed bytes.Buffer
+		printed.ReadFrom(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return verdict, printed.String()
+	}
+	verdict, printed := run("--job", job, "--record", record)
+	if verdict != "void" || !strings.Contains(printed, "BROKEN tests-0: killed in its opening, before any test began: Loom's fault") || strings.Contains(printed, "KILLED") {
+		t.Fatalf("a kill in the opening: verdict %q, printed:\n%s", verdict, printed)
+	}
+	// Placed again, the unit began its tests and was killed there: that is the change's red, read from the later run.
+	verdict, printed = run("--job", job, "--record", record, "--rerun", againJob+":"+againRecord)
+	if verdict != "red" || !strings.Contains(printed, "AGAIN tests-0: from run r-2") || !strings.Contains(printed, "KILLED tests-0: over budget, P0") {
+		t.Fatalf("the again-run's kill after its tests began: verdict %q, printed:\n%s", verdict, printed)
+	}
+}
+
 // The tree's own tests are the plan's list: a test gone from the tree is dropped with its subtests, and a new one is
 // sized by Loom's time, a share of what its package lost, its package's median doubled, or 30 s. A package outside
 // --only stays out (the reference arrives filtered the same way).

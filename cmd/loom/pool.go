@@ -210,7 +210,7 @@ func cancelPoolRun(client *http.Client, wire string, secret []byte, pool string,
 //
 //	loom pool token <pool> [--hours 24]            a pool token for its instances
 //	loom pool publish-runner                       the linux runner, built at this checkout's version, in the public store
-//	loom pool prompt <pool> --runner <sha256> [--until 55m] [--worker-prefix codex]
+//	loom pool prompt <pool> --runner <sha256> [--until 55m] [--before <sha256>]
 //	                                               the turn brief that starts one instance's serve
 func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pool "+arguments[0], flag.ContinueOnError)
@@ -219,6 +219,7 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	hours := flags.Int("hours", 24, "how long a pool token lasts")
 	runnerHash := flags.String("runner", "", "the runner binary's sha256 in the public store (from publish-runner)")
 	until := flags.String("until", "55m", "how long one serve turn runs before it exits for the next turn")
+	before := flags.String("before", "", "a script's sha256 in the public store that readies the instance before serve asks for a unit")
 	source := flags.String("source", defaultSource(), "this repository's checkout")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		fmt.Fprint(stderr, usage)
@@ -279,23 +280,36 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprint(stderr, "loom: prompt needs a pool name and --runner <sha256>\n")
 			return 3
 		}
+		if *before != "" && !protocol.Sha256Pattern.MatchString(*before) {
+			fmt.Fprint(stderr, "loom: --before takes a sha256\n")
+			return 3
+		}
 		token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: flags.Arg(0), Scope: protocol.ScopePool, Expires: time.Now().Add(time.Duration(*hours) * time.Hour).Unix()})
 		if err != nil {
 			fmt.Fprintf(stderr, "loom: %v\n", err)
 			return 3
 		}
-		fmt.Fprint(stdout, servePrompt(*wire, flags.Arg(0), token, *runnerHash, *until))
+		fmt.Fprint(stdout, servePrompt(*wire, flags.Arg(0), token, *runnerHash, *until, *before))
 	}
 	return 0
 }
 
 // servePrompt is the whole of one instance's turn: fetch the runner by hash, check it, serve until the deadline
-// with every unit's output in a file, and show only serve's one summary line.
-func servePrompt(wire string, pool string, token string, runnerHash string, until string) string {
+// with every unit's output in a file, and show only serve's one summary line. A before script, fetched and checked
+// the same way, readies the instance first, so a cold one's setup never runs inside a unit's budget; a failure to
+// fetch or run it never costs the turn its serve, since each unit's own opening still checks what it needs.
+func servePrompt(wire string, pool string, token string, runnerHash string, until string, before string) string {
+	readying := ""
+	if before != "" {
+		readying = "script=/tmp/loom-before-" + before[:12] + ".sh\n" +
+			"[ -s \"$script\" ] || { curl -fsS -o \"$script.partial\" https://adamic-store.kirkouimet.com/blobs/" + before + " && " +
+			"echo \"" + before + "  $script.partial\" | sha256sum -c --quiet && mv \"$script.partial\" \"$script\"; } || true\n" +
+			"[ -s \"$script\" ] && (mkdir -p /tmp/loom-before && cd /tmp/loom-before && timeout 30m bash \"$script\" > /tmp/loom-before.log 2>&1) || true\n"
+	}
 	return "This is a compute worker, not a coding task: do not edit, commit or push anything in any repository. " +
 		"Run exactly this in the shell, in the foreground, and wait for it however long it takes. " +
 		"Then reply with only its last line of output, nothing else.\n\n```bash\n" +
-		"set -e\nmkdir -p /tmp/loom-units\n" +
+		"set -e\nmkdir -p /tmp/loom-units\n" + readying +
 		"runner=/tmp/loom-runner-" + runnerHash[:12] + "\n" +
 		"if [ ! -x \"$runner\" ]; then curl -fsS -o \"$runner.partial\" https://adamic-store.kirkouimet.com/blobs/" + runnerHash + "; " +
 		"echo \"" + runnerHash + "  $runner.partial\" | sha256sum -c --quiet; chmod 755 \"$runner.partial\"; mv \"$runner.partial\" \"$runner\"; fi\n" +

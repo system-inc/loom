@@ -439,6 +439,10 @@ echo "loom-warm: built and vetted every test binary in $(( SECONDS - started )) 
 exit "${code}"
 `
 
+// warmOpenBody ends warm --script: the opening has readied the instance, and nothing is built.
+const warmOpenBody = `echo "loom-warm: $(hostname) opened ${sha} in $(( SECONDS - started )) s"
+`
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: adamic-gate plan|warm|compare ...")
@@ -1227,11 +1231,18 @@ func warm(arguments []string) error {
 	sha := flags.String("sha", "", "the main commit the next runs will test")
 	units := flags.Int("units", 25, "how many instances to warm")
 	gateInputs := flags.String("gate-inputs", "", "the hash of the gate inputs' manifest in the public store")
+	script := flags.Bool("script", false, "print one self-contained script that opens an instance at the sha, nothing built, instead of a job")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(*sha) || *units < 1 {
 		return fmt.Errorf("warm needs a full 40-character --sha and --units of at least 1")
+	}
+	// The script runs before a serve turn asks for its first unit (loom pool prompt --before), so a new instance's
+	// setup, 7 to 14 minutes, never runs inside a unit's 90 s budget (Oct 9: ac1e362f's tests-112 spent 411 s there).
+	if *script {
+		fmt.Print("#!/bin/bash\nset -- " + *sha + "\n" + codexPreamble(*gateInputs) + codexOpening + warmOpenBody)
+		return nil
 	}
 	job := protocol.Job{Name: "adamic-gate-warm"}
 	for index := 0; index < *units; index++ {
@@ -1722,6 +1733,7 @@ func reds(arguments []string) (string, error) {
 		}
 		output, exitCode, exited, tail, timedOut := "", 0, false, "", false
 		var running []string // the leaves its kill trap named, "<package> <test>"
+		began := false       // the opening finished and the tests started: unitBody's first line was written
 		for _, event := range events {
 			if event.Unit != unit.Id {
 				continue
@@ -1735,6 +1747,7 @@ func reds(arguments []string) (string, error) {
 				timedOut = event.TimedOut
 			case "output":
 				tail = event.Text
+				began = began || testsBegan.MatchString(event.Text)
 				for _, line := range strings.Split(event.Text, "\n") {
 					if leaf, found := strings.CutPrefix(strings.TrimSpace(line), "loom-pilot: running at the kill: "); found {
 						running = append(running, leaf)
@@ -1755,6 +1768,12 @@ func reds(arguments []string) (string, error) {
 			default:
 				broken = append(broken, fmt.Sprintf("%s: the stage broke (exited %t, code %d, last output %q)", unit.Id, exited, exitCode, strings.TrimSpace(tail)))
 			}
+			continue
+		}
+		// Killed before its tests began, in the opening (a cold instance's setup, a slow clone): it proved nothing about the
+		// change, so it is Loom's to place again, never a red or a P0 (Oct 9: ac1e362f's tests-112 spent 411 s in setup).
+		if timedOut && !began && len(running) == 0 {
+			broken = append(broken, fmt.Sprintf("%s: killed in its opening, before any test began: Loom's fault (last output %q)", unit.Id, strings.TrimSpace(tail)))
 			continue
 		}
 		// Killed at its budget's kill (90 s for 60): a red, P0 for its slowest leaf's owner (Kirk, Oct 9 03:17Z, in place
@@ -1907,6 +1926,10 @@ func readOutputs(content []byte) (map[string][]string, map[string]string, error)
 	}
 	return texts, actions, scanner.Err()
 }
+
+// testsBegan matches unitBody's first line, written when the opening is done and the tests start ("... setup 3 s, 2
+// packages at a time"); the opening itself never writes that shape.
+var testsBegan = regexp.MustCompile(`loom-pilot: .*setup \d+ s`)
 
 // A laterRun is the run a unit was placed again in, read whole: its id, a token to fetch its results, its events.
 type laterRun struct {

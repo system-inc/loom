@@ -101,7 +101,7 @@ pregate() {
 	again=() rerun=()
 	rm -f "${work}/${sha}.again.json" "${work}/${sha}.again-record.jsonl"
 	"${planner}" reds --job "${job}" --record "${record}" > "${work}/${sha}.first-reds.txt" 2>&1
-	while read -r unit; do again+=("${unit}"); done < <(grep -E '^BROKEN [^ ]+: (exited 2, Loom|no results)' "${work}/${sha}.first-reds.txt" | awk '{print $2}' | tr -d :)
+	while read -r unit; do again+=("${unit}"); done < <(grep -E '^BROKEN [^ ]+: (exited 2, Loom|no results|killed in its opening)' "${work}/${sha}.first-reds.txt" | awk '{print $2}' | tr -d :)
 	if [ ${#again[@]} -gt 0 ]; then
 		python3 - "${job}" "${work}/${sha}.again.json" "${again[@]}" <<'PYTHON'
 import json, sys

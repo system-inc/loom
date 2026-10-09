@@ -17,15 +17,37 @@ staging=${HOME}/.loom/runner-staging
 # Each member moves at its next serve turn. Re-solve each run (solve.py) and move this with the answer.
 starInstances=${LOOM_STAR_INSTANCES:-72}
 read -r staged stagedOn < "${staging}" 2> /dev/null || staged=""
+# The before script (#k225rs4): the opening at main's tip, nothing built (adamic-gate warm --script), published by hash,
+# so a member's turn readies its instance before serve asks for a unit and a cold setup (7 to 14 minutes) never runs
+# inside a unit's 90 s budget. On for every member once ~/.loom/before-on exists, after a staged instance served green.
+before=()
+tip=$(git -C "${HOME}/Projects/system/adamic-gate" ls-remote origin refs/heads/main 2> /dev/null | cut -f1)
+if [ -f "${HOME}/.loom/before-on" ] && [[ ${tip} =~ ^[0-9a-f]{40}$ ]] &&
+	"${HOME}/.loom/bin/adamic-gate" warm --script --sha "${tip}" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" > "${HOME}/.loom/before.sh.partial"; then
+	mv "${HOME}/.loom/before.sh.partial" "${HOME}/.loom/before.sh"
+	hash=$(shasum -a 256 "${HOME}/.loom/before.sh" | cut -c1-64)
+	if [ "$(cat "${HOME}/.loom/before.published" 2> /dev/null)" != "${hash}" ]; then
+		token=$(python3 - <<'PYTHON'
+import base64, hashlib, hmac, json, os, time
+secret = open(os.path.expanduser("~/.loom/token-secret")).read().strip().encode()
+payload = base64.urlsafe_b64encode(json.dumps({"run": "before-script", "scope": "coordinator", "expires": int(time.time()) + 600}, separators=(",", ":")).encode()).rstrip(b"=")
+print((payload + b"." + base64.urlsafe_b64encode(hmac.new(secret, payload, hashlib.sha256).digest()).rstrip(b"=")).decode())
+PYTHON
+)
+		curl -fsS -X PUT --data-binary @"${HOME}/.loom/before.sh" -H "Authorization: Bearer ${token}" "https://loom-wire.kirk-ouimet.workers.dev/public/blobs/${hash}" > /dev/null &&
+			echo "${hash}" > "${HOME}/.loom/before.published"
+	fi
+	[ "$(cat "${HOME}/.loom/before.published" 2> /dev/null)" = "${hash}" ] && before=(--before "${hash}")
+fi
 cd "${ahra}" || exit 1
 for pair in loom-pool:codex loom-side:codex-side; do
 	fleet=${pair%%:*} pool=${pair#*:}
 	prompt=${HOME}/.loom/rearm-${pool}.md
-	"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${runner}" --until 115m "${pool}" > "${prompt}" || continue
+	"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${runner}" ${before[@]+"${before[@]}"} --until 115m "${pool}" > "${prompt}" || continue
 	stagedPrompt=""
 	if [ -n "${staged}" ] && [ "${pool}" = codex-side ]; then
 		stagedPrompt=${HOME}/.loom/rearm-${pool}-staged.md
-		"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${staged}" --until 115m "${pool}" > "${stagedPrompt}" || stagedPrompt=""
+		"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${staged}" ${before[@]+"${before[@]}"} --until 115m "${pool}" > "${stagedPrompt}" || stagedPrompt=""
 	fi
 	for member in $(./node_modules/.bin/ahra ai fleet "${fleet}" --json 2> /dev/null | python3 -c "
 import json, re, sys
@@ -37,7 +59,7 @@ for member in json.load(sys.stdin):
 		memberPrompt=${prompt}
 		if [ "${pool}" = codex ] && [ "${number}" -gt "${starInstances}" ]; then
 			memberPrompt=${HOME}/.loom/rearm-codex-side.md
-			"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${runner}" --until 115m codex-side > "${memberPrompt}" || continue
+			"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${runner}" ${before[@]+"${before[@]}"} --until 115m codex-side > "${memberPrompt}" || continue
 		fi
 		if ./node_modules/.bin/ahra ai summary "${id}" 2> /dev/null | grep -q "approval review rejected"; then
 			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: left alone, Codex's approval review rejected the runner"
