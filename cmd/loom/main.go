@@ -128,6 +128,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.Var(&pools, "pool", "also place units on a pool on the wire, <name>=<slots>; repeatable")
 	var strictPools poolSlotsFlag
 	flags.Var(&strictPools, "strict-pool", "a pool whose workers serve --strict, <name>=<slots>: it takes the job's test jobs and nothing else; repeatable")
+	recordPlatform := flags.String("record-platform", "", "the platform whose verdict the run records, such as linux/amd64: units not marked portable go only to its machines")
+	poolPlatforms := poolPlatformFlag{}
+	flags.Var(poolPlatforms, "pool-platform", "the platform a pool's workers run when it isn't Linux's, <name>=<goos>/<goarch>; repeatable")
 	poolHas := poolHasFlag{}
 	flags.Var(poolHas, "pool-has", "the toolchains every worker of a pool has, <name>=<toolchain>,...: units that require one go only there; repeatable")
 	priority := flags.Int("priority", 0, "the run's units' priority on its pools, 0 to 1000, highest handed out first")
@@ -203,14 +206,14 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		for _, wanted := range append(append(poolSlotsFlag{}, pools...), strictPools...) {
 			strict := slices.Contains(strictPools, wanted)
 			machine := &coordinator.PoolMachine{Pool: wanted.name, Strict: strict, Priority: *priority, AgeEvery: *ageEvery, AgeStep: *ageStep, AgeCeiling: *ageCeiling,
-				Has: poolHas[wanted.name], Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
+				Has: poolHas[wanted.name], Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: platformOf(poolPlatforms, wanted.name), Log: stdout}
 			poolMachines[machine.Name()] = true
 			for range wanted.slots {
 				slots = append(slots, machine)
 			}
 		}
 	}
-	config := coordinator.Config{Wire: *wire, Secret: secret, Slots: slots, Uncached: *uncached, Durations: durations, Log: stdout}
+	config := coordinator.Config{Wire: *wire, Secret: secret, Slots: slots, Uncached: *uncached, Durations: durations, RecordPlatform: *recordPlatform, Log: stdout}
 	if *yieldTo != "" {
 		config.SlotLimit = yieldLimit(slots, *yieldTo)
 	}
@@ -713,4 +716,12 @@ func publishToken(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, token)
 	return 0
+}
+
+// platformOf is the platform a pool's workers run: what --pool-platform says, or Linux's.
+func platformOf(platforms poolPlatformFlag, pool string) string {
+	if platform := platforms[pool]; platform != "" {
+		return platform
+	}
+	return poolPlatform
 }

@@ -58,6 +58,10 @@ type JobUnit struct {
 	// that kind's hard ceiling, its timeout no longer than KindCeilings says, so the runner kills it there at the
 	// latest, and a kill is infra, never the change's red. Empty: no kind, no ceiling, as before.
 	Kind string `json:"kind,omitempty"`
+	// Portable says the unit's verdict is the same on any platform, so a run with a record platform may place it on a
+	// machine of another (a Mac). Without it, such a run keeps the unit on the record platform: a platform-specific
+	// test proves nothing about Linux on a Mac. Placement only.
+	Portable bool `json:"portable,omitempty"`
 }
 
 // KindCeilings is each kind's hard ceiling in seconds, the longest timeout a unit of it may carry (Loom, contracts

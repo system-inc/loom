@@ -20,6 +20,9 @@ type LocalMachine struct {
 	WorkspaceParent string
 	// Has names the toolchains this machine has, for units that require them (protocol.Toolchains).
 	Has []string
+	// GoPlatform names the platform this machine reports, for a test standing one machine in for another; empty is
+	// this computer's own.
+	GoPlatform string
 }
 
 func (machine LocalMachine) Toolchains() []string { return machine.Has }
@@ -38,7 +41,12 @@ func (machine LocalMachine) Name() string {
 
 func (machine LocalMachine) RunnerVersion() string { return runner.Version }
 
-func (machine LocalMachine) Platform() string { return runtime.GOOS + "/" + runtime.GOARCH }
+func (machine LocalMachine) Platform() string {
+	if machine.GoPlatform != "" {
+		return machine.GoPlatform
+	}
+	return runtime.GOOS + "/" + runtime.GOARCH
+}
 
 func (machine LocalMachine) Cores() int { return runtime.NumCPU() }
 

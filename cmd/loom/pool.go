@@ -77,6 +77,29 @@ func (pools poolHasFlag) Set(text string) error {
 	return nil
 }
 
+// poolPlatformFlag is --pool-platform <name>=<goos>/<goarch>: the platform a pool's workers run, by pool, where it
+// isn't Linux's (Macs serve a pool of their own, since the wire can't route by worker).
+type poolPlatformFlag map[string]string
+
+func (pools poolPlatformFlag) String() string {
+	var parts []string
+	for name, platform := range pools {
+		parts = append(parts, name+"="+platform)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
+}
+
+func (pools poolPlatformFlag) Set(text string) error {
+	name, platform, found := strings.Cut(text, "=")
+	goos, goarch, slash := strings.Cut(platform, "/")
+	if !found || !slash || !protocol.RunIdPattern.MatchString(name) || goos == "" || goarch == "" || strings.Contains(goarch, "/") {
+		return fmt.Errorf("%q isn't <name>=<goos>/<goarch>, such as macs=darwin/arm64", text)
+	}
+	pools[name] = platform
+	return nil
+}
+
 // poolStatus is what GET /pools/<pool> answers: the queue's length and every worker seen in the last ten
 // minutes. took is the unit a worker last took, shown as the wire gives it.
 type poolStatus struct {

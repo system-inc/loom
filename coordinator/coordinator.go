@@ -53,6 +53,10 @@ type Config struct {
 	Durations *Durations
 	// Log receives one line per thing that happens, for a person. Nil discards it.
 	Log io.Writer
+	// RecordPlatform, when set ("linux/amd64"), is the platform whose verdict the run records: a unit that isn't portable
+	// goes only to a machine of it, and one no machine of it can take is never placed, so the run is void. Empty places
+	// every unit on any platform, as before.
+	RecordPlatform string
 	// LateGrace is how far past its timeout an attempt may run before it counts as dropped. Zero means 60 s.
 	LateGrace time.Duration
 	// PoolQueueWait is how long a pool unit may wait in the pool's queue before it starts. A pool unit's timeout and
@@ -377,7 +381,7 @@ func (coordinator *coordinator) placeReady(runContext context.Context) bool {
 			fmt.Fprintf(coordinator.config.Log, "%s: not placed, no machine of the run has %s\n", state.planned.Id, missing)
 			continue
 		}
-		slot := coordinator.pickSlot(state.lastSlot, state.planned.Unit.Test != nil, state.planned.Unit.Requires, state.brokeOn)
+		slot := coordinator.pickSlot(state.lastSlot, state.planned.Unit, state.brokeOn)
 		if slot < 0 {
 			// A test job may wait for a strict slot while an argv unit behind it takes a box's, or the other way round.
 			continue
@@ -451,7 +455,8 @@ func (coordinator *coordinator) preemptOverLimit() {
 // none is free. A machine at its slot limit offers none. A strict machine's slots take only test jobs; when the run
 // has any, a test job goes only to them, and an argv unit never does (#098rcha). A machine without every toolchain
 // the unit requires offers none.
-func (coordinator *coordinator) pickSlot(avoid int, testJob bool, requires []string, brokeOn map[string]bool) int {
+func (coordinator *coordinator) pickSlot(avoid int, unit protocol.JobUnit, brokeOn map[string]bool) int {
+	testJob := unit.Test != nil
 	fallback := -1
 	strictSlots := false
 	for _, machine := range coordinator.config.Slots {
@@ -464,7 +469,7 @@ func (coordinator *coordinator) pickSlot(avoid int, testJob bool, requires []str
 		if strict := takesOnlyTestJobs(coordinator.config.Slots[index]); strict != (testJob && strictSlots) {
 			continue
 		}
-		if brokeOn[coordinator.config.Slots[index].Name()] || !fits(coordinator.config.Slots[index], requires) {
+		if brokeOn[coordinator.config.Slots[index].Name()] || !coordinator.fitsUnit(coordinator.config.Slots[index], unit) {
 			continue
 		}
 		if limit := coordinator.config.SlotLimit; limit != nil {
@@ -491,15 +496,25 @@ func (coordinator *coordinator) hasMachineFor(state *unitState) bool {
 		strictSlots = strictSlots || takesOnlyTestJobs(machine)
 	}
 	for _, machine := range coordinator.config.Slots {
-		if takesOnlyTestJobs(machine) == (state.planned.Unit.Test != nil && strictSlots) && !state.brokeOn[machine.Name()] && fits(machine, state.planned.Unit.Requires) {
+		if takesOnlyTestJobs(machine) == (state.planned.Unit.Test != nil && strictSlots) && !state.brokeOn[machine.Name()] && coordinator.fitsUnit(machine, state.planned.Unit) {
 			return true
 		}
 	}
 	return false
 }
 
-// unfit names a toolchain the unit requires that no machine of the run has, or is empty when one could take it.
+// unfit names what the unit needs that no machine of the run has (a toolchain, or the record platform for a unit
+// that isn't portable), or is empty when one could take it.
 func (coordinator *coordinator) unfit(state *unitState) string {
+	if record := coordinator.config.RecordPlatform; record != "" && !state.planned.Unit.Portable {
+		found := false
+		for _, machine := range coordinator.config.Slots {
+			found = found || machine.Platform() == record
+		}
+		if !found {
+			return "the record platform " + record
+		}
+	}
 	for _, toolchain := range state.planned.Unit.Requires {
 		found := false
 		for _, machine := range coordinator.config.Slots {
@@ -513,6 +528,15 @@ func (coordinator *coordinator) unfit(state *unitState) string {
 		}
 	}
 	return ""
+}
+
+// fitsUnit says whether the machine may take the unit: it has every toolchain the unit requires, and in a run with a
+// record platform, it is of that platform or the unit is portable.
+func (coordinator *coordinator) fitsUnit(machine Machine, unit protocol.JobUnit) bool {
+	if record := coordinator.config.RecordPlatform; record != "" && !unit.Portable && machine.Platform() != record {
+		return false
+	}
+	return fits(machine, unit.Requires)
 }
 
 // fits says whether the machine has every toolchain in requires. A machine that names none has none.

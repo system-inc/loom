@@ -877,3 +877,47 @@ func TestAUnitNoMachineHasTheToolchainForIsNeverPlacedAndTheRunIsVoid(t *testing
 		}
 	}
 }
+
+// #1zjjfha: a Mac takes only the units whose verdict matches Linux's. In a run that records linux/amd64, a unit that
+// isn't portable runs only on a Linux machine, a portable one on either, and one with no Linux machine is void.
+func TestARecordPlatformKeepsUnitsThatArentPortableOnIt(t *testing.T) {
+	wire := newFakeWire(t)
+	linux, mac := t.TempDir(), t.TempDir()
+	slots := []Machine{LocalMachine{Label: "linux-box", WorkspaceParent: linux, GoPlatform: "linux/amd64"},
+		LocalMachine{Label: "mac", WorkspaceParent: mac, GoPlatform: "darwin/arm64"}, LocalMachine{Label: "mac", WorkspaceParent: mac, GoPlatform: "darwin/arm64"}}
+	var units []protocol.JobUnit
+	for _, id := range []string{"specific-0", "specific-1", "specific-2"} {
+		units = append(units, shell(id, "pwd"))
+	}
+	portable := shell("portable-0", "pwd")
+	portable.Portable = true
+	units = append(units, portable)
+	settings := config(wire, slots...)
+	settings.RecordPlatform = "linux/amd64"
+	result := run(t, settings, units...)
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	resolved, _ := filepath.EvalSymlinks(linux)
+	for _, id := range []string{"specific-0", "specific-1", "specific-2"} {
+		said := ""
+		for _, event := range unitEventsOf(result.Events, id) {
+			if event.Type == "output" {
+				said += event.Text
+			}
+		}
+		if !strings.Contains(said, linux) && !strings.Contains(said, resolved) {
+			t.Fatalf("%s ran in %q, not on the Linux box", id, strings.TrimSpace(said))
+		}
+	}
+	// With no Linux machine, the platform-specific unit is never placed and the run isn't green; the portable one runs.
+	macsOnly := config(wire, slots[1], slots[2])
+	macsOnly.RecordPlatform = "linux/amd64"
+	result = run(t, macsOnly, shell("specific", "echo x"), portable)
+	if result.Verdict.Status == "green" || !strings.Contains(fmt.Sprint(unitEventsOf(result.Events, "specific")), "no machine of the run has the record platform linux/amd64") {
+		t.Fatalf("verdict %+v, specific: %+v", result.Verdict, unitEventsOf(result.Events, "specific"))
+	}
+	if startedCounts(result.Events)["portable-0"] != 1 {
+		t.Fatalf("the portable unit didn't run on a Mac: %+v", unitEventsOf(result.Events, "portable-0"))
+	}
+}
