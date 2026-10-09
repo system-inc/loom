@@ -441,6 +441,51 @@ func TestAFetchRefusesAPoisonedStore(t *testing.T) {
 	})
 }
 
+func TestAFetchRefusesOutputPathsARunnerShouldntWrite(t *testing.T) {
+	product := keyOf("product")
+	for name, path := range map[string]string{
+		"climbing out":        "../../escaped",
+		"climbing out a key":  product + "/../../escaped",
+		"absolute":            "/tmp/escaped",
+		"not under a key":     "loose-file",
+		"a key with no file":  product + "/",
+		"an unclean path":     product + "/./tool",
+		"inputs of a non-key": "not-a-key.inputs",
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := newFakeStore()
+			productKey := keyOf("productKey " + name)
+			content := []byte("payload")
+			sum := sha256.Sum256(content)
+			store.blobs[hex.EncodeToString(sum[:])] = content
+			canonical, _ := Manifest{Key: productKey, Outputs: []Output{{Bytes: 7, Path: path, Sha256: hex.EncodeToString(sum[:])}}}.Canonical()
+			manifestSum := sha256.Sum256(canonical)
+			store.blobs[hex.EncodeToString(manifestSum[:])] = canonical
+			store.refs[productKey] = hex.EncodeToString(manifestSum[:])
+			parent := t.TempDir()
+			cache := filepath.Join(parent, "a", "b", "cache")
+			runner := serve(t, store, "workshop")
+			if err := (Store{Read: runner.Read}).Fetch(productKey, cache); err == nil || !strings.Contains(err.Error(), "poisoned") {
+				t.Fatalf("%s: %v", path, err)
+			}
+			filepath.WalkDir(parent, func(file string, entry os.DirEntry, err error) error {
+				if err == nil && !entry.IsDir() {
+					t.Fatalf("a refused fetch wrote %s", file)
+				}
+				return nil
+			})
+		})
+	}
+	t.Run("listed twice", func(t *testing.T) {
+		if err := checkOutputPaths([]Output{{Path: product + "/tool"}, {Path: product + "/tool"}}); err == nil || !strings.Contains(err.Error(), "twice") {
+			t.Fatalf("%v", err)
+		}
+	})
+	if err := checkOutputPaths([]Output{{Path: product + "/bin/tool"}, {Path: product + ".inputs"}}); err != nil {
+		t.Fatalf("an honest product's paths: %v", err)
+	}
+}
+
 func TestTheCanonicalManifestMatchesTheStores(t *testing.T) {
 	// The bytes Actions.ts's canonicalManifest writes for the same manifest (test/pipeline/Actions.test.ts).
 	manifest := Manifest{Key: "k", Outputs: []Output{

@@ -140,11 +140,16 @@ func (store Store) Manifest(key string) (Manifest, error) {
 // Fetch writes an action's outputs under directory (a runner's ADAMIC_BUILD_CACHE_DIR). Every blob is read and
 // checked against its hash and size into a scratch directory first, and only when all of them check is each product
 // renamed into place whole, as buildcache itself publishes one, so a poisoned store leaves nothing behind. A product
-// already in the cache is left as it is, since its key says what it holds.
+// already in the cache is left as it is, since its key says what it holds. The runner doesn't trust the store for
+// its own paths: every output is a local path under a buildcache key (<key>/<file> or <key>.inputs), listed once,
+// and it is written through an os.Root on the scratch directory, so nothing a manifest says lands outside it.
 func (store Store) Fetch(key, directory string) error {
 	manifest, err := store.Manifest(key)
 	if err != nil {
 		return err
+	}
+	if err = checkOutputPaths(manifest.Outputs); err != nil {
+		return fmt.Errorf("action %s: %w: the store is poisoned", key, err)
 	}
 	if err = os.MkdirAll(directory, 0o755); err != nil {
 		return err
@@ -154,6 +159,11 @@ func (store Store) Fetch(key, directory string) error {
 		return err
 	}
 	defer os.RemoveAll(scratch)
+	root, err := os.OpenRoot(scratch)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	for _, output := range manifest.Outputs {
 		content, err := store.blob(output.Sha256)
 		if err != nil {
@@ -166,11 +176,13 @@ func (store Store) Fetch(key, directory string) error {
 		if output.Executable {
 			mode = 0o755
 		}
-		file := filepath.Join(scratch, filepath.FromSlash(output.Path))
-		if err = os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
-			return err
+		file := filepath.FromSlash(output.Path)
+		if parent := filepath.Dir(file); parent != "." {
+			if err = root.MkdirAll(parent, 0o755); err != nil {
+				return err
+			}
 		}
-		if err = os.WriteFile(file, content, mode); err != nil {
+		if err = root.WriteFile(file, content, mode); err != nil {
 			return err
 		}
 	}
@@ -186,6 +198,34 @@ func (store Store) Fetch(key, directory string) error {
 		if err = os.Rename(filepath.Join(scratch, entry.Name()), target); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// productKeyPattern is a buildcache key, the first part of every output path.
+var productKeyPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// checkOutputPaths refuses a manifest whose outputs a runner shouldn't write: a path that isn't local (empty,
+// absolute, or climbing out with ..), one not under a buildcache key (<key>/<file>, or <key>.inputs beside it), or
+// one listed twice.
+func checkOutputPaths(outputs []Output) error {
+	seen := map[string]bool{}
+	for _, output := range outputs {
+		local := filepath.FromSlash(output.Path)
+		if !filepath.IsLocal(local) || filepath.ToSlash(filepath.Clean(local)) != output.Path {
+			return fmt.Errorf("output path %q isn't a clean local path", output.Path)
+		}
+		first, rest, nested := strings.Cut(output.Path, "/")
+		switch {
+		case nested && productKeyPattern.MatchString(first) && rest != "":
+		case !nested && strings.HasSuffix(first, ".inputs") && productKeyPattern.MatchString(strings.TrimSuffix(first, ".inputs")):
+		default:
+			return fmt.Errorf("output path %q isn't under a buildcache key", output.Path)
+		}
+		if seen[output.Path] {
+			return fmt.Errorf("output path %q is listed twice", output.Path)
+		}
+		seen[output.Path] = true
 	}
 	return nil
 }
