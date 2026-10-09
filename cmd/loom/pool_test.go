@@ -67,3 +67,27 @@ func TestTheGatesTableNeverLimitsAPool(t *testing.T) {
 		t.Fatalf("server %d, pool %d", limit("server"), limit(pool.Name()))
 	}
 }
+
+func TestPoolCancelDropsTheRunsUnitsWithACoordinatorTokenForThatRun(t *testing.T) {
+	secret := []byte("loom-test-secret")
+	run := "adamic-gate-pilot-20261009T011550-8aad87d5"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		claims, err := protocol.VerifyToken(secret, strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "), time.Now())
+		body, _ := io.ReadAll(request.Body)
+		if err != nil || claims.Scope != protocol.ScopeCoordinator || claims.Run != run || request.Method != http.MethodPost ||
+			request.URL.Path != "/pools/codex/cancel" || string(body) != `{"run":"`+run+`"}` {
+			http.Error(writer, "no", http.StatusForbidden)
+			return
+		}
+		writer.Write([]byte(`{"dropped":9}`))
+	}))
+	defer server.Close()
+	dropped, err := cancelPoolRun(server.Client(), server.URL, secret, "codex", run)
+	if err != nil || dropped != 9 {
+		t.Fatalf("dropped %d, %v", dropped, err)
+	}
+	// A refusal is an error naming the pool's answer, never zero dropped.
+	if _, err := cancelPoolRun(server.Client(), server.URL, secret, "codex", "another-run"); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("a refused cancel read as %v", err)
+	}
+}

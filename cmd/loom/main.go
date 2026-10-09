@@ -159,6 +159,17 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		config.SlotLimit = yieldLimit(slots, *yieldTo)
 	}
 	result, err := coordinator.Run(runContext, config, job)
+	// A run stopped by a signal takes its queued units off every pool it used, so they never sit ahead of live
+	// work; a unit a worker already took runs on, unread.
+	if runContext.Err() != nil && result.Run != "" {
+		for _, wanted := range pools {
+			if dropped, err := cancelPoolRun(&http.Client{Timeout: 15 * time.Second}, *wire, secret, wanted.name, result.Run); err != nil {
+				fmt.Fprintf(stderr, "loom: dropping the run's queued units from pool %s: %v\n", wanted.name, err)
+			} else {
+				fmt.Fprintf(stdout, "stopped: dropped %d queued units from pool %s\n", dropped, wanted.name)
+			}
+		}
+	}
 	if err != nil {
 		return fail(err)
 	}

@@ -67,7 +67,9 @@ pregate() {
 	echo "running" > "${verdicts}/${sha}"
 	reference=$(reference) || { void "${sha}" "no green whole gate's record to plan from"; return; }
 	inputs=$(cat "${HOME}/.loom/gate-inputs" 2> /dev/null)
-	if star "${sha}"; then
+	# LOOM_PREGATE_WHOLE=1 asks for the whole set on the star's pool for a candidate no train branch names yet (a
+	# lane's next star, such as compiler's V2 on Oct 9).
+	if [ "${LOOM_PREGATE_WHOLE:-}" = 1 ] || star "${sha}"; then
 		pool=codex units=50 only="" scope="the whole Go test set"
 	else
 		pool=codex-side units=15 only=${packages} scope="the red-prone packages"

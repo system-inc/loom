@@ -66,6 +66,9 @@ func pool(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && (arguments[0] == "token" || arguments[0] == "publish-runner" || arguments[0] == "prompt") {
 		return poolTools(arguments, stdout, stderr)
 	}
+	if len(arguments) > 0 && arguments[0] == "cancel" {
+		return poolCancel(arguments[1:], stdout, stderr)
+	}
 	if len(arguments) == 0 || arguments[0] != "status" {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -137,6 +140,70 @@ func writePoolStatus(writer io.Writer, name string, status poolStatus, now time.
 		}
 		fmt.Fprintf(writer, "  %s  %d cpus  asked %s  took %s\n", worker.Worker, worker.Cpus, seen, took)
 	}
+}
+
+// poolCancel handles `loom pool cancel [--pools codex,codex-side] <run>`: every queued unit of the run leaves each
+// pool at once, so a run whose driver is gone never holds a pool's queue ahead of live work (Oct 9: p3's driver died
+// with its window and nine of its units sat queued ahead of the star's pre-gate). Units a worker already took run on;
+// the wire can't reach them, and their events land in a run nobody reads.
+func poolCancel(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("pool cancel", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	pools := flags.String("pools", "codex,codex-side", "the pools to drop the run's units from, comma separated")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 || !protocol.RunIdPattern.MatchString(flags.Arg(0)) {
+		fmt.Fprint(stderr, "usage: loom pool cancel [--pools codex,codex-side] [--wire <url>] <run>\n")
+		return 3
+	}
+	home, _ := os.UserHomeDir()
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom: %v\n", err)
+		return 3
+	}
+	code := 0
+	for name := range strings.SplitSeq(*pools, ",") {
+		dropped, err := cancelPoolRun(&http.Client{Timeout: 15 * time.Second}, *wire, secret, name, flags.Arg(0))
+		if err != nil {
+			fmt.Fprintf(stderr, "loom: %v\n", err)
+			code = 3
+			continue
+		}
+		fmt.Fprintf(stdout, "pool %s: dropped %d queued units of %s\n", name, dropped, flags.Arg(0))
+	}
+	return code
+}
+
+// cancelPoolRun drops every queued unit of the run from the pool and says how many it dropped.
+func cancelPoolRun(client *http.Client, wire string, secret []byte, pool string, run string) (int, error) {
+	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: run, Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Minute).Unix()})
+	if err != nil {
+		return 0, err
+	}
+	body, _ := json.Marshal(map[string]string{"run": run})
+	url := strings.TrimSuffix(wire, "/") + "/pools/" + pool + "/cancel"
+	request, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return 0, err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	answer, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("POST %s: %s %s", url, response.Status, bytes.TrimSpace(answer))
+	}
+	var cancelled struct {
+		Dropped int `json:"dropped"`
+	}
+	if err := protocol.Decode(bytes.NewReader(answer), &cancelled); err != nil {
+		return 0, fmt.Errorf("pool %s's cancel: %w", pool, err)
+	}
+	return cancelled.Dropped, nil
 }
 
 // poolTools are what starting a pool takes:
