@@ -29,6 +29,13 @@ type PlannedResult struct {
 // decided by Choose against the verdict index. A package the change didn't reach keeps its key and so its verdict;
 // selection is the key, so no unit is left out to make the plan smaller.
 func PlanTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool) ([]PlannedResult, error) {
+	return planTree(tree, gateTools, tools, index, uncached, KeyFor)
+}
+
+// A keyFunction makes a unit's key parts. PlanTree's is KeyFor; the selector's mutants are weaker ones.
+type keyFunction func(tree, gateTools string, unit Unit, tools Tools, compilerPackages []string) (KeyParts, error)
+
+func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool, keyFor keyFunction) ([]PlannedResult, error) {
 	module, packages, err := testedPackages(tree)
 	if err != nil {
 		return nil, err
@@ -47,7 +54,7 @@ func PlanTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 			compilers = append(compilers, module+"/"+input)
 		}
 		unit := Unit{Kind: "test", Package: listed.ImportPath, Directory: directory, Environment: GateEnvironment}
-		keyParts, err := KeyFor(tree, gateTools, unit, tools, compilers)
+		keyParts, err := keyFor(tree, gateTools, unit, tools, compilers)
 		if err != nil {
 			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
 		}
