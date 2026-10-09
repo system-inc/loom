@@ -498,9 +498,11 @@ import json, sys
 path, verdict, run, sha, branch, base, header, gate, unplanned, complete = sys.argv[1:]
 record = {"finished": True, "verdict": verdict, "runner": "pool", "pool": "codex-side", "pool_run": run, "covers": "go-tests",
           "uncached_tests": header.rstrip().endswith(", uncached"), "sha": sha, "branch": branch, "base": base}
-# A gate of the tip merged onto main names both (#11ymb02), as the boxes' fast-gate.sh does.
+# A gate of the tip merged onto main names both (#11ymb02), as the boxes' fast-gate.sh does, and its sha is the merge,
+# the tree its units ran: the phases record run.py writes names that tree, and push-main pairs the two only when their
+# shas agree (integration, Oct 9 14:45Z: the star's fast named f9fc14c1, its fast-phases c310d512, and it refused).
 if gate and gate != sha:
-    record.update({"candidate": sha, "gated": gate})
+    record.update({"sha": gate, "candidate": sha, "gated": gate})
 if unplanned.isdigit():
     record["unplanned_packages_not_run"] = int(unplanned)
 # A complete job ran its phases and the stage 3 lane; the Darwin leg is a box's alone and wasn't run here.

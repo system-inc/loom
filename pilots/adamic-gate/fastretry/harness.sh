@@ -11,7 +11,7 @@ fast=${1:-${here}/../fast.sh}
 stubs=$(mktemp -d)
 mkdir -p "${stubs}/fakebin/tar/phase" && cp "${here}/curl" "${stubs}/fakebin/curl" && echo "green: phases passed (stub)" > "${stubs}/fakebin/tar/phase/status.txt"
 tar -czf "${stubs}/phase.tgz" -C "${stubs}/fakebin/tar" phase
-awk '/^runPhases\(\) \{/,/^}/' "$fast" > "$stubs/funcs.sh"; awk '/^runStage3\(\) \{/,/^}/' "$fast" >> "$stubs/funcs.sh"
+awk '/^runPhases\(\) \{/,/^}/' "$fast" > "$stubs/funcs.sh"; awk '/^runStage3\(\) \{/,/^}/' "$fast" >> "$stubs/funcs.sh"; awk '/^finish\(\) \{/,/^}/' "$fast" >> "$stubs/funcs.sh"
 check() { if eval "$2"; then echo "PASS $1"; else echo "FAIL $1: calls $(cat $T/calls 2>/dev/null), status $(cat $work/phases-status 2>/dev/null)"; sed "s/^/    /" $T/out.log; failures=$((failures + 1)); fi; }
 scenario() { # scenario <name> <plan lines...>
 	T=$(mktemp -d) && export STUB=$T && cp "$stubs/phase.tgz" $T/ && printf '%s\n' "${@:2}" > $T/plan
@@ -56,5 +56,11 @@ mkdir -p $T/k/phase && echo "red: x fast gate, first failure at build after 20.0
 runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-build-red-stands 'grep -q "^red: x fast gate, first failure at build" $work/phases-status && [ "$(cat $T/calls)" = 2 ] && [ "$(python3 -c "import json; print(json.load(open(\"$T/job-2.json\"))[\"name\"])")" != adamic-gate-fast-phases ]'
 scenario phases-green-once "" ""
 runPhases $sha 20261009T000000Z > $T/out.log 2>&1; check phases-green-once 'grep -q "^green: phases passed" $work/phases-status && [ "$(cat $T/calls)" = 2 ] && git --git-dir=$T/origin.git show "gate-logs/111111111111/20261009T000000Z/fast-phases:box.txt" | grep -qv "placed twice"'
+# finish: a merge-gated record's fast.json names the merge its units ran as its sha, beside candidate and gated, so
+# push-main pairs it with the phases record run.py writes for that same tree.
+scenario finish-names-the-merge
+echo 3333333333333333333333333333333333333333 > $work/gate; echo "run stub-run-1: 1 units on 1 slots, uncached" > $work/run.log
+LOOM_FAST_PUBLISH=0 ceiling=1800 finish $sha 20261009T000000Z "green: stub" stub-run-1 > $T/out.log 2>&1
+check finish-names-the-merge 'python3 -c "import json,glob,sys; r=json.load(open(glob.glob(\"$work/record-*/fast.json\")[0])); sys.exit(0 if (r[\"sha\"], r[\"candidate\"], r[\"gated\"]) == (\"3\"*40, \"1\"*40, \"3\"*40) else 1)"'
 echo "failures: $failures"
 exit $((failures > 0))
