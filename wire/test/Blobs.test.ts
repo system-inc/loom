@@ -288,6 +288,8 @@ describe('public refs', function () {
         expect((await call(`/public/refs/build/${name}`, { method: 'PUT', bearer: candidate, body: sha256 })).status).toBe(403);
         expect(await env.PublicStore.head(`refs/build/${name}`)).toBeNull();
         expect((await call(`/public/refs/build-candidate/${name}`, { method: 'PUT', bearer: candidate, body: sha256 })).status).toBe(201);
+        expect((await call(`/public/refs/gocache-candidate/${name}`, { method: 'PUT', bearer: candidate, body: sha256 })).status).toBe(201);
+        expect((await call(`/public/refs/gocache/${name}`, { method: 'PUT', bearer: candidate, body: sha256 })).status).toBe(403);
         // main's own gate's token writes either.
         const publisher = await token('home', 'publish');
         expect((await call(`/public/refs/build/${name}`, { method: 'PUT', bearer: publisher, body: sha256 })).status).toBe(201);

@@ -24,9 +24,9 @@ const (
 	ScopePool        = "pool"
 	// ScopePublish writes the public store (blobs and refs) and nothing else: a gate box's token.
 	ScopePublish = "publish"
-	// ScopePublishCandidate writes the public store's blobs and its refs/build-candidate refs only, never refs/build,
-	// which only main's own gate writes (@system_adamic_developer_tools, Oct 9): what a candidate built can only
-	// ever mislead another candidate.
+	// ScopePublishCandidate writes the public store's blobs and refs in a namespace ending -candidate only
+	// (refs/build-candidate, refs/gocache-candidate), never refs/build or refs/gocache, which only main's own gate
+	// writes (@system_adamic_developer_tools, Oct 9): what a candidate built can only ever mislead another candidate.
 	ScopePublishCandidate = "publish-candidate"
 )
 

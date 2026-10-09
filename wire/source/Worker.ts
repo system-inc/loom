@@ -27,8 +27,9 @@ const boardScope: TokenScope[] = ['board'];
 const poolScope: TokenScope[] = ['pool'];
 // A gate box writing build products to the public store holds a publish token: it writes /public and nothing else.
 const publicWriterScopes: TokenScope[] = ['coordinator', 'publish', 'publish-candidate'];
-// A candidate's publish token writes refs in this namespace only (protocol.ScopePublishCandidate).
-const CandidateRefNamespace = 'build-candidate';
+// A candidate's publish token writes refs only in a namespace named for candidates (refs/build-candidate for
+// internal/buildcache, refs/gocache-candidate for the go command's shared cache), never a trusted one.
+const CandidateRefSuffix = '-candidate';
 const watcherScopes: TokenScope[] = ['coordinator', 'board'];
 const subprotocolTokenPrefix = 'token.';
 
@@ -421,8 +422,8 @@ async function handlePublicRef(request: Request, environment: Env, namespace: st
     if (claims instanceof Response) {
         return claims;
     }
-    if (claims.scope === 'publish-candidate' && namespace !== CandidateRefNamespace) {
-        return jsonResponse(403, { error: `a candidate's publish token writes refs/${CandidateRefNamespace} only` });
+    if (claims.scope === 'publish-candidate' && !namespace.endsWith(CandidateRefSuffix)) {
+        return jsonResponse(403, { error: `a candidate's publish token writes refs/<namespace>${CandidateRefSuffix} only` });
     }
     const target = (await request.text()).trim();
     if (!Sha256Pattern.test(target)) {
