@@ -211,5 +211,9 @@ index=$(mktemp -u)
 gitDirectory=$(git -C "${gate}" rev-parse --absolute-git-dir)
 tree=$(cd "${record}" && GIT_INDEX_FILE=${index} git --git-dir="${gitDirectory}" --work-tree=. add -A -f . && GIT_INDEX_FILE=${index} git --git-dir="${gitDirectory}" write-tree)
 commit=$(git -C "${gate}" commit-tree "${tree}" -m "Pool gate of ${sha}: $(head -1 "${record}/status.txt")")
-git -C "${gate}" push -q origin "${commit}:refs/heads/${branch}" || { echo "publish: push of ${branch} failed"; exit 2; }
+# A push GitHub answers "reference already exists" may have landed on its first try (beb1be1b's, Oct 9 04:01Z): the
+# ref holding this very commit is a landed record.
+if ! git -C "${gate}" push -q origin "${commit}:refs/heads/${branch}"; then
+	[ "$(git -C "${gate}" ls-remote origin "refs/heads/${branch}" | cut -f1)" = "${commit}" ] || { echo "publish: push of ${branch} failed"; exit 2; }
+fi
 echo "${branch} $(head -1 "${record}/status.txt")"

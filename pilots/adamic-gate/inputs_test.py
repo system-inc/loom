@@ -104,6 +104,22 @@ class Inputs(unittest.TestCase):
         moved, _, _ = self.rerun({"review/optional-indexing/map-shape.a": "shape\n"})
         self.assertEqual(moved, ["phase-vet", "tests-lower"])
 
+    def test_the_gate_command_reads_the_whole_tree(self):
+        self.job["units"].append(testUnit("tests-gate", module + "cmd/adamic-gate=."))
+        moved, _, _ = self.rerun({"b/b_test.go": "package b\n// t.Parallel\n"})
+        self.assertEqual(moved, ["phase-vet", "tests-b", "tests-gate", "tests-rest"])
+
+    def test_the_trees_own_declaration_replaces_the_stand_in(self):
+        self.write({inputs.testReadsPath: json.dumps({"a": ["README"]})})
+        base = self.commit()
+        self.job["units"].append(testUnit("tests-lower", module + "internal/lower=."))
+        moved, _, _ = self.rerun({"review/optional-indexing/map-shape.a": "s\n", "README": "r2\n"}, base=base)
+        # README is shared, so everything moves; the review read is no longer declared, so only phase-vet and the
+        # README's moves remain, and tests-lower moves through shared alone.
+        self.assertIn("tests-lower", moved)
+        moved, _, _ = self.rerun({"review/optional-indexing/map-shape.a": "s2\n"}, base=git(self.repository, "rev-parse", "HEAD"))
+        self.assertEqual(moved, ["phase-vet"])
+
     def test_an_undeclared_read_is_not_seen(self):
         # The definition's known edge, named so a change to it is a decision: b reading a's testdata without a
         # declaration keeps its verdict. test-reads.json is where such reads are declared.

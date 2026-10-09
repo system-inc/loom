@@ -20,7 +20,8 @@ The definition, agreed with developer tools on Oct 9 (03:24Z), named in every ou
   test-only landings, which carry them, move only the packages whose tests they change.
 - own: for a test unit, per package it runs, the package directory's own *_test.go files and its testdata/ tree, plus
   the paths cloud/fast-gate/test-reads.json declares that package reads ({"<package directory>": ["<path>", ...]}, a
-  path being a file or a directory). Until that file exists, the reads found on Oct 9 stand in for it (knownReads). A phase unit (run.py --phase) owns the whole tree, since its
+  path being a file or a directory, "." the whole tree). Until that file exists, the reads found on Oct 9 stand in for
+  it (knownReads); once it does, the file at the hashed sha is the whole declaration. A phase unit (run.py --phase) owns the whole tree, since its
   inputs aren't declared per package: any change at all reruns it.
 - toolchain: the gate inputs' manifest hash the unit's body pins (Go, clang, TypeScript, corpora) and, for a phase
   unit, the tools sha it runs run.py from.
@@ -48,9 +49,10 @@ gateRepository = os.path.expanduser("~/Projects/system/adamic-gate")
 testReadsPath = "cloud/fast-gate/test-reads.json"
 # Paths no unit's shared part covers: test inputs a package owns, review evidence, and the landings' own records.
 records = ("documentation/velocity/landings.csv", "stage3/progress.json")
-# The reads of review evidence and of other packages' test files that Go tests made on main on Oct 9 (git grep for
-# review/ across *.go), standing in for cloud/fast-gate/test-reads.json until developer tools lands it.
-knownReads = {"internal/lower": ["review/optional-indexing"]}
+# The reads of review evidence and of other packages' test files that Go tests made on main on Oct 9, standing in for
+# cloud/fast-gate/test-reads.json until developer tools lands it: internal/lower reads review/optional-indexing, and
+# cmd/adamic-gate's tests walk every _test.go and shards.json in the repository (the parallel check, the shards).
+knownReads = {"internal/lower": ["review/optional-indexing"], "cmd/adamic-gate": ["."]}
 
 
 def sha256(text):
@@ -109,7 +111,7 @@ class Tree:
             lines = []
             for path, meta in self.entries:
                 mine = (os.path.dirname(path) == directory and path.endswith("_test.go")) or path.startswith(directory + "/testdata/")
-                read = any(path == other or path.startswith(other.rstrip("/") + "/") for other in declared)
+                read = any(other in (".", "./") or path == other or path.startswith(other.rstrip("/") + "/") for other in declared)
                 if mine or read:
                     lines.append("%s\t%s\n" % (meta, path))
             self.owned[directory] = sha256("".join(lines))
