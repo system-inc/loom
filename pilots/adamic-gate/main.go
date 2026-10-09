@@ -68,9 +68,14 @@ tree=/tmp/adamic out=${PWD}/loom-out
 mkdir -p "${out}"
 # Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only.
 git config --global url."https://github.com/".insteadOf git@github.com:
-[ -d "${tree}/.git" ] || git clone -q --filter=blob:none https://github.com/system-inc/adamic.git "${tree}" || { echo "loom-pilot: clone failed"; exit 2; }
+# GitHub turns away anonymous fetches when many instances check out at once (15 side instances at 00:10Z on
+# Oct 9 all read "could not read Username"; the same fetch a minute later passed), so each step retries with
+# backoff and jitter before the unit gives up, and never prompts.
+export GIT_TERMINAL_PROMPT=0
+retry() { local attempt; for attempt in 1 2 3 4; do "$@" && return 0; sleep $(( attempt * 10 + RANDOM % 10 )); done; return 1; }
+[ -d "${tree}/.git" ] || retry git clone -q --filter=blob:none https://github.com/system-inc/adamic.git "${tree}" || { echo "loom-pilot: clone failed"; exit 2; }
 find "${tree}/.git" -maxdepth 6 -name index.lock -delete 2>/dev/null
-git -C "${tree}" fetch -q origin "${sha}" && git -C "${tree}" switch -q --detach "${sha}" && git -C "${tree}" submodule update -q --init --recursive || { echo "loom-pilot: checkout of ${sha} failed"; exit 2; }
+retry git -C "${tree}" fetch -q origin "${sha}" && retry git -C "${tree}" switch -q --detach "${sha}" && retry git -C "${tree}" submodule update -q --init --recursive || { echo "loom-pilot: checkout of ${sha} failed"; exit 2; }
 if [ ! -f /tmp/adamic-setup-done ]; then
   (cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && touch /tmp/adamic-setup-done || { echo "loom-pilot: setup failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
 fi
