@@ -91,3 +91,19 @@ func TestPoolCancelDropsTheRunsUnitsWithACoordinatorTokenForThatRun(t *testing.T
 		t.Fatalf("a refused cancel read as %v", err)
 	}
 }
+
+// The Codex opening hands serve its pool token in a file serve removes, never on serve's command line.
+func TestTheServePromptKeepsTheTokenOffTheCommandLine(t *testing.T) {
+	prompt := servePrompt("https://wire", "codex", "secret.token", strings.Repeat("a", 64), "55m", "")
+	for _, line := range strings.Split(prompt, "\n") {
+		if strings.Contains(line, " serve --pool ") && (strings.Contains(line, "secret.token") || !strings.Contains(line, "--token-file /tmp/loom-pool-token")) {
+			t.Fatalf("serve's line: %s", line)
+		}
+	}
+	if !strings.Contains(prompt, "serve --pool https://wire/pools/codex --token-file /tmp/loom-pool-token") {
+		t.Fatalf("the prompt has no serve line:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "(umask 077 && printf '%s\\n' 'secret.token' > /tmp/loom-pool-token)") {
+		t.Fatalf("the prompt doesn't write the token file:\n%s", prompt)
+	}
+}

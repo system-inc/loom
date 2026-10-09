@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -199,5 +201,21 @@ func TestServeEndsWhenThePoolRefusesItsToken(t *testing.T) {
 	summary, err := Serve(context.Background(), pool.serveOptions(t, time.Now().Add(time.Hour), time.Minute, io.Discard))
 	if !errors.Is(err, errPoolRefused) || summary.Units != 0 || !strings.Contains(summary.Stopped, "401") || time.Since(started) > 5*time.Second {
 		t.Fatalf("summary %+v, err %v", summary, err)
+	}
+}
+
+func TestThePoolTokenFileIsReadOnceAndRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pool-token")
+	os.WriteFile(path, []byte("  pool-token\n"), 0o600)
+	token, err := ReadTokenFile(path)
+	if err != nil || token != "pool-token" {
+		t.Fatalf("token %q, %v", token, err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the token file is still there: %v", err)
+	}
+	os.WriteFile(path, []byte("\n"), 0o600)
+	if _, err := ReadTokenFile(path); err == nil {
+		t.Fatalf("an empty token file was taken")
 	}
 }

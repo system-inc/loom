@@ -16,8 +16,8 @@ says, and a test job the same way as below except the disk trims.
 
 **What it holds.** The pool token, which asks its pool for the next unit and reaches nothing else, and for each unit
 that unit's run token, which posts that unit's events and log and reads and writes blobs through that run's own
-endpoint, and expires with the run. Nothing else. The run token stays in the runner's memory. The pool token is on the
-runner's command line, so a process of the same user (the tests included) could read it; it reaches only `next`.
+endpoint, and expires with the run. Nothing else. Both stay in the runner's memory: serve reads the pool token from
+`--token-file` and removes the file at once, so it is on no command line and no disk while units run.
 
 **What it accepts.** Only a unit carrying a structured test job (`protocol.TestJob`). It refuses, before anything runs,
 with an error event naming why, and finishes the unit broken:
@@ -70,5 +70,13 @@ uploaded through the run token, and the unit's events through the run token. On 
 (`<root>/adamic-npm`, `<root>/adamic-tools`, `<root>/adamic-setup-done`, Go's caches in HOME) and the unit's workspace, removed when
 the unit ends.
 
-**What it reads.** The public adamic repository and its public submodules on GitHub, the npm registry, Go's module
-proxy, Loom's public store, and whatever adamic's own `cloud/setup.sh` downloads.
+**What it reads.** The public adamic repository and its public submodules on GitHub, https://registry.npmjs.org, Go's
+module proxy (https://proxy.golang.org) and checksum database (https://sum.golang.org), Loom's public store, and what
+adamic's own `cloud/setup.sh` downloads, which as of adamic 3a391aff13 is: https://go.dev and https://dl.google.com
+(the Go toolchain), GitHub releases (LLVM, the WASI SDK) and https://nodejs.org (Node.js). setup.sh sets
+`GOPROXY=https://proxy.golang.org|direct`, so a module the proxy doesn't hold is fetched from its own host. These are
+as of that commit: setup.sh runs at the job's commit and may change them.
+
+**What "verifiable" means.** A commit is verifiable when it can be fetched from the public repository's URL with no
+credentials. That includes commits in pull requests from forks, which GitHub serves through the same URL. The runner
+proves only that GitHub holds the commit; the coordinator, not the runner, chooses which commit a job names.

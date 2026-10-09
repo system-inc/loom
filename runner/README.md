@@ -4,7 +4,7 @@ Runs one Loom unit on this machine and streams its events to stdout as JSON line
 
 ```
 loom-runner run [--workspace <directory>] [--keep] <unit.json | https URL | ->
-loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--workspace <directory>] [--log <file>]
+loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--workspace <directory>] [--log <file>]
 loom-runner version
 ```
 

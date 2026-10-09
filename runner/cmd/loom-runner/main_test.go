@@ -77,10 +77,16 @@ func TestServePrintsOneSummaryLineAndLogsTheEvents(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "serve.log")
 	var stdout, stderr bytes.Buffer
 	// With 61 s to serve and the last minute closed to new units, it serves for about a second.
-	code := run([]string{"serve", "--pool", server.URL + "/pools/codex", "--token", "pool-token", "--worker", "codex-1", "--until", "61s",
+	tokenFile := filepath.Join(t.TempDir(), "pool-token")
+	os.WriteFile(tokenFile, []byte("pool-token\n"), 0o600)
+	code := run([]string{"serve", "--pool", server.URL + "/pools/codex", "--token-file", tokenFile, "--worker", "codex-1", "--until", "61s",
 		"--workspace", t.TempDir(), "--log", logPath}, &stdout, &stderr)
 	if code != 0 || !strings.HasPrefix(stdout.String(), "loom-runner serve: 2 units, 2 passed, 0 failed, 0 broken in ") || strings.Count(stdout.String(), "\n") != 1 {
 		t.Fatalf("exit %d, stdout %q, stderr %q", code, stdout.String(), stderr.String())
+	}
+	// The token never stays on disk once serve has it.
+	if _, err := os.Stat(tokenFile); !os.IsNotExist(err) {
+		t.Errorf("the pool token file is still there after serve read it: %v", err)
 	}
 	logged, _ := os.ReadFile(logPath)
 	mutex.Lock()

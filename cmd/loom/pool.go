@@ -321,7 +321,8 @@ func servePrompt(wire string, pool string, token string, runnerHash string, unti
 		"runner=/tmp/loom-runner-" + runnerHash[:12] + "\n" +
 		"if [ ! -x \"$runner\" ]; then curl -fsS -o \"$runner.partial\" https://adamic-store.kirkouimet.com/blobs/" + runnerHash + "; " +
 		"echo \"" + runnerHash + "  $runner.partial\" | sha256sum -c --quiet; chmod 755 \"$runner.partial\"; mv \"$runner.partial\" \"$runner\"; fi\n" +
-		"\"$runner\" serve --pool " + strings.TrimSuffix(wire, "/") + "/pools/" + pool + " --token " + token +
+		"(umask 077 && printf '%s\\n' '" + token + "' > /tmp/loom-pool-token)\n" +
+		"\"$runner\" serve --pool " + strings.TrimSuffix(wire, "/") + "/pools/" + pool + " --token-file /tmp/loom-pool-token" +
 		" --worker \"$(hostname)\" --until " + until + " --workspace /tmp/loom-units --log /tmp/loom-serve.log 2>> /tmp/loom-serve.err\n" +
 		"```\n"
 }

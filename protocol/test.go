@@ -3,6 +3,7 @@ package protocol
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -87,7 +88,7 @@ func CheckTestJob(job TestJob) error {
 		}
 	}
 	for _, path := range job.ChangedPaths {
-		if !changedPathPattern.MatchString(path) {
+		if !changedPathPattern.MatchString(path) || slices.Contains(strings.Split(path, "/"), "..") {
 			return fmt.Errorf("changed path %q isn't a path in the repository", path)
 		}
 	}

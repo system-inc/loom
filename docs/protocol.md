@@ -157,7 +157,7 @@ A **pool token** (scope `pool`, run = the pool's name) is all an instance holds 
 - `GET /pools/<pool>` (a coordinator or board token): `{"queued": <n>, "workers": [{"worker", "cpus", "seenAt", "took"}]}`: every worker seen in the last four hours (a worker running a unit asks nothing until it ends), when it last asked, and the unit it last took. The board shows a worker that asked in the last ten minutes or is running a unit.
 - `GET /runs/<run>/events?after=<position>` (a coordinator token for the run): the log's events after that position as JSON lines (`{"position", "event"}` each), waiting up to 20 s for the first one when there are none yet. The coordinator follows a pool unit's stream this way: plain HTTP, no WebSocket client needed.
 
-`loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--strict]` exits 0 at its deadline, finishing the unit in hand first if it can within the unit's timeout, or at once on `SIGTERM` (the unit is then broken, as with any stopped runner).
+`loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict]` reads the pool token from the file and removes it, so it is never on the runner's command line. It exits 0 at its deadline, finishing the unit in hand first if it can within the unit's timeout, or at once on `SIGTERM` (the unit is then broken, as with any stopped runner).
 
 ## The board
 

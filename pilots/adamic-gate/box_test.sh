@@ -7,14 +7,16 @@
 # It plants a home with an ssh key and a build-cache token, points box.sh at a scratch units directory
 # (LOOM_BOX_UNITS) whose warm-up script is a probe, and runs one worker warm-only (LOOM_BOX_WARM_ONLY), so nothing
 # serves and no pool is asked. The probe tries to read the planted secrets and /mnt, and must find none of them,
-# while the pool token, its own directory and node stay readable. Then a mutant box.sh without the tmpfs must let the
+# and the shared pool token too, while the worker's own copy of it (serve's to read and remove), its own directory and
+# node stay readable. Then a mutant box.sh without the tmpfs must let the
 # probe read the secrets, or this test proves nothing.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 # Not under /tmp: the worker binds its own /tmp over it, so a scratch there would vanish inside the namespace.
 scratch=$(mktemp -d "${HOME}/box-test.XXXXXX")
 home=${scratch}/home
-units=${scratch}/units
+# Inside the planted home, as ~/loom-units is inside the box user's: so the shared pool token is hidden with it.
+units=${home}/loom-units
 runnerSha=0000000000000000000000000000000000000000000000000000000000000000
 failures=0
 
@@ -31,10 +33,11 @@ for path in "${home}/.ssh/id_test" "${home}/.adamic-build-cache-token"; do
 	if cat "\${path}" > /dev/null 2>&1; then echo "read \${path}"; else echo "hidden \${path}"; fi
 done
 if ls /mnt/c > /dev/null 2>&1; then echo "read /mnt/c"; else echo "hidden /mnt/c"; fi
-cat /tmp/.box/pool-token > /dev/null 2>&1 && echo "kept pool-token"
+# The worker's own copy waits in its directory for serve, which reads and removes it; the shared one is in the hidden home.
+[ -s /tmp/.box/worker/pool-token ] && echo "kept pool-token"
+if cat "${units}/pool-token" > /dev/null 2>&1; then echo "read the shared pool-token"; else echo "hidden the shared pool-token"; fi
 [ -x /tmp/.box/node/bin/npm ] && echo "kept node"
 touch /tmp/.box/worker/probe-wrote && echo "kept worker"
-: > /tmp/.box/pool-token 2> /dev/null && echo "wrote pool-token" || echo "pool-token read-only"
 PROBE
 
 # probe <box.sh> <worker name>: one warm-only worker on core 0, its before.log once it ends.
@@ -67,7 +70,7 @@ check "${output}" "hidden /mnt/c"
 check "${output}" "kept pool-token"
 check "${output}" "kept node"
 check "${output}" "kept worker"
-check "${output}" "pool-token read-only"
+check "${output}" "hidden the shared pool-token"
 
 # The mutant: box.sh without the tmpfs over the home. The probe must read the planted secrets through it.
 mutant=${scratch}/box-mutant.sh

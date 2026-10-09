@@ -39,6 +39,8 @@ func TestATestJobIsChecked(t *testing.T) {
 		"a huge pattern":              func(job *TestJob) { job.Packages[0].Run = strings.Repeat("a", MaximumPatternBytes+1) },
 		"an absolute changed path":    func(job *TestJob) { job.ChangedPaths = []string{"/etc/passwd"} },
 		"a changed path flag":         func(job *TestJob) { job.ChangedPaths = []string{"-x"} },
+		"a changed path climbing out": func(job *TestJob) { job.ChangedPaths = []string{"internal/../../etc/passwd"} },
+		"a changed path that is ..":   func(job *TestJob) { job.ChangedPaths = []string{".."} },
 		"a changed path line break":   func(job *TestJob) { job.ChangedPaths = []string{"a\nb"} },
 	}
 	for name, change := range refused {

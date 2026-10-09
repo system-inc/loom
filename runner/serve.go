@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -123,6 +124,23 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	}
 	summary.Seconds = time.Since(started).Seconds()
 	return summary, nil
+}
+
+// ReadTokenFile reads the pool token from a file and removes the file, so the token is never on the runner's command
+// line (where any process of the same user, a unit's tests included, could read it from /proc) and never left on disk.
+func ReadTokenFile(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("the pool token file: %w", err)
+	}
+	if err := os.Remove(path); err != nil {
+		return "", fmt.Errorf("removing the pool token file after reading it: %w", err)
+	}
+	token := strings.TrimSpace(string(content))
+	if token == "" {
+		return "", fmt.Errorf("the pool token file %s is empty", path)
+	}
+	return token, nil
 }
 
 // serveBackoff doubles from a second to at most thirty while the pool keeps failing.

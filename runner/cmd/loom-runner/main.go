@@ -2,11 +2,12 @@
 // each. It exits 0 when the unit passed, 1 when it failed and 2 when it is broken or couldn't be read.
 //
 //	loom-runner run [--workspace <directory>] [--keep] <unit.json | https URL | ->
-//	loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--strict] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
+//	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
 //	loom-runner version
 //
 // serve asks a pool for units and runs them until its deadline, each unit posting its own events to the
-// wire. With --strict (the Codex pool's) it runs only structured test jobs and refuses every other unit before
+// wire. --token-file names a file holding the pool token, which serve reads and removes, so the token is never on its
+// command line. With --strict (the Codex pool's) it runs only structured test jobs and refuses every other unit before
 // anything runs (README.md, "What a strict worker does"). Its events go to --log, never stdout: it prints one summary line when it ends, since that line is
 // all a Codex turn should show. It exits 0 at the deadline or on SIGTERM, and 2 when the pool refuses it.
 package main
@@ -27,7 +28,7 @@ import (
 
 const usage = `usage:
   loom-runner run [--workspace <directory>] [--keep] <unit.json | https URL | ->
-  loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--strict] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
+  loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
   loom-runner version
 `
 
@@ -95,7 +96,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	pool := flags.String("pool", "", "the pool's address, <wire>/pools/<pool>")
-	token := flags.String("token", "", "the pool token")
+	tokenFile := flags.String("token-file", "", "a file holding the pool token; serve reads it and removes it")
 	hostname, _ := os.Hostname()
 	worker := flags.String("worker", hostname, "this instance's name in the pool's status")
 	until := flags.Duration("until", 0, "how long to serve; no unit is taken in its last minute")
@@ -107,8 +108,13 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
-	if flags.NArg() != 0 || *pool == "" || *token == "" || *worker == "" || *until <= 0 {
+	if flags.NArg() != 0 || *pool == "" || *tokenFile == "" || *worker == "" || *until <= 0 {
 		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	token, err := runner.ReadTokenFile(*tokenFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "loom-runner: %v\n", err)
 		return 2
 	}
 	events := io.Discard
@@ -125,7 +131,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	defer stop()
 	summary, err := runner.Serve(serveContext, runner.ServeOptions{
 		Pool:     *pool,
-		Token:    *token,
+		Token:    token,
 		Worker:   *worker,
 		Deadline: time.Now().Add(*until),
 		Unit:     runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr, Strict: *strict, Root: *root, Tree: *tree},
