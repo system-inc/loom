@@ -336,8 +336,36 @@ finish() {
 			red) verdict="${verdict} (stopped at its $((ceiling / 60))-minute ceiling)" ;;
 			*)
 				# A red the finished units already proved stands: the units still running can't make it green (Oct 9:
-				# lowering chain 97456986 had 8 units failed on named tests and still read void).
-				if grep -q '^FAIL ' "${work}/reds.txt" 2> /dev/null; then
+				# lowering chain 97456986 had 8 units failed on named tests and still read void). But only a red of the
+				# candidate's own: when every named red is main's, from the ruled list or main's own pool records, the
+				# stop is Loom's and the job goes back to the pool as void (@system_adamic, Oct 9 06:43Z: C emission
+				# 3fefe5b2 sat 80 minutes as red on main's TestCallTargetReaders beside 21 infra breaks).
+				local mains
+				mains=$(python3 - "${work}/reds.txt" "${HOME}/.loom/canary/main-reds.txt" "${HOME}/.loom/main.log" "${HOME}/.loom/pregate" <<'PY'
+import os, re, sys
+reds, ruled, log, pregate = sys.argv[1:]
+def named(path):
+    out = set()
+    for line in open(path, errors="replace") if os.path.exists(path) else []:
+        match = re.match(r"^FAIL (\S+) (\S+)", line)
+        if match and match.group(2) != "(package)" and not match.group(2).startswith("("):
+            out.add(match.group(1) + " " + match.group(2))
+    return out
+main = {line.strip() for line in open(ruled) if line.strip() and not line.startswith("#")} if os.path.exists(ruled) else set()
+for line in open(log, errors="replace") if os.path.exists(log) else []:
+    match = re.search(r" pre-gate of ([0-9a-f]{40}) ", line)
+    if match:
+        main |= named(os.path.join(pregate, match.group(1) + ".reds.txt"))
+candidate = [line.rstrip("\n") for line in open(reds, errors="replace") if line.startswith("FAIL ")] if os.path.exists(reds) else []
+mine = [line for line in candidate if " ".join(line.split()[1:3]) not in main]
+# Nothing printed when any red is the candidate's own (or a package red, which names no test): the red stands.
+if candidate and not mine:
+    print(", ".join(sorted({line.split()[2] for line in candidate})))
+PY
+)
+				if [ -n "${mains}" ]; then
+					verdict="void: ${sha} fast gate on Loom's side pool stopped at its $((ceiling / 60))-minute ceiling (#x80gpc0) before every unit reported, its only named reds main's own (${mains}), so it goes back to the pool (run ${run})"
+				elif grep -q '^FAIL ' "${work}/reds.txt" 2> /dev/null; then
 					verdict="red: ${sha} fast gate on Loom's side pool, first: $(grep -m1 '^FAIL ' "${work}/reds.txt" | cut -c6- | cut -d' ' -f1-2), stopped at its $((ceiling / 60))-minute ceiling with $(grep -c '^FAIL ' "${work}/reds.txt") failed tests and units unreported (branch $(cat "${work}/branch" 2> /dev/null), run ${run})"
 				else
 					verdict="void: ${sha} fast gate on Loom's side pool stopped at its $((ceiling / 60))-minute ceiling (#x80gpc0) before every unit reported, so the boxes take it (run ${run})"
