@@ -147,11 +147,13 @@ finish() {
 	cp "${work}/build.txt" "${record}/build-vet.txt" 2> /dev/null
 	[ -s "${work}/test.jsonl" ] && cp "${work}/test.jsonl" "${record}/test.jsonl"
 	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
-	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" <<'PY'
+	# uncached_tests is the run's own mode, read from the coordinator's first line ("... units on N slots, uncached"),
+	# which push-main --fast-gate requires of a landing's Go-test record (integration, Oct 9 04:38Z).
+	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" <<'PY'
 import json, sys
-path, verdict, run, sha, branch, base = sys.argv[1:]
+path, verdict, run, sha, branch, base, header = sys.argv[1:]
 json.dump({"finished": True, "verdict": verdict, "runner": "pool", "pool": "codex-side", "pool_run": run, "covers": "go-tests",
-           "sha": sha, "branch": branch, "base": base}, open(path, "w"), indent=2)
+           "uncached_tests": header.rstrip().endswith(", uncached"), "sha": sha, "branch": branch, "base": base}, open(path, "w"), indent=2)
 PY
 	find "${record}" -type f -size +5M -name '*.jsonl' -exec gzip -9 {} \;
 	index=$(mktemp -u)
