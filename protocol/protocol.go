@@ -19,16 +19,18 @@ type Job struct {
 }
 
 type JobUnit struct {
-	Id             string              `json:"id"`
-	Needs          []string            `json:"needs,omitempty"`
-	Matrix         map[string][]string `json:"matrix,omitempty"`
-	Argv           []string            `json:"argv"`
-	Environment    map[string]string   `json:"environment,omitempty"`
-	Directory      string              `json:"directory,omitempty"`
-	Inputs         []Input             `json:"inputs,omitempty"`
-	Outputs        []Output            `json:"outputs,omitempty"`
-	TimeoutSeconds int                 `json:"timeoutSeconds"`
-	Resources      Resources           `json:"resources,omitempty"`
+	Id     string              `json:"id"`
+	Needs  []string            `json:"needs,omitempty"`
+	Matrix map[string][]string `json:"matrix,omitempty"`
+	Argv   []string            `json:"argv,omitempty"`
+	// Test is a structured go test of the adamic repository, in place of argv (test.go).
+	Test           *TestJob          `json:"test,omitempty"`
+	Environment    map[string]string `json:"environment,omitempty"`
+	Directory      string            `json:"directory,omitempty"`
+	Inputs         []Input           `json:"inputs,omitempty"`
+	Outputs        []Output          `json:"outputs,omitempty"`
+	TimeoutSeconds int               `json:"timeoutSeconds"`
+	Resources      Resources         `json:"resources,omitempty"`
 	// Cache says the unit is hermetic: its result depends on nothing but what its cache key holds, so a
 	// pass may stand in for a later unit with the same key. Off by default, since a unit that reads a
 	// machine's own state (a warm checkout, say) has inputs its key can't see.
@@ -57,9 +59,11 @@ type Resources struct {
 
 // A Unit is one command handed to one runner.
 type Unit struct {
-	Run            string            `json:"run"`
-	Unit           string            `json:"unit"`
-	Argv           []string          `json:"argv"`
+	Run  string   `json:"run"`
+	Unit string   `json:"unit"`
+	Argv []string `json:"argv,omitempty"`
+	// Test is a structured go test of the adamic repository, in place of argv: a strict runner runs only these.
+	Test           *TestJob          `json:"test,omitempty"`
 	Environment    map[string]string `json:"environment,omitempty"`
 	Directory      string            `json:"directory,omitempty"`
 	Inputs         []Input           `json:"inputs,omitempty"`
@@ -192,8 +196,16 @@ func Expand(job Job) ([]PlannedUnit, error) {
 	}
 	var plan []PlannedUnit
 	for _, unit := range job.Units {
-		if len(unit.Argv) == 0 {
-			return nil, fmt.Errorf("unit %s has no argv", unit.Id)
+		if (len(unit.Argv) == 0) == (unit.Test == nil) {
+			return nil, fmt.Errorf("unit %s needs argv or a test job, exactly one", unit.Id)
+		}
+		if unit.Test != nil {
+			if len(unit.Matrix) > 0 {
+				return nil, fmt.Errorf("unit %s: a test job takes no matrix", unit.Id)
+			}
+			if err := CheckTestJob(*unit.Test); err != nil {
+				return nil, fmt.Errorf("unit %s: %w", unit.Id, err)
+			}
 		}
 		if unit.TimeoutSeconds <= 0 {
 			return nil, fmt.Errorf("unit %s needs a positive timeoutSeconds", unit.Id)
@@ -278,9 +290,11 @@ func substitute(unit JobUnit, combination map[string]string) (JobUnit, error) {
 	}
 	expanded := unit
 	expanded.Matrix = nil
-	expanded.Argv = make([]string, len(unit.Argv))
-	for index, argument := range unit.Argv {
-		expanded.Argv[index] = replace(argument)
+	if unit.Argv != nil {
+		expanded.Argv = make([]string, len(unit.Argv))
+		for index, argument := range unit.Argv {
+			expanded.Argv[index] = replace(argument)
+		}
 	}
 	if unit.Environment != nil {
 		expanded.Environment = map[string]string{}

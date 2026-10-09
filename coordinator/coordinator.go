@@ -505,7 +505,7 @@ func jsonLine(event protocol.Event) (string, error) {
 // has no wire; it reads and writes blobs through the run's own endpoint.
 func (coordinator *coordinator) unitFor(planned protocol.PlannedUnit) protocol.Unit {
 	unit := protocol.Unit{
-		Run: coordinator.run, Unit: planned.Id, Argv: planned.Unit.Argv, Environment: planned.Unit.Environment,
+		Run: coordinator.run, Unit: planned.Id, Argv: planned.Unit.Argv, Test: planned.Unit.Test, Environment: planned.Unit.Environment,
 		Directory: planned.Unit.Directory, Inputs: planned.Unit.Inputs, Outputs: planned.Unit.Outputs,
 		TimeoutSeconds: planned.Unit.TimeoutSeconds, Resources: planned.Unit.Resources, Token: coordinator.runnerToken,
 	}

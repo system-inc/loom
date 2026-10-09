@@ -29,8 +29,15 @@ func CheckUnit(unit Unit) error {
 	if unit.Unit == "" || len(unit.Unit) > MaximumUnitIdLength {
 		return fmt.Errorf("the unit needs a unit id of 1 to %d bytes", MaximumUnitIdLength)
 	}
-	if len(unit.Argv) == 0 || unit.Argv[0] == "" {
-		return fmt.Errorf("the unit has no argv")
+	switch {
+	case len(unit.Argv) > 0 && unit.Test != nil:
+		return fmt.Errorf("the unit carries both argv and a test job; it carries one")
+	case unit.Test != nil:
+		if err := CheckTestJob(*unit.Test); err != nil {
+			return err
+		}
+	case len(unit.Argv) == 0 || unit.Argv[0] == "":
+		return fmt.Errorf("the unit has no argv and no test job")
 	}
 	if unit.TimeoutSeconds <= 0 {
 		return fmt.Errorf("the unit needs a positive timeoutSeconds")

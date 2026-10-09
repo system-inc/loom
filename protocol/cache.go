@@ -9,7 +9,8 @@ import (
 )
 
 // cacheKeyVersion changes whenever the key's encoding does, so an old entry can never match a new key.
-const cacheKeyVersion = "loom-cache-v1"
+// v2 added the unit's test job.
+const cacheKeyVersion = "loom-cache-v2"
 
 // A cacheKeyPart is one thing a unit's result depends on, named so a test can drop it and watch the key go blind.
 type cacheKeyPart struct {
@@ -35,6 +36,7 @@ func cacheKeyParts(unit Unit, runnerVersion string, platform string) []cacheKeyP
 	}
 	return []cacheKeyPart{
 		{"argv", unit.Argv},
+		{"test", unit.Test},
 		{"environment", environment},
 		{"directory", unit.Directory},
 		{"inputs", inputs},
