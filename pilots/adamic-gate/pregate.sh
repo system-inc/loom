@@ -86,11 +86,15 @@ pregate() {
 	else
 		pool=codex-side units=15 only=${packages} scope="the red-prone packages"
 	fi
-	# The tree's own test list at the sha (treetests.py) is kept beside the job, not planned from yet: without package
-	# affinity in the packing, its thousands of small split tests scatter over every unit and each unit builds many
-	# packages (Oct 9, 04:40Z: 2,625 units for main). It joins the plan with #wa8exgw.
+	# The tree's own test list at the sha (treetests.py). Under a budget (LOOM_PREGATE_BUDGET, seconds; main.sh sets 60
+	# for main's gate, #w3y7pks) the plan is made from it, package first, as many units as fit the budget, each packed
+	# unit killed at budget plus a half and that kill a red; unbudgeted it is kept beside the job only, since without
+	# package affinity its thousands of small split tests scattered over 2,625 units (Oct 9, 04:40Z).
 	git -C "${gate}" fetch -q origin "${sha}" 2> /dev/null
 	python3 "${HOME}/.loom/bin/treetests.py" "${sha}" > "${work}/${sha}.tree-tests.txt" 2> /dev/null
+	if [ -n "${LOOM_PREGATE_BUDGET:-}" ] && [ -s "${work}/${sha}.tree-tests.txt" ]; then
+		split+=(--budget "${LOOM_PREGATE_BUDGET}" --unit-setup 10 --tree-tests "${work}/${sha}.tree-tests.txt")
+	fi
 	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" ${split[@]+"${split[@]}"} > "${job}" 2> "${work}/${sha}.plan.err" || { void "${sha}" "planning failed"; return; }
 	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
 	slots=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)
