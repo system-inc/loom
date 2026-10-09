@@ -1,7 +1,10 @@
 #!/bin/bash
 # pregate.sh: the pre-gate (#vvpm0a8, @system_adamic for Kirk, Oct 8: "all tests should fail fast and loud").
-# Every train candidate in the whole gate's request file runs the packages that turn stars red on Loom's warm Codex
-# pool before any box takes its whole gate: every unit at once, so the whole red list comes back in one run.
+# Every candidate in the whole gate's request file runs on Loom's warm Codex pool before any box takes its whole
+# gate: every unit at once, so the whole red list comes back in one run. A star candidate (a sha some
+# cloud/land-train-* branch points at) runs the whole Go test set on the star's pool, about 14 minutes (@system_adamic,
+# Oct 9: V1's reds were in stage1 packages the narrow pre-gate never ran); any other candidate runs the packages
+# that turn stars red on the side pool.
 #
 #	pilots/adamic-gate/pregate.sh [--once <sha>]
 #
@@ -29,7 +32,6 @@ verdicts=${state}/pregate
 work=${HOME}/.loom/pregate
 gate=${HOME}/Projects/system/adamic-gate
 packages=${LOOM_PREGATE_PACKAGES:-'/(stage3/fixtures|internal/fresh|internal/lower|internal/flow|internal/oracle)$'}
-units=${LOOM_PREGATE_UNITS:-25}
 mkdir -p "${verdicts}" "${work}"
 loom=${HOME}/.loom/bin/loom-pregate planner=${HOME}/.loom/bin/adamic-gate
 [ -x "${loom}" ] && [ -x "${planner}" ] || { echo "pregate: build ${loom} and ${planner} on a box first (see the header)"; exit 1; }
@@ -53,19 +55,30 @@ void() {
 	echo "$(date -u +%H:%M:%S) void: pre-gate of $1: $2"
 }
 
+# star <sha>: whether a cloud/land-train-* branch points at it, read from origin (resolved there, never from a
+# local FETCH_HEAD).
+star() {
+	git -C "${gate}" ls-remote origin 'refs/heads/cloud/land-train-*' 2> /dev/null | grep -q "^$1"
+}
+
 pregate() {
-	local sha=$1 started=${SECONDS} reference inputs run verdict summary
+	local sha=$1 started=${SECONDS} reference inputs run verdict summary pool units only scope
 	local job=${work}/${sha}.job.json record=${work}/${sha}.record.jsonl report=${work}/${sha}.reds.txt
 	echo "running" > "${verdicts}/${sha}"
 	reference=$(reference) || { void "${sha}" "no green whole gate's record to plan from"; return; }
 	inputs=$(cat "${HOME}/.loom/gate-inputs" 2> /dev/null)
-	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${packages}" > "${job}" 2> /dev/null || { void "${sha}" "planning failed"; return; }
-	printf 'running\npre-gate of %s on the Codex pool since %s\n' "${sha}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
-	"${loom}" run --uncached --slots none --pool codex=25 --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
+	if star "${sha}"; then
+		pool=codex units=50 only="" scope="the whole Go test set"
+	else
+		pool=codex-side units=15 only=${packages} scope="the red-prone packages"
+	fi
+	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" > "${job}" 2> /dev/null || { void "${sha}" "planning failed"; return; }
+	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
+	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo 25 || echo 15)" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
 	"${planner}" reds --job "${job}" --record "${record}" > "${report}" 2>&1
 	case $? in 0) verdict=green ;; 1) verdict=red ;; *) verdict=void ;; esac
 	run=$(head -1 "${report}" | awk '{print $2}' | tr -d :)
-	summary="pre-gate of ${sha} in $((SECONDS - started)) s,$(head -1 "${report}" | cut -d, -f2-) (run ${run}, list ${report})"
+	summary="pre-gate of ${sha} (${scope}, ${pool}) in $((SECONDS - started)) s,$(head -1 "${report}" | cut -d, -f2-) (run ${run}, list ${report})"
 	echo "${verdict} ${summary}" > "${work}/${sha}.verdict"
 	case ${verdict} in
 		green) printf 'green\n%s\n' "${summary}" > "${verdicts}/${sha}" ;;
@@ -75,7 +88,7 @@ pregate() {
 	echo "$(date -u +%H:%M:%S) $(cat "${work}/${sha}.verdict")"
 	if [ "${verdict}" != green ]; then
 		{
-			echo "Pre-gate of ${sha} is ${verdict} in $((SECONDS - started)) s on the Codex pool:$(head -1 "${report}" | cut -d, -f2-). The packages that turn stars red, every unit at once; the whole list, failed leaves only$([ "${verdict}" = void ] && echo ", and the candidate stays eligible for the boxes since the fault is Loom's"):"
+			echo "Pre-gate of ${sha} is ${verdict} in $((SECONDS - started)) s on Loom's ${pool} pool:$(head -1 "${report}" | cut -d, -f2-). It ran ${scope}, every unit at once; the whole list, failed leaves only$([ "${verdict}" = void ] && echo ", and the candidate stays eligible for the boxes since the fault is Loom's"):"
 			echo
 			head -c 12000 "${report}" | tail -n +2
 			[ "$(wc -c < "${report}")" -gt 12000 ] && echo "... cut at 12 KB; the full list is ${report}"

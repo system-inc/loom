@@ -15,7 +15,7 @@
 set -uo pipefail
 
 jobs=${LOOM_FAST_JOBS:-${HOME}/.loom/jobs/fast}
-concurrent=${LOOM_FAST_CONCURRENT:-3}
+concurrent=${LOOM_FAST_CONCURRENT:-2}
 gate=${HOME}/Projects/system/adamic-gate
 mkdir -p "${jobs}"
 # A job left running by a server that died starts again.
