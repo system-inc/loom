@@ -71,7 +71,8 @@ def main():
         if not (str(job.get("branch", "")).startswith("cloud/land-") or tier >= 30):
             continue
         running, verdict = os.path.join(jobs, sha + ".running"), os.path.join(jobs, sha + ".verdict")
-        if os.path.exists(running):
+        # A running job is moving, and a cancelled one was stopped on purpose (its void says so).
+        if os.path.exists(running) or os.path.exists(os.path.join(jobs, sha + ".cancelled")):
             continue
         what = None
         if not os.path.exists(verdict):
