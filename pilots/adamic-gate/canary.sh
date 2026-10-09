@@ -65,9 +65,9 @@ echo "canary ${stamp}: tools ${hash:0:12} (${tools}) on main ${main:0:12}, the l
 started=${SECONDS}
 LOOM_BIN=${tools} LOOM_FAST_JOBS=${jobs} LOOM_FAST_PUBLISH=0 bash "${tools}/fast.sh" --once "${landed}" > "${out}/${stamp}.log" 2>&1
 verdict=$(head -1 "${jobs}/${landed}.verdict" 2> /dev/null)
-python3 - "${out}/${stamp}.json" "${hash}" "${tools}" "${main}" "${landed}" "${landedOn}" "${verdict}" "$((SECONDS - started))" "${jobs}/${landed}.work/reds.txt" "${out}/main-reds.txt" <<'PY'
+python3 - "${out}/${stamp}.json" "${hash}" "${tools}" "${main}" "${landed}" "${landedOn}" "${verdict}" "$((SECONDS - started))" "${jobs}/${landed}.work/reds.txt" "${out}/main-reds.txt" "${jobs}/${landed}.work/test.jsonl" "${LOOM_CANARY_MIN_TESTS:-500}" <<'PY'
 import json, os, re, sys
-path, hash, tools, main, landed, landedOn, verdict, seconds, reds, mainReds = sys.argv[1:]
+path, hash, tools, main, landed, landedOn, verdict, seconds, reds, mainReds, testLines, floor = sys.argv[1:]
 failed = []
 if os.path.exists(reds):
     # "FAIL <package> <test> (<unit>)": a numbered shard counts as its family's name.
@@ -77,8 +77,18 @@ unknown = [name for name in failed if name not in known]
 green = verdict.startswith("green:")
 passed = green or (verdict.startswith("red:") and failed and not unknown)
 reason = "green" if green else ("red only on main's own: " + ", ".join(failed) if passed else ("no verdict" if not verdict else verdict.split(":")[0] + (", not main's: " + ", ".join(unknown[:8]) if unknown else "")))
+# A thin selection proves little about the tools (@system_adamic_tests, Oct 9: a main tip whose landings touch only inert
+# paths would pass on a handful of tests): under the floor of top-level tests passed, the canary fails, whatever its
+# verdict. Earlier canaries passed 2,365 and 6,656; developer tools' watch holds the same 500.
+ran = set()
+for line in open(testLines, errors="replace") if os.path.exists(testLines) else []:
+    match = re.search(r'"Action":"pass","Package":"([^"]*)","Test":"([^"/]*)"', line)
+    if match:
+        ran.add(match.group(1) + " " + match.group(2))
+if passed and len(ran) < int(floor):
+    passed, reason = False, "void: ran %d tests, under the canary's %s" % (len(ran), floor)
 json.dump({"tools_hash": hash, "tools": tools, "main": main, "landed": landed, "landed_on": landedOn, "verdict": verdict,
-           "seconds": int(seconds), "failed": failed, "main_reds": sorted(known & set(failed)), "pass": passed, "reason": reason},
+           "seconds": int(seconds), "failed": failed, "main_reds": sorted(known & set(failed)), "tests_passed": len(ran), "pass": passed, "reason": reason},
           open(path, "w"), indent=2)
 PY
 if python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))["pass"] else 1)' "${out}/${stamp}.json"; then
