@@ -33,6 +33,8 @@ def phaseUnit(identifier, phase):
 
 class Inputs(unittest.TestCase):
     def setUp(self):
+        # The stand-in is Loom's own list here, never whatever ~/.loom/test-reads.json holds on this machine.
+        inputs.standInReads = lambda: inputs.knownReads
         self.repository = tempfile.mkdtemp()
         git(self.repository, "init", "-q")
         git(self.repository, "config", "user.email", "loom@test")

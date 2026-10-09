@@ -20,8 +20,9 @@ The definition, agreed with developer tools on Oct 9 (03:24Z), named in every ou
   test-only landings, which carry them, move only the packages whose tests they change.
 - own: for a test unit, per package it runs, the package directory's own *_test.go files and its testdata/ tree, plus
   the paths cloud/fast-gate/test-reads.json declares that package reads ({"<package directory>": ["<path>", ...]}, a
-  path being a file or a directory, "." the whole tree). Until that file exists, the reads found on Oct 9 stand in for
-  it (knownReads); once it does, the file at the hashed sha is the whole declaration. A phase unit (run.py --phase) owns the whole tree, since its
+  path being a file or a directory, "." the whole tree). Once that file is in the tree at the hashed sha it is the
+  whole declaration; until then ~/.loom/test-reads.json stands in for it (developer tools' file from its branch), or
+  failing that the reads found on Oct 9 (knownReads). A phase unit (run.py --phase) owns the whole tree, since its
   inputs aren't declared per package: any change at all reruns it.
 - toolchain: the gate inputs' manifest hash the unit's body pins (Go, clang, TypeScript, corpora) and, for a phase
   unit, the tools sha it runs run.py from.
@@ -63,6 +64,13 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def standInReads():
+    path = os.path.expanduser("~/.loom/test-reads.json")
+    if os.path.exists(path):
+        return json.load(open(path))
+    return knownReads
+
+
 def isTestPath(path):
     return path.endswith("_test.go") or "testdata" in path.split("/")
 
@@ -86,7 +94,7 @@ class Tree:
         self.root = subprocess.run(["git", "-C", repository, "rev-parse", sha + "^{tree}"], check=True, capture_output=True, text=True).stdout.strip()
         self.shared = sha256("".join("%s\t%s\n" % (meta, path) for path, meta in self.entries if isShared(path)))
         reads = [meta for path, meta in self.entries if path == testReadsPath]
-        self.reads = knownReads
+        self.reads = standInReads()
         if reads:
             blob = reads[0].split()[2]
             self.reads = json.loads(subprocess.run(["git", "-C", repository, "cat-file", "blob", blob], check=True, capture_output=True, text=True).stdout)
