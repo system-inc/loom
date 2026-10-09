@@ -11,7 +11,10 @@
 # exits nonzero with nothing written, and fast.sh places the pool unit as before. It never decides a red: a selection
 # that leaves no select.json goes to the pool, whose unit's word stands. The whole try is held to LOOM_SELECT_BUDGET
 # seconds (30). Boxes are tried least loaded first; one that is busy with another selection, has no tree yet (it starts
-# a clone in the background and says so) or can't fetch hands on to the next.
+# a clone in the background and says so) or can't fetch hands on to the next. When none took it and some were busy,
+# the least loaded busy box is waited on, its lock held to what the budget leaves past a selection's own 10 s (#9jadv57,
+# Oct 9 19:46Z: three requeues at once, and ba611349, finding Workshop busy, waited 1,154 s on the pool for a 28 s
+# selection a box makes in 4 to 8 s).
 #
 # The box watcher's trees (~/fast-gate/tree*, tools*) are never read or touched. Workshop alone by default (Loom, Oct 9
 # 18:1xZ: proven there at 5 to 8 s, byte-identical on 7 real jobs; Server went unreachable under cold setups beside a
@@ -24,19 +27,27 @@ for sha in "${gated}" "${base}" "${tools}"; do
 done
 boxes=${LOOM_SELECT_BOXES:-workshop}
 budget=${LOOM_SELECT_BUDGET:-30}
+# What a selection takes on a warm box once it holds the lock (4 to 8 s live), kept clear of a wait on a busy one.
+selectSeconds=10
 started=${SECONDS}
 # One connection per box kept for ten minutes, so the probe and the selection skip ssh's handshake (0.7 s to 0.1 s).
 ssh=(ssh -o BatchMode=yes -o ConnectTimeout=3 -o ControlMaster=auto -o "ControlPath=${HOME}/.ssh/loom-select-%r@%h:%p" -o ControlPersist=600)
 
 # What runs on the box: stdout is the selection's tar.gz and nothing else, everything said goes to stderr.
-# Exit 0 with the archive; 3 when this box can't now (busy, cold, a fetch failed); 1 when run.py left no select.json.
+# Exit 0 with the archive; 4 when this box is busy with another selection; 3 when it can't now (cold, a fetch failed, or
+# still busy after waiting <wait> seconds for its lock); 1 when run.py left no select.json.
 read -r -d '' remote <<'BOX'
 set -uo pipefail
-sha=$1 base=$2 baseName=$3 tools=$4
+sha=$1 base=$2 baseName=$3 tools=$4 wait=$5
 root=${HOME}/loom-select tree=${HOME}/loom-select/adamic toolsTree=${HOME}/loom-select/tools
 mkdir -p "${root}"
 exec 9> "${root}/lock"
-flock -n 9 || { echo "select-box: $(hostname) is busy with another selection" >&2; exit 3; }
+if [ "${wait}" -gt 0 ]; then
+	flock -w "${wait}" 9 || { echo "select-box: $(hostname) stayed busy with another selection for ${wait} s" >&2; exit 3; }
+	echo "select-box: $(hostname) took the lock after waiting" >&2
+else
+	flock -n 9 || { echo "select-box: $(hostname) is busy with another selection" >&2; exit 4; }
+fi
 export GIT_TERMINAL_PROMPT=0
 if [ ! -d "${tree}/.git" ]; then
 	# The first clone takes minutes, far past a selection's budget, so it runs detached under its own lock and lands
@@ -84,16 +95,18 @@ for box in ${boxes}; do
 done
 wait
 order=$(for box in ${boxes}; do
-	read -r load cpus < "${probes}/${box}" 2> /dev/null && [ -n "${cpus:-}" ] && awk -v box="${box}" -v load="${load}" -v cpus="${cpus}" 'BEGIN {printf "%.3f %s\n", load / cpus, box}'
+	read -r load cpus < "${probes}/${box}" 2> /dev/null && [ -n "${cpus:-}" ] && awk -v box="${box}" -v minute="${load}" -v cpus="${cpus}" 'BEGIN {printf "%.3f %s\n", minute / cpus, box}'
 done | sort -n | awk '{print $2}')
 rm -f "${probes}"/* && rmdir "${probes}"
 [ -n "${order}" ] || { echo "select-box: no box answered (${boxes})" >&2; exit 3; }
 
 partial=${archive}.partial-$$
-for box in ${order}; do
-	left=$((budget - (SECONDS - started)))
+# tryBox <box> <wait>: the selection on <box>, waiting up to <wait> seconds for its lock (0, not at all). Done, with the
+# archive in place and the box printed, it exits; otherwise it returns the box's exit, 4 when the box was busy.
+tryBox() {
+	local box=$1 wait=$2 left=$((budget - (SECONDS - started))) code
 	[ "${left}" -gt 0 ] || { echo "select-box: out of budget (${budget} s) before ${box}" >&2; exit 3; }
-	timeout "${left}" "${ssh[@]}" "${box}" bash -s -- "$(printf '%q ' "${gated}" "${base}" "${baseName}" "${tools}")" <<< "${remote}" > "${partial}"
+	timeout "${left}" "${ssh[@]}" "${box}" bash -s -- "$(printf '%q ' "${gated}" "${base}" "${baseName}" "${tools}" "${wait}")" <<< "${remote}" > "${partial}"
 	code=$?
 	if [ "${code}" = 0 ] && tar -tzf "${partial}" 2> /dev/null | grep -qx './select.json'; then
 		mv "${partial}" "${archive}"
@@ -102,10 +115,23 @@ for box in ${order}; do
 	fi
 	rm -f "${partial}"
 	case ${code} in
+		4) echo "select-box: ${box} is busy with another selection after $((SECONDS - started)) s" >&2 ;;
 		3 | 255) echo "select-box: ${box} passed (exit ${code}) after $((SECONDS - started)) s" >&2 ;;
 		124) echo "select-box: ${box} ran past the budget (${budget} s)" >&2; exit 3 ;;
 		*) echo "select-box: ${box}'s selection left no select.json (exit ${code}); the pool decides" >&2; exit 1 ;;
 	esac
+	return "${code}"
+}
+busy=
+for box in ${order}; do
+	tryBox "${box}" 0 || [ $? != 4 ] || busy="${busy} ${box}"
+done
+# No box was free to take it: a busy one is waited on, least loaded first, while the budget leaves a selection its time.
+for box in ${busy}; do
+	wait=$((budget - (SECONDS - started) - selectSeconds))
+	[ "${wait}" -gt 0 ] || { echo "select-box: no budget left to wait on ${box}" >&2; break; }
+	echo "select-box: waiting up to ${wait} s on ${box}'s lock" >&2
+	tryBox "${box}" "${wait}"
 done
 echo "select-box: no box took it (${order//$'\n'/ })" >&2
 exit 3
