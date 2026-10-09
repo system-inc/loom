@@ -17,7 +17,15 @@
         { "binding": "PublicStore", "bucket_name": "adamic-public" }
     ],
     "durable_objects": {
-        "bindings": [{ "name": "ChangeBoard", "class_name": "ChangeBoard" }]
+        "bindings": [
+            { "name": "ChangeBoard", "class_name": "ChangeBoard" },
+            // The queue: one object, idFromName('main'), the single writer of main's future and the only writer of main.
+            { "name": "Queue", "class_name": "Queue" }
+        ]
     },
-    "migrations": [{ "tag": "changeboard-v1", "new_sqlite_classes": ["ChangeBoard"] }]
+    "migrations": [
+        { "tag": "changeboard-v1", "new_sqlite_classes": ["ChangeBoard"] },
+        { "tag": "queue-v1", "new_sqlite_classes": ["Queue"] }
+    ]
+    // GITHUB_TOKEN reads git facts at submit; GITHUB_LANDER_TOKEN moves main, minted by Kirk at cutover.
 }
