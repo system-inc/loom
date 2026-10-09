@@ -127,6 +127,11 @@ PY
 # change's red; anything else that leaves none is void.
 runSelection() {
 	local sha=$1 stamp=$2 work=${jobs}/$1.work run token hash
+	# An earlier attempt's selection never stands in for this one's: a selection that fails or uploads nothing left the
+	# old select.json in place, and the job ran on it (Oct 9 11:26Z: gocacheprog 77dcb095's new selection landed on a
+	# black hole and failed in 0.2 s, and its 10:54Z selection, made before the job had a merge gate, named the tip's
+	# changed paths while the env unpacked under the gate: 10,390 json tests failed).
+	rm -f "${work}/select.tgz" "${work}/select/select.json" "${work}/select-events.jsonl"
 	"${bin}/adamic-gate" unit --sha "$(cat "${work}/gate")" --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --id select --body "${bin}/select.sh" --output loom-out/select.tgz --output loom-out/select.stdout -- "$(cat "${work}/base")" "$(cat "${work}/base_name")" "$(cat "${work}/tools")" > "${work}/select-job.json" 2> "${work}/select-plan.log" || {
 		finish "${sha}" "${stamp}" "void: ${sha} fast gate on Loom's side pool: the selection couldn't be planned, so the boxes take it" ""
 		return 1
