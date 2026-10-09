@@ -147,6 +147,12 @@ trap 'kill $! 2> /dev/null' EXIT
 # Then the first request Loom hasn't decided runs, bottom first as integration writes them.
 while true; do
 	next=$(undecided | head -1)
-	[ -n "${next}" ] && pregate "${next}"
+	# A star candidate gets the whole gate on the pool (gate.sh: Go set, phases, census, a landing record the loops and
+	# push-main read since the promotion); any other candidate, the red-prone packages' pre-gate.
+	if [ -n "${next}" ] && star "${next}"; then
+		"${HOME}/.loom/bin/gate.sh" "${next}"
+	elif [ -n "${next}" ]; then
+		pregate "${next}"
+	fi
 	sleep 10
 done
