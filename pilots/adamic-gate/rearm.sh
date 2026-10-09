@@ -81,8 +81,13 @@ for member in json.load(sys.stdin):
 			memberPrompt=${HOME}/.loom/rearm-codex-side.md
 			"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${runner}" ${before[@]+"${before[@]}"} --until 115m codex-side > "${memberPrompt}" || continue
 		fi
-		if ./node_modules/.bin/ahra ai summary "${id}" 2> /dev/null | grep -q "approval review rejected"; then
-			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: left alone, Codex's approval review rejected the runner"
+		# Codex words its refusal many ways ("approval review rejected", "the prior automatic approval rejection still
+		# applies", "approval review's rejection remains unresolved"; Oct 9 17:08Z, three members re-sent and refused
+		# again), and a worker the pool retired by name is refused with 403 on every turn. Each resend spends a turn, on an
+		# account whose ceiling is shared, so either leaves the member alone.
+		summary=$(./node_modules/.bin/ahra ai summary "${id}" 2> /dev/null)
+		if grep -qiE "approval.{0,20}reject|is retired from this pool" <<< "${summary}"; then
+			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: left alone, $(grep -qi "is retired from this pool" <<< "${summary}" && echo "the pool retired its worker" || echo "Codex's approval review rejected the runner")"
 			continue
 		fi
 		if [ -n "${stagedPrompt}" ] && { [ -z "${stagedOn:-}" ] || [ "${stagedOn}" = "${id}" ]; }; then
