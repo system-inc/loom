@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -174,5 +175,41 @@ func TestAPoolUnitHandedToAnAskNobodyHearsIsQueuedAgainAndFinishes(t *testing.T)
 	}
 	if starts != 1 {
 		t.Fatalf("%d started events: %+v", starts, unitEventsOf(result.Events, "lost"))
+	}
+}
+
+func TestAPoolUnitWhoseWorkerGoesSilentIsPlacedAgainAndContinuesItsStream(t *testing.T) {
+	wire := newFakeWire(t)
+	wire.ghosts = 1
+	servePool(t, wire, "codex", 1)
+	pool := &PoolMachine{Pool: "codex", Wire: wire.server.URL, Secret: testSecret, Version: runner.Version,
+		GoPlatform: runtime.GOOS + "/" + runtime.GOARCH, QueueCheck: 50 * time.Millisecond}
+	unit := poolUnit("orphaned", "echo finished")
+	unit.TimeoutSeconds = 30
+	started := time.Now()
+	result := run(t, config(wire, pool), unit)
+	if result.Verdict.Status != "green" || time.Since(started) > 20*time.Second {
+		t.Fatalf("verdict %+v after %v", result.Verdict, time.Since(started))
+	}
+	// One stream across both attempts: the ghost's started, the coordinator's notes, then the second runner's
+	// events numbered on from them, and the wire holds exactly the record's events, none in conflict.
+	inRecord := unitEventsOf(result.Events, "orphaned")
+	machines := []string{}
+	for index, event := range inRecord {
+		if event.Sequence != index {
+			t.Fatalf("event %d has sequence %d: %+v", index, event.Sequence, inRecord)
+		}
+		if event.Type == "started" {
+			machines = append(machines, event.Machine)
+		}
+	}
+	hostname, _ := os.Hostname()
+	if !reflect.DeepEqual(machines, []string{"ghost", hostname}) {
+		t.Fatalf("started on %v", machines)
+	}
+	onWire := unitEventsOf(wire.events(result.Run), "orphaned")
+	sort.Slice(onWire, func(left, right int) bool { return onWire[left].Sequence < onWire[right].Sequence })
+	if !reflect.DeepEqual(onWire, inRecord) {
+		t.Fatalf("the wire holds %+v, the record %+v", onWire, inRecord)
 	}
 }

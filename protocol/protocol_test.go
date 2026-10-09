@@ -408,7 +408,7 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 		event.Time = at(event.Sequence)
 		fixture = append(fixture, event)
 	}
-	add("a", Event{Type: "started", Machine: "box", RunnerVersion: "v0-dev", Cpus: 4, MemoryMegabytes: 16384})
+	add("a", Event{Type: "started", Machine: "box", RunnerVersion: "v0-dev", Cpus: 4, MemoryMegabytes: 16384, HeartbeatSeconds: 120})
 	add("a", Event{Type: "output", Stream: "stdout"})
 	add("a", Event{Type: "output", Stream: "stderr", Text: "�", Replaced: true})
 	add("a", Event{Type: "error", Phase: PhaseWire, Message: "posting to the wire failed, retrying"})

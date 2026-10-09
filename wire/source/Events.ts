@@ -90,6 +90,8 @@ const typeFields: Record<string, Record<string, { check: FieldCheck; required: b
         cpus: { check: isCount, required: false },
         memoryMegabytes: { check: isCount, required: false },
         inputs: { check: isInputHashes, required: false },
+        // The runner's heartbeat: past this silence it says the unit is still running.
+        heartbeatSeconds: { check: isSeconds, required: false },
     },
     output: {
         // runner is the runner's own line about the unit (its heartbeat while the unit is silent), never the unit's.

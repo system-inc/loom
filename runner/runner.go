@@ -145,7 +145,7 @@ type unitRun struct {
 func Run(runContext context.Context, unit protocol.Unit, options Options) Result {
 	options = options.withDefaults()
 	run := &unitRun{unit: unit, options: options}
-	run.emitter = &emitter{run: unit.Run, unit: unit.Unit, writer: options.Events, now: time.Now}
+	run.emitter = &emitter{run: unit.Run, unit: unit.Unit, sequence: max(0, unit.SequenceStart), writer: options.Events, now: time.Now}
 	if unit.Wire != nil && unit.Wire.Url != "" {
 		run.emitter.wire = poster.New(unit.Wire.Url, unit.Token, options.Client, options.WireInterval)
 		run.emitter.wire.Report = func(message string) {
@@ -160,12 +160,13 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 		inputHashes[input.Path] = input.Sha256
 	}
 	run.emitter.emit(protocol.Event{
-		Type:            "started",
-		Machine:         machine.name,
-		RunnerVersion:   Version,
-		Cpus:            machine.cpus,
-		MemoryMegabytes: machine.memoryMegabytes,
-		InputHashes:     inputHashes,
+		Type:             "started",
+		Machine:          machine.name,
+		RunnerVersion:    Version,
+		Cpus:             machine.cpus,
+		MemoryMegabytes:  machine.memoryMegabytes,
+		InputHashes:      inputHashes,
+		HeartbeatSeconds: options.Heartbeat.Seconds(),
 	})
 
 	status := run.execute(runContext)

@@ -1,4 +1,4 @@
-{"run":"r-fixture","unit":"a","sequence":0,"time":"2026-10-08T19:00:00.000Z","type":"started","machine":"box","runnerVersion":"v0-dev","cpus":4,"memoryMegabytes":16384}
+{"run":"r-fixture","unit":"a","sequence":0,"time":"2026-10-08T19:00:00.000Z","type":"started","machine":"box","runnerVersion":"v0-dev","cpus":4,"memoryMegabytes":16384,"heartbeatSeconds":120}
 {"run":"r-fixture","unit":"a","sequence":1,"time":"2026-10-08T19:00:00.001Z","type":"output","stream":"stdout"}
 {"run":"r-fixture","unit":"a","sequence":2,"time":"2026-10-08T19:00:00.002Z","type":"output","stream":"stderr","text":"�","replaced":true}
 {"run":"r-fixture","unit":"a","sequence":3,"time":"2026-10-08T19:00:00.003Z","type":"error","phase":"wire","message":"posting to the wire failed, retrying"}

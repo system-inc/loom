@@ -31,12 +31,13 @@ import (
 // that has left it with no event from its runner for NeverStarted is queued again. It posted nothing, so the next
 // worker's events conflict with none.
 //
+// A worker can also go mid-unit (its turn ended). A runner that beats says so in its started event, and one
+// silent for three of its heartbeats is given up; the coordinator places the unit again.
+//
 // The record renumbers each attempt's events and relays them to the wire, which already holds a pool unit's
 // events from its runner; the relay's copies are identical, so the wire drops them as replays. A re-placed
-// unit is different: a runner always numbers from 0, the wire already holds the unit's earlier sequences,
-// so it refuses the new runner's batch as a conflict and the runner gives the wire up. The coordinator
-// never hears that attempt, drops it again, and the run is void. Void is honest, never green; a re-placed
-// pool unit finishing needs the runner to number from the record's offset, which v1 doesn't do.
+// unit's runner is told to number from the record's offset (Unit.SequenceStart), so its stream continues the
+// earlier attempts' on the wire instead of conflicting with them.
 type PoolMachine struct {
 	// Pool is the pool's name on the wire, such as codex.
 	Pool string
@@ -66,6 +67,9 @@ type PoolMachine struct {
 	followers map[string]*runFollower   // by run
 	queued    map[string]queuedSnapshot // by run, the last look at its units still queued
 }
+
+// silentBeats is how many of its runner's heartbeats a started unit may go silent before its worker counts as gone.
+const silentBeats = 3
 
 // maximumRequeues bounds how often one attempt queues its unit again before it gives the unit up as dropped.
 const maximumRequeues = 5
@@ -118,15 +122,20 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 	heard := false
 	var leftQueue time.Time // when a look first found the unit gone from the queue, zero while it waits there
 	requeues := 0
+	var lastHeard time.Time
+	heartbeat := time.Duration(0) // the runner's, from its started event; 0 for a runner that doesn't beat
 	for {
 		machine.mutex.Lock()
 		lines, failure := stream.lines, stream.failure
 		stream.lines = nil
 		machine.mutex.Unlock()
 		if len(lines) > 0 {
-			heard = true
+			heard, lastHeard = true, time.Now()
 		}
 		for _, line := range lines {
+			if line.heartbeat > 0 {
+				heartbeat = time.Duration(line.heartbeat * float64(time.Second))
+			}
 			if _, err := events.Write(line.text); err != nil {
 				return err
 			}
@@ -140,6 +149,11 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 		select {
 		case <-stream.signal:
 		case <-check.C:
+			// A runner that beats says something at least every heartbeat; three beats of silence is a worker
+			// gone mid-unit (its turn ended). The unit is given up here and placed again, its stream continued.
+			if heard && heartbeat > 0 && time.Since(lastHeard) >= silentBeats*heartbeat {
+				return fmt.Errorf("silent for %.0f s, %d of its runner's %.0f s heartbeats: its worker is gone", time.Since(lastHeard).Seconds(), silentBeats, heartbeat.Seconds())
+			}
 			if heard {
 				continue
 			}
@@ -245,8 +259,9 @@ type poolStream struct {
 }
 
 type poolLine struct {
-	text     []byte // the event as a JSON line
-	finished bool
+	text      []byte // the event as a JSON line
+	finished  bool
+	heartbeat float64 // a started event's heartbeatSeconds, 0 for any other line
 }
 
 // subscribe makes a stream for the unit and starts the run's reading loop if none runs.
@@ -309,7 +324,11 @@ func (machine *PoolMachine) follow(loopContext context.Context, follower *runFol
 			if stream == nil || entry.event.Run != follower.run || (entry.event.Type == "error" && entry.event.Phase == protocol.PhasePlace) {
 				continue
 			}
-			stream.lines = append(stream.lines, poolLine{text: entry.line, finished: entry.event.Type == "finished"})
+			line := poolLine{text: entry.line, finished: entry.event.Type == "finished"}
+			if entry.event.Type == "started" {
+				line.heartbeat = entry.event.HeartbeatSeconds
+			}
+			stream.lines = append(stream.lines, line)
 			notify(stream)
 		}
 		var failure *readFailure

@@ -35,6 +35,9 @@ func CheckUnit(unit Unit) error {
 	if unit.TimeoutSeconds <= 0 {
 		return fmt.Errorf("the unit needs a positive timeoutSeconds")
 	}
+	if unit.SequenceStart < 0 {
+		return fmt.Errorf("sequenceStart is a sequence, 0 or more")
+	}
 	if unit.Directory != "" && !filepath.IsLocal(filepath.FromSlash(unit.Directory)) {
 		return fmt.Errorf("directory %q isn't inside the workspace", unit.Directory)
 	}

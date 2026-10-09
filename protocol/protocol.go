@@ -65,6 +65,9 @@ type Unit struct {
 	Store          *Endpoint         `json:"store,omitempty"`
 	Wire           *Endpoint         `json:"wire,omitempty"`
 	Token          string            `json:"token,omitempty"`
+	// SequenceStart is the sequence the runner's first event takes: 0 for a first attempt. A pool unit placed
+	// again continues its stream on the wire from where the record stands, since its runner posts there itself.
+	SequenceStart int `json:"sequenceStart,omitempty"`
 }
 
 type Endpoint struct {
@@ -88,6 +91,9 @@ type Event struct {
 	Cpus            int               `json:"cpus,omitempty"`
 	MemoryMegabytes int               `json:"memoryMegabytes,omitempty"`
 	InputHashes     map[string]string `json:"inputs,omitempty"`
+	// HeartbeatSeconds is the longest the runner lets a unit go without an event: past it, the runner says the
+	// unit is still running. A watcher may take a longer silence from such a runner as the runner gone.
+	HeartbeatSeconds float64 `json:"heartbeatSeconds,omitempty"`
 	// output
 	Stream   string `json:"stream,omitempty"`
 	Text     string `json:"text,omitempty"`

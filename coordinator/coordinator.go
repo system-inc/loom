@@ -527,6 +527,9 @@ func (coordinator *coordinator) runOn(runContext context.Context, state *unitSta
 	state.startedAt = time.Now()
 	coordinator.mutex.Unlock()
 	attempt := coordinator.record.begin(id)
+	if _, pooled := machine.(*PoolMachine); pooled {
+		attempt.continueFromOffset(&unit)
+	}
 	reader, writer := io.Pipe()
 	parsed := make(chan struct{})
 	finishedStatus := ""

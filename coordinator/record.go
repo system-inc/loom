@@ -25,12 +25,14 @@ func newRecord(run string, sink func(line []byte)) *record {
 	return &record{run: run, next: map[string]int{}, now: time.Now, sink: sink}
 }
 
-// An attempt is one runner's go at one unit. Its own stream starts at sequence 0; the record shifts it to
-// follow whatever the unit's earlier attempts already wrote, so a re-placed unit stays one gapless stream.
+// An attempt is one runner's go at one unit. Its own stream starts at sequence 0, or at the offset when the
+// runner was told to continue the unit's stream (continueFromOffset); the record shifts it to follow whatever
+// the unit's earlier attempts already wrote, so a re-placed unit stays one gapless stream.
 type attempt struct {
 	record   *record
 	unit     string
 	offset   int  // the record's next sequence for the unit when the attempt began
+	start    int  // the runner's first sequence: 0, or offset for a pool runner told to continue the stream
 	expected int  // the next sequence the runner should send
 	finished bool // the runner sent finished
 	lines    int  // events taken from the runner
@@ -41,6 +43,15 @@ func (record *record) begin(unit string) *attempt {
 	record.mutex.Lock()
 	defer record.mutex.Unlock()
 	return &attempt{record: record, unit: unit, offset: record.next[unit]}
+}
+
+// continueFromOffset has the runner number its events from the attempt's offset, for a runner that posts its
+// events to the wire itself: the wire already holds the unit's earlier attempts, and a runner numbering from 0
+// again would conflict with them.
+func (attempt *attempt) continueFromOffset(unit *protocol.Unit) {
+	unit.SequenceStart = attempt.offset
+	attempt.start = attempt.offset
+	attempt.expected = attempt.offset
 }
 
 // take records one event a runner sent. An event of this attempt's run and unit is renumbered into the
@@ -55,7 +66,7 @@ func (attempt *attempt) take(event protocol.Event) {
 			attempt.gap = true
 		}
 		attempt.expected = event.Sequence + 1
-		event.Sequence += attempt.offset
+		event.Sequence += attempt.offset - attempt.start
 		if event.Sequence >= record.next[attempt.unit] {
 			record.next[attempt.unit] = event.Sequence + 1
 		}
