@@ -75,9 +75,15 @@ mkdir -p "${out}"
 # that, the unit doesn't start: exit 2, Loom's fault, placed again elsewhere.
 freeMegabytes() { df -Pm "${HOME}" /tmp | awk 'NR > 1 {print $4}' | sort -n | head -1; }
 rm -rf "${HOME}/.cache/adamic/runtime"/.build-* 2> /dev/null
+# What an earlier unit left in /tmp that no later one reads: go's and the tests' temporary directories (a unit killed at
+# its budget never removes them), npm trees replaced by a new lockfile, a half-made npm cache, and other units'
+# workspaces. One unit runs at a time, so none of it is in use (Oct 9: an instance at 92% of its 8.8 GB /tmp failed
+# 236 units in a row this way).
+rm -rf /tmp/go-build* /tmp/Test* /tmp/adamic-npm/replaced-* /tmp/adamic-npm/*.staging-* 2> /dev/null
+find /tmp -maxdepth 1 -name 'loom-unit-*' ! -path "$(dirname "${PWD}")" ! -path "${PWD}" -exec rm -rf {} + 2> /dev/null
 [ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
 free=$(freeMegabytes)
-[ "${free:-0}" -ge "${LOOM_MINIMUM_FREE_MB:-1500}" ] || { echo "loom-pilot: only ${free} MB free on the instance after trimming its caches: Loom's fault"; df -h "${HOME}" /tmp; exit 2; }
+[ "${free:-0}" -ge "${LOOM_MINIMUM_FREE_MB:-1500}" ] || { echo "loom-pilot: only ${free} MB free on the instance after trimming its caches: Loom's fault"; df -h "${HOME}" /tmp; du -xsh /tmp/* 2> /dev/null | sort -h | tail -8; exit 2; }
 # Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only. The rewrite rides in the
 # environment, never ~/.gitconfig: some instances mount it read-only, and there every cohere checkout went to ssh and
 # failed (V3 8880e6bc's pre-gate, Oct 9: four units broken on "could not lock config file").
