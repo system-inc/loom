@@ -311,6 +311,11 @@ job["name"] = "adamic-verify"
 job["units"].insert(0, unit)
 json.dump(job, open(work + "/job.json", "w"), indent=2)
 PY
+# A unit whose every test an earlier attempt already proved isn't placed at all (keptunits.py, #g4jyja4): its specs
+# would only skip what they name. The line saying what left follows the kept count in kept-skipped.txt.
+if [ -n "${LOOM_VERIFY_KEPT:-}" ]; then
+	python3 "${bin}/keptunits.py" "${work}/job.json" "${LOOM_VERIFY_KEPT}" >> "${work}/kept-skipped.txt"
+fi
 # place <job> <record> <slots>: the job on the pool, or under LOOM_VERIFY_STRICT its test jobs on codex-strict and the
 # rest on the pool. A job the converter can't read is placed as before, and run.log says so.
 place() {
