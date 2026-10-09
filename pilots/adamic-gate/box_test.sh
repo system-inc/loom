@@ -6,10 +6,10 @@
 #
 # It plants a home with an ssh key and a build-cache token, points box.sh at a scratch units directory
 # (LOOM_BOX_UNITS) whose warm-up script is a probe, and runs one worker warm-only (LOOM_BOX_WARM_ONLY), so nothing
-# serves and no pool is asked. The probe tries to read the planted secrets and /mnt, and must find none of them,
-# and the shared pool token too, while the worker's own copy of it (serve's to read and remove), its own directory and
-# node stay readable. Then a mutant box.sh without the tmpfs must let the
-# probe read the secrets, or this test proves nothing.
+# serves and no pool is asked. The probe must find the planted secrets and the shared pool token hidden and a tmpfs
+# over /mnt/c, while the worker's own copy of the token (serve's to read and remove), its own directory and node stay
+# readable and names still resolve (/etc/resolv.conf lives under /mnt/wsl on WSL). Then a mutant box.sh without the
+# tmpfs mounts must let the probe read the secrets and /mnt/c, or this test proves nothing.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 # Not under /tmp: the worker binds its own /tmp over it, so a scratch there would vanish inside the namespace.
@@ -32,7 +32,10 @@ cat > "${units}/before.sh" <<PROBE
 for path in "${home}/.ssh/id_test" "${home}/.adamic-build-cache-token"; do
 	if cat "\${path}" > /dev/null 2>&1; then echo "read \${path}"; else echo "hidden \${path}"; fi
 done
-if ls /mnt/c > /dev/null 2>&1; then echo "read /mnt/c"; else echo "hidden /mnt/c"; fi
+# A drive counts as hidden when a tmpfs sits on it in the worker's own mount table (or the box has no such drive):
+# its contents can't prove it, since a box's /mnt/c may be empty to begin with.
+if [ ! -d /mnt/c ] || grep -qE "^([^ ]+ ){4}/mnt/c .* - tmpfs " /proc/self/mountinfo; then echo "hidden /mnt/c"; else echo "read /mnt/c"; fi
+getent hosts github.com > /dev/null 2>&1 && echo "resolves github.com"
 # The worker's own copy waits in its directory for serve, which reads and removes it; the shared one is in the hidden home.
 [ -s /tmp/.box/worker/pool-token ] && echo "kept pool-token"
 if cat "${units}/pool-token" > /dev/null 2>&1; then echo "read the shared pool-token"; else echo "hidden the shared pool-token"; fi
@@ -67,6 +70,7 @@ output=$(probe "${here}/box.sh")
 check "${output}" "hidden ${home}/.ssh/id_test"
 check "${output}" "hidden ${home}/.adamic-build-cache-token"
 check "${output}" "hidden /mnt/c"
+check "${output}" "resolves github.com"
 check "${output}" "kept pool-token"
 check "${output}" "kept node"
 check "${output}" "kept worker"
@@ -78,6 +82,7 @@ grep -v 'mount -t tmpfs' "${here}/box.sh" > "${mutant}"
 output=$(probe "${mutant}")
 check "${output}" "read ${home}/.ssh/id_test"
 check "${output}" "read ${home}/.adamic-build-cache-token"
+check "${output}" "read /mnt/c"
 
 if [ "${failures}" -eq 0 ]; then
 	echo "box_test: ok (scratch ${scratch})"

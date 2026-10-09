@@ -61,17 +61,21 @@ for ((index = 0; index < workers; index++)); do
 	#
 	# A unit sees nothing of the box user's own (#mtxysfp, Oct 9 21:30Z): the mapped user is the box user, so with only
 	# /tmp bound a unit could read ~/.ssh, ~/.adamic-build-cache-token (it writes and deletes the build-cache Worker) and
-	# ~/.loom, and on WSL the Windows drives under /mnt. So what the worker needs is bound into /tmp/.box first (the
+	# ~/.loom, and on WSL the Windows drives (/mnt/c and every other drive letter). So what the worker needs is bound
+	# into /tmp/.box first (the
 	# runner, the warm-up script and node read-only, the worker's own directory for its logs and its own copy of the pool
 	# token, which serve reads and removes), then an
-	# empty tmpfs goes over the home and over /mnt, and everything after reads from /tmp/.box.
+	# empty tmpfs goes over the home and over each drive, and everything after reads from /tmp/.box. Only the drives:
+	# /etc/resolv.conf is a link into /mnt/wsl on every one of our WSL boxes, and hiding all of /mnt broke name
+	# resolution for every worker started on aa8cb73 (Oct 9 21:45Z: "Could not resolve host: github.com").
 	setsid nohup nice -n 19 ionice -c 3 taskset -c "${cores}" unshare -Urm sh -c '
 		mount --bind "$1/tmp" /tmp && mkdir -p /tmp/.box/node /tmp/.box/worker /tmp/warm &&
 		for file in runner before.sh; do : > "/tmp/.box/${file}"; done &&
 		mount --bind "$4" /tmp/.box/runner && mount --bind "$9" /tmp/.box/before.sh &&
 		mount --bind "${10}" /tmp/.box/node && mount --bind "$1" /tmp/.box/worker &&
 		for path in runner before.sh node; do mount -o remount,bind,ro "/tmp/.box/${path}" || exit 2; done &&
-		mount -t tmpfs -o size=1m,mode=755 none "${12}" && { [ ! -d /mnt ] || mount -t tmpfs -o size=1m,mode=755 none /mnt; } &&
+		mount -t tmpfs -o size=1m,mode=755 none "${12}" &&
+		for drive in /mnt/?; do [ ! -d "${drive}" ] || mount -t tmpfs -o size=1m,mode=755 none "${drive}" || exit 2; done &&
 		cd /tmp/warm &&
 		unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="/tmp/.box/node/bin:${PATH}" bash /tmp/.box/before.sh > /tmp/.box/worker/before.log 2>&1 &&
 		{ [ -z "${11}" ] || exit 0; } && cd / && exec unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="/tmp/.box/node/bin:${PATH}" \
