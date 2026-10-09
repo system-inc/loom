@@ -714,13 +714,14 @@ func plan(arguments []string) error {
 	budget := flags.Float64("budget", 0, "seconds a unit may take, its setup included: units are as many as fit it, each killed at budget plus a half")
 	unitSetup := flags.Float64("unit-setup", 10, "with --budget, seconds a unit spends before its first test (warm instance)")
 	packageSetup := flags.Float64("package-setup", 5, "with --budget, seconds a unit spends on each package it runs, building its test binary")
-	productBudget := flags.Float64("product-budget", 300, "with --budget, seconds of products a unit may hold, its setup included: products pack into as few units as fit it, each still run to completion under 600 s")
+	productBudget := flags.Float64("product-budget", 300, "seconds of products a unit may hold, its setup included: products pack into as few units as fit it, each run to completion under 600 s (under --budget always, else only when given)")
 	only := flags.String("only", "", "plan only packages matching this regular expression, for a trial")
 	target := flags.String("target", "box", "where the units run: box (a gate slot's warm tree) or codex (a Codex instance)")
 	gateInputs := flags.String("gate-inputs", "", "on codex, the hash of the gate inputs' manifest in the public store")
 	remainder := flags.Bool("remainder", false, "also run, per package, every test the reference doesn't name (a gate, not a parity check)")
 	stages := flags.Bool("stages", false, "also run the gate's other stages as units (today: go build and go vet)")
 	phasesTools := flags.String("phases", "", "also run the whole gate's other phases as units, through run.py --phase at this tools sha")
+	productTimes := flags.String("product-times", "", "size only the products by compare --times' file (as --loom-times does every test), so products pack by Loom's times while the tests keep the reference's")
 	loomTimes := flags.String("loom-times", "", "size each test by its seconds on Loom's own units (compare --times), where it has them")
 	phaseUnits := flags.String("phase-units", "", "with --phases, the units to run: one line each, <phase> or <phase> <unit> (run.py --list-units)")
 	onlyTests := flags.String("only-tests", "", "a JSON object, package to the only top-level tests it runs (a fast gate's select.json only_tests); its products and the setups of the kept tests stay too")
@@ -733,6 +734,10 @@ func plan(arguments []string) error {
 	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(*sha) || *referencePath == "" || *units < 1 {
 		return fmt.Errorf("plan needs --reference, a full 40-character --sha and --units of at least 1")
 	}
+	// Products pack under a budget, and without one when --product-budget is given (@system_adamic, Oct 9): the fast
+	// gate plans unbudgeted, and its 531 products were 531 of 567 units. Unbudgeted and without it, one unit each.
+	packProducts := *budget > 0
+	flags.Visit(func(given *flag.Flag) { packProducts = packProducts || given.Name == "product-budget" })
 	reference, err := readTestsFile(*referencePath, *only)
 	if err != nil {
 		return err
@@ -752,17 +757,23 @@ func plan(arguments []string) error {
 			}
 		}
 	}
-	// A product the reference ran or Loom has timed has a known time. One new since both is sized by fromTheTree's
-	// guess, so under a budget it runs alone instead of packing a unit by a guess.
-	productTimed := map[string]bool{}
-	for key := range reference {
-		if _, test, _ := strings.Cut(key, " "); strings.HasPrefix(test, "TestProduct_") {
-			productTimed[key] = true
+	// Products alone can be sized by Loom's times (--product-times), so an unbudgeted plan packs its products by them
+	// while its tests keep the reference's times and splits: the reference holds no product (e69fcba7's holds none of
+	// the tree's 531), and without Loom's times every product is a guess, so none would pack.
+	if *productTimes != "" {
+		times, err := readLoomTimes(*productTimes)
+		if err != nil {
+			return err
 		}
-	}
-	for key := range timed {
-		if _, test, _ := strings.Cut(key, " "); strings.HasPrefix(test, "TestProduct_") {
-			productTimed[key] = true
+		for key, seconds := range times {
+			if _, test, _ := strings.Cut(key, " "); !strings.HasPrefix(test, "TestProduct_") || strings.Contains(test, "/") {
+				continue
+			}
+			timed[key] = seconds
+			if outcome, known := reference[key]; known {
+				outcome.seconds = seconds
+				reference[key] = outcome
+			}
 		}
 	}
 	if *treeTests != "" {
@@ -900,6 +911,7 @@ func plan(arguments []string) error {
 	// after they pass and fetches what they made instead of paying for it.
 	productsOf := map[string][]string{} // package to its TestProduct_ tests
 	productSeconds := map[string]float64{}
+	productUntimed := map[string]bool{} // a product no record timed, its seconds fromTheTree's guess
 	{
 		kept := items[:0]
 		for _, candidate := range items {
@@ -907,6 +919,7 @@ func plan(arguments []string) error {
 			if candidate.parent == "" && strings.HasPrefix(name, "TestProduct_") {
 				productsOf[packageName] = append(productsOf[packageName], name)
 				productSeconds[candidate.key] = candidate.seconds
+				productUntimed[candidate.key] = candidate.untimed
 				continue
 			}
 			kept = append(kept, candidate)
@@ -1144,7 +1157,7 @@ func plan(arguments []string) error {
 		seconds  float64
 	}
 	var productPlan []productUnit
-	if *budget > 0 {
+	if packProducts {
 		// Products pack too (#fysfvrx): one unit each, a candidate's 531 products were 531 of its 567 units, each paying
 		// an opening and a setup on a Codex instance for a few seconds of work (Oct 9, 2bb9a979). They pack the way tests
 		// do, package first and longest first by Loom's times (else the reference's), into units of --product-budget,
@@ -1162,7 +1175,7 @@ func plan(arguments []string) error {
 			for _, name := range names {
 				candidate := item{key: packageName + " " + name, seconds: productSeconds[packageName+" "+name]}
 				switch {
-				case !productTimed[candidate.key]:
+				case productUntimed[candidate.key]:
 					fmt.Fprintf(os.Stderr, "untimed product: %s, %.0f s by a guess, a unit of its own\n", candidate.key, candidate.seconds)
 					aloneProducts = append(aloneProducts, candidate)
 				case candidate.seconds+*packageSetup > productCapacity:
@@ -1322,7 +1335,7 @@ func plan(arguments []string) error {
 	}
 	job := protocol.Job{Name: "adamic-gate-pilot"}
 	productUnits := map[string][]string{} // package to its product units' ids
-	if *budget <= 0 {
+	if !packProducts {
 		productPackages := make([]string, 0, len(productsOf))
 		for packageName := range productsOf {
 			productPackages = append(productPackages, packageName)
@@ -1342,7 +1355,7 @@ func plan(arguments []string) error {
 		// package unrun, worse for truth than slowness (@system_adamic's ruling, Oct 9 06:40Z, until #c5k975w closes).
 		// Ten minutes is the ceiling, so a hung build reds instead of stalling the run; over 60 s it is listed and filed.
 		productTimeout := 3*3600 + 600
-		if *budget > 0 {
+		if packProducts {
 			productTimeout = 600
 		}
 		argv := []string{"bash", "-c", opening + unitBody, "adamic-gate-unit", *sha}

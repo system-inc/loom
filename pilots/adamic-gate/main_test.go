@@ -680,6 +680,12 @@ func productFixture(t *testing.T, arguments ...string) protocol.Job {
 	referencePath, treePath := filepath.Join(directory, "reference.jsonl.gz"), filepath.Join(directory, "tree-tests.txt")
 	os.WriteFile(referencePath, reference.Bytes(), 0o644)
 	os.WriteFile(treePath, []byte(strings.Join(tree, "\n")+"\n"), 0o644)
+	return planJob(t, append([]string{"--reference", referencePath, "--sha", testSha, "--target", "codex", "--tree-tests", treePath}, arguments...))
+}
+
+// planJob runs plan with these arguments and reads back the job it prints, checked as Loom would expand it.
+func planJob(t *testing.T, arguments []string) protocol.Job {
+	t.Helper()
 	read, write, _ := os.Pipe()
 	stdout := os.Stdout
 	os.Stdout = write
@@ -689,7 +695,7 @@ func productFixture(t *testing.T, arguments ...string) protocol.Job {
 		printed.ReadFrom(read)
 		close(done)
 	}()
-	err := plan(append([]string{"--reference", referencePath, "--sha", testSha, "--target", "codex", "--tree-tests", treePath}, arguments...))
+	err := plan(arguments)
 	write.Close()
 	os.Stdout = stdout
 	<-done
@@ -706,95 +712,109 @@ func productFixture(t *testing.T, arguments ...string) protocol.Job {
 	return job
 }
 
-// Under a budget, products pack by their times into as few units of the product budget as fit (#fysfvrx): 800 s of
-// timed products in 290 s of room are three units, never one each. A package's products in a unit are one spec, an
-// alternation, so no unit holds two specs of one package (#4zwdxa3); a product no record timed and one over the
-// budget run alone.
-func TestABudgetPacksProductsIntoUnitsOfTheProductBudget(t *testing.T) {
-	job := productFixture(t, "--budget", "60", "--unit-setup", "10", "--package-setup", "5", "--product-budget", "300")
-	var products []protocol.JobUnit
-	for _, unit := range job.Units {
-		if strings.HasPrefix(unit.Id, "product-") {
-			products = append(products, unit)
-		}
-	}
-	got := map[string][]string{}
-	expected := map[string]float64{}
-	for index, unit := range products {
-		if unit.Id != fmt.Sprintf("product-%02d", index) || unit.TimeoutSeconds != 600 {
-			t.Fatalf("product unit %d is %s, timeout %d", index, unit.Id, unit.TimeoutSeconds)
-		}
-		got[unit.Id] = unit.Argv[5:]
-		expected[unit.Id] = unit.ExpectedSeconds
-	}
-	want := map[string][]string{
-		"product-00": {module + "b=^(TestProduct_Badger|TestProduct_Basil|TestProduct_Birch)$", module + "e=^(TestProduct_Echo)$"},
-		"product-01": {module + "a=^(TestProduct_Alpha|TestProduct_Apex|TestProduct_Atlas|TestProduct_Axle)$", module + "d=^(TestProduct_Delta)$"},
-		"product-02": {module + "c=^(TestProduct_Cedar|TestProduct_Cobalt)$"},
-		"product-03": {module + "c=^(TestProduct_Fresh)$"},
-		"product-04": {module + "c=^(TestProduct_Huge)$"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("product units:\n%v\nwant:\n%v", got, want)
-	}
-	// A packed unit expects its products' seconds and each package's setup; one alone, its product's own.
-	if expected["product-00"] != 270+10+2*5 || expected["product-01"] != 260+20+2*5 || expected["product-02"] != 240+5 || expected["product-04"] != 400 {
-		t.Fatalf("expected seconds %v", expected)
-	}
-	for _, unit := range products {
-		packages := map[string]bool{}
-		for _, spec := range unit.Argv[5:] {
-			packageName, _, _ := strings.Cut(spec, "=")
-			if packages[packageName] {
-				t.Fatalf("%s holds two specs of %s: %v", unit.Id, packageName, unit.Argv[5:])
+// productPlans are the two ways products pack: under a budget, and unbudgeted with --product-budget given.
+var productPlans = [][]string{
+	{"--budget", "60", "--unit-setup", "10", "--package-setup", "5", "--product-budget", "300"},
+	{"--units", "2", "--product-budget", "300"},
+}
+
+// Under a budget, or unbudgeted with --product-budget given, products pack by their times into as few units of the
+// product budget as fit (#fysfvrx): 800 s of timed products in 290 s of room are three units, never one each. A
+// package's products in a unit are one spec, an alternation, so no unit holds two specs of one package (#4zwdxa3); a
+// product no record timed and one over the budget run alone.
+func TestAProductBudgetPacksProductsIntoUnitsOfIt(t *testing.T) {
+	for _, arguments := range productPlans {
+		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
+			job := productFixture(t, arguments...)
+			var products []protocol.JobUnit
+			for _, unit := range job.Units {
+				if strings.HasPrefix(unit.Id, "product-") {
+					products = append(products, unit)
+				}
 			}
-			packages[packageName] = true
-		}
+			got := map[string][]string{}
+			expected := map[string]float64{}
+			for index, unit := range products {
+				if unit.Id != fmt.Sprintf("product-%02d", index) || unit.TimeoutSeconds != 600 {
+					t.Fatalf("product unit %d is %s, timeout %d", index, unit.Id, unit.TimeoutSeconds)
+				}
+				got[unit.Id] = unit.Argv[5:]
+				expected[unit.Id] = unit.ExpectedSeconds
+			}
+			want := map[string][]string{
+				"product-00": {module + "b=^(TestProduct_Badger|TestProduct_Basil|TestProduct_Birch)$", module + "e=^(TestProduct_Echo)$"},
+				"product-01": {module + "a=^(TestProduct_Alpha|TestProduct_Apex|TestProduct_Atlas|TestProduct_Axle)$", module + "d=^(TestProduct_Delta)$"},
+				"product-02": {module + "c=^(TestProduct_Cedar|TestProduct_Cobalt)$"},
+				"product-03": {module + "c=^(TestProduct_Fresh)$"},
+				"product-04": {module + "c=^(TestProduct_Huge)$"},
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("product units:\n%v\nwant:\n%v", got, want)
+			}
+			// A packed unit expects its products' seconds and each package's setup; one alone, its product's own.
+			if expected["product-00"] != 270+10+2*5 || expected["product-01"] != 260+20+2*5 || expected["product-02"] != 240+5 || expected["product-04"] != 400 {
+				t.Fatalf("expected seconds %v", expected)
+			}
+			for _, unit := range products {
+				packages := map[string]bool{}
+				for _, spec := range unit.Argv[5:] {
+					packageName, _, _ := strings.Cut(spec, "=")
+					if packages[packageName] {
+						t.Fatalf("%s holds two specs of %s: %v", unit.Id, packageName, unit.Argv[5:])
+					}
+					packages[packageName] = true
+				}
+			}
+		})
 	}
 }
 
 // A test unit needs exactly the product units holding its packages' products, each once.
 func TestTestUnitsNeedThePackedProductUnitsOfTheirPackages(t *testing.T) {
-	job := productFixture(t, "--budget", "60", "--unit-setup", "10", "--package-setup", "5", "--product-budget", "300")
-	holding := map[string][]string{} // package to the product units holding its products
-	for _, unit := range job.Units {
-		if !strings.HasPrefix(unit.Id, "product-") {
-			continue
-		}
-		for _, spec := range unit.Argv[5:] {
-			packageName, _, _ := strings.Cut(spec, "=")
-			holding[packageName] = append(holding[packageName], unit.Id)
-		}
-	}
-	shared := 0
-	for _, unit := range job.Units {
-		if strings.HasPrefix(unit.Id, "product-") {
-			continue
-		}
-		want := map[string]bool{}
-		for _, spec := range unit.Argv[5:] {
-			packageName, _, _ := strings.Cut(spec, "=")
-			for _, id := range holding[packageName] {
-				want[id] = true
+	for _, arguments := range productPlans {
+		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
+			job := productFixture(t, arguments...)
+			holding := map[string][]string{} // package to the product units holding its products
+			for _, unit := range job.Units {
+				if !strings.HasPrefix(unit.Id, "product-") {
+					continue
+				}
+				for _, spec := range unit.Argv[5:] {
+					packageName, _, _ := strings.Cut(spec, "=")
+					holding[packageName] = append(holding[packageName], unit.Id)
+				}
 			}
-		}
-		got := map[string]bool{}
-		for _, need := range unit.Needs {
-			if got[need] {
-				t.Fatalf("%s needs %s twice: %v", unit.Id, need, unit.Needs)
+			shared := 0
+			for _, unit := range job.Units {
+				if strings.HasPrefix(unit.Id, "product-") {
+					continue
+				}
+				want := map[string]bool{}
+				for _, spec := range unit.Argv[5:] {
+					packageName, _, _ := strings.Cut(spec, "=")
+					for _, id := range holding[packageName] {
+						want[id] = true
+					}
+				}
+				got := map[string]bool{}
+				for _, need := range unit.Needs {
+					if got[need] {
+						t.Fatalf("%s needs %s twice: %v", unit.Id, need, unit.Needs)
+					}
+					got[need] = true
+				}
+				if !reflect.DeepEqual(got, want) || len(want) == 0 {
+					t.Fatalf("%s (%v) needs %v, want %v", unit.Id, unit.Argv[5:], unit.Needs, want)
+				}
+				if strings.Contains(strings.Join(unit.Argv[5:], " "), module+"a=") && strings.Contains(strings.Join(unit.Argv[5:], " "), module+"d=") {
+					shared++
+				}
 			}
-			got[need] = true
-		}
-		if !reflect.DeepEqual(got, want) || len(want) == 0 {
-			t.Fatalf("%s (%v) needs %v, want %v", unit.Id, unit.Argv[5:], unit.Needs, want)
-		}
-		if strings.Contains(strings.Join(unit.Argv[5:], " "), module+"a=") && strings.Contains(strings.Join(unit.Argv[5:], " "), module+"d=") {
-			shared++
-		}
-	}
-	// a's and d's products share product-01, and their tests a unit: it needs product-01 once.
-	if shared == 0 {
-		t.Fatalf("no test unit holds both a and d")
+			// a's and d's products share product-01, and their tests a unit: it needs product-01 once.
+			if shared == 0 {
+				t.Fatalf("no test unit holds both a and d")
+			}
+		})
 	}
 }
 
@@ -818,6 +838,42 @@ func TestWithoutABudgetEachProductIsAUnitOfItsOwn(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("product units:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// --product-times sizes the products alone by Loom's times: products the reference never ran (it holds none) pack by
+// them, and the tests keep the reference's times, here 5 s each though the file says 500 s for one.
+func TestProductTimesSizeOnlyTheProducts(t *testing.T) {
+	directory := t.TempDir()
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	tree := []string{module + "a TestProduct_One", module + "a TestProduct_Two"}
+	for test := range 4 {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"TestPlain%02d","Elapsed":5}`+"\n", module, test)
+		tree = append(tree, fmt.Sprintf("%sa TestPlain%02d", module, test))
+	}
+	writer.Close()
+	referencePath, treePath, timesPath := filepath.Join(directory, "reference.jsonl.gz"), filepath.Join(directory, "tree-tests.txt"), filepath.Join(directory, "loom-times.tsv")
+	os.WriteFile(referencePath, reference.Bytes(), 0o644)
+	os.WriteFile(treePath, []byte(strings.Join(tree, "\n")+"\n"), 0o644)
+	os.WriteFile(timesPath, []byte("loom_seconds\twhole_gate_seconds\tunit\tpackage\ttest\n"+
+		"100\t1\tproduct-00\t"+module+"a\tTestProduct_One\n80\t1\tproduct-01\t"+module+"a\tTestProduct_Two\n500\t5\ttests-00\t"+module+"a\tTestPlain00\n"), 0o644)
+	arguments := []string{"--reference", referencePath, "--sha", testSha, "--target", "codex", "--tree-tests", treePath, "--units", "1", "--product-budget", "300"}
+	summary := func(job protocol.Job) []string {
+		var units []string
+		for _, unit := range job.Units {
+			units = append(units, fmt.Sprintf("%s %v %.0f s", unit.Id, unit.Argv[5:], unit.ExpectedSeconds))
+		}
+		return units
+	}
+	got := summary(planJob(t, append(arguments, "--product-times", timesPath)))
+	want := []string{"product-00 [" + module + "a=^(TestProduct_One|TestProduct_Two)$] 185 s", "tests-00 [" + module + "a=^(TestPlain00|TestPlain01|TestPlain02|TestPlain03)$] 20 s"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("with --product-times:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	// Without it the products are guesses, each a unit of its own.
+	if got := summary(planJob(t, arguments)); len(got) != 3 || !strings.HasPrefix(got[1], "product-01 ["+module+"a=^(TestProduct_Two)$]") {
+		t.Fatalf("without --product-times:\n%s", strings.Join(got, "\n"))
 	}
 }
 

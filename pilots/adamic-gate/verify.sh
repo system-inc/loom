@@ -55,8 +55,8 @@ treeTests=() && [ -s "${work}/tree-tests.txt" ] && treeTests=(--tree-tests "${wo
 # Loom's own times, and a selection's only tests are packed exactly: the planner plans only the names it is given, plus
 # their products and setups (--only-tests). Held back on its first dry run (f18497c: floor1 88bd168f's selection planned
 # as 1,449 units and 133,676 s of predicted work, against about 8,000 s as 13 units, its untimed tests sized about 15
-# times pessimistic), and came back behind a switch (#3sjs0rn, Oct 9). Off, nothing here changes the plan: no argument,
-# the same stderr, the same message.
+# times pessimistic), and came back behind a switch (#3sjs0rn, Oct 9). Off, nothing in this block changes the plan: no
+# argument, the same stderr, the same message.
 budget=() planErrors=/dev/null
 if [ -n "${LOOM_FAST_BUDGET:-}" ]; then
 	[[ ${LOOM_FAST_BUDGET} =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "verify: LOOM_FAST_BUDGET is seconds a unit may take, not ${LOOM_FAST_BUDGET}"; exit 1; }
@@ -93,7 +93,12 @@ PY
 		[ -n "${changed}" ] && budget+=(--changed-packages "${changed}")
 	fi
 fi
-"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" ${treeTests[@]+"${treeTests[@]}"} ${budget[@]+"${budget[@]}"} > "${work}/tests.json" 2> "${planErrors}" || { echo "verify: planning failed$([ -s "${planErrors}" ] && echo ": $(tail -1 "${planErrors}")")"; exit 1; }
+# Products pack into units of 300 s by Loom's times, budget on or off (#fysfvrx, @system_adamic, Oct 9): one unit each,
+# 2bb9a979's 531 products were 531 of its 543 units. Loom's times size the products alone, so off, the tests keep the
+# reference's times and splits; the reference holds no product, so without Loom's times each still runs alone.
+products=(--product-budget 300)
+[ -s "${HOME}/.loom/loom-times.tsv" ] && products+=(--product-times "${HOME}/.loom/loom-times.tsv")
+"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" ${treeTests[@]+"${treeTests[@]}"} "${products[@]}" ${budget[@]+"${budget[@]}"} > "${work}/tests.json" 2> "${planErrors}" || { echo "verify: planning failed$([ -s "${planErrors}" ] && echo ": $(tail -1 "${planErrors}")")"; exit 1; }
 
 # The build-and-vet unit runs on the same opening as the tests, so it sees the tree they will.
 python3 - "${work}" "${LOOM_VERIFY_ENV:-}" "${LOOM_VERIFY_PACKAGES:-}" "${LOOM_VERIFY_SELECT:-}" <<'PY'
@@ -126,6 +131,11 @@ for line in open(work + "/tree-tests.txt"):
 wasiClang = re.compile(r"TestWASI(Unit[0-9]+)?")
 stale = []
 import os
+# The unit with the fewest specs, never a product unit while a test unit is left: a product unit runs to completion
+# under a 600 s ceiling (#fysfvrx), and a package run whole there, as 2bb9a979's 21 listed packages were, could hit it.
+def fewest():
+    units = [unit for unit in job["units"] if not unit["id"].startswith("product-")] or job["units"]
+    return min(units, key=lambda unit: len(unit["argv"]))
 # Budgeted with the tree, the planner packed a selected package's family members itself (--only-tests above), the
 # shards in a spec of their own: its remainder spec, which would run the rest, is dropped and its packed specs stay
 # (f18497c). Otherwise its specs all leave for the one family spec below.
@@ -152,7 +162,7 @@ for package, tests in sorted((selection.get("only_tests") or {}).items()):
         wasi = []
     if packed:
         continue
-    unit = min(job["units"], key=lambda unit: len(unit["argv"]))
+    unit = fewest()
     if tests:
         # Never an exact anchor alone (@system_adamic, Oct 9 11:01Z: the trio's internal/native requested
         # TestNormalizeMatchesNode, the tree holds TestNormalizeMatchesNodePoints00 and on, and ^(...)$ ran "no tests to
@@ -220,7 +230,7 @@ if os.environ.get("LOOM_FAST_BUDGET"):
 covered = {spec.split("=", 1)[0] for unit in job["units"] for spec in unit["argv"][5:]}
 for package in (open(listed).read().split() if listed else []):
     if package not in covered:
-        min(job["units"], key=lambda unit: len(unit["argv"]))["argv"].append(package + "=. skip=^()$")
+        fewest()["argv"].append(package + "=. skip=^()$")
 # A job's env runs first in every unit, after the line naming the gate inputs.
 exports = open(environment).read() if environment else ""
 if exports:

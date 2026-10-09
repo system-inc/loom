@@ -1,14 +1,14 @@
 #!/bin/bash
 # budget.sh [<verify.sh>]: verify.sh's planning against stubs (#3sjs0rn), up to the job it hands Loom. LOOM_FAST_BUDGET
-# unset or empty plans exactly as before the switch: the planner's argv and job.json byte for byte the same as the
-# verify.sh this port started from (89fa600; BASELINE=<sha> names another after a deliberate change to the unbudgeted
-# plan). Set to seconds, the planner gets --budget and --loom-times, a selection's families go to it as the tree's
-# members (--only-tests), and its packed specs stay while its remainder leaves (f18497c to be20c4b). The mutants (the
-# guard removed, the guard inverted, the job script's guard removed) must fail:
+# unset or empty plans exactly as before the switch: the planner's argv (but for the products', #fysfvrx) and job.json
+# byte for byte the same as the verify.sh this port started from (89fa600; BASELINE=<sha> names another after a
+# deliberate change to the unbudgeted plan). Set to seconds, the planner gets --budget and --loom-times, a selection's
+# families go to it as the tree's members (--only-tests), and its packed specs stay while its remainder leaves (f18497c
+# to be20c4b). The mutants (the guard removed, the guard inverted, the job script's guard removed) must fail:
 #
 #	pilots/adamic-gate/fastretry/budget.sh
-#	sed 's/^if \[ -n "\${LOOM_FAST_BUDGET:-}" \]; then$/LOOM_FAST_BUDGET=${LOOM_FAST_BUDGET:-60}; if true; then/' verify.sh > m.sh && fastretry/budget.sh m.sh   # fails 3
-#	sed 's/^if \[ -n "\${LOOM_FAST_BUDGET:-}" \]; then$/if [ -z "${LOOM_FAST_BUDGET:-}" ]; then/' verify.sh > m.sh && fastretry/budget.sh m.sh               # fails 7
+#	sed 's/^if \[ -n "\${LOOM_FAST_BUDGET:-}" \]; then$/LOOM_FAST_BUDGET=${LOOM_FAST_BUDGET:-60}; if true; then/' verify.sh > m.sh && fastretry/budget.sh m.sh   # fails 4
+#	sed 's/^if \[ -n "\${LOOM_FAST_BUDGET:-}" \]; then$/if [ -z "${LOOM_FAST_BUDGET:-}" ]; then/' verify.sh > m.sh && fastretry/budget.sh m.sh               # fails 11
 #	sed 's/^packed = bool(os.environ.get("LOOM_FAST_BUDGET")) and /packed = /' verify.sh > m.sh && fastretry/budget.sh m.sh                             # fails 1
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
@@ -49,19 +49,29 @@ run() { # run <script> [LOOM_FAST_BUDGET value]: every wait bounded at 20 s
 		perl -e 'alarm 20; exec @ARGV' bash "$1" $sha 'pkg/(a|b)' none 5 > $T/out.log 2>&1
 }
 today() { printf '%s\n' plan --target codex --remainder --gate-inputs inputs-hash --reference $home/.loom/pregate/reference-2222222222222222222222222222222222222222.jsonl.gz --sha $sha --units 12 --only 'pkg/(a|b)' --tree-tests $work/tree-tests.txt; }
+# Products pack by Loom's times, budget on or off (#fysfvrx): their arguments follow today's either way.
+products() { printf '%s\n' --product-budget 300 --product-times $home/.loom/loom-times.tsv; }
 spec() { python3 -c 'import json, sys; job = json.load(open(sys.argv[1])); print("\n".join(" ".join([unit["id"], json.dumps(unit.get("needs"))] + unit["argv"][5:]) for unit in job["units"]))' $work/job.json; }
 
-# A: off, the planner gets exactly today's arguments; empty is off; unset is on at 60 (budget mode lands on).
-scenario; run $stubs/verify.sh off; check off-argv-is-today '[ "$(cat $T/argv)" = "$(today)" ]'
-scenario; run $stubs/verify.sh ""; check empty-argv-is-today '[ "$(cat $T/argv)" = "$(today)" ]'
+# A: off, the planner gets exactly today's arguments and the products'; empty is off; unset is on at 60 (budget mode
+# lands on).
+scenario; run $stubs/verify.sh off; check off-argv-is-today '[ "$(cat $T/argv)" = "$(today; products)" ]'
+scenario; run $stubs/verify.sh ""; check empty-argv-is-today '[ "$(cat $T/argv)" = "$(today; products)" ]'
 scenario; run $stubs/verify.sh; check unset-is-on-at-60 'grep -qx -- --budget $T/argv && [ "$(grep -A1 -x -- --budget $T/argv | tail -1)" = 60 ]'
-# A': unset, the job is byte for byte the baseline's, even with a budgeted attempt's only-tests.json left in the work
-# directory (a re-plan reuses it).
+# A': off, the job is byte for byte the baseline's and its argv the baseline's and the products', even with a budgeted
+# attempt's only-tests.json left in the work directory (a re-plan reuses it).
 scenario; echo '{"pkg/a":["TestA"]}' > $work/only-tests.json; run $stubs/baseline.sh; cp $work/job.json $T/baseline-job.json; cp $T/argv $T/baseline-argv
-run $stubs/verify.sh off; check off-job-is-the-baselines 'cmp -s $work/job.json $T/baseline-job.json && cmp -s $T/argv $T/baseline-argv'
+run $stubs/verify.sh off; check off-job-is-the-baselines 'cmp -s $work/job.json $T/baseline-job.json && [ "$(cat $T/argv)" = "$(cat $T/baseline-argv; products)" ]'
+# A'': off, a selection's family spec goes to the test unit with the fewest specs, never a product unit, which runs
+# under a 600 s ceiling (#fysfvrx): here product-00 ties tests-01 and comes first.
+scenario; printf '%s' '{"name":"stub","units":[
+ {"id":"product-00","argv":["bash","-c","'"${opening}"'","adamic-gate-unit","'${sha}'","pkg/c=^(TestProduct_C)$"]},
+ {"id":"tests-01","needs":["product-00"],"argv":["bash","-c","'"${opening}"'","adamic-gate-unit","'${sha}'","pkg/a=^(TestA)$","pkg/b=^(TestB)$"]}]}' > $T/plan.json
+run $stubs/verify.sh off
+check off-family-not-on-a-product '[ "$(spec | grep ^product-00)" = "product-00 null pkg/c=^(TestProduct_C)$" ] && spec | grep -qF "tests-01 [\"product-00\"] pkg/b=^(TestB)$ skip=^(TestSlow)$ pkg/a=^(TestA)(("'
 # B: 60, the planner gets today's arguments, then the budget, Loom's times and the selection's family members.
 scenario; run $stubs/verify.sh 60
-check budget-argv '[ "$(cat $T/argv)" = "$(today; printf "%s\n" --budget 60 --unit-setup 10 --split-all --loom-times $home/.loom/loom-times.tsv --only-tests $work/only-tests.json)" ]'
+check budget-argv '[ "$(cat $T/argv)" = "$(today; products; printf "%s\n" --budget 60 --unit-setup 10 --split-all --loom-times $home/.loom/loom-times.tsv --only-tests $work/only-tests.json)" ]'
 check budget-family-members '[ "$(cat $work/only-tests.json)" = "{\"pkg/a\": [\"TestA\", \"TestAUnit00\", \"TestA_Setup\"]}" ]'
 # C: the packed specs stay, the selected package's remainder leaves and takes tests-02 with it, tests-03 no longer
 # waits on it, no family spec is added, and the stale name is still listed.
