@@ -9,6 +9,14 @@
 # (a fault of the tools, fixed), and the record keeps both. The verdict is void if any run is, red if any is red,
 # green only when every run is green.
 #
+# Every record lists its units, each with its input hash at the record's sha (inputs.py, loom-inputs-v1) and its
+# verdict (passed, failed, killed at its budget, broken, or missing), so a later rerun can keep what didn't move. A
+# rerun (rerun.sh) sets LOOM_PUBLISH_RERUN_OF to the base record's gate-logs ref and passes the base run's jobs and
+# records first: there a later unit stands in for an earlier one by id whatever its verdict, since rerun-plan reran
+# exactly the units whose inputs moved or weren't green, and the record names its base as rerun_of.
+# LOOM_PUBLISH_RERUN_BASE_JOBS says how many of the leading job and record pairs are the base's: a unit kept from them
+# reads "kept", not its base verdict, the way developer tools' rerun_merge.py checks a rerun against its base.
+#
 #	pilots/adamic-gate/publish.sh <sha> <tools sha> <job> <record> [<job> <record>]...   # a copy in ~/.loom/bin
 set -uo pipefail
 [ $# -ge 4 ] && [ $(( ($# - 2) % 2 )) = 0 ] || { echo "usage: publish.sh <sha> <tools sha> <job> <record> [<job> <record>]..."; exit 2; }
@@ -21,20 +29,25 @@ record=$(mktemp -d)/full-main
 mkdir -p "${record}"
 verdicts=() runs=() index=0
 # Each job without the units a later job names again, written beside the record.
-python3 - "${record}" "${LOOM_PUBLISH_RERUN_RED:-}" "${LOOM_PUBLISH_RERUN_WHY:-}" "$@" <<'PYTHON'
+python3 - "${record}" "${LOOM_PUBLISH_RERUN_RED:-}" "${LOOM_PUBLISH_RERUN_WHY:-}" "${LOOM_PUBLISH_RERUN_OF:-}" "${LOOM_PUBLISH_RERUN_BASE_JOBS:-0}" "$@" <<'PYTHON'
 import json, sys
-record, rerunRed, why, pairs = sys.argv[1], set(sys.argv[2].split()), sys.argv[3], sys.argv[4:]
+record, rerunRed, why, rerunOf, baseJobs, pairs = sys.argv[1], set(sys.argv[2].split()), sys.argv[3], sys.argv[4], int(sys.argv[5]), sys.argv[6:]
+if rerunOf and not baseJobs:
+    sys.exit("publish: a rerun names its base's job count in LOOM_PUBLISH_RERUN_BASE_JOBS")
 if rerunRed and not why:
     sys.exit("publish: LOOM_PUBLISH_RERUN_RED needs LOOM_PUBLISH_RERUN_WHY")
 jobs = [json.load(open(pairs[at])) for at in range(0, len(pairs), 2)]
-finished = []
+finished, killed = [], []
 for at in range(1, len(pairs), 2):
-    statuses = {}
+    statuses, timedOut = {}, set()
     for line in open(pairs[at]):
         event = json.loads(line)
         if event.get("type") == "finished":
             statuses[event["unit"]] = event.get("status")
+            if event.get("timedOut"):
+                timedOut.add(event["unit"])
     finished.append(statuses)
+    killed.append(timedOut)
 replaced = []
 for index, job in enumerate(jobs):
     # Phase and stage units stand in for each other by id. A test unit's id is only its place in its own plan, so a
@@ -48,6 +61,9 @@ for index, job in enumerate(jobs):
         status = finished[index].get(unit["id"])
         again = later.get(unit["id"])
         same = again is not None and (unit["id"].startswith(("phase-", "stage-")) or again["argv"] == unit["argv"])
+        if rerunOf and again is not None:
+            replaced.append({"unit": unit["id"], "was": status or "never finished", "run": index, "rerun": True})
+            continue
         if same and (status in (None, "broken") or (status == "failed" and unit["id"] in rerunRed)):
             replaced.append({"unit": unit["id"], "was": status or "never finished", "run": index})
             continue
@@ -55,7 +71,24 @@ for index, job in enumerate(jobs):
     job["units"] = kept
     json.dump(job, open("%s/job-%d.json" % (record, index), "w"))
 json.dump({"replaced": replaced, "why_red_was_rerun": why or None}, open(record + "/replaced.json", "w"), indent=1)
+# Each unit the record keeps, with the verdict of the run it was kept from.
+units = []
+for index, job in enumerate(jobs):
+    for unit in job["units"]:
+        verdict = "killed" if unit["id"] in killed[index] else finished[index].get(unit["id"]) or "missing"
+        if rerunOf and index < baseJobs:
+            verdict = "kept"
+        units.append({"id": unit["id"], "verdict": verdict})
+json.dump(units, open(record + "/units-verdicts.json", "w"))
 PYTHON
+[ $? = 0 ] || exit 2
+# Every kept unit's input hash at this sha (a rerun's base units planned at an earlier one are hashed as they would run
+# here, which rerun-plan proved equal to their base hashes).
+# A hash that fails costs the record its units list, never the record: it still lands, and a rerun can't stand on it.
+if ! python3 "${HOME}/.loom/bin/inputs.py" hash --sha "${sha}" --at "${sha}" "${record}"/job-*.json > "${record}/inputs.json" 2> "${record}/inputs.err"; then
+	echo "publish: hashing the units' inputs failed: $(tail -1 "${record}/inputs.err")" | tee -a "${record}/publish-problems.txt"
+	echo '{"definition": null, "units": []}' > "${record}/inputs.json"
+fi
 while [ $# -gt 0 ]; do
 	job=${record}/job-${index}.json events=$2
 	shift 2
@@ -97,9 +130,9 @@ summary=$(for file in "${record}"/reds-*.txt; do head -1 "${file}" | cut -d, -f2
 cat "${record}"/reds-*.txt | grep -E '^(FAIL|BROKEN) ' | head -1 > "${record}/first-failure.txt"
 # The whole gate's record: what push-main --full-gate checks of a box's, from the runs and their units (the verdict
 # printed last is the record's, which can only be stricter than the runs').
-merged=$(python3 - "${record}" "${sha}" "${tools}" "${verdict}" "${runs[@]}" <<'PYTHON'
+merged=$(python3 - "${record}" "${sha}" "${tools}" "${verdict}" "${LOOM_PUBLISH_RERUN_OF:-}" "${runs[@]}" <<'PYTHON'
 import glob, gzip, json, os, sys
-record, sha, tools, verdict, runs = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
+record, sha, tools, verdict, rerunOf, runs = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6:]
 stages = ["coverage", "tools", "build", "vet", "tests", "wasi", "stage3", "catalog", "determinism", "census"]
 steps, exits, catalogRows, problems = {}, {}, [], []
 # The phases: each unit's run.py full.json carries its own stage's seconds and exit. Units of one stage ran side by
@@ -156,6 +189,12 @@ summary = {"sha": sha, "base": sha, "tools_sha": tools, "runner": "pool", "finis
            "stages_exit": {stage: exits[stage] for stage in stages if stage in exits},
            "planned_stages": stages, "failure": "; ".join(problems) or None, "runs": runs,
            "replaced_units": json.load(open(record + "/replaced.json"))}
+# Every unit with its input hash and verdict, the rerun contract with push-main (#hpjftdj).
+hashes = json.load(open(record + "/inputs.json"))
+byId = {unit["id"]: unit["input_sha256"] for unit in hashes["units"]}
+summary["input_definition"] = hashes["definition"]
+summary["units"] = [{"id": unit["id"], "input_sha256": byId[unit["id"]], "verdict": unit["verdict"]} for unit in json.load(open(record + "/units-verdicts.json"))] if byId else []
+summary["rerun_of"] = rerunOf or None
 if missing:
     summary["covers"] = sorted(set(stages) - set(missing))
 json.dump(summary, open(record + "/full.json", "w"), indent=1)

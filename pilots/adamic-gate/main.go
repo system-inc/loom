@@ -78,8 +78,10 @@ rm -rf "${HOME}/.cache/adamic/runtime"/.build-* 2> /dev/null
 [ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
 free=$(freeMegabytes)
 [ "${free:-0}" -ge "${LOOM_MINIMUM_FREE_MB:-1500}" ] || { echo "loom-pilot: only ${free} MB free on the instance after trimming its caches: Loom's fault"; df -h "${HOME}" /tmp; exit 2; }
-# Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only.
-git config --global url."https://github.com/".insteadOf git@github.com:
+# Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only. The rewrite rides in the
+# environment, never ~/.gitconfig: some instances mount it read-only, and there every cohere checkout went to ssh and
+# failed (V3 8880e6bc's pre-gate, Oct 9: four units broken on "could not lock config file").
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:
 # GitHub turns away anonymous fetches when many instances check out at once (15 side instances at 00:10Z on
 # Oct 9 all read "could not read Username"; the same fetch a minute later passed), so each step retries with
 # backoff and jitter before the unit gives up, and never prompts.

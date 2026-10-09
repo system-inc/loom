@@ -12,14 +12,30 @@
 # back to the boxes.
 #
 #	pilots/adamic-gate/fast.sh            # the server, as LaunchAgent com.loom.fast (a copy in ~/.loom/bin)
+#	pilots/adamic-gate/fast.sh --once <sha>   # one job now, beside the server's (its .running keeps the server off it)
+#
+# A job is cancelled by writing ~/.loom/jobs/fast/<sha>.cancel (the watcher's skip list, developer tools): a job not
+# started never starts, and a running one's coordinator is stopped within 10 s, which drops its units still queued on
+# the pool. Its verdict reads void, cancelled, so the tip goes back to the boxes if anyone still wants it.
 set -uo pipefail
 
 jobs=${LOOM_FAST_JOBS:-${HOME}/.loom/jobs/fast}
 concurrent=${LOOM_FAST_CONCURRENT:-2}
 gate=${HOME}/Projects/system/adamic-gate
 mkdir -p "${jobs}"
-# A job left running by a server that died starts again.
-rm -f "${jobs}"/*.running
+once=
+if [ "${1:-}" = --once ]; then
+	once=$2
+	[[ ${once} =~ ^[0-9a-f]{40}$ ]] && [ -f "${jobs}/${once}.json" ] || { echo "fast: --once takes the sha of a job in ${jobs}"; exit 2; }
+	[ -f "${jobs}/${once}.verdict" ] || [ -f "${jobs}/${once}.running" ] && { echo "fast: ${once:0:12} is already decided or running"; exit 2; }
+	touch "${jobs}/${once}.running"
+else
+	# A job left running by a server that died starts again, unless something still runs it (a --once).
+	for marker in "${jobs}"/*.running; do
+		[ -e "${marker}" ] || continue
+		pgrep -f "${jobs}/$(basename "${marker}" .running)\.work/" > /dev/null || rm -f "${marker}"
+	done
+fi
 
 serve() {
 	local sha=$1 started=${SECONDS} work=${jobs}/$1.work stamp verdict line run
@@ -56,6 +72,7 @@ PY
 		passed\|1) verdict="red: ${sha} fast gate on Loom's side pool, go tests only,${line}; first: $(grep -m1 '^FAIL ' "${work}/reds.txt" | cut -c6- | cut -d' ' -f1-2) (branch $(cat "${work}/branch"), run ${run})" ;;
 		*) verdict="void: ${sha} fast gate on Loom's side pool broke (a unit never reported: Loom's fault), so the boxes take it (run ${run})" ;;
 	esac
+	[ -f "${jobs}/${sha}.cancelled" ] && verdict="void: ${sha} cancelled while it ran (${sha:0:12}.cancel), so the boxes take it if it's still wanted (run ${run})"
 	finish "${sha}" "${stamp}" "${verdict}" "${run}"
 }
 
@@ -146,12 +163,30 @@ PY
 	echo "$(date -u +%H:%M:%S) ${verdict}"
 }
 
+# cancel <sha>: a running job's coordinator stopped (its record path names the sha), or a waiting one decided at once.
+cancel() {
+	local sha=$1
+	if [ -f "${jobs}/${sha}.running" ]; then
+		pkill -TERM -f "loom-pregate run .*${jobs}/${sha}\.work/" && echo "$(date -u +%H:%M:%S) cancelled: ${sha:0:12}'s run stopped"
+	elif [ ! -f "${jobs}/${sha}.verdict" ]; then
+		echo "void: ${sha} cancelled before it started (${sha:0:12}.cancel)" > "${jobs}/${sha}.verdict"
+		echo "$(date -u +%H:%M:%S) cancelled: ${sha:0:12} before it started"
+	fi
+	mv "${jobs}/${sha}.cancel" "${jobs}/${sha}.cancelled"
+}
+if [ -n "${once}" ]; then
+	serve "${once}"
+	exit
+fi
 while true; do
+	for request in "${jobs}"/*.cancel; do
+		[ -e "${request}" ] && cancel "$(basename "${request}" .cancel)"
+	done
 	for job in "${jobs}"/*.json; do
 		[ -e "${job}" ] || continue
 		sha=$(basename "${job}" .json)
 		[[ ${sha} =~ ^[0-9a-f]{40}$ ]] || continue
-		[ -f "${jobs}/${sha}.verdict" ] || [ -f "${jobs}/${sha}.running" ] && continue
+		[ -f "${jobs}/${sha}.verdict" ] || [ -f "${jobs}/${sha}.running" ] || [ -f "${jobs}/${sha}.cancelled" ] && continue
 		[ "$(find "${jobs}" -maxdepth 1 -name '*.running' | wc -l)" -ge "${concurrent}" ] && break
 		touch "${jobs}/${sha}.running"
 		serve "${sha}" &
