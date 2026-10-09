@@ -7,6 +7,7 @@
 // cut, Oct 9), so no credential that can move main lives here.
 
 import { DurableObject } from 'cloudflare:workers';
+import { changeBoardOf } from './ChangeBoard';
 import { jsonResponse, readBodyText } from './Http';
 
 export const GenesisHash = '0'.repeat(64);
@@ -16,6 +17,9 @@ export const MaximumChangeBodyBytes = 1024 * 1024;
 export const MaximumFutureBodyBytes = 32 * 1024 * 1024;
 export const MaximumEventsPage = 1000;
 export const UnitKeyVersion = 'loom-unit-v1';
+// The board hears each moved change at most once a second (contracts v1.1), and a failed push is tried again.
+export const BoardPushMilliseconds = 1000;
+export const BoardRetryMilliseconds = 5000;
 // The events an owner acts on; the owners' feed carries only these (contracts v1.1, section 5).
 export const OwnerEventTypes: readonly EventType[] = ['change.landed', 'change.red', 'change.parked'];
 
@@ -781,6 +785,7 @@ export class Queue extends DurableObject<Env> {
                 change TEXT
             );
             CREATE INDEX IF NOT EXISTS eventsByChange ON events (change, seq);
+            CREATE TABLE IF NOT EXISTS facts (name TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
         `);
         const token = (environment as unknown as { GITHUB_TOKEN?: string }).GITHUB_TOKEN ?? '';
         this.history = token === '' ? null : new GitHubHistory(token);
@@ -867,7 +872,75 @@ export class Queue extends DurableObject<Env> {
             subject.change ?? null,
         );
         apply(state, event, hash);
+        if (subject.change !== undefined) {
+            await this.scheduleBoardPush();
+        }
         return event;
+    }
+
+    // ---------- The board of changes ----------
+
+    private fact(name: string): string | null {
+        return this.sql.exec<{ value: string }>('SELECT value FROM facts WHERE name = ?', name).toArray()[0]?.value ?? null;
+    }
+
+    private setFact(name: string, value: string): void {
+        this.sql.exec('INSERT INTO facts (name, value) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value', name, value);
+    }
+
+    // Makes sure an alarm will push the moved changes, no sooner than a second after the last push. Only storage is
+    // touched, so the request that moved a change never waits on the board and can't fail because of it.
+    private async scheduleBoardPush(): Promise<void> {
+        if ((await this.ctx.storage.getAlarm()) === null) {
+            await this.ctx.storage.setAlarm(Math.max(Date.now(), Number(this.fact('boardPushedAt') ?? '0') + BoardPushMilliseconds));
+        }
+    }
+
+    // Pushes every change an event touched since the last push, each as its summary now. Nothing is lost: until a push
+    // succeeds, the sequence it covers stays owed and the next alarm tries again.
+    override async alarm(): Promise<void> {
+        const state = await this.current();
+        const pushedSeq = Number(this.fact('boardSeq') ?? '0');
+        const moved = this.sql
+            .exec<{ change: string }>('SELECT DISTINCT change FROM events WHERE seq > ? AND change IS NOT NULL', pushedSeq)
+            .toArray();
+        const head = state.seq;
+        this.setFact('boardPushedAt', String(Date.now()));
+        try {
+            const board = changeBoardOf(this.env);
+            for (const row of moved) {
+                const entry = state.changes.get(row.change);
+                if (entry === undefined) {
+                    continue;
+                }
+                const response = await board.fetch('https://board/change', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        change: row.change,
+                        owner: entry.record.owner,
+                        sha: entry.record.sha,
+                        state: entry.state,
+                        future: entry.future,
+                        units: unitCounts(state.futures.get(entry.future ?? '')),
+                        updatedAt: this.now(),
+                    }),
+                });
+                await response.body?.cancel();
+                if (!response.ok) {
+                    throw new Error(`the board answered ${response.status}`);
+                }
+            }
+        }
+        catch {
+            await this.ctx.storage.setAlarm(Date.now() + BoardRetryMilliseconds);
+            return;
+        }
+        this.setFact('boardSeq', String(head));
+        // An event appended while the push ran is owed; make sure an alarm comes for it.
+        if (state.seq > head) {
+            await this.ctx.storage.setAlarm(Date.now() + BoardPushMilliseconds);
+        }
     }
 
     private async submit(request: Request): Promise<Response> {

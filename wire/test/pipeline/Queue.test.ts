@@ -1,5 +1,5 @@
 import { env } from 'cloudflare:workers';
-import { runInDurableObject } from 'cloudflare:test';
+import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { call, token } from '../Helpers';
 import { canonical, futureLandable, GenesisHash, MaximumStackDepth, replay, sha256Text, unitKeyOf, type FutureEntry, type GitFacts, type Queue, type QueueEvent, type UnitVerdict } from '../../source/Queue';
@@ -387,6 +387,31 @@ describe('a queue with no GitHub credential', function () {
         expect(replayed.changes.get(second)?.state).toBe('refused');
         expect(replayed.changes.get(first)?.checked).toBe(true);
         expect(replayed.line).toEqual([first]);
+    });
+});
+
+describe("the queue's board pushes", function () {
+    it('push each moved change as its summary from an alarm, and nothing twice once pushed', async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(41))).json()) as { change: string }).change;
+        await postWhole(queue, id, sha(41), 'passed', null);
+        const board = (env as unknown as { ChangeBoard: DurableObjectNamespace }).ChangeBoard;
+        const lineOf = async function (): Promise<Record<string, unknown> | undefined> {
+            const changes = ((await (await board.get(board.idFromName('board')).fetch('https://board/changes')).json()) as { changes: Record<string, unknown>[] }).changes;
+            return changes.find(function (line) {
+                return line.change === id;
+            });
+        };
+        expect(await lineOf()).toBeUndefined();
+        expect(await runDurableObjectAlarm(queue)).toBe(true);
+        expect(await lineOf()).toMatchObject({ change: id, owner: 'system_adamic_compiler', sha: sha(41), state: 'testing', future: sha(41), units: { planned: 0, passed: 0, failed: 0, void: 0 } });
+        await report(queue, id, { main: sha(50), from: main, landed: sha(41) });
+        expect(await runDurableObjectAlarm(queue)).toBe(true);
+        expect(await lineOf()).toMatchObject({ change: id, state: 'landed' });
+        const pushed = await runInDurableObject(queue, function (_instance: Queue, context: DurableObjectState) {
+            return context.storage.sql.exec<{ value: string }>("SELECT value FROM facts WHERE name = 'boardSeq'").toArray()[0]?.value;
+        });
+        expect(pushed).toBe(String((await logOf(queue)).length));
     });
 });
 
