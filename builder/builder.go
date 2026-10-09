@@ -360,7 +360,7 @@ func (builder Builder) build(action Action) Result {
 		return finish("failed", err)
 	}
 	defer os.RemoveAll(cache)
-	environment := []string{"ADAMIC_BUILD_CACHE_DIR=" + cache, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on"}
+	environment := append(GateEnvironment(), "ADAMIC_BUILD_CACHE_DIR="+cache, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on")
 	if output, err := builder.Run(action, environment); err != nil {
 		tail := output
 		if len(tail) > 4000 {

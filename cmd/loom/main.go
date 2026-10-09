@@ -62,6 +62,7 @@ const usage = `usage:
   loom submit-token <owner> [--days N]
   loom build-token <builder> [--days N]
   loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>]
+  loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--packages a,b] [--list]
 `
 
 func main() {
@@ -95,6 +96,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "build-token" {
 		return buildToken(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "build-actions" {
+		return buildActions(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "publish-token" {
 		return publishToken(arguments[1:], stdout, stderr)
