@@ -141,11 +141,17 @@ def main():
             skipped.setdefault(package, stale(package))
             continue
         cause = "product" if test.startswith("TestProduct_") and over else "slow" if over else "killed"
-        families.setdefault(familyOf(package, test) + (cause,), []).append((unit, test, over))
+        # A package's products share its archive and its cold build, so they're one family and one task (compiler, Oct 9:
+        # bridge/tsgo's products all wait on one typescript-go compile), however many products it declares.
+        family = (package, "TestProduct_") if cause == "product" else familyOf(package, test)
+        families.setdefault(family + (cause,), []).append((unit, test, over))
     for package, change in sorted(skipped.items()):
         print("p0: stale, not filed: %s moved on main since %s (%s)" % (package, arguments.sha[:12], change))
     # Reads, so they run in a dry run too: the grain tasks owners hold sit under both.
-    tree = tasks("tree", "5g5151k", "--depth", "4") + tasks("tree", os.environ.get("LOOM_P0_PARENT", "1pckk0k") or "1pckk0k", "--depth", "4")
+    # Products are filed under #c5k975w, so that tree is searched too: without it the filer never found its own product
+    # tasks and filed them again on the next run (compiler cancelled five duplicates on Oct 9).
+    tree = (tasks("tree", "5g5151k", "--depth", "4") + tasks("tree", os.environ.get("LOOM_P0_PARENT", "1pckk0k") or "1pckk0k", "--depth", "4")
+            + tasks("tree", "c5k975w", "--depth", "4"))
     notes = set(json.load(open(noted))) if os.path.exists(noted) else set()
     for (package, stem, cause), members in sorted(families.items()):
         key = "%s %s %s" % (package, stem, cause)
