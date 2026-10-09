@@ -7,8 +7,10 @@ take over. Each tick, from Kirk's Mac beside the gate lane:
 1. Every unplanned future loom-pipeline lists (slice 1: one change, tree = its sha) goes through today's fast gate
    exactly as a cut does: a cloud/land-queue-<tree8> branch at the tree, which fast-gate-watch gates like any
    cloud/land-* tip. Its newest finished record (gate-logs/<tree12>/<stamp>/fast) is the verdict input: green is
-   passed, red is failed with cause change (the judge's stub: any red is the change's), void is void. A record that
-   gated another tree (a gate merge onto a moved main) tested something else, so it is void for this future.
+   passed, red is failed with cause change (the judge's stub: any red is the change's), void is void. Main moves often,
+   so the gate usually tests the change merged onto a newer main (a gate merge, second parent the change's sha): that
+   merge becomes the change's future, posted with its first parent as gateMerge.base, and it is what lands. A record
+   of any other tree is void for this future.
 2. Every landing order goes through Kirk's push script, push-main.sh --fast-gate on the order's record. A landing is
    reported with the new main, the main it moved from, and the tree it landed, once git shows that tree on main. A
    hold (exit 3) or main's pause waits; any other refusal is reported, which parks the change.
@@ -111,6 +113,14 @@ class Gate:
                              cwd=os.path.dirname(os.path.dirname(os.path.dirname(pushMain))))
         return ran.returncode, ran.stdout, ran.stderr
 
+    def parents(self, sha):
+        """sha's parents, from git (a gate merge lives under refs/gate-merges, so fetch it by sha): [] when origin lacks it."""
+        listed = git("rev-list", "--parents", "-n", "1", sha).split()
+        if not listed:
+            git("fetch", "-q", "--no-tags", "origin", sha)
+            listed = git("rev-list", "--parents", "-n", "1", sha).split()
+        return listed[1:]
+
     def main(self):
         git("fetch", "-q", "origin", "main")
         return git("rev-parse", "origin/main")
@@ -119,12 +129,19 @@ class Gate:
         return subprocess.run(["git", "-C", repository, "merge-base", "--is-ancestor", tree, main]).returncode == 0
 
 
-def verdictOf(record, tree):
-    """The whole verdict today's record gives the future at tree."""
-    if record["gated"] != tree:
-        return {"future": tree, "run": record["ref"], "status": "void", "cause": "infra", "rule": rule}
+def verdictOf(record, tree, gate):
+    """The body today's record gives the change at tree: its whole verdict, and gateMerge when it gated a merge of tree."""
+    gated, merge = record["gated"], None
+    if gated != tree:
+        parents = gate.parents(gated)
+        if len(parents) != 2 or parents[1] != tree:
+            return {"verdict": {"future": tree, "run": record["ref"], "status": "void", "cause": "infra", "rule": rule}}
+        merge = {"base": parents[0]}
     status, cause = {"green": ("passed", None), "red": ("failed", "change"), "void": ("void", "infra")}[record["status"]]
-    return {"future": tree, "run": record["ref"], "status": status, "cause": cause, "rule": rule}
+    body = {"verdict": {"future": gated, "run": record["ref"], "status": status, "cause": cause, "rule": rule}}
+    if merge is not None:
+        body["gateMerge"] = merge
+    return body
 
 
 def tick(pipeline, gate, memory):
@@ -152,9 +169,9 @@ def tick(pipeline, gate, memory):
         key = "%s %s" % (change, record["ref"])
         if key in memory["posted"]:
             continue
-        verdict = verdictOf(record, tree)
-        status, answer = pipeline.call("POST", "/verdicts", {"change": change, "verdict": verdict})
-        log("verdict %s %s on %s: %d %s" % (change, verdict["status"], record["ref"], status, answer))
+        body = dict(verdictOf(record, tree, gate), change=change)
+        status, answer = pipeline.call("POST", "/verdicts", body)
+        log("verdict %s %s on %s: %d %s" % (change, body["verdict"]["status"], record["ref"], status, answer))
         if status in (200, 409):
             memory["posted"].append(key)
     status, orders = pipeline.call("GET", "/landings")

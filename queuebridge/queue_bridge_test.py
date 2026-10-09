@@ -40,6 +40,9 @@ class FakeGate:
     def record(self, tree):
         return self.found
 
+    def parents(self, sha):
+        return {other: [old, tree], "3" * 40: [old, "4" * 40]}.get(sha, [])
+
     def facts(self, sha, base):
         return {"shaExists": True, "baseIsAncestor": True, "baseOnMain": base == old, "diffPaths": ["a.go"]}
 
@@ -88,10 +91,14 @@ class Tick(unittest.TestCase):
             self.assertEqual(pipeline.posts(), [("/verdicts", {"change": change, "verdict": {
                 "future": tree, "run": "gate-logs/r/fast", "status": verdict, "cause": cause, "rule": "todays-gate-v0"}})])
 
-    def test_a_green_record_of_another_tree_never_passes_this_one(self):
+    def test_a_gate_merge_of_the_tree_is_its_future_and_any_other_tree_is_void(self):
         pipeline = FakePipeline([future])
         queue_bridge.tick(pipeline, FakeGate({"ref": "gate-logs/r/fast", "status": "green", "gated": other}), memory())
-        self.assertEqual([body["verdict"]["status"] for path, body in pipeline.posts()], ["void"])
+        self.assertEqual(pipeline.posts(), [("/verdicts", {"change": change, "gateMerge": {"base": old}, "verdict": {
+            "future": other, "run": "gate-logs/r/fast", "status": "passed", "cause": None, "rule": "todays-gate-v0"}})])
+        pipeline = FakePipeline([future])
+        queue_bridge.tick(pipeline, FakeGate({"ref": "gate-logs/r/fast", "status": "green", "gated": "3" * 40}), memory())
+        self.assertEqual([(body["verdict"]["future"], body["verdict"]["status"]) for path, body in pipeline.posts()], [(tree, "void")])
 
     def test_a_landing_is_reported_with_the_tree_only_when_main_holds_it(self):
         pushed = (0, "Pushed main %s..%s\n" % (old, new), "")

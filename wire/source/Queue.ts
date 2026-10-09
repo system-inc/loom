@@ -590,8 +590,10 @@ export class GitHubHistory implements History {
     }
 }
 
-// A whole verdict's shape as today's gate's adapter posts it for one change: {change, verdict}.
-export function checkVerdict(body: string): { change: string; verdict: Verdict } | string {
+// A whole verdict's shape as today's gate's adapter posts it for one change: {change, verdict}, and gateMerge {base}
+// when today's gate tested the change merged onto a newer main (a gate merge, first parent base, second the change's
+// sha) rather than the sha itself. The adapter read those parents from git, as it reads every git fact.
+export function checkVerdict(body: string): { change: string; verdict: Verdict; gateMerge: { base: string } | null } | string {
     const parsed = parseJson(body);
     if (!isPlainObject(parsed) || !isPlainObject(parsed.verdict)) {
         return 'the body is {change, verdict}';
@@ -616,9 +618,14 @@ export function checkVerdict(body: string): { change: string; verdict: Verdict }
     if (typeof verdict.run !== 'string' || verdict.run === '' || typeof verdict.rule !== 'string' || verdict.rule === '') {
         return 'verdict.run and verdict.rule are named';
     }
+    const gateMerge = parsed.gateMerge ?? null;
+    if (gateMerge !== null && (!isPlainObject(gateMerge) || typeof gateMerge.base !== 'string' || !shaPattern.test(gateMerge.base))) {
+        return 'gateMerge is {base}, the main the gate merged the change onto, or absent';
+    }
     return {
         change: parsed.change,
         verdict: { future: verdict.future, run: verdict.run, status: verdict.status as VerdictStatus, cause: cause as VerdictCause, rule: verdict.rule },
+        gateMerge: gateMerge === null ? null : { base: gateMerge.base as string },
     };
 }
 
@@ -1048,6 +1055,12 @@ export class Queue extends DurableObject<Env> {
         if (future === undefined) {
             return jsonResponse(404, { error: `no future ${tree}` });
         }
+        const superseded = future.changes.find(function (change) {
+            return state.changes.get(change)?.future !== tree;
+        });
+        if (superseded !== undefined) {
+            return jsonResponse(409, { error: `change ${superseded} is tested in ${String(state.changes.get(superseded)?.future)} now, not ${tree}` });
+        }
         const finished = future.changes.find(function (change) {
             return !isLive(state.changes.get(change));
         });
@@ -1075,7 +1088,18 @@ export class Queue extends DurableObject<Env> {
                 return jsonResponse(404, { error: `no change ${checked.change}` });
             }
             if (entry.future !== checked.verdict.future) {
-                return jsonResponse(409, { error: `change ${checked.change} is tested in ${String(entry.future)}, not ${checked.verdict.future}` });
+                // Today's gate tested the change on a newer main: that merge becomes its future, the tree that lands,
+                // while the future it replaces is still undecided (the builder's job, stubbed by today's gate).
+                const replaced = state.futures.get(entry.future ?? '');
+                const open = replaced !== undefined && replaced.units === null && (replaced.decided === null || replaced.decided.status === 'void');
+                if (checked.gateMerge === null || !open || !isLive(entry)) {
+                    return jsonResponse(409, { error: `change ${checked.change} is tested in ${String(entry.future)}, not ${checked.verdict.future}` });
+                }
+                await this.append(
+                    'future.built',
+                    { change: checked.change, future: checked.verdict.future },
+                    { base: checked.gateMerge.base, changes: [checked.change], gateMergeOf: entry.future },
+                );
             }
             const future = this.liveFuture(state, checked.verdict.future);
             if (future instanceof Response) {
@@ -1210,7 +1234,7 @@ export class Queue extends DurableObject<Env> {
                 return [];
             }
             const future = state.futures.get(entry.future);
-            return [{ change: change, future: entry.future, base: entry.record.base, owner: entry.record.owner, run: future?.decided?.run ?? '' }];
+            return [{ change: change, future: entry.future, base: future?.base ?? entry.record.base, owner: entry.record.owner, run: future?.decided?.run ?? '' }];
         });
         return jsonResponse(200, { landings: orders });
     }
@@ -1276,7 +1300,8 @@ export class Queue extends DurableObject<Env> {
                     future.units === null &&
                     future.decided === null &&
                     future.changes.every(function (change) {
-                        return isLive(state.changes.get(change));
+                        const entry = state.changes.get(change);
+                        return isLive(entry) && entry?.future === future.tree;
                     })
                 );
             })

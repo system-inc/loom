@@ -352,6 +352,38 @@ describe('the queue', function () {
     });
 });
 
+describe("today's gate on a newer main", function () {
+    it('makes the gate merge the change\'s future, the tree that lands, only while its own future is undecided', async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
+        const merged = sha(60);
+        const post = function (gateMerge: unknown, status = 'passed', run = 'gate-logs/m/fast'): Promise<Response> {
+            return queue.fetch('https://queue/verdicts', {
+                method: 'POST',
+                body: JSON.stringify({ change: id, verdict: { future: merged, run: run, status: status, cause: null, rule: 'todays-gate-v0' }, gateMerge: gateMerge }),
+            });
+        };
+        // Without saying it's a gate merge of this change, another tree decides nothing.
+        expect((await post(undefined)).status).toBe(409);
+        const decided = await post({ base: sha(61) });
+        expect(decided.status, await decided.clone().text()).toBe(200);
+        expect(await landings(queue)).toEqual([{ change: id, future: merged, base: sha(61), owner: 'system_adamic_compiler', run: 'gate-logs/m/fast' }]);
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: unknown[] }).futures).toEqual([]);
+        // The replaced future decides nothing now.
+        expect((await postWhole(queue, id, sha(1), 'passed', null)).status).toBe(409);
+        expect((await report(queue, id, { main: sha(70), from: sha(61), landed: sha(1) })).status).toBe(409);
+        expect((await report(queue, id, { main: sha(70), from: sha(61), landed: merged })).status).toBe(200);
+        // A change whose own future already passed can't be moved to another tree.
+        const second = ((await (await submit(queue, change(2))).json()) as { change: string }).change;
+        await postWhole(queue, second, sha(2), 'passed', null);
+        const moved = await queue.fetch('https://queue/verdicts', {
+            method: 'POST',
+            body: JSON.stringify({ change: second, verdict: { future: sha(62), run: 'r2', status: 'passed', cause: null, rule: 'todays-gate-v0' }, gateMerge: { base: sha(61) } }),
+        });
+        expect(moved.status).toBe(409);
+    });
+});
+
 describe('a queue with no GitHub credential', function () {
     it('takes a change unchecked, and only git facts from the bridge clear it into a future or refuse it', async function () {
         const queue = await freshQueue();
