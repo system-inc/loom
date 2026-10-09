@@ -1,7 +1,8 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { canonical, GenesisHash, MaximumStackDepth, replay, sha256Text, type GitFacts, type Queue, type QueueEvent } from '../../source/Queue';
+import { call, token } from '../Helpers';
+import { canonical, futureLandable, GenesisHash, MaximumStackDepth, replay, sha256Text, unitKeyOf, type FutureEntry, type GitFacts, type Queue, type QueueEvent, type UnitVerdict } from '../../source/Queue';
 
 const main = 'a'.repeat(40);
 
@@ -15,31 +16,11 @@ function facts(overrides: Partial<GitFacts> = {}, diffPaths = ['internal/lower/a
 }
 
 // A fresh queue object per test, with git answered from a table keyed by sha and a pinned clock.
-// main as a test holds it: a sha, moved only forward from the sha the lander read, or refused with a reason.
-class TestMain {
-    sha = main;
-    refuse: string | null = null;
-    async read(): Promise<string> {
-        return this.sha;
-    }
-    async fastForward(from: string, to: string): Promise<string | null> {
-        if (this.refuse !== null) {
-            return this.refuse;
-        }
-        if (from !== this.sha) {
-            return `main is ${this.sha}, not ${from}`;
-        }
-        this.sha = to;
-        return null;
-    }
-}
-
-async function freshQueue(answers: Record<string, GitFacts> = {}, mainRef: TestMain = new TestMain()): Promise<DurableObjectStub<Queue>> {
+async function freshQueue(answers: Record<string, GitFacts> = {}): Promise<DurableObjectStub<Queue>> {
     // The pipeline's binding (pipeline.jsonc); the generated Env type knows only loom-wire's.
     const namespace = (env as unknown as { Queue: DurableObjectNamespace<Queue> }).Queue;
     const stub = namespace.get(namespace.idFromName('queue-' + crypto.randomUUID()));
     await runInDurableObject(stub, function (instance: Queue) {
-        instance.main = mainRef;
         instance.history = {
             // A base other than the main these tests start from is one main has moved past: nothing descends from it here.
             async facts(asked: string, base: string): Promise<GitFacts> {
@@ -158,7 +139,7 @@ describe('the queue', function () {
             log.map(function (event) {
                 return event.seq;
             }),
-        ).toEqual([1, 2, 3]);
+        ).toEqual([1, 2, 3, 4, 5]);
         expect(log[0]?.prev).toBe(GenesisHash);
         for (let index = 1; index < log.length; index++) {
             expect(log[index]?.prev).toBe(await sha256Text(canonical(log[index - 1])));
@@ -197,122 +178,317 @@ describe('the queue', function () {
         const id = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
         await submit(queue, change(2));
         const lines = (await (await queue.fetch(`https://queue/changes/${id}/events`)).text()).trim().split('\n');
-        expect(lines).toHaveLength(1);
+        expect(lines).toHaveLength(2);
         expect(JSON.parse(lines[0] ?? '')).toMatchObject({ seq: 1, type: 'change.submitted', subject: { change: id } });
-        expect((await (await queue.fetch(`https://queue/changes/${id}/events?after=1`)).text()).trim()).toBe('');
+        // Slice 1: a change is its own future, its tree its sha.
+        expect(JSON.parse(lines[1] ?? '')).toMatchObject({ seq: 2, type: 'future.built', subject: { change: id, future: sha(1) }, data: { base: main, changes: [id] } });
+        expect((await (await queue.fetch(`https://queue/changes/${id}/events?after=2`)).text()).trim()).toBe('');
         expect((await queue.fetch(`https://queue/changes/chg_${'q'.repeat(26)}`)).status).toBe(404);
-        // The owners' feed carries only landed, red and parked; a submit is none of them.
-        expect((await (await queue.fetch('https://queue/changes/events')).text()).trim()).toBe('');
+        // The owners' feed carries only landed, red and parked; a submit is none of them. The whole log carries all.
+        expect((await (await queue.fetch('https://queue/events?after=0&owners=1')).text()).trim()).toBe('');
+        expect((await (await queue.fetch('https://queue/events?after=1')).text()).trim().split('\n')).toHaveLength(3);
     });
 
-    it('lands a change only on a passed verdict, by fast-forward to exactly its future, and says so once', async function () {
-        const held = new TestMain();
-        const queue = await freshQueue({}, held);
+    it('lands nothing itself: a change whose whole verdict passed is a landing order until the pusher reports exactly its tree', async function () {
+        const queue = await freshQueue();
         const id = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
-        const land = function (): Promise<Response> {
-            return queue.fetch('https://queue/land', { method: 'POST', body: JSON.stringify({ change: id }) });
-        };
-        expect((await land()).status).toBe(409);
-        const verdict = { future: sha(1), run: 'gate-logs/x/fast', status: 'passed', cause: null, rule: 'todays-gate-v0' };
-        expect((await queue.fetch('https://queue/verdicts', { method: 'POST', body: JSON.stringify({ change: id, verdict: verdict }) })).status).toBe(200);
-        const landed = await land();
+        expect(await landings(queue)).toEqual([]);
+        // A verdict for a tree the change isn't tested in decides nothing, whatever it says.
+        expect((await postWhole(queue, id, sha(9), 'passed', null)).status).toBe(409);
+        expect(await landings(queue)).toEqual([]);
+        expect((await postWhole(queue, id, sha(1), 'passed', null)).status).toBe(200);
+        expect(await landings(queue)).toEqual([{ change: id, future: sha(1), base: main, owner: 'system_adamic_compiler' }]);
+        // The pusher moved main somewhere else: refused, nothing logged.
+        expect((await report(queue, id, { main: sha(2), from: main })).status).toBe(409);
+        const landed = await report(queue, id, { main: sha(1), from: main });
         expect(landed.status, await landed.clone().text()).toBe(200);
-        expect(await landed.json()).toEqual({ change: id, state: 'landed', landed: sha(1) });
-        expect(held.sha).toBe(sha(1));
         expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'landed', landed: sha(1), future: sha(1) });
-        // A second land is an answer, not a second move.
-        expect((await land()).status).toBe(200);
-        const types = (await logOf(queue)).map(function (event) {
-            return event.type;
-        });
-        expect(types).toEqual(['change.submitted', 'verdict.decided', 'change.landed']);
-        const feed = (await (await queue.fetch('https://queue/changes/events')).text()).trim().split('\n');
+        expect(await landings(queue)).toEqual([]);
+        // A second report of the same landing is an answer, not a second event.
+        expect((await report(queue, id, { main: sha(1), from: main })).status).toBe(200);
+        expect(
+            (await logOf(queue)).map(function (event) {
+                return event.type;
+            }),
+        ).toEqual(['change.submitted', 'future.built', 'verdict.decided', 'change.landed']);
+        const feed = (await (await queue.fetch('https://queue/events?owners=1')).text()).trim().split('\n');
         expect(feed).toHaveLength(1);
         expect(JSON.parse(feed[0] ?? '')).toMatchObject({ type: 'change.landed', subject: { change: id }, data: { main: sha(1), from: main } });
         expect((await replay(await logOf(queue))).changes.get(id)?.state).toBe('landed');
     });
 
-    it('refuses to land a future main has moved past, or one GitHub will not fast-forward, and moves nothing', async function () {
-        const held = new TestMain();
-        const queue = await freshQueue({ [sha(2)]: facts({ baseIsAncestor: false }) }, held);
-        const ids: string[] = [];
-        for (const seed of [2, 3]) {
-            const id = ((await (await submit(queue, change(seed))).json().catch(function () {
-                return {};
-            })) as { change?: string }).change;
-            ids.push(id ?? '');
-        }
-        // sha(2) was refused at submit (its base isn't its ancestor); land sha(3) after GitHub refuses.
-        expect(ids[0]).toBe('');
-        const id = ids[1] ?? '';
-        await queue.fetch('https://queue/verdicts', {
-            method: 'POST',
-            body: JSON.stringify({ change: id, verdict: { future: sha(3), run: 'r', status: 'passed', cause: null, rule: 'todays-gate-v0' } }),
-        });
-        held.refuse = 'Update is not a fast forward';
-        const refused = await queue.fetch('https://queue/land', { method: 'POST', body: JSON.stringify({ change: id }) });
-        expect(refused.status).toBe(409);
-        expect(((await refused.json()) as { error: string }).error).toContain('not a fast forward');
-        expect(held.sha).toBe(main);
-        expect(
-            (await logOf(queue)).map(function (event) {
-                return event.type;
-            }),
-        ).not.toContain('change.landed');
-    });
-
-    it('sends a red caused by the change to its owner, and keeps every other red and void off the feed', async function () {
+    it('gives a failed or void verdict no landing order, sends only the change-caused red to the owner, and parks a refused push', async function () {
         const queue = await freshQueue();
         const ids: string[] = [];
-        for (const seed of [1, 2, 3]) {
+        for (const seed of [1, 2, 3, 4]) {
             ids.push(((await (await submit(queue, change(seed))).json()) as { change: string }).change);
         }
-        const post = function (id: string, status: string, cause: string | null): Promise<Response> {
-            return queue.fetch('https://queue/verdicts', {
-                method: 'POST',
-                body: JSON.stringify({ change: id, verdict: { future: sha(9), run: 'r', status: status, cause: cause, rule: 'todays-gate-v0' } }),
+        expect((await postWhole(queue, ids[0] ?? '', sha(1), 'failed', 'change')).status).toBe(200);
+        expect((await postWhole(queue, ids[1] ?? '', sha(2), 'failed', 'mainRed')).status).toBe(200);
+        expect((await postWhole(queue, ids[2] ?? '', sha(3), 'void', 'infra')).status).toBe(200);
+        expect((await postWhole(queue, ids[3] ?? '', sha(4), 'passed', null)).status).toBe(200);
+        expect(
+            (await landings(queue)).map(function (order) {
+                return order.change;
+            }),
+        ).toEqual([ids[3]]);
+        expect((await report(queue, ids[1] ?? '', { main: sha(2), from: main })).status).toBe(409);
+        // A void lets the next run decide; a red is final.
+        expect((await postWhole(queue, ids[2] ?? '', sha(3), 'passed', null, 'second')).status).toBe(200);
+        expect((await postWhole(queue, ids[0] ?? '', sha(1), 'passed', null, 'second')).status).toBe(409);
+        // main moved past change 4's base, so the fast-forward was refused: parked, its owner told.
+        expect((await report(queue, ids[3] ?? '', { main: sha(77), refused: 'not a fast-forward' })).status).toBe(200);
+        const feed = (await (await queue.fetch('https://queue/events?owners=1')).text())
+            .trim()
+            .split('\n')
+            .map(function (line) {
+                return JSON.parse(line) as QueueEvent;
             });
-        };
-        expect((await post(ids[0] ?? '', 'failed', 'change')).status).toBe(200);
-        expect((await post(ids[1] ?? '', 'failed', 'mainRed')).status).toBe(200);
-        expect((await post(ids[2] ?? '', 'void', 'infra')).status).toBe(200);
-        const feed = (await (await queue.fetch('https://queue/changes/events')).text()).trim().split('\n');
-        expect(feed).toHaveLength(1);
-        expect(JSON.parse(feed[0] ?? '')).toMatchObject({ type: 'change.red', subject: { change: ids[0] } });
+        expect(
+            feed.map(function (event) {
+                return [event.type, event.subject.change];
+            }),
+        ).toEqual([
+            ['change.red', ids[0]],
+            ['change.parked', ids[3]],
+        ]);
         expect(await (await queue.fetch(`https://queue/changes/${ids[0]}`)).json()).toMatchObject({ state: 'red' });
-        expect((await post(ids[0] ?? '', 'passed', null)).status).toBe(409);
+        expect(
+            (await landings(queue)).map(function (order) {
+                return order.change;
+            }),
+        ).toEqual([ids[2]]);
     });
 
-    it('refuses to land a change whose verdict failed, or one main moved past, and moves nothing', async function () {
-        const held = new TestMain();
-        const queue = await freshQueue({}, held);
-        const ids: string[] = [];
-        for (const seed of [5, 6]) {
-            ids.push(((await (await submit(queue, change(seed))).json()) as { change: string }).change);
-        }
-        const verdictFor = function (id: string, future: string, status: string, cause: string | null): Promise<Response> {
-            return queue.fetch('https://queue/verdicts', {
-                method: 'POST',
-                body: JSON.stringify({ change: id, verdict: { future: future, run: 'r', status: status, cause: cause, rule: 'todays-gate-v0' } }),
-            });
-        };
-        const land = function (id: string): Promise<Response> {
-            return queue.fetch('https://queue/land', { method: 'POST', body: JSON.stringify({ change: id }) });
-        };
-        // A failed verdict that isn't the change's (main already red) names a future, and still never lands.
-        expect((await verdictFor(ids[0] ?? '', sha(5), 'failed', 'mainRed')).status).toBe(200);
-        expect((await land(ids[0] ?? '')).status).toBe(409);
-        // A passed future, but main moved on before the lander came: it needs a new future, not this one.
-        expect((await verdictFor(ids[1] ?? '', sha(6), 'passed', null)).status).toBe(200);
-        held.sha = sha(77);
-        const moved = await land(ids[1] ?? '');
-        expect(moved.status).toBe(409);
-        expect(((await moved.json()) as { error: string }).error).toContain('does not descend from main');
-        expect(held.sha).toBe(sha(77));
+    it('lists unplanned futures for the planner and takes its plan only with keys computed from their parts', async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
+        const listed = (await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: unknown[] };
+        expect(listed.futures).toEqual([{ future: sha(1), tree: sha(1), base: main, changes: [id] }]);
+        const units = await planOf(['a', 'b']);
+        const forged = [{ ...units[0], unitKey: 'f'.repeat(64) }, units[1]];
+        const refused = await postPlan(queue, sha(1), forged);
+        expect(refused.status).toBe(422);
+        expect(((await refused.json()) as { error: string }).error).toContain('is not its keyParts');
+        // A reuse needs a passed verdict in the index for its exact key; the index is empty.
+        expect((await postPlan(queue, sha(1), [{ ...units[0], decision: 'reuse' }, units[1]])).status).toBe(422);
+        expect((await postPlan(queue, sha(1), units)).status).toBe(200);
+        expect((await postPlan(queue, sha(1), units)).status).toBe(200);
+        expect((await postPlan(queue, sha(1), [units[0]])).status).toBe(409);
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: unknown[] }).futures).toEqual([]);
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'testing', units: { planned: 2, passed: 0 } });
+        // A planned future is the judge's: today's gate's whole verdict no longer decides it.
+        expect((await postWhole(queue, id, sha(1), 'passed', null)).status).toBe(409);
         expect(
-            (await logOf(queue)).map(function (event) {
-                return event.type;
+            (await logOf(queue)).filter(function (event) {
+                return event.type === 'unit.planned';
             }),
-        ).not.toContain('change.landed');
+        ).toHaveLength(2);
+    });
+
+    it("lands a planned future only on the judge's green, recomputed, and serves each unit's latest verdict from the index", async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
+        const units = await planOf(['a', 'b']);
+        await postPlan(queue, sha(1), units);
+        const keys = units.map(function (unit) {
+            return unit.unitKey;
+        });
+        expect((await queue.fetch(`https://queue/verdicts/${keys[0]}`)).status).toBe(404);
+        // A batch that claims green over a void unit is refused, and logs nothing.
+        const lying = batch(id, sha(1), 'run-1', [record(id, keys[0] ?? '', 'run-1', 'passed', null), record(id, keys[1] ?? '', 'run-1', 'void', 'infra')], 'green');
+        expect((await postBatch(queue, sha(1), lying)).status).toBe(422);
+        // A batch green over only part of the plan is refused too: the plan is the planner's, not the judge's.
+        expect((await postBatch(queue, sha(1), batch(id, sha(1), 'run-1', [record(id, keys[0] ?? '', 'run-1', 'passed', null)], 'green'))).status).toBe(422);
+        const voided = batch(id, sha(1), 'run-1', [record(id, keys[0] ?? '', 'run-1', 'passed', null), record(id, keys[1] ?? '', 'run-1', 'void', 'infra')], 'void');
+        expect((await postBatch(queue, sha(1), voided)).status).toBe(200);
+        expect(await landings(queue)).toEqual([]);
+        expect(await (await queue.fetch(`https://queue/verdicts/${keys[1]}`)).json()).toMatchObject({ unitKey: keys[1], status: 'void', run: 'run-1' });
+        // The rerun is green, with one unit failed as main's red, which the judge excuses.
+        const green = batch(id, sha(1), 'run-2', [record(id, keys[0] ?? '', 'run-2', 'passed', null), record(id, keys[1] ?? '', 'run-2', 'failed', 'mainRed')], 'green', [keys[1] ?? '']);
+        const decided = await postBatch(queue, sha(1), green);
+        expect(decided.status, await decided.clone().text()).toBe(200);
+        expect((await postBatch(queue, sha(1), green)).status).toBe(200);
+        expect((await postBatch(queue, sha(1), { ...green, run: 'run-3' })).status).toBe(422);
+        expect(await (await queue.fetch(`https://queue/verdicts/${keys[1]}`)).json()).toMatchObject({ status: 'failed', cause: 'mainRed', run: 'run-2' });
+        expect(await landings(queue)).toEqual([{ change: id, future: sha(1), base: main, owner: 'system_adamic_compiler' }]);
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ units: { planned: 2, passed: 1, failed: 1 } });
+        // Replay rebuilds the index and the landing order from the log alone.
+        const replayed = await replay(await logOf(queue));
+        expect(replayed.verdicts.get(keys[1] ?? '')?.record).toMatchObject({ status: 'failed', run: 'run-2' });
+        expect(replayed.futures.get(sha(1))?.decided).toEqual({ run: 'run-2', status: 'green' });
+    });
+
+    it("sends a red batch's kicks to the owner, and lets a later future reuse a passed key", async function () {
+        const queue = await freshQueue();
+        const first = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
+        const units = await planOf(['a', 'b']);
+        const keys = units.map(function (unit) {
+            return unit.unitKey;
+        });
+        await postPlan(queue, sha(1), units);
+        const red = batch(first, sha(1), 'run-1', [record(first, keys[0] ?? '', 'run-1', 'passed', null), record(first, keys[1] ?? '', 'run-1', 'failed', 'change')], 'red', [], [keys[1] ?? '']);
+        const kicks = { [keys[1] ?? '']: { test: 'TestB', repro: `loom repro ${keys[1]}` } };
+        expect((await postBatch(queue, sha(1), { ...red, decision: { ...red.decision, kicks: kicks } })).status).toBe(200);
+        const feed = (await (await queue.fetch('https://queue/events?owners=1')).text()).trim().split('\n');
+        expect(JSON.parse(feed[0] ?? '')).toMatchObject({ type: 'change.red', subject: { change: first }, data: { kicks: kicks } });
+        expect(await landings(queue)).toEqual([]);
+        // The next change reuses unit a, which passed, and runs b again.
+        const second = ((await (await submit(queue, change(2))).json()) as { change: string }).change;
+        expect((await postPlan(queue, sha(2), [{ ...units[0], decision: 'reuse', reused: 'run-1' }, units[1]])).status).toBe(200);
+        // It can't reuse b, whose latest verdict is red.
+        const third = ((await (await submit(queue, change(3))).json()) as { change: string }).change;
+        expect((await postPlan(queue, sha(3), [units[0], { ...units[1], decision: 'reuse' }])).status).toBe(422);
+        const green = batch(second, sha(2), 'run-2', [record(second, keys[0] ?? '', 'run-2', 'passed', null), record(second, keys[1] ?? '', 'run-2', 'passed', null)], 'green');
+        expect((await postBatch(queue, sha(2), green)).status).toBe(200);
+        expect(
+            (await landings(queue)).map(function (order) {
+                return order.change;
+            }),
+        ).toEqual([second]);
+        expect(third).toMatch(/^chg_/);
     });
 });
+
+describe('a landing order', function () {
+    it("needs the future's own verdicts to say green, not only a decision that did", function () {
+        const verdictOf = function (unitKey: string, status: UnitVerdict['status'], cause: UnitVerdict['cause'], future = sha(1)): UnitVerdict {
+            return { unitKey: unitKey, change: 'chg_' + 'a'.repeat(26), future: future, run: 'r', status: status, cause: cause };
+        };
+        const futureWith = function (verdicts: (UnitVerdict | null)[]): FutureEntry {
+            const units = new Map(
+                verdicts.map(function (verdict, index) {
+                    const key = String(index).repeat(64);
+                    return [key, { unitKey: key, name: `u${index}`, decision: 'run' as const, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
+                }),
+            );
+            return { tree: sha(1), base: main, changes: [], units: units, whole: null, decided: { run: 'r', status: 'green' } };
+        };
+        expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'failed', 'mainRed')]))).toBe(true);
+        expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'void', 'infra')]))).toBe(false);
+        expect(futureLandable(futureWith([verdictOf('', 'passed', null), null]))).toBe(false);
+        expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'passed', null, sha(2))]))).toBe(false);
+        expect(futureLandable(futureWith([]))).toBe(false);
+        expect(futureLandable({ ...futureWith([verdictOf('', 'passed', null)]), decided: { run: 'r', status: 'void' } })).toBe(false);
+    });
+});
+
+describe("loom-pipeline's queue seams", function () {
+    it('open to a coordinator token only, and reach the Queue object past it', async function () {
+        const coordinator = await token('system_adamic_loom', 'coordinator');
+        const routes: [string, string][] = [
+            ['GET', '/landings'],
+            ['GET', `/verdicts/${'a'.repeat(64)}`],
+            ['GET', '/futures?state=unplanned'],
+            ['POST', `/futures/${sha(1)}/plan`],
+            ['POST', `/futures/${sha(1)}/verdicts`],
+            ['POST', '/verdicts'],
+            ['POST', `/landings/chg_${'q'.repeat(26)}`],
+        ];
+        for (const [method, path] of routes) {
+            const body = method === 'POST' ? '{}' : undefined;
+            expect((await call(path, { method: method, body: body })).status, path).toBe(401);
+            for (const scope of ['submit', 'board', 'runner', 'pool', 'build'] as const) {
+                expect((await call(path, { method: method, body: body, bearer: await token('system_adamic_loom', scope) })).status, `${scope} ${path}`).toBe(403);
+            }
+        }
+        expect(await (await call('/landings', { bearer: coordinator })).json()).toEqual({ landings: [] });
+        expect((await call(`/verdicts/${'a'.repeat(64)}`, { bearer: coordinator })).status).toBe(404);
+        expect(await (await call('/futures?state=unplanned', { bearer: coordinator })).json()).toEqual({ futures: [] });
+        const plan = await call(`/futures/${sha(1)}/plan`, { method: 'POST', bearer: coordinator, body: JSON.stringify(await planOf(['a'])) });
+        expect(plan.status).toBe(404);
+        expect(await plan.json()).toEqual({ error: `no future ${sha(1)}` });
+    });
+});
+
+function landings(queue: DurableObjectStub<Queue>): Promise<{ change: string; future: string; base: string; owner: string }[]> {
+    return queue
+        .fetch('https://queue/landings')
+        .then(function (response) {
+            return response.json();
+        })
+        .then(function (body) {
+            return (body as { landings: { change: string; future: string; base: string; owner: string }[] }).landings;
+        });
+}
+
+function report(queue: DurableObjectStub<Queue>, id: string, body: Record<string, unknown>): Promise<Response> {
+    return queue.fetch(`https://queue/landings/${id}`, { method: 'POST', body: JSON.stringify(body) });
+}
+
+function postWhole(queue: DurableObjectStub<Queue>, id: string, future: string, status: string, cause: string | null, run = 'gate-logs/x/fast'): Promise<Response> {
+    return queue.fetch('https://queue/verdicts', {
+        method: 'POST',
+        body: JSON.stringify({ change: id, verdict: { future: future, run: run, status: status, cause: cause, rule: 'todays-gate-v0' } }),
+    });
+}
+
+interface TestUnit {
+    name: string;
+    unitKey: string;
+    keyParts: Record<string, unknown>;
+    decision: string;
+    reason: string;
+    reused?: string;
+}
+
+// One test unit per named package, keyed from its parts the way the planner keys them.
+async function planOf(packages: string[]): Promise<TestUnit[]> {
+    const units: TestUnit[] = [];
+    for (const name of packages) {
+        const keyParts = {
+            kind: 'test',
+            package: `github.com/system-inc/adamic/internal/${name}`,
+            select: { run: '', skip: '' },
+            closure: 'c'.repeat(64),
+            reads: 'd'.repeat(64),
+            products: [],
+            tools: { runner: 'e'.repeat(64), go: 'go1.27.2', clang: '', node: '', wasiSdk: '' },
+            env: { ADAMIC_GATE_UNCACHED: '1' },
+            gateInputs: '',
+        };
+        units.push({ name: keyParts.package, unitKey: await unitKeyOf(keyParts), keyParts: keyParts, decision: 'run', reason: 'new key' });
+    }
+    return units;
+}
+
+function postPlan(queue: DurableObjectStub<Queue>, tree: string, units: unknown[]): Promise<Response> {
+    return queue.fetch(`https://queue/futures/${tree}/plan`, { method: 'POST', body: JSON.stringify(units) });
+}
+
+function record(id: string, unitKey: string, run: string, status: string, cause: string | null): Record<string, unknown> {
+    return {
+        unitKey: unitKey,
+        change: id,
+        future: '',
+        run: run,
+        status: status,
+        cause: cause,
+        infra: status === 'void' ? 'kill' : null,
+        attempts: [],
+        tests: [],
+        outputs: [],
+        rule: 'judge-v1',
+        decidedAt: '2026-10-09T23:40:00Z',
+    };
+}
+
+function batch(id: string, tree: string, run: string, records: Record<string, unknown>[], status: string, excused: string[] = [], red: string[] = []): { change: string; run: string; rule: string; plan: string[]; verdicts: Record<string, unknown>[]; decision: Record<string, unknown>; quarantine: unknown[] } {
+    return {
+        change: id,
+        run: run,
+        rule: 'judge-v1',
+        plan: records.map(function (item) {
+            return item.unitKey as string;
+        }),
+        verdicts: records.map(function (item) {
+            return { ...item, future: tree };
+        }),
+        decision: { status: status, red: red, excused: excused, problems: [], kicks: {} },
+        quarantine: [],
+    };
+}
+
+function postBatch(queue: DurableObjectStub<Queue>, tree: string, body: Record<string, unknown>): Promise<Response> {
+    return queue.fetch(`https://queue/futures/${tree}/verdicts`, { method: 'POST', body: JSON.stringify(body) });
+}

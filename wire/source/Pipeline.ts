@@ -16,6 +16,9 @@ export { Queue } from './Queue';
 
 // A change is submitted with its owner's submit token; any of these reads one, and Changes.ts says which may do what.
 const changeScopes: TokenScope[] = ['submit', 'coordinator', 'board'];
+// GET /verdicts/<unitKey>, POST /verdicts, GET /futures, POST /futures/<tree>/plan and /verdicts, GET /landings and
+// POST /landings/<change>.
+const queueSeamPattern = /^\/(?:verdicts(?:\/[0-9a-f]{64})?|futures(?:\/[0-9a-f]{40}\/(?:plan|verdicts))?|landings(?:\/chg_[0-9a-z]{26})?)$/;
 
 export default {
     async fetch(request: Request, environment: Env): Promise<Response> {
@@ -28,6 +31,22 @@ export default {
                 return claims;
             }
             return handleChanges(request, claims, changesMatch[1] ?? '', queueOf(environment));
+        }
+        // The coordinator's seams with the queue (contracts v1.1): the verdict index and the planner's futures, the
+        // judge's verdicts, and the landing orders the workshop pusher pulls and answers. The Queue object checks the rest.
+        if (queueSeamPattern.test(path)) {
+            const claims = await authorize(request, environment, null, { scopes: ['coordinator'], queryScopes: [] });
+            if (claims instanceof Response) {
+                await request.body?.cancel();
+                return claims;
+            }
+            const queue = queueOf(environment);
+            if (queue === null) {
+                await request.body?.cancel();
+                return jsonResponse(503, { error: "the queue isn't on the wire yet" });
+            }
+            const url = new URL(request.url);
+            return queue.fetch(new Request(`https://queue${path}${url.search}`, { method: request.method, headers: request.headers, body: request.body }));
         }
         // The action store checks its own build token, since no other scope may reach it.
         const action = await handleAction(request, environment);
