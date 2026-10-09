@@ -144,22 +144,42 @@ def treeTests(job, given):
 
 
 def reported(work):
-    """The units the run's own record says finished, passed or failed: a unit that never ran is a void already."""
-    units = set()
-    path = os.path.join(work, "record.jsonl")
-    if not os.path.exists(path) and os.path.exists(path + ".gz"):
-        lines = gzip.open(path + ".gz", "rt", errors="replace")
-    else:
-        lines = open(path, errors="replace") if os.path.exists(path) else []
-    for line in lines:
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        event = event.get("event", event)
-        if event.get("type") == "finished" and event.get("status") in ("passed", "failed"):
-            units.add(event.get("unit"))
-    return units
+    """The units whose latest attempt finished, passed or failed, on its own: a unit that never ran is a void already.
+    The run's record, then its retry rounds' (verify.sh's again-<n>-record.jsonl), each attempt replacing the one before.
+    An attempt that exited 2, or that uploaded no test results, is Loom's break, not a run of the unit's tests: the red
+    list already names it BROKEN (Oct 9 14:30Z: gocacheprog 77dcb095 read 61 "ran: 0" reds from units that refused on a
+    full /tmp or failed their checkout and uploaded nothing)."""
+    paths = [os.path.join(work, "record.jsonl")]
+    rounds = []
+    for name in os.listdir(work):
+        match = re.fullmatch(r"again-([0-9]+)-record\.jsonl(\.gz)?", name)
+        if match:
+            rounds.append((int(match.group(1)), os.path.join(work, name[:-3] if name.endswith(".gz") else name)))
+    paths += [path for _, path in sorted(rounds)]
+    latest = {}
+    for path in paths:
+        if not os.path.exists(path) and os.path.exists(path + ".gz"):
+            lines = gzip.open(path + ".gz", "rt", errors="replace")
+        else:
+            lines = open(path, errors="replace") if os.path.exists(path) else []
+        attempt = {}
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            event = event.get("event", event)
+            if event.get("type") == "started":
+                attempt[event.get("unit")] = {}
+            elif event.get("type") == "exit":
+                attempt.setdefault(event.get("unit"), {})["code"] = event.get("code")
+            elif event.get("type") == "finished":
+                attempt.setdefault(event.get("unit"), {})["status"] = event.get("status")
+            elif event.get("type") == "uploaded" and re.fullmatch(r"loom-out/test\.jsonl(\.gz)?", event.get("path") or ""):
+                attempt.setdefault(event.get("unit"), {})["results"] = True
+        latest.update(attempt)
+    return {unit for unit, attempt in latest.items()
+            if attempt.get("status") in ("passed", "failed") and attempt.get("code") != 2 and attempt.get("results")}
 
 
 def family(test, name):
