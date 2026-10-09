@@ -41,7 +41,9 @@ PYTHON
 	[ "$(cat "${HOME}/.loom/before.published" 2> /dev/null)" = "${hash}" ] && before=(--before "${hash}")
 fi
 cd "${ahra}" || exit 1
-for pair in loom-pool:codex loom-side:codex-side; do
+# loom-star's members all serve the star's pool (@system_adamic, Oct 9 10:52Z: double the live star pool, measured in
+# steps of 20 against the account's concurrency cap); numbered 1 to 72, so none falls past LOOM_STAR_INSTANCES.
+for pair in loom-pool:codex loom-side:codex-side loom-star:codex; do
 	fleet=${pair%%:*} pool=${pair#*:}
 	prompt=${HOME}/.loom/rearm-${pool}.md
 	"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${runner}" ${before[@]+"${before[@]}"} --until 115m "${pool}" > "${prompt}" || continue
