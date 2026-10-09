@@ -119,7 +119,8 @@ func TestABudgetSetsTheUnitCountAndAnOverBudgetTestRunsAlone(t *testing.T) {
 	read, write, _ := os.Pipe()
 	stdout := os.Stdout
 	os.Stdout = write
-	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10"})
+	// No package setup here: the arithmetic below is the unit count's alone.
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--package-setup", "0"})
 	write.Close()
 	os.Stdout = stdout
 	if err != nil {
@@ -288,5 +289,54 @@ func TestLoomsTimedSubtestsSplitATestTheReferenceHeldWhole(t *testing.T) {
 	}
 	if len(job.Units) != 12 && len(job.Units) != 13 {
 		t.Fatalf("%d units", len(job.Units))
+	}
+}
+
+// Under a budget a package's tests pack together (#wa8exgw): three packages of many small tests make units that each
+// run one package, not every unit a slice of all three.
+func TestABudgetPacksAPackagesTestsTogether(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	for _, packageName := range []string{"a", "b", "c"} {
+		for test := range 30 {
+			fmt.Fprintf(writer, `{"Action":"pass","Package":"%s%s","Test":"Test%02d","Elapsed":3}`+"\n", module, packageName, test)
+		}
+	}
+	writer.Close()
+	path := filepath.Join(t.TempDir(), "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	read, write, _ := os.Pipe()
+	stdout := os.Stdout
+	os.Stdout = write
+	var printed bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		printed.ReadFrom(read)
+		close(done)
+	}()
+	err := plan([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--budget", "60", "--unit-setup", "10", "--package-setup", "5"})
+	write.Close()
+	os.Stdout = stdout
+	<-done
+	if err != nil {
+		t.Fatal(err)
+	}
+	var job protocol.Job
+	if err := protocol.Decode(&printed, &job); err != nil {
+		t.Fatal(err)
+	}
+	// 90 s of each package in 45 s of room after its setup: two units a package, six in all, each one package.
+	if len(job.Units) != 6 {
+		t.Fatalf("%d units", len(job.Units))
+	}
+	for _, unit := range job.Units {
+		packages := map[string]bool{}
+		for _, spec := range unit.Argv[5:] {
+			name, _, _ := strings.Cut(spec, "=")
+			packages[name] = true
+		}
+		if len(packages) != 1 {
+			t.Fatalf("%s runs %d packages: %v", unit.Id, len(packages), unit.Argv[5:])
+		}
 	}
 }

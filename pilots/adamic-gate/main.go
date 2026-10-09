@@ -632,6 +632,7 @@ func plan(arguments []string) error {
 	units := flags.Int("units", 10, "how many units, unless --budget sets the count")
 	budget := flags.Float64("budget", 0, "seconds a unit may take, its setup included: units are as many as fit it, each killed at budget plus a half")
 	unitSetup := flags.Float64("unit-setup", 10, "with --budget, seconds a unit spends before its first test (warm instance)")
+	packageSetup := flags.Float64("package-setup", 5, "with --budget, seconds a unit spends on each package it runs, building its test binary")
 	only := flags.String("only", "", "plan only packages matching this regular expression, for a trial")
 	target := flags.String("target", "box", "where the units run: box (a gate slot's warm tree) or codex (a Codex instance)")
 	gateInputs := flags.String("gate-inputs", "", "on codex, the hash of the gate inputs' manifest in the public store")
@@ -801,31 +802,94 @@ func plan(arguments []string) error {
 		}
 		return heaviest
 	}
+	packByPackage := func(capacity float64, perPackage float64) int {
+		type chunk struct {
+			items   []item
+			seconds float64
+			parents map[string]bool
+		}
+		var order []string
+		byPackage := map[string][]item{}
+		for _, candidate := range items {
+			packageName, _, _ := strings.Cut(candidate.key, " ")
+			if _, seen := byPackage[packageName]; !seen {
+				order = append(order, packageName)
+			}
+			byPackage[packageName] = append(byPackage[packageName], candidate)
+		}
+		var chunks []chunk
+		for _, packageName := range order {
+			var bins []chunk
+			for _, candidate := range byPackage[packageName] {
+				placed := false
+				for index := range bins {
+					extra := candidate.seconds
+					if candidate.parent != "" && !bins[index].parents[candidate.parent] {
+						extra += setup[candidate.parent]
+					}
+					if bins[index].seconds+extra+perPackage <= capacity {
+						bins[index].items = append(bins[index].items, candidate)
+						bins[index].seconds += extra
+						if candidate.parent != "" {
+							bins[index].parents[candidate.parent] = true
+						}
+						placed = true
+						break
+					}
+				}
+				if !placed {
+					fresh := chunk{items: []item{candidate}, seconds: candidate.seconds + setup[candidate.parent], parents: map[string]bool{}}
+					if candidate.parent != "" {
+						fresh.parents[candidate.parent] = true
+					}
+					bins = append(bins, fresh)
+				}
+			}
+			chunks = append(chunks, bins...)
+		}
+		sort.SliceStable(chunks, func(left, right int) bool { return chunks[left].seconds > chunks[right].seconds })
+		var unitLoads []float64
+		var members [][]int
+		for index, piece := range chunks {
+			cost := piece.seconds + perPackage
+			fit := -1
+			for unit := range unitLoads {
+				if unitLoads[unit]+cost <= capacity {
+					fit = unit
+					break
+				}
+			}
+			if fit < 0 {
+				unitLoads = append(unitLoads, 0)
+				members = append(members, nil)
+				fit = len(unitLoads) - 1
+			}
+			unitLoads[fit] += cost
+			members[fit] = append(members[fit], index)
+		}
+		loads = make([]float64, len(unitLoads))
+		assigned = make([]map[string][]string, len(unitLoads))
+		childrenOf = make([]map[string][]string, len(unitLoads))
+		for unit := range unitLoads {
+			assigned[unit] = map[string][]string{}
+			childrenOf[unit] = map[string][]string{}
+			for _, index := range members[unit] {
+				for _, candidate := range chunks[index].items {
+					place(unit, candidate)
+				}
+			}
+			loads[unit] = unitLoads[unit]
+		}
+		return len(unitLoads)
+	}
 	count := *units
 	if *budget > 0 {
-		total := 0.0
-		for _, candidate := range items {
-			total += candidate.seconds
-		}
-		// The fewest units whose packing fits: doubled until one fits, then bisected, each try a whole packing, and
-		// packed once more at the count chosen. Counting up one at a time packed 23,000 items hundreds of times once
-		// the tree's own tests joined the plan (Oct 9).
-		low := max(1, int(math.Ceil(total/capacity)))
-		high := low
-		for pack(high) > capacity && high < len(items) {
-			low = high + 1
-			high = min(len(items), high*2)
-		}
-		for low < high {
-			middle := (low + high) / 2
-			if pack(middle) <= capacity {
-				high = middle
-			} else {
-				low = middle + 1
-			}
-		}
-		count = high
-		pack(count)
+		// Package first (#wa8exgw): a unit builds the test binary of every package it runs, so a package's tests stay
+		// together. Each package's tests are cut into chunks that fit a unit with its setup (first fit, longest first,
+		// a split parent's own time paid once in each chunk holding its children), and the chunks are packed into
+		// units the same way, each chunk paying its package's setup. Spread longest first over the lightest unit, main's
+		// 20,813 split tests landed in 2,625 units of many packages each (Oct 9).
+		count = packByPackage(capacity, *packageSetup)
 		fmt.Fprintf(os.Stderr, "budget %.0f s: %d units within %.0f s of tests each, %d over budget alone\n", *budget, count, capacity, len(alone))
 	} else {
 		pack(count)
