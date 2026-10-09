@@ -263,7 +263,15 @@ finish() {
 	if [ -f "${work}/ceiling" ]; then
 		case "${verdict%%:*}" in
 			red) verdict="${verdict} (stopped at its $((ceiling / 60))-minute ceiling)" ;;
-			*) verdict="void: ${sha} fast gate on Loom's side pool stopped at its $((ceiling / 60))-minute ceiling (#x80gpc0) before every unit reported, so the boxes take it (run ${run})" ;;
+			*)
+				# A red the finished units already proved stands: the units still running can't make it green (Oct 9:
+				# lowering chain 97456986 had 8 units failed on named tests and still read void).
+				if grep -q '^FAIL ' "${work}/reds.txt" 2> /dev/null; then
+					verdict="red: ${sha} fast gate on Loom's side pool, first: $(grep -m1 '^FAIL ' "${work}/reds.txt" | cut -c6- | cut -d' ' -f1-2), stopped at its $((ceiling / 60))-minute ceiling with $(grep -c '^FAIL ' "${work}/reds.txt") failed tests and units unreported (branch $(cat "${work}/branch" 2> /dev/null), run ${run})"
+				else
+					verdict="void: ${sha} fast gate on Loom's side pool stopped at its $((ceiling / 60))-minute ceiling (#x80gpc0) before every unit reported, so the boxes take it (run ${run})"
+				fi
+				;;
 		esac
 	fi
 	record=$(mktemp -d)

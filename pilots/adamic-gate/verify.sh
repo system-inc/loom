@@ -46,7 +46,7 @@ if [ -n "${LOOM_VERIFY_SELECT:-}" ] && python3 -c 'import json, sys; sys.exit(0 
 	python3 -c 'import json, sys; json.dump(json.load(open(sys.argv[1]))["only_tests"], open(sys.argv[2], "w"))' "${LOOM_VERIFY_SELECT}" "${work}/only-tests.json"
 	budget+=(--only-tests "${work}/only-tests.json")
 fi
-"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units 12 --only "${packages}" "${budget[@]}" > "${work}/tests.json" 2> "${work}/plan.err" || { echo "verify: planning failed: $(tail -1 "${work}/plan.err")"; exit 1; }
+"${planner}" plan --target codex --remainder --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "${sha}" --units ${LOOM_VERIFY_UNITS:-12} --only "${packages}" "${budget[@]}" > "${work}/tests.json" 2> "${work}/plan.err" || { echo "verify: planning failed: $(tail -1 "${work}/plan.err")"; exit 1; }
 
 # The build-and-vet unit runs on the same opening as the tests, so it sees the tree they will.
 python3 - "${work}" "${LOOM_VERIFY_ENV:-}" "${LOOM_VERIFY_PACKAGES:-}" "${LOOM_VERIFY_SELECT:-}" <<'PY'
