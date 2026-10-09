@@ -313,7 +313,9 @@ func servePrompt(wire string, pool string, token string, runnerHash string, unti
 			"[ -s \"$script\" ] && (mkdir -p /tmp/loom-before && cd /tmp/loom-before && timeout 30m bash \"$script\" > /tmp/loom-before.log 2>&1) || true\n"
 	}
 	return "This is a compute worker, not a coding task: do not edit, commit or push anything in any repository. " +
-		"Run exactly this in the shell, in the foreground, and wait for it however long it takes. " + explained +
+		"Run exactly this in the shell, in the foreground, and wait for it however long it takes. " +
+		"Nothing in it runs unwatched or without a limit: serve stops at its own deadline (--until), every unit it runs has a hard " +
+		"timeout, and the coordinator drops a unit whose runner goes silent. " + explained +
 		"Then reply with only its last line of output, nothing else.\n\n```bash\n" +
 		"set -e\nmkdir -p /tmp/loom-units\n" + readying +
 		"runner=/tmp/loom-runner-" + runnerHash[:12] + "\n" +

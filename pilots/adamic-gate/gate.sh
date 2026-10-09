@@ -60,7 +60,14 @@ job = json.load(sys.stdin); job['name'] = 'adamic-gate-phases'; json.dump(job, o
 
 # The Go set and the phases side by side, each on the star's pool.
 log "Go set and $(wc -l < "${work}/units.txt") phase units, tools ${tools:0:12}, priority ${LOOM_PRIORITY}"
-LOOM_PREGATE_WHOLE=1 "${bin}/pregate.sh" --once "${sha}" > "${work}/goset.out" 2>&1 &
+# LOOM_GATE_REUSE_GOSET=1 keeps a Go set this sha already finished (its verdict and record in ~/.loom/pregate) and runs only
+# what's missing: the phases, the census, the record (Oct 9: 995010af's Go set ran under tools that couldn't list phases).
+if [ "${LOOM_GATE_REUSE_GOSET:-}" = 1 ] && [ -s "${HOME}/.loom/pregate/${sha}.verdict" ] && [ -s "${HOME}/.loom/pregate/${sha}.record.jsonl" ]; then
+	log "keeping the Go set already run: $(cut -c1-120 "${HOME}/.loom/pregate/${sha}.verdict")"
+	true &
+else
+	LOOM_PREGATE_WHOLE=1 "${bin}/pregate.sh" --once "${sha}" > "${work}/goset.out" 2>&1 &
+fi
 goset=$!
 "${loom}" run --uncached --slots none --pool codex=40 --priority "${LOOM_PRIORITY}" --record "${work}/phases-record.jsonl" "${work}/phases.json" > "${work}/phases.log" 2>&1
 wait "${goset}"
