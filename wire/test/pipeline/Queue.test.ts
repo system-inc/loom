@@ -35,7 +35,9 @@ class TestMain {
 }
 
 async function freshQueue(answers: Record<string, GitFacts> = {}, mainRef: TestMain = new TestMain()): Promise<DurableObjectStub<Queue>> {
-    const stub = env.Queue.get(env.Queue.idFromName('queue-' + crypto.randomUUID()));
+    // The pipeline's binding (pipeline.jsonc); the generated Env type knows only loom-wire's.
+    const namespace = (env as unknown as { Queue: DurableObjectNamespace<Queue> }).Queue;
+    const stub = namespace.get(namespace.idFromName('queue-' + crypto.randomUUID()));
     await runInDurableObject(stub, function (instance: Queue) {
         instance.main = mainRef;
         instance.history = {
