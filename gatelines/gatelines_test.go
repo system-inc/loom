@@ -2,6 +2,7 @@ package gatelines
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,5 +63,41 @@ func TestARedGateThatEndsAtOnceStaysRedOnItsSlot(t *testing.T) {
 				t.Fatalf("after the linger, the lent slot is still shown: %+v", line)
 			}
 		}
+	}
+}
+
+// A whole gate started by hand on a box other than Home holds that box's claim, and the board reads it there.
+func TestAWholeGateOnAnyBoxIsReadFromItsClaim(t *testing.T) {
+	state, full := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(state, "slots"), []byte("threadripper B\n"), 0o644)
+	os.MkdirAll(filepath.Join(full, "boxes", "threadripper"), 0o755)
+	os.WriteFile(filepath.Join(full, "boxes", "threadripper", "holder"), []byte(fmt.Sprintf("%d 8161285ad449cc3a8cce6746120de2133c4a738a\n", os.Getpid())), 0o644)
+	reader := NewReader(state, full)
+	reader.Run = func(_ context.Context, box string, _ string, arguments ...string) (string, error) {
+		output := "cores|64\n"
+		if box == "threadripper" && len(arguments) == 1 && arguments[0] == "full" {
+			output += "full|8161285ad449-20261009T012331Z|yes|running: full gate of 8161285ad449|tests-1.stderr\n"
+		}
+		return output, nil
+	}
+	lineOn := func(box string) *Line {
+		for _, machine := range reader.Read(context.Background()).Machines {
+			for _, line := range machine.Lines {
+				if machine.Name == box && line.Kind == "full" {
+					return &line
+				}
+			}
+		}
+		return nil
+	}
+	if line := lineOn("threadripper"); line == nil || line.State != "gating" || line.Sha != "8161285ad449" || line.Since == nil {
+		t.Fatalf("the Threadripper's whole gate: %+v", line)
+	}
+	// A claim whose process is gone holds nothing: past the linger a just-ended gate gets, its line is gone.
+	os.WriteFile(filepath.Join(full, "boxes", "threadripper", "holder"), []byte("999999 8161285ad449cc3a8cce6746120de2133c4a738a\n"), 0o644)
+	lineOn("threadripper")
+	reader.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	if line := lineOn("threadripper"); line != nil {
+		t.Fatalf("a dead claim still shows %+v", line)
 	}
 }

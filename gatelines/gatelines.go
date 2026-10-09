@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -94,6 +95,27 @@ func runSSH(runContext context.Context, box string, script string, arguments ...
 		box, "bash -c "+"'"+strings.ReplaceAll(script, "'", `'\''`)+"'"+" gate-lines "+strings.Join(quoted, " "))
 	output, err := command.Output()
 	return string(output), err
+}
+
+// wholeGateBoxes names each box a whole gate holds now, with when it took the box. Every whole gate, a loop's or one
+// started by hand on any box, claims its box as <Full>/boxes/<box>/holder ("<pid> <sha>"); a claim whose process is
+// gone holds nothing (Oct 9: the Threadripper read idle on the board through a hand-started whole gate).
+func (reader *Reader) wholeGateBoxes() map[string]time.Time {
+	held := map[string]time.Time{}
+	entries, _ := os.ReadDir(filepath.Join(reader.Full, "boxes"))
+	for _, entry := range entries {
+		path := filepath.Join(reader.Full, "boxes", entry.Name(), "holder")
+		content, err := os.ReadFile(path)
+		info, statError := os.Stat(path)
+		if err != nil || statError != nil {
+			continue
+		}
+		pid, _ := strconv.Atoi(strings.Fields(string(content) + " 0")[0])
+		if pid > 0 && syscall.Kill(pid, 0) == nil {
+			held[entry.Name()] = info.ModTime()
+		}
+	}
+	return held
 }
 
 // A gate is one entry of the watcher's running directory.
@@ -266,6 +288,7 @@ func (reader *Reader) Read(readContext context.Context) Lines {
 		output string
 		err    error
 	}
+	held := reader.wholeGateBoxes()
 	reports := make([]report, len(boxes))
 	var wait sync.WaitGroup
 	for index, box := range boxes {
@@ -275,7 +298,7 @@ func (reader *Reader) Read(readContext context.Context) Lines {
 			callContext, cancel := context.WithTimeout(readContext, 8*time.Second)
 			defer cancel()
 			var arguments []string
-			if box.Name == "home" {
+			if _, whole := held[box.Name]; whole || box.Name == "home" {
 				arguments = append(arguments, "full")
 			} else {
 				for _, found := range byBox[box.Name] {
@@ -362,10 +385,13 @@ func (reader *Reader) Read(readContext context.Context) Lines {
 				classes[slot] = found.slotClass
 			}
 		}
-		if box.Name == "home" && len(full) == 4 {
+		if len(full) == 4 {
 			line := Line{Slot: 1, Class: "whole", Kind: "full", Branch: "main", State: stateOf(full[2]), Step: stepOf(full[3]), Detail: full[2]}
 			line.Sha, _, _ = strings.Cut(full[0], "-")
-			if started, err := os.ReadFile(filepath.Join(reader.Full, "last-started")); err == nil {
+			if claimed, whole := held[box.Name]; whole {
+				at := claimed.UTC().Format(time.RFC3339)
+				line.Since = &at
+			} else if started, err := os.ReadFile(filepath.Join(reader.Full, "last-started")); err == nil {
 				if at, _, ok := strings.Cut(strings.TrimSpace(string(started)), " "); ok {
 					line.Since = &at
 				}
