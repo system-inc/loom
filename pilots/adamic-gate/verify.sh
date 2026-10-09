@@ -16,6 +16,13 @@
 # ruling that the caches land on, since an off-by-default landing only adds a flip we'd make anyway). "off" or empty
 # plans a fixed count of units, as it ran from f18497c's dry run until #3sjs0rn brought the budgeted planner back.
 #
+# LOOM_VERIFY_STRICT=1 (off by default, #098rcha's step d) places the job's go test units on the codex-strict pool as
+# test jobs (adamic-gate test-jobs), whose workers serve --strict and run nothing else; what a test job can't say
+# exactly (build-vet, a retried unit's round marker aside) stays argv on the pool below. job.json itself stays argv:
+# every step after placement reads it, and the units keep their ids and outputs. LOOM_VERIFY_STRICT_RACE=1 also runs
+# the job as before on LOOM_VERIFY_RACE_POOL (default the pool below), in the background, and writes parity.txt, the
+# two runs' go test outcomes test for test; it never changes the verdict.
+#
 # Side work runs only on the side pool (LOOM_VERIFY_POOL, default codex-side): the star's pool never holds it
 # (@system_adamic, Oct 8 23:59Z). <slots> caps how much of it one run takes (default 5). Nothing builds on
 # Kirk's Mac: the binaries are the pre-gate's (pregate.sh's header says how they are made on a box).
@@ -302,8 +309,35 @@ job["name"] = "adamic-verify"
 job["units"].insert(0, unit)
 json.dump(job, open(work + "/job.json", "w"), indent=2)
 PY
-"${loom}" run --uncached --slots none --pool "${pool}=${slots}" --priority "${LOOM_PRIORITY:-0}" --record "${work}/record.jsonl" "${work}/job.json" > "${work}/run.log" 2>&1 &
+# place <job> <record> <slots>: the job on the pool, or under LOOM_VERIFY_STRICT its test jobs on codex-strict and the
+# rest on the pool. A job the converter can't read is placed as before, and run.log says so.
+place() {
+	local job=$1 record=$2 count=$3 strictJob=${1%.json}.strict.json
+	if [ "${LOOM_VERIFY_STRICT:-}" = 1 ]; then
+		# A retried unit's LOOM_AGAIN only names its round for its log; a test job carries no environment.
+		if python3 -c '
+import json, sys
+job = json.load(open(sys.argv[1]))
+for unit in job["units"]:
+    (unit.get("environment") or {}).pop("LOOM_AGAIN", None)
+    if unit.get("environment") == {}:
+        del unit["environment"]
+json.dump(job, open(sys.argv[2], "w"))' "${job}" "${strictJob}.in" && "${planner}" test-jobs --job "${strictJob}.in" > "${strictJob}" 2> "${strictJob%.json}.log"; then
+			echo "strict: $(tail -1 "${strictJob%.json}.log") on codex-strict"
+			"${loom}" run --uncached --slots none --strict-pool "codex-strict=${count}" --pool "${pool}=1" --priority "${LOOM_PRIORITY:-0}" --record "${record}" "${strictJob}"
+			return
+		fi
+		echo "strict: converting ${job##*/} failed ($(tail -1 "${strictJob%.json}.log" 2> /dev/null)); placed as argv"
+	fi
+	"${loom}" run --uncached --slots none --pool "${pool}=${count}" --priority "${LOOM_PRIORITY:-0}" --record "${record}" "${job}"
+}
+place "${work}/job.json" "${work}/record.jsonl" "${slots}" > "${work}/run.log" 2>&1 &
 coordinator=$!
+# The race beside it: the same job as before on its own pool, its go test outcomes against the strict run's once both end.
+if [ "${LOOM_VERIFY_STRICT:-}" = 1 ] && [ "${LOOM_VERIFY_STRICT_RACE:-}" = 1 ]; then
+	"${loom}" run --uncached --slots none --pool "${LOOM_VERIFY_RACE_POOL:-${pool}}=${slots}" --priority "${LOOM_PRIORITY:-0}" --record "${work}/race-record.jsonl" "${work}/job.json" > "${work}/race-run.log" 2>&1 &
+	race=$!
+fi
 
 # The build first, the moment its unit ends.
 until grep -qE "^build-vet: (passed|failed|broken|void)" "${work}/run.log" || ! kill -0 "${coordinator}" 2> /dev/null; do sleep 5; done
@@ -407,7 +441,7 @@ json.dump(job, open(sys.argv[2], "w"))
 PY
 	echo "again, round ${round}: ${again}" >> "${work}/run.log"
 	count=$(echo ${again} | wc -w | tr -d ' ')
-	"${loom}" run --uncached --slots none --pool "${pool}=${count}" --priority "${LOOM_PRIORITY:-0}" --record "${work}/again-${round}-record.jsonl" "${work}/again-${round}.json" >> "${work}/run.log" 2>&1
+	place "${work}/again-${round}.json" "${work}/again-${round}-record.jsonl" "${count}" >> "${work}/run.log" 2>&1
 	reruns+=(--rerun "${work}/again-${round}.json:${work}/again-${round}-record.jsonl")
 done
 "${planner}" reds --job "${work}/tests-only.json" --record "${work}/record.jsonl" ${reruns[@]+"${reruns[@]}"} --tests "${work}/test.jsonl" > "${work}/reds.txt" 2>&1
@@ -450,3 +484,13 @@ fi
 } > "${work}/reds-message.txt"
 send "${work}/reds-message.txt"
 echo "$(date -u +%H:%M:%S) ${sha:0:12}: $(head -1 "${work}/reds.txt")"
+# The race's parity, once it ends, in the background: the verdict above never waits on it.
+if [ -n "${race:-}" ]; then
+	(
+		# The race is the script's child, not this subshell's, so it is watched rather than waited for.
+		while kill -0 "${race}" 2> /dev/null; do sleep 10; done
+		"${planner}" reds --job "${work}/tests-only.json" --record "${work}/race-record.jsonl" --tests "${work}/race-test.jsonl" > /dev/null 2>&1
+		python3 "${bin}/parity.py" "${work}/test.jsonl" "${work}/race-test.jsonl" > "${work}/parity.txt" 2>&1
+		echo "$(date -u +%H:%M:%S) ${sha:0:12}: strict against the race: $(head -1 "${work}/parity.txt")"
+	) &
+fi
