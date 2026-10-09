@@ -35,7 +35,7 @@ async function putProduct(builder: string, key: string, files: Record<string, Ui
     for (const [path, bytes] of Object.entries(files)) {
         const sha256 = await sha256Hex(bytes);
         expect((await answer(`/actions/blobs/${sha256}`, { method: 'PUT', bearer: builder, body: bytes })).status).toBeLessThan(300);
-        outputs.push({ path: path, sha256: sha256, bytes: bytes.length });
+        outputs.push({ path: path, sha256: sha256, bytes: bytes.length, executable: path.startsWith('bin/') });
     }
     const manifest = new TextEncoder().encode(canonicalManifest({ key: key, outputs: outputs }));
     const manifestSha256 = await sha256Hex(manifest);
@@ -133,7 +133,7 @@ describe('the action store', function () {
             return sha256;
         };
         const held = randomBytes(10);
-        const heldOutput = { path: 'out', sha256: await sha256Hex(held), bytes: 10 };
+        const heldOutput = { path: 'out', sha256: await sha256Hex(held), bytes: 10, executable: false };
         await answer(`/actions/blobs/${heldOutput.sha256}`, { method: 'PUT', bearer: workshop, body: held });
         const otherKey = await store(canonicalManifest({ key: await freshKey(), outputs: [heldOutput] }));
         const forOther = await put(otherKey);
@@ -141,7 +141,7 @@ describe('the action store', function () {
         expect(await forOther.json()).toMatchObject({ error: expect.stringContaining(`not ${key}`) });
         const loose = await store(JSON.stringify({ outputs: [heldOutput], key: key }));
         expect(await (await put(loose)).json()).toMatchObject({ error: expect.stringContaining('canonical') });
-        const missingOutput = { path: 'gone', sha256: await freshKey(), bytes: 5 };
+        const missingOutput = { path: 'gone', sha256: await freshKey(), bytes: 5, executable: false };
         const dangling = await store(canonicalManifest({ key: key, outputs: [heldOutput, missingOutput] }));
         const refused = await put(dangling);
         expect(refused.status).toBe(409);
@@ -182,8 +182,8 @@ describe('the action store', function () {
 describe('an action manifest', function () {
     it('is canonical, so two honest builds of one key write the same bytes', async function () {
         const key = await freshKey();
-        const a = { path: 'b/two', sha256: await freshKey(), bytes: 2 };
-        const b = { path: 'a/one', sha256: await freshKey(), bytes: 1 };
+        const a = { path: 'b/two', sha256: await freshKey(), bytes: 2, executable: true };
+        const b = { path: 'a/one', sha256: await freshKey(), bytes: 1, executable: false };
         expect(canonicalManifest({ key: key, outputs: [a, b] })).toBe(canonicalManifest({ key: key, outputs: [b, a] }));
         expect(checkManifest(canonicalManifest({ key: key, outputs: [a, b] }), key)).toEqual({ key: key, outputs: [b, a] });
     });
@@ -192,12 +192,14 @@ describe('an action manifest', function () {
         const key = await freshKey();
         const sha256 = await freshKey();
         for (const path of ['', '/abs', '../up', 'a/../b', 'a//b', './a', 'a/']) {
-            expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: path, sha256: sha256, bytes: 1 }] }), key), path).toBe('string');
+            expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: path, sha256: sha256, bytes: 1, executable: false }] }), key), path).toBe('string');
         }
-        expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: 'a', sha256: sha256, bytes: 1 }, { path: 'a', sha256: sha256, bytes: 1 }] }), key)).toBe('string');
-        expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: 'a', sha256: 'ABC', bytes: 1 }] }), key)).toBe('string');
-        expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: 'a', sha256: sha256, bytes: -1 }] }), key)).toBe('string');
-        expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: 'a', sha256: sha256, bytes: 1.5 }] }), key)).toBe('string');
+        expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: 'a', sha256: sha256, bytes: 1, executable: false }, { path: 'a', sha256: sha256, bytes: 1, executable: false }] }), key)).toBe('string');
+        expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: 'a', sha256: 'ABC', bytes: 1, executable: false }] }), key)).toBe('string');
+        expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: 'a', sha256: sha256, bytes: -1, executable: false }] }), key)).toBe('string');
+        expect(typeof checkManifest(canonicalManifest({ key: key, outputs: [{ path: 'a', sha256: sha256, bytes: 1.5, executable: false }] }), key)).toBe('string');
         expect(typeof checkManifest('{"key":"' + key + '","outputs":[],"builder":"workshop"}', key)).toBe('string');
+        expect(typeof checkManifest('{"key":"' + key + '","outputs":[{"bytes":1,"executable":1,"path":"a","sha256":"' + sha256 + '"}]}', key)).toBe('string');
+        expect(typeof checkManifest('{"key":"' + key + '","outputs":[{"bytes":1,"path":"a","sha256":"' + sha256 + '"}]}', key)).toBe('string');
     });
 });

@@ -10,8 +10,9 @@
 //
 // The manifest is canonical JSON with no builder and no time in it, so two honest builds of one key write the
 // same manifest bytes and the same sha256:
-//   {"key":"<productKey>","outputs":[{"bytes":<n>,"path":"<relative path>","sha256":"<64 hex>"}, ...]}
-// keys sorted, outputs sorted by path, no whitespace.
+//   {"key":"<productKey>","outputs":[{"bytes":<n>,"executable":<bool>,"path":"<relative path>","sha256":"<64 hex>"}, ...]}
+// keys sorted, outputs sorted by path, no whitespace. A file is executable or not, never a mode, so a builder's umask
+// can't make two honest builds differ.
 
 import { blobExists, headBlob, putBlob, Sha256Pattern } from './Blobs';
 import { jsonResponse, readBodyText } from './Http';
@@ -30,6 +31,7 @@ export interface ActionOutput {
     path: string;
     sha256: string;
     bytes: number;
+    executable: boolean;
 }
 
 export interface ActionManifest {
@@ -49,7 +51,7 @@ export function canonicalManifest(manifest: ActionManifest): string {
     return JSON.stringify({
         key: manifest.key,
         outputs: outputs.map(function (output) {
-            return { bytes: output.bytes, path: output.path, sha256: output.sha256 };
+            return { bytes: output.bytes, executable: output.executable, path: output.path, sha256: output.sha256 };
         }),
     });
 }
@@ -84,8 +86,8 @@ export function checkManifest(text: string, productKey: string): ActionManifest 
             return 'each output is an object';
         }
         const output = value as Record<string, unknown>;
-        if (Object.keys(output).sort().join(',') !== 'bytes,path,sha256') {
-            return 'each output is exactly a path, a sha256 and a size in bytes';
+        if (Object.keys(output).sort().join(',') !== 'bytes,executable,path,sha256') {
+            return 'each output is exactly a path, a sha256, a size in bytes and whether it is executable';
         }
         if (
             typeof output.path !== 'string' ||
@@ -106,7 +108,10 @@ export function checkManifest(text: string, productKey: string): ActionManifest 
         if (typeof output.bytes !== 'number' || !Number.isSafeInteger(output.bytes) || output.bytes < 0) {
             return `${output.path}'s size is a whole number of bytes`;
         }
-        outputs.push({ path: output.path, sha256: output.sha256, bytes: output.bytes });
+        if (typeof output.executable !== 'boolean') {
+            return `${output.path}'s executable is true or false`;
+        }
+        outputs.push({ path: output.path, sha256: output.sha256, bytes: output.bytes, executable: output.executable });
     }
     const manifest = { key: productKey, outputs: outputs };
     if (canonicalManifest(manifest) !== text) {
