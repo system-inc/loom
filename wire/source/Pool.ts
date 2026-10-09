@@ -478,12 +478,13 @@ export class Pool extends DurableObject<Env> {
 
     // ---------- Workers ----------
 
-    // Every worker seen in the last four hours, by name; older ones are forgotten here, lazily.
+    // Every worker seen in the last four hours, by name; older ones are forgotten here, lazily. A retired worker is
+    // no capacity, so it isn't listed (Oct 9: 8 switched-off box workers and 11 silent instances read as 19 of 70).
     private workers(): PoolWorker[] {
         this.sql.exec('DELETE FROM workers WHERE seenAt <= ?', Date.now() - WorkerWindowMilliseconds);
         return this.sql
             .exec<{ worker: string; cpus: number; seenAt: number; took: string }>(
-                'SELECT worker, cpus, seenAt, took FROM workers ORDER BY worker',
+                'SELECT worker, cpus, seenAt, took FROM workers WHERE worker NOT IN (SELECT worker FROM retired) ORDER BY worker',
             )
             .toArray()
             .map(function (row) {

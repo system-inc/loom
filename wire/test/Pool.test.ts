@@ -238,6 +238,10 @@ describe('a pool', function () {
         expect(await refused.json()).toEqual({ error: 'worker full-disk is retired from this pool: its /tmp is full' });
         expect((await poolState(pool, coordinator)).queued).toBe(2);
         expect(await (await next(pool, member, 'healthy')).json()).toMatchObject({ run: run, unit: 'a' });
+        // A retired worker is no capacity: the listing leaves it out, though it asked.
+        expect((await poolState(pool, coordinator)).workers.map(function (worker) {
+            return worker.worker;
+        })).toEqual(['healthy']);
         for (const body of ['nope', '{}', '{"worker":"x"}', '{"worker":"","reason":"r"}', '{"worker":"x","reason":""}', '{"worker":"x","reason":"r","extra":1}']) {
             expect((await operation('retire', body)).status, body).toBe(400);
         }
@@ -246,6 +250,9 @@ describe('a pool', function () {
         const restored = await operation('restore', JSON.stringify({ worker: 'full-disk' }));
         expect(await restored.json()).toEqual({ retired: [] });
         expect(await (await next(pool, member, 'full-disk')).json()).toMatchObject({ run: run, unit: 'b' });
+        expect((await poolState(pool, coordinator)).workers.map(function (worker) {
+            return worker.worker;
+        })).toEqual(['full-disk', 'healthy']);
     });
 
     it("lists one run's units still queued, oldest first, and none once a worker takes them", async function () {
