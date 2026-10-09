@@ -151,6 +151,36 @@ export function checkPoolAsk(body: string): PoolAsk | string {
     return { worker: parsed.worker, cpus: cpus };
 }
 
+// A retire's body is exactly {"worker", "reason"}, a restore's exactly {"worker"}.
+export function checkPoolRetire(body: string, retiring: boolean): string | { worker: string; reason: string } {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(body);
+    }
+    catch {
+        return 'the body is not JSON';
+    }
+    if (!isPlainObject(parsed)) {
+        return 'the body is a JSON object';
+    }
+    const wanted = retiring ? ['reason', 'worker'] : ['worker'];
+    if (Object.keys(parsed).sort().join(',') !== wanted.join(',')) {
+        return retiring ? 'the body has exactly worker and reason' : 'the body has exactly worker';
+    }
+    if (
+        typeof parsed.worker !== 'string' ||
+        parsed.worker === '' ||
+        parsed.worker.length > MaximumWorkerNameLength
+    ) {
+        return `worker is a name of 1 to ${MaximumWorkerNameLength} characters`;
+    }
+    const reason = retiring ? parsed.reason : '';
+    if (typeof reason !== 'string' || (retiring && (reason === '' || reason.length > 1024))) {
+        return 'reason is a sentence of 1 to 1024 characters';
+    }
+    return { worker: parsed.worker, reason: reason };
+}
+
 // A cancel's or a queued's body is exactly {"run"}.
 export function checkPoolRun(body: string): string | { run: string } {
     let parsed: unknown;
@@ -210,6 +240,10 @@ export class Pool extends DurableObject<Env> {
                 seenAt INTEGER NOT NULL,
                 took TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS retired (
+                worker TEXT PRIMARY KEY,
+                reason TEXT NOT NULL
+            );
         `);
         // A pool made before priorities has units without the column; it is added in place, its units at 0.
         const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(units)').toArray();
@@ -236,6 +270,9 @@ export class Pool extends DurableObject<Env> {
         }
         if (operation === '/queued' && request.method === 'POST') {
             return this.queued(request);
+        }
+        if ((operation === '/retire' || operation === '/restore') && request.method === 'POST') {
+            return this.retire(request, operation === '/retire');
         }
         if (operation === '/status' && request.method === 'GET') {
             return jsonResponse(200, { queued: this.queuedCount(), workers: this.workers() });
@@ -327,6 +364,15 @@ export class Pool extends DurableObject<Env> {
             ask.cpus,
             Date.now(),
         );
+        // A retired worker is refused, never handed a unit: the runner reads a 403 as the pool turning it away and
+        // stops serving, so an instance that can't hold a unit stops taking them (Oct 9: a8ff7263308d, its read-only
+        // home under /tmp beside the tree, failed every unit it took for its disk).
+        const retired = this.sql
+            .exec<{ reason: string }>('SELECT reason FROM retired WHERE worker = ?', ask.worker)
+            .toArray()[0];
+        if (retired !== undefined) {
+            return jsonResponse(403, { error: `worker ${ask.worker} is retired from this pool: ${retired.reason}` });
+        }
         // A serve asks one question at a time, so a new ask from the same worker means its last one was dropped on
         // the way (a connection cut, a client timeout). That ask is answered 204 now, before a unit can go to a
         // caller nobody hears.
@@ -395,6 +441,37 @@ export class Pool extends DurableObject<Env> {
         return jsonResponse(200, {
             units: rows.map(function (row) {
                 return row.unit;
+            }),
+        });
+    }
+
+    // ---------- Retire ----------
+
+    // Retires a worker by name, or restores one, so the operator can take an unfit instance out of the pool without
+    // reaching it. The body is {"worker", "reason"} to retire and {"worker"} to restore.
+    private async retire(request: Request, retiring: boolean): Promise<Response> {
+        const body = await readBodyText(request, MaximumAskBodyBytes);
+        if (body === null) {
+            return jsonResponse(413, { error: `a retire is at most ${MaximumAskBodyBytes} bytes` });
+        }
+        const retire = checkPoolRetire(body, retiring);
+        if (typeof retire === 'string') {
+            return jsonResponse(400, { error: retire });
+        }
+        if (retiring) {
+            this.sql.exec(
+                'INSERT INTO retired (worker, reason) VALUES (?, ?) ON CONFLICT (worker) DO UPDATE SET reason = excluded.reason',
+                retire.worker,
+                retire.reason,
+            );
+        }
+        else {
+            this.sql.exec('DELETE FROM retired WHERE worker = ?', retire.worker);
+        }
+        const rows = this.sql.exec<{ worker: string }>('SELECT worker FROM retired ORDER BY worker').toArray();
+        return jsonResponse(200, {
+            retired: rows.map(function (row) {
+                return row.worker;
             }),
         });
     }

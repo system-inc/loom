@@ -220,6 +220,34 @@ describe('a pool', function () {
         expect((await next(pool, member, 'instance-1')).status).toBe(204);
     });
 
+    it('refuses a retired worker with 403 and hands its units to others, until it is restored', async function () {
+        const pool = freshPool();
+        await waitOf(pool, 100);
+        const coordinator = await token(freshRun(), 'coordinator');
+        const member = await token(pool, 'pool');
+        const run = freshRun();
+        const operation = function (name: string, body: string, bearer = coordinator): Promise<Response> {
+            return call(`/pools/${pool}/${name}`, { method: 'POST', bearer: bearer, body: body });
+        };
+        const retired = await operation('retire', JSON.stringify({ worker: 'full-disk', reason: 'its /tmp is full' }));
+        expect(retired.status).toBe(200);
+        expect(await retired.json()).toEqual({ retired: ['full-disk'] });
+        await postUnits(pool, coordinator, [poolUnit(run, 'a'), poolUnit(run, 'b')]);
+        const refused = await next(pool, member, 'full-disk');
+        expect(refused.status).toBe(403);
+        expect(await refused.json()).toEqual({ error: 'worker full-disk is retired from this pool: its /tmp is full' });
+        expect((await poolState(pool, coordinator)).queued).toBe(2);
+        expect(await (await next(pool, member, 'healthy')).json()).toMatchObject({ run: run, unit: 'a' });
+        for (const body of ['nope', '{}', '{"worker":"x"}', '{"worker":"","reason":"r"}', '{"worker":"x","reason":""}', '{"worker":"x","reason":"r","extra":1}']) {
+            expect((await operation('retire', body)).status, body).toBe(400);
+        }
+        expect((await operation('restore', '{"worker":"x","reason":"r"}')).status).toBe(400);
+        expect((await operation('retire', JSON.stringify({ worker: 'x', reason: 'r' }), member)).status).toBe(403);
+        const restored = await operation('restore', JSON.stringify({ worker: 'full-disk' }));
+        expect(await restored.json()).toEqual({ retired: [] });
+        expect(await (await next(pool, member, 'full-disk')).json()).toMatchObject({ run: run, unit: 'b' });
+    });
+
     it("lists one run's units still queued, oldest first, and none once a worker takes them", async function () {
         const pool = freshPool();
         await waitOf(pool, 100);
