@@ -4,16 +4,20 @@
 # environment the tests run in. Every value it takes is a positional argument the runner checked first (CheckTestJob),
 # quoted at every use; nothing of the job is ever part of this text.
 #
-#	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep>
+#	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep> <root>
 #
-# trim (a strict runner's: an instance that runs one unit at a time) first removes what earlier units left in /tmp and
-# the caches; keep touches nothing outside the tree, for a machine running other work beside it.
+# <root> holds everything it keeps between units beside the tree (the npm trees, the gate inputs, the setup marker) and
+# is where it looks for what earlier units left: /tmp only for a strict runner, whose instance is the runner's alone.
+# It touches nothing outside <root>, <tree> and HOME, which adamic's setup and Go's caches use. trim (a strict runner's:
+# one unit at a time) first removes what earlier units left there; keep removes nothing.
 #
 # Exit 0: the tree is at <sha> and <environment file> holds the environment, NUL separated. Exit 3: the job is refused
 # (the sha or base can't be fetched from the public repository, a submodule isn't public on GitHub); nothing ran. Exit 2:
 # the instance couldn't be readied (disk, network, setup): Loom's fault, never the change's.
 set -uo pipefail
-tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6
+tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6 root=$7
+case ${root} in /*) ;; *) echo "loom-runner prepare: the root must be an absolute path"; exit 2 ;; esac
+mkdir -p "${root}"
 repository=https://github.com/system-inc/adamic
 started=${SECONDS}
 say() { echo "loom-runner prepare: $*"; }
@@ -26,11 +30,11 @@ export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT
 export GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2=/dev/null
 
 # Disk: on an instance that runs one unit at a time, what earlier units left in /tmp and the caches is no one's.
-freeMegabytes() { df -Pm "${HOME}" /tmp | awk 'NR > 1 {print $4}' | sort -n | head -1; }
+freeMegabytes() { df -Pm "${HOME}" "${root}" | awk 'NR > 1 {print $4}' | sort -n | head -1; }
 if [ "${trim}" = trim ]; then
-	rm -rf "${HOME}/.cache/adamic/runtime"/.build-* /tmp/go-build* /tmp/Test* /tmp/adamic-npm/replaced-* /tmp/adamic-npm/*.staging-* 2> /dev/null
-	find /tmp/adamic-gate -mindepth 1 -maxdepth 1 ! -name 'markdown-width-*' -exec rm -rf {} + 2> /dev/null
-	rm -rf /tmp/adamic-stage3-lane-* 2> /dev/null
+	rm -rf "${HOME}/.cache/adamic/runtime"/.build-* "${root}"/go-build* "${root}"/Test* "${root}"/adamic-npm/replaced-* "${root}"/adamic-npm/*.staging-* 2> /dev/null
+	find "${root}/adamic-gate" -mindepth 1 -maxdepth 1 ! -name 'markdown-width-*' -exec rm -rf {} + 2> /dev/null
+	rm -rf "${root}"/adamic-stage3-lane-* 2> /dev/null
 	[ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
 fi
 free=$(freeMegabytes)
@@ -60,7 +64,7 @@ find "${tree}/.git" -maxdepth 6 -name index.lock -delete 2> /dev/null
 # The commit must be one the public repository holds. git fetch of a sha the checkout already has succeeds without
 # asking the remote, so each commit is first fetched into an empty object store, where only GitHub can supply it (the
 # commit object alone: --depth=1 --filter=tree:0), and only then into the checkout.
-probe=$(mktemp -d)
+probe=$(mktemp -d "${root}/loom-probe-XXXXXX")
 git init -q --bare "${probe}"
 for commit in "${sha}" ${base:+"${base}"}; do
 	if ! retry git -C "${probe}" fetch -q --depth=1 --filter=tree:0 "${repository}" "${commit}"; then
@@ -92,33 +96,33 @@ if ! git -C "${tree}" submodule update -q --init --recursive; then
 fi
 
 # The toolchain: adamic's own cloud/setup.sh at this commit, once per instance.
-if [ ! -f /tmp/adamic-setup-done ]; then
-	(cd "${tree}" && bash cloud/setup.sh --wasi-sdk > /tmp/adamic-setup.log 2>&1) && touch /tmp/adamic-setup-done || { say "cloud/setup.sh failed"; tail -20 /tmp/adamic-setup.log; exit 2; }
+if [ ! -f "${root}/adamic-setup-done" ]; then
+	(cd "${tree}" && bash cloud/setup.sh --wasi-sdk > "${root}/adamic-setup.log" 2>&1) && touch "${root}/adamic-setup-done" || { say "cloud/setup.sh failed"; tail -20 "${root}/adamic-setup.log"; exit 2; }
 fi
 for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do
 	[ -f "${environment}" ] && { source "${environment}"; break; }
 done
-(cd / && go list fmt testing > /dev/null 2>&1) || { say "the Go toolchain lacks its standard library after setup"; rm -f /tmp/adamic-setup-done; exit 2; }
-mkdir -p -m 1777 "${TMPDIR:-/tmp}"
+(cd / && go list fmt testing > /dev/null 2>&1) || { say "the Go toolchain lacks its standard library after setup"; rm -f "${root}/adamic-setup-done"; exit 2; }
+mkdir -p -m 1777 "${TMPDIR:-${root}}"
 
 # stage3/api's pinned npm packages, npm ci from the public registry once per lockfile, hardlinked into the tree.
 lockfile=${tree}/stage3/api/package-lock.json
 if [ -f "${lockfile}" ]; then
 	key=$(sha256sum "${lockfile}" | cut -c1-64)
-	cache=/tmp/adamic-npm/${key} target=${tree}/stage3/api/node_modules
+	cache=${root}/adamic-npm/${key} target=${tree}/stage3/api/node_modules
 	if [ ! -d "${cache}/node_modules" ]; then
 		staging=${cache}.staging-$$
 		mkdir -p "${staging}" && cp "${tree}/stage3/api/package.json" "${lockfile}" "${staging}/"
 		(cd "${staging}" && npm_config_update_notifier=false npm ci --ignore-scripts --no-audit --no-fund --install-strategy=hoisted --registry=https://registry.npmjs.org > npm.log 2>&1) && mv "${staging}" "${cache}" || { say "npm ci of stage3/api failed"; tail -20 "${staging}/npm.log"; exit 2; }
 	fi
 	if [ "$(cat "${target}/.fast-gate-lockfile-sha256" 2> /dev/null)" != "${key}" ]; then
-		[ -e "${target}" ] && mv "${target}" "/tmp/adamic-npm/replaced-$$-${SECONDS}"
+		[ -e "${target}" ] && mv "${target}" "${root}/adamic-npm/replaced-$$-${SECONDS}"
 		cp -al "${cache}/node_modules" "${target}" && echo "${key}" > "${target}/.fast-gate-lockfile-sha256"
 	fi
 fi
 
 # The gate inputs, from Loom's public store by hash: a manifest of chunks of one tar.gz and its total, every hash checked.
-tools=/tmp/adamic-tools inputs=/tmp/adamic-tools/gate-inputs
+tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs
 if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/null)" != "${gateInputs}" ]; then
 	fetch() { curl -fsS --retry 3 -o "$2" "https://adamic-store.kirkouimet.com/blobs/$1" && echo "$1  $2" | sha256sum -c --quiet; }
 	staging=${tools}/staging-$$

@@ -27,10 +27,6 @@ import (
 //go:embed prepare.sh
 var prepareScript []byte
 
-// DefaultTree is where a test job's checkout lives: one per instance, kept across units, as the instance's opening
-// clones it.
-const DefaultTree = "/tmp/adamic"
-
 // testOutputs are the only outputs a test unit may declare: what runTest writes.
 var testOutputs = map[string]bool{"loom-out/test.jsonl.gz": true, "loom-out/cpu.tsv": true}
 
@@ -82,9 +78,17 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	job := run.unit.Test
 	started := time.Now()
 	deadline := started.Add(time.Duration(run.unit.TimeoutSeconds) * time.Second)
-	tree := run.options.Tree
+	root, tree := run.options.Root, run.options.Tree
+	switch {
+	case root != "":
+	case run.options.Strict:
+		root = "/tmp"
+	default:
+		root = filepath.Join(run.options.WorkspaceParent, "loom-test-root")
+	}
 	if tree == "" {
-		tree = DefaultTree
+		// /tmp/adamic for a strict runner: the checkout the instance's opening clones, kept across units.
+		tree = filepath.Join(root, "adamic")
 	}
 	script := filepath.Join(run.directory, "prepare.sh")
 	environmentFile := filepath.Join(run.directory, "environment")
@@ -97,7 +101,7 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	if run.options.Strict {
 		trim = "trim"
 	}
-	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim}, run.environment(), run.workspace, time.Until(deadline))
+	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim, root}, run.environment(), run.workspace, time.Until(deadline))
 	switch {
 	case err != nil:
 		run.fail(protocol.PhaseStart, err)

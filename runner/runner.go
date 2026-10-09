@@ -49,7 +49,11 @@ type Options struct {
 	// Strict runs only structured test jobs (strict.go): a unit with argv, or anything a test job doesn't take, is
 	// refused before anything runs. The Codex pool's runners serve this way.
 	Strict bool
-	// Tree is where a test job's checkout is kept across units. Empty means DefaultTree.
+	// Root is where a test job keeps what outlives a unit (its npm trees, gate inputs and setup marker) and where its
+	// preparation clears earlier units' leavings. Empty means /tmp for a strict runner, whose instance is the runner's
+	// alone, and loom-test-root under WorkspaceParent otherwise.
+	Root string
+	// Tree is where a test job's checkout is kept across units. Empty means adamic under Root.
 	Tree string
 }
 

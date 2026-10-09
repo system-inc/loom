@@ -36,7 +36,8 @@ What one runner receives. The coordinator fills in the store and wire addresses 
 | Field | Meaning |
 |---|---|
 | `run`, `unit` | The run id and the unit's planned id. A run id is a letter or digit, then up to 127 letters, digits, `.`, `-` and `_` (`protocol.RunIdPattern`, the same the wire takes); a unit id is 1 to 256 bytes. |
-| `argv` | The command. No shell unless argv names one. |
+| `argv` | The command. No shell unless argv names one. A unit carries `argv` or `test`, exactly one. |
+| `test` | A structured go test of the adamic repository in place of a command (below). |
 | `environment` | Variables set for the command, on top of a minimal base (`PATH`, `HOME`, `TMPDIR`, `LANG`, and the machine's facts `LOOM_SLOT` and `LOOM_SLOT_CPUS` when whatever started the runner set them). Nothing else from the runner's environment leaks in. |
 | `directory` | Working directory, relative to the unit's workspace. |
 | `inputs` | Files placed before the command starts: `path`, `sha256`, optional `mode` (octal string) and `archive` (`"tar"` unpacks at `path`). Every byte is verified against its hash; a mismatch refuses the unit. |
@@ -48,6 +49,10 @@ What one runner receives. The coordinator fills in the store and wire addresses 
 | `token` | The run's token. It posts events to its own run and reads and writes blobs only through its own run's blob endpoint, as Store says. It expires with the run. A runner holds nothing else. |
 
 `protocol.CheckUnit` checks what decoding can't: the id limits above, local paths, 64-hex hashes, a plain mode, a positive timeout, a store when there are inputs or outputs. The runner calls it before anything runs (a unit it refuses finishes `broken`), and the coordinator calls it before handing a unit out.
+
+### Test jobs
+
+`test` (`protocol.TestJob`) is data, never a command: `repository` (exactly `https://github.com/system-inc/adamic`), `sha`, `base` (for a merge gate), `packages` (each `{"package", "run", "skip"}`: an import path under the module and its `-run` and `-skip` patterns), `gateInputs` (the sha256 of the gate inputs' manifest in the public store), `changedPaths` and `sample`. `protocol.CheckTestJob` is the whole of what they may be. The runner fetches the commit from the public repository itself, readies it with its own compiled-in preparation, and builds each `go test` command, every pattern one argument. A strict runner (`loom-runner serve --strict`, the Codex pool's) runs nothing else: README.md, "What a strict worker does", is the line by line account. The cache key includes `test`.
 
 ## Events
 
@@ -152,7 +157,7 @@ A **pool token** (scope `pool`, run = the pool's name) is all an instance holds 
 - `GET /pools/<pool>` (a coordinator or board token): `{"queued": <n>, "workers": [{"worker", "cpus", "seenAt", "took"}]}`: every worker seen in the last four hours (a worker running a unit asks nothing until it ends), when it last asked, and the unit it last took. The board shows a worker that asked in the last ten minutes or is running a unit.
 - `GET /runs/<run>/events?after=<position>` (a coordinator token for the run): the log's events after that position as JSON lines (`{"position", "event"}` each), waiting up to 20 s for the first one when there are none yet. The coordinator follows a pool unit's stream this way: plain HTTP, no WebSocket client needed.
 
-`loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration>` exits 0 at its deadline, finishing the unit in hand first if it can within the unit's timeout, or at once on `SIGTERM` (the unit is then broken, as with any stopped runner).
+`loom-runner serve --pool <wire>/pools/<pool> --token <pool token> --worker <name> --until <duration> [--strict]` exits 0 at its deadline, finishing the unit in hand first if it can within the unit's timeout, or at once on `SIGTERM` (the unit is then broken, as with any stopped runner).
 
 ## The board
 

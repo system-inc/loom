@@ -22,6 +22,8 @@ import (
 //	CheckTestJob's repository check dropped: TestABadTestJobIsRefusedBeforeAnythingRuns
 //	goTestArguments joining the pattern into a shell line: TestShellTextInAPatternStaysOneArgument
 //	prepare.sh fetching the commit into the checkout, not an empty store (a planted local commit then passes): TestPrepareRefusesACommitGitHubDoesntHave
+//	a trim reaching the host's /tmp (as a mutant, only /tmp/go-buildloom-canary-*): TestPrepareNamesNoHostPath, TestPrepareTouchesNothingOutsideItsRoot
+//	a strict runner's root anything but /tmp: TestAStrictRunnersRootIsTmpAndOthersKeepTheirOwn
 
 const testSha = "0123456789abcdef0123456789abcdef01234567"
 
@@ -53,6 +55,7 @@ printf '{"Action":"pass","Package":"%s","Test":"TestA"}\n' "${!#}"
 	prepareScript = []byte(`#!/bin/bash
 touch "` + fixture.directory + `/prepared"
 echo "$6" > "` + fixture.directory + `/trim"
+echo "$7" > "` + fixture.directory + `/root"
 env > "` + fixture.directory + `/prepare-environment"
 [ ` + strconv.Itoa(prepareExit) + ` = 0 ] || exit ` + strconv.Itoa(prepareExit) + `
 mkdir -p "$1"
@@ -92,6 +95,7 @@ func goodTestJob() protocol.TestJob {
 func (fixture *strictFixture) options(t *testing.T) Options {
 	options := testOptions(t)
 	options.Strict = true
+	options.Root = filepath.Join(fixture.directory, "root")
 	options.Tree = fixture.tree
 	return options
 }
@@ -273,9 +277,9 @@ func TestPrepareRefusesACommitGitHubDoesntHave(t *testing.T) {
 	git("clone", "-q", private, tree)
 	script := filepath.Join(directory, "prepare.sh")
 	os.WriteFile(script, prepareScript, 0o700)
-	// keep: this test runs on a developer's machine, where /tmp and the caches belong to other work.
-	command := exec.Command("bash", script, tree, planted, "", "", filepath.Join(directory, "environment"), "keep")
-	command.Env = append(os.Environ(), "LOOM_PREPARE_ATTEMPTS=1")
+	// keep, a root and a HOME of its own: this test runs on a developer's machine, whose /tmp and caches are other work's.
+	command := exec.Command("bash", script, tree, planted, "", "", filepath.Join(directory, "environment"), "keep", filepath.Join(directory, "root"))
+	command.Env = append(os.Environ(), "LOOM_PREPARE_ATTEMPTS=1", "HOME="+filepath.Join(directory, "home"))
 	started := time.Now()
 	output, _ := command.CombinedOutput()
 	if command.ProcessState.ExitCode() != 3 || !strings.Contains(string(output), "refused: "+planted) {
@@ -283,5 +287,75 @@ func TestPrepareRefusesACommitGitHubDoesntHave(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(directory, "environment")); err == nil {
 		t.Fatalf("a refused commit left an environment")
+	}
+}
+
+// Every path prepare.sh keeps or clears beside the tree is under its root: no line of its code names /tmp.
+func TestPrepareNamesNoHostPath(t *testing.T) {
+	for number, line := range strings.Split(string(prepareScript), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "#") && strings.Contains(line, "/tmp") {
+			t.Errorf("prepare.sh line %d names /tmp: %s", number+1, line)
+		}
+	}
+}
+
+// prepare.sh with trim clears its root and its HOME, and nothing else: a canary in the host's /tmp named like each
+// thing it trims survives. The run ends at the refusal (a commit GitHub doesn't hold, or GitHub unreachable), after
+// the trims.
+func TestPrepareTouchesNothingOutsideItsRoot(t *testing.T) {
+	directory := t.TempDir()
+	root, home, tree := filepath.Join(directory, "root"), filepath.Join(directory, "home"), filepath.Join(directory, "root", "adamic")
+	planted := []string{filepath.Join(root, "go-build1"), filepath.Join(root, "TestX"), filepath.Join(root, "adamic-stage3-lane-1"),
+		filepath.Join(root, "adamic-gate", "left"), filepath.Join(home, ".cache", "adamic", "runtime", ".build-1")}
+	for _, path := range planted {
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		os.WriteFile(path, []byte("x"), 0o644)
+	}
+	suffix := strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	var canaries []string
+	for _, prefix := range []string{"go-build", "Test", "adamic-stage3-lane-"} {
+		canary := filepath.Join("/tmp", prefix+"loom-canary-"+suffix)
+		if err := os.WriteFile(canary, []byte("x"), 0o644); err != nil {
+			t.Skipf("can't place a canary in /tmp: %v", err)
+		}
+		canaries = append(canaries, canary)
+		t.Cleanup(func() { os.Remove(canary) })
+	}
+	exec.Command("git", "init", "-q", tree).Run()
+	script := filepath.Join(directory, "prepare.sh")
+	os.WriteFile(script, prepareScript, 0o700)
+	command := exec.Command("bash", script, tree, strings.Repeat("e", 40), "", "", filepath.Join(directory, "environment"), "trim", root)
+	command.Env = append(os.Environ(), "LOOM_PREPARE_ATTEMPTS=1", "HOME="+home)
+	output, _ := command.CombinedOutput()
+	if command.ProcessState.ExitCode() != 3 {
+		t.Fatalf("exit %d: %s", command.ProcessState.ExitCode(), output)
+	}
+	for _, path := range planted {
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("trim left %s", path)
+		}
+	}
+	for _, canary := range canaries {
+		if _, err := os.Stat(canary); err != nil {
+			t.Errorf("prepare.sh touched %s, outside its root", canary)
+		}
+	}
+}
+
+func TestAStrictRunnersRootIsTmpAndOthersKeepTheirOwn(t *testing.T) {
+	fixture := newStrictFixture(t, 0)
+	options := fixture.options(t)
+	options.Root = ""
+	runUnit(t, testJobUnit(goodTestJob()), options)
+	if root, _ := os.ReadFile(filepath.Join(fixture.directory, "root")); string(root) != "/tmp\n" {
+		t.Errorf("a strict runner's root is %q", root)
+	}
+	options.Strict = false
+	runUnit(t, testJobUnit(goodTestJob()), options)
+	if root, _ := os.ReadFile(filepath.Join(fixture.directory, "root")); string(root) != filepath.Join(options.WorkspaceParent, "loom-test-root")+"\n" {
+		t.Errorf("a box runner's root is %q", root)
+	}
+	if trim, _ := os.ReadFile(filepath.Join(fixture.directory, "trim")); string(trim) != "keep\n" {
+		t.Errorf("a box runner prepared with %q, not keep", trim)
 	}
 }
