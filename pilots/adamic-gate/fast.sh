@@ -65,7 +65,11 @@ open(work + "/priority", "w").write(str(priority if isinstance(priority, int) an
 for field in ("base_name", "tools"):
     open(work + "/" + field, "w").write(str(job.get(field, "")))
 # A landing (a cloud/land-* branch, or a job asking for "phases") gets the fast gate's other stages after its Go tests.
-open(work + "/phases-wanted", "w").write("yes" if job.get("phases") is True or str(job.get("branch", "")).startswith("cloud/land-") else "")
+# A job marked complete (an area, or a landing that wants the box's whole shape, #vaf0xwc) runs its phases and the stage 3
+# landing lane besides, and its record says so.
+complete = job.get("complete") is True
+open(work + "/complete", "w").write("yes" if complete else "")
+open(work + "/phases-wanted", "w").write("yes" if complete or job.get("phases") is True or str(job.get("branch", "")).startswith("cloud/land-") else "")
 packages = [] if job.get("packages") == "select" else [package for package in job.get("packages") or [] if package]
 open(work + "/packages", "w").write("^(" + "|".join(re.escape(package) for package in packages) + ")$" if packages else "")
 open(work + "/package-list", "w").write("".join(package + "\n" for package in packages))
@@ -91,7 +95,9 @@ PY
 	run=$(head -1 "${work}/run.log" 2> /dev/null | awk '{print $2}' | tr -d :)
 	line=$(head -1 "${work}/reds.txt" 2> /dev/null | cut -d, -f2-)
 	rm -f "${work}/phases-status" "${work}/phases-ref"
-	if [ -s "${work}/phases-wanted" ] && [ "$(cat "${work}/build.verdict" 2> /dev/null)|$(cat "${work}/reds.exit" 2> /dev/null)" = "passed|0" ]; then
+	# A complete job runs on past a red, as a box's complete mode does: its phases run whenever the build passed.
+	if [ -s "${work}/phases-wanted" ] && { [ "$(cat "${work}/build.verdict" 2> /dev/null)|$(cat "${work}/reds.exit" 2> /dev/null)" = "passed|0" ] ||
+		{ [ -s "${work}/complete" ] && [ "$(cat "${work}/build.verdict" 2> /dev/null)" = passed ]; }; }; then
 		runPhases "${sha}" "${stamp}"
 	fi
 	case "$(cat "${work}/build.verdict" 2> /dev/null)|$(cat "${work}/reds.exit" 2> /dev/null)" in
@@ -226,6 +232,7 @@ for line in open(sys.argv[1]):
 	else
 		head -1 "${out}/phase/status.txt" > "${work}/phases-status"
 	fi
+	[ -s "${work}/complete" ] && [ "$(cut -d: -f1 "${work}/phases-status")" != void ] && runStage3 "${sha}"
 	record=${out}/phase
 	cp "${out}/phase.log" "${record}/phase.log" 2> /dev/null
 	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
@@ -270,6 +277,28 @@ within() {
 	kill "${watchdog}" 2> /dev/null
 }
 
+# runStage3 runs a complete job's stage 3 landing lane (run.py's stage3 units: apply tests, lane tests, the lane) as one
+# pool run beside its phases, the way gate.sh runs them for a whole gate. Any unit failing makes the phases red, naming it;
+# one that exited 2 (Loom's fault) makes them void; all green leaves the phases' own word standing.
+runStage3() {
+	local sha=$1 work=${jobs}/$1.work tools reference run
+	tools=$(cat "${work}/tools" 2> /dev/null)
+	[[ ${tools} =~ ^[0-9a-f]{40}$ ]] || tools=$(git -C "${gate}" ls-remote origin refs/heads/devtools/fast-gate | cut -f1)
+	printf 'stage3 %s\n' stage3-apply-tests stage3-lane-tests stage3-lane > "${work}/stage3-units.txt"
+	reference=$(ls -t "${HOME}"/.loom/pregate/reference-*.jsonl.gz | head -1)
+	"${HOME}/.loom/bin/adamic-gate" plan --target codex --gate-inputs "$(cat "${HOME}/.loom/gate-inputs")" --reference "${reference}" --sha "$(cat "${work}/gate")" --units 1 --only '^nothing-matches$' \
+		--phases "${tools}" --phase-units "${work}/stage3-units.txt" 2> "${work}/stage3-plan.err" | python3 -c "
+import json, sys
+job = json.load(sys.stdin); job['name'] = 'adamic-gate-fast-stage3'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/stage3.json" || { echo "void: the stage 3 lane couldn't be planned" > "${work}/phases-status"; return; }
+	"${HOME}/.loom/bin/loom-pregate" run --uncached --slots none --pool "$([ "$(cat "${work}/priority" 2> /dev/null || echo 0)" -ge 30 ] && echo codex || echo codex-side)=3" --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/stage3-record.jsonl" "${work}/stage3.json" > "${work}/stage3-run.log" 2>&1
+	run=$(head -1 "${work}/stage3-run.log" | awk '{print $2}' | tr -d :)
+	if grep -q '"type":"exit".*"code":2' "${work}/stage3-record.jsonl" 2> /dev/null || grep -qE ': (broken|void)|never finished' "${work}/stage3-run.log"; then
+		echo "void: the stage 3 lane broke for Loom's own reasons (run ${run})" > "${work}/phases-status"
+	elif grep -qE ': failed' "${work}/stage3-run.log"; then
+		echo "red: stage 3 landing lane failed: $(grep -E ': failed' "${work}/stage3-run.log" | cut -d: -f1 | tr '\n' ' ')(run ${run})" > "${work}/phases-status"
+	fi
+}
+
 # finish publishes the record and then writes the verdict, so the watcher never reads a verdict without its log.
 finish() {
 	local sha=$1 stamp=$2 verdict=$3 run=$4 work=${jobs}/$1.work record index gitDirectory tree commit gated
@@ -310,9 +339,9 @@ finish() {
 	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
 	# uncached_tests is the run's own mode, read from the coordinator's first line ("... units on N slots, uncached"),
 	# which push-main --fast-gate requires of a landing's Go-test record (integration, Oct 9 04:38Z).
-	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" "$(cat "${work}/gate" 2> /dev/null)" "${unplanned}" <<'PY'
+	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" "$(cat "${work}/gate" 2> /dev/null)" "${unplanned}" "$(cat "${work}/complete" 2> /dev/null)" <<'PY'
 import json, sys
-path, verdict, run, sha, branch, base, header, gate, unplanned = sys.argv[1:]
+path, verdict, run, sha, branch, base, header, gate, unplanned, complete = sys.argv[1:]
 record = {"finished": True, "verdict": verdict, "runner": "pool", "pool": "codex-side", "pool_run": run, "covers": "go-tests",
           "uncached_tests": header.rstrip().endswith(", uncached"), "sha": sha, "branch": branch, "base": base}
 # A gate of the tip merged onto main names both (#11ymb02), as the boxes' fast-gate.sh does.
@@ -320,6 +349,9 @@ if gate and gate != sha:
     record.update({"candidate": sha, "gated": gate})
 if unplanned.isdigit():
     record["unplanned_packages_not_run"] = int(unplanned)
+# A complete job ran its phases and the stage 3 lane; the Darwin leg is a box's alone and wasn't run here.
+if complete == "yes":
+    record.update({"complete": True, "darwin": "not run (pool is Linux only)"})
 json.dump(record, open(path, "w"), indent=2)
 PY
 	find "${record}" -type f -size +5M -name '*.jsonl' -exec gzip -9 {} \;
