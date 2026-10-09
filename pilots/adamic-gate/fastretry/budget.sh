@@ -64,7 +64,10 @@ scenario; run $stubs/verify.sh; check unset-is-on-at-60 'grep -qx -- --budget $T
 # A': off, the job is byte for byte the baseline's and its argv the baseline's and the products', even with a budgeted
 # attempt's only-tests.json left in the work directory (a re-plan reuses it).
 scenario; echo '{"pkg/a":["TestA"]}' > $work/only-tests.json; run $stubs/baseline.sh; cp $work/job.json $T/baseline-job.json; cp $T/argv $T/baseline-argv
-run $stubs/verify.sh off; check off-job-is-the-baselines 'cmp -s $work/job.json $T/baseline-job.json && [ "$(cat $T/argv)" = "$(cat $T/baseline-argv; products)" ]'
+# The build-vet unit's own body is masked: it changes on purpose (the full-disk check, Oct 9 18:3xZ) and has its own
+# harness, fastretry/builddisk.sh; every other byte of the job must match the baseline's.
+nobody() { python3 -c 'import json, sys; job = json.load(open(sys.argv[1])); [unit.update(argv=unit["argv"][:2] + ["<build body>"] + unit["argv"][3:]) for unit in job["units"] if unit["id"] == "build-vet"]; print(json.dumps(job, sort_keys=True))' "$1"; }
+run $stubs/verify.sh off; check off-job-is-the-baselines '[ "$(nobody $work/job.json)" = "$(nobody $T/baseline-job.json)" ] && [ "$(cat $T/argv)" = "$(cat $T/baseline-argv; products)" ]'
 # A'': off, a selection's family spec goes to the test unit with the fewest specs, never a product unit, which runs
 # under a 600 s ceiling (#fysfvrx): here product-00 ties tests-01 and comes first.
 scenario; printf '%s' '{"name":"stub","units":[

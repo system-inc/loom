@@ -251,6 +251,13 @@ go build ./... > "${out}/build.log" 2>&1; build=$?
 go vet ./... > "${out}/vet.log" 2>&1; vet=$?
 if [ "${build}" = 0 ]; then echo "loom-build: go build ./... passed"; else echo "loom-build: go build ./... FAILED (exit ${build})"; head -40 "${out}/build.log"; fi
 if [ "${vet}" = 0 ]; then echo "loom-build: go vet ./... passed"; else echo "loom-build: go vet ./... FAILED (exit ${vet})"; head -40 "${out}/vet.log"; fi
+# A build or vet that ran out of disk proved nothing about the tree (Oct 9 18:2xZ: canary 9's build-vet linked
+# cmd/adamic and four more into "no space left on device" and read as a red build): Loom's, placed again.
+if { [ "${build}" != 0 ] || [ "${vet}" != 0 ]; } && grep -qs "no space left on device" "${out}/build.log" "${out}/vet.log"; then
+  echo "loom-build: the instance's disk filled during the build (no space left on device): Loom's fault, not the tree's"
+  df -h "${HOME}" /tmp
+  exit 2
+fi
 [ "${build}" = 0 ] && [ "${vet}" = 0 ]
 '''
 unit = {"id": "build-vet", "argv": ["bash", "-c", opening + body, "adamic-build-vet", job["units"][0]["argv"][4]],
@@ -325,7 +332,7 @@ text = "\n".join(lines)
 # The build body exits 0 or 1; the opening exits 2 when Loom's own setup or checkout fails, before any build.
 if code == 0:
     verdict = "passed"
-elif code == 1 and "loom-build: go build" in text:
+elif code == 1 and "loom-build: go build" in text and "no space left on device" not in text:
     verdict = "failed"
 else:
     verdict = "broken"
