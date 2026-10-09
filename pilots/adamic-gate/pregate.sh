@@ -31,6 +31,9 @@ requests=${ADAMIC_FULL_GATE_REQUESTS:-${state}/requests}
 verdicts=${state}/pregate
 work=${HOME}/.loom/pregate
 gate=${HOME}/Projects/system/adamic-gate
+# The star's pool: 50 instances from Oct 9 01:39Z (@system_adamic: under 5 minutes uncached needs the CPUs), its
+# whole-set runs planned two units a slot so the longest-first packing has small units to fill in with.
+starSlots=${LOOM_STAR_POOL_SLOTS:-50}
 packages=${LOOM_PREGATE_PACKAGES:-'/(stage3/fixtures|internal/fresh|internal/lower|internal/flow|internal/oracle)$'}
 mkdir -p "${verdicts}" "${work}"
 loom=${HOME}/.loom/bin/loom-pregate planner=${HOME}/.loom/bin/adamic-gate
@@ -70,13 +73,13 @@ pregate() {
 	# LOOM_PREGATE_WHOLE=1 asks for the whole set on the star's pool for a candidate no train branch names yet (a
 	# lane's next star, such as compiler's V2 on Oct 9).
 	if [ "${LOOM_PREGATE_WHOLE:-}" = 1 ] || star "${sha}"; then
-		pool=codex units=50 only="" scope="the whole Go test set"
+		pool=codex units=$((starSlots * 2)) only="" scope="the whole Go test set"
 	else
 		pool=codex-side units=15 only=${packages} scope="the red-prone packages"
 	fi
 	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" > "${job}" 2> /dev/null || { void "${sha}" "planning failed"; return; }
 	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
-	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo 25 || echo 15)" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
+	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
 	"${planner}" reds --job "${job}" --record "${record}" > "${report}" 2>&1
 	case $? in 0) verdict=green ;; 1) verdict=red ;; *) verdict=void ;; esac
 	run=$(head -1 "${report}" | awk '{print $2}' | tr -d :)
