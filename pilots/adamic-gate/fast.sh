@@ -626,9 +626,23 @@ for _, _, sha, priority in sorted(ready):
     print(sha, priority)
 PYTHON
 )
+	# Admission control (@system_adamic, Oct 9 17:20Z, the queueing angel): with ~/.loom/admit holding K, at most K jobs
+	# run at once, every tier included, so the candidates admitted get the whole pool and finish under their ceiling instead
+	# of every candidate getting a little and the ceiling voiding the ones that never got enough. The rest wait here with
+	# no unit placed, so nothing voids while it waits; tier picks who is admitted next. K is units the pool finishes in 30
+	# minutes over units per candidate (Oct 9 17:22Z: 2,102 an hour over a mean of 292, so 4). Without the file, today's
+	# rule: the cap holds below tier 30 only.
+	admit=$(cat "${HOME}/.loom/admit" 2> /dev/null)
+	[[ ${admit} =~ ^[1-9][0-9]*$ ]] || admit=""
 	while read -r sha priority; do
 		[ -n "${sha}" ] || continue
-		[ "${priority}" -lt 30 ] && [ "$(find "${jobs}" -maxdepth 1 -name '*.running' | wc -l)" -ge "${concurrent}" ] && break
+		running=$(find "${jobs}" -maxdepth 1 -name '*.running' | wc -l | tr -d ' ')
+		if [ -n "${admit}" ]; then
+			[ "${running}" -ge "${admit}" ] && break
+			echo "$(date -u +%H:%M:%S) admitted ${sha:0:12} at tier ${priority}, ${running} running of ${admit}"
+		else
+			[ "${priority}" -lt 30 ] && [ "${running}" -ge "${concurrent}" ] && break
+		fi
 		touch "${jobs}/${sha}.running"
 		within "${sha}" &
 	done <<< "${waiting}"
