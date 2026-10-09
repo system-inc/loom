@@ -19,6 +19,8 @@
 # the Codex pool's before script) runs in its namespace first, with no budget over it, so a cold clone and setup (7 to 14
 # minutes) never land inside a unit's 90 s (Oct 9 07:48Z: server's first unit was killed at 90 s still cloning, and the
 # next one tripped on the half-made tree). A worker whose warm-up fails never serves; its before.log says why.
+# LOOM_BOX_WARM_ONLY=1 readies each worker's tree and stops there, serving nothing (#x2bmxpk: the workers stay off until
+# the A/B passes, but its "on" passes shouldn't spend their time cloning).
 set -euo pipefail
 workers=$1 first=$2 until=$3 pool=$4
 runnerSha=${LOOM_RUNNER_SHA:-7f01c04925b5bcdf4c2359abcee90f0723b656867e696313db20391d08cdada7}
@@ -56,9 +58,9 @@ for ((index = 0; index < workers; index++)); do
 	setsid nohup nice -n 19 ionice -c 3 taskset -c "${cores}" unshare -Urm sh -c '
 		mount --bind "$1/tmp" /tmp && mkdir -p /tmp/warm && cd /tmp/warm &&
 		unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="${10}/bin:${PATH}" bash "$9" > "$1/before.log" 2>&1 &&
-		cd / && exec unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="${10}/bin:${PATH}" \
+		{ [ -z "${11}" ] || exit 0; } && cd / && exec unshare -U --map-user="$2" --map-group="$3" env HOME=/tmp/home TMPDIR=/tmp PATH="${10}/bin:${PATH}" \
 			"$4" serve --pool "$5" --token "$(cat "$6")" --worker "$7" --until "$8" --workspace /tmp/loom-units --log "$1/serve.log"
-	' box "${worker}" "$(id -u)" "$(id -g)" "${runner}" "${pool}" "${units}/pool-token" "${name}" "${until}" "${units}/before.sh" "${units}/node" \
+	' box "${worker}" "$(id -u)" "$(id -g)" "${runner}" "${pool}" "${units}/pool-token" "${name}" "${until}" "${units}/before.sh" "${units}/node" "${LOOM_BOX_WARM_ONLY:-}" \
 		>> "${worker}/serve.out" 2>&1 < /dev/null &
 	echo "box: ${name} serving on cores ${cores} until ${until}"
 done
