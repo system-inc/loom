@@ -37,6 +37,7 @@ path>,..." runs every package go list names that the list doesn't, so it owns ev
 """
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -161,6 +162,36 @@ def unitInputs(unit, tree):
     return {"id": unit["id"], "input_sha256": sha256(canonical(parts)), "parts": parts}
 
 
+def packageInputs(tree, directory, gateInputs):
+    """A package's own input hash: the unit hash without its run part, so a verdict keyed by it survives any re-plan,
+    width or ceiling (@system_adamic, Oct 9 09:24Z: a unit is an artifact of the plan; key by package and hash)."""
+    parts = {"shared": tree.shared, "own": {directory: tree.own(directory)}, "toolchain": {"gate_inputs": gateInputs}}
+    return sha256(canonical(parts))
+
+
+def keptTests(sha, gateInputs, testLines, repository=gateRepository):
+    """Each package a run's go test lines name: its input hash at the sha and its top-level tests that passed and
+    failed there. A test that both passed and failed (a rerun) counts as failed; a skip proves nothing and isn't kept."""
+    tree = Tree(repository, sha)
+    passed, failed = {}, {}
+    for line in testLines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        test, action, importPath = event.get("Test") or "", event.get("Action"), event.get("Package") or ""
+        if not test or "/" in test or not importPath.startswith(module) or action not in ("pass", "fail"):
+            continue
+        (passed if action == "pass" else failed).setdefault(importPath, set()).add(test)
+    packages = {}
+    for importPath in sorted(set(passed) | set(failed)):
+        directory = importPath[len(module):]
+        bad = failed.get(importPath, set())
+        packages[importPath] = {"input_sha256": packageInputs(tree, directory, gateInputs),
+                                "passed": sorted(passed.get(importPath, set()) - bad), "failed": sorted(bad)}
+    return {"definition": Definition + "-package", "sha": sha, "gate_inputs": gateInputs, "packages": packages}
+
+
 def retarget(job, sha):
     """The job as it runs at another sha: each unit's argv names its sha at index 4, and nothing else does."""
     moved = json.loads(json.dumps(job))
@@ -231,7 +262,18 @@ def main():
     planning.add_argument("--out", required=True)
     planning.add_argument("--repository", default=gateRepository)
     planning.add_argument("jobs", nargs="+")
+    keeping = commands.add_parser("kept", help="each package's input hash and its passed and failed tests, from a run's go test lines")
+    keeping.add_argument("--sha", required=True, help="the sha the tests ran at")
+    keeping.add_argument("--gate-inputs", required=True, help="the gate inputs' manifest hash the run pinned")
+    keeping.add_argument("--repository", default=gateRepository)
+    keeping.add_argument("tests", help="the run's go test -json lines (test.jsonl, or .gz)")
     arguments = parser.parse_args()
+    if arguments.command == "kept":
+        opener = gzip.open if arguments.tests.endswith(".gz") else open
+        with opener(arguments.tests, "rt") as lines:
+            json.dump(keptTests(arguments.sha, arguments.gate_inputs, lines, arguments.repository), sys.stdout, indent=1)
+        print()
+        return
     jobs = [json.load(open(path)) for path in arguments.jobs]
     if arguments.command == "hash":
         if arguments.at:
