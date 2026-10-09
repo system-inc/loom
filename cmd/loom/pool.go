@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +48,32 @@ func (pools *poolSlotsFlag) Set(text string) error {
 		return fmt.Errorf("%q isn't <name>=<slots>, such as codex=4", text)
 	}
 	*pools = append(*pools, poolSlots{name: name, slots: slots})
+	return nil
+}
+
+// poolHasFlag is --pool-has <name>=<toolchain>,...: the toolchains every worker of a pool has, by pool.
+type poolHasFlag map[string][]string
+
+func (pools poolHasFlag) String() string {
+	var parts []string
+	for name, toolchains := range pools {
+		parts = append(parts, name+"="+strings.Join(toolchains, ","))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
+}
+
+func (pools poolHasFlag) Set(text string) error {
+	name, list, found := strings.Cut(text, "=")
+	if !found || !protocol.RunIdPattern.MatchString(name) || list == "" {
+		return fmt.Errorf("%q isn't <name>=<toolchain>,..., such as codex=wasiSdk", text)
+	}
+	for _, toolchain := range strings.Split(list, ",") {
+		if !slices.Contains(protocol.Toolchains, toolchain) {
+			return fmt.Errorf("%q isn't a toolchain (%s)", toolchain, strings.Join(protocol.Toolchains, ", "))
+		}
+		pools[name] = append(pools[name], toolchain)
+	}
 	return nil
 }
 

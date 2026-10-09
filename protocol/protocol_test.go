@@ -75,15 +75,16 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 		return Job{Name: "j", Units: []JobUnit{{Id: "a", Argv: []string{"true"}, TimeoutSeconds: 1}}}
 	}
 	cases := map[string]func(*Job){
-		"no name":      func(j *Job) { j.Name = "" },
-		"no units":     func(j *Job) { j.Units = nil },
-		"bad id":       func(j *Job) { j.Units[0].Id = "A b" },
-		"duplicate id": func(j *Job) { j.Units = append(j.Units, j.Units[0]) },
-		"no argv":      func(j *Job) { j.Units[0].Argv = nil },
-		"no timeout":   func(j *Job) { j.Units[0].TimeoutSeconds = 0 },
-		"unknown need": func(j *Job) { j.Units[0].Needs = []string{"z"} },
-		"self need":    func(j *Job) { j.Units[0].Needs = []string{"a"} },
-		"bad hash":     func(j *Job) { j.Units[0].Inputs = []Input{{Path: "x", Sha256: "abc"}} },
+		"no name":           func(j *Job) { j.Name = "" },
+		"no units":          func(j *Job) { j.Units = nil },
+		"bad id":            func(j *Job) { j.Units[0].Id = "A b" },
+		"duplicate id":      func(j *Job) { j.Units = append(j.Units, j.Units[0]) },
+		"no argv":           func(j *Job) { j.Units[0].Argv = nil },
+		"no timeout":        func(j *Job) { j.Units[0].TimeoutSeconds = 0 },
+		"unknown need":      func(j *Job) { j.Units[0].Needs = []string{"z"} },
+		"self need":         func(j *Job) { j.Units[0].Needs = []string{"a"} },
+		"unknown toolchain": func(j *Job) { j.Units[0].Requires = []string{"wasi-sdk"} },
+		"bad hash":          func(j *Job) { j.Units[0].Inputs = []Input{{Path: "x", Sha256: "abc"}} },
 		"bad archive": func(j *Job) {
 			j.Units[0].Inputs = []Input{{Path: "x", Sha256: strings.Repeat("a", 64), Archive: "zip"}}
 		},
@@ -95,6 +96,11 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 	}
 	if _, err := Expand(good()); err != nil {
 		t.Fatalf("the good job is refused: %v", err)
+	}
+	required := good()
+	required.Units[0].Requires = []string{"wasiSdk", "clang"}
+	if _, err := Expand(required); err != nil {
+		t.Fatalf("a unit requiring known toolchains is refused: %v", err)
 	}
 	for name, breakIt := range cases {
 		job := good()

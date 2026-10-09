@@ -43,7 +43,15 @@ type JobUnit struct {
 	// ahead of the wall it recorded for the same id last time: a planner that re-cuts its units every run reuses ids
 	// for different work (Oct 9, main c869cea9: units of 310 and 265 s placed last on stale times). Zero: none given.
 	ExpectedSeconds float64 `json:"expectedSeconds,omitempty"`
+	// Requires names the toolchains the unit's machine must have, from Toolchains: the coordinator places it only on a
+	// machine that has them all, and a unit no machine of the run has them for is never placed, so the run is void,
+	// never green without it (Oct 9: a wasi shard on a runner without the WASI SDK skips every test and passes).
+	// Placement only: the runner never sees it, and it isn't part of the cache key.
+	Requires []string `json:"requires,omitempty"`
 }
+
+// Toolchains are the names a unit may require and a machine may have, the unit key's tools (contract v1).
+var Toolchains = []string{"go", "clang", "node", "wasiSdk"}
 
 type Input struct {
 	Path    string `json:"path"`
@@ -215,6 +223,11 @@ func Expand(job Job) ([]PlannedUnit, error) {
 		}
 		if unit.TimeoutSeconds <= 0 {
 			return nil, fmt.Errorf("unit %s needs a positive timeoutSeconds", unit.Id)
+		}
+		for _, toolchain := range unit.Requires {
+			if !slices.Contains(Toolchains, toolchain) {
+				return nil, fmt.Errorf("unit %s requires %q, which isn't a toolchain (%s)", unit.Id, toolchain, strings.Join(Toolchains, ", "))
+			}
 		}
 		for _, need := range unit.Needs {
 			if !bases[need] || need == unit.Id {

@@ -73,6 +73,9 @@ type PoolMachine struct {
 	AgeEvery   time.Duration
 	AgeStep    int
 	AgeCeiling int
+	// Has names the toolchains every worker of the pool has, for units that require them (protocol.Toolchains):
+	// a Codex instance set up with setup.sh --wasi-sdk has wasiSdk.
+	Has []string
 	// Log, when set, hears each unit queued again.
 	Log io.Writer
 
@@ -127,6 +130,8 @@ func (machine *PoolMachine) RunnerVersion() string { return machine.Version }
 func (machine *PoolMachine) TakesOnlyTestJobs() bool { return machine.Strict }
 
 func (machine *PoolMachine) Platform() string { return machine.GoPlatform }
+
+func (machine *PoolMachine) Toolchains() []string { return machine.Has }
 
 func (machine *PoolMachine) Cores() int { return machine.CoreCount }
 

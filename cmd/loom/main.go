@@ -112,6 +112,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.Var(&pools, "pool", "also place units on a pool on the wire, <name>=<slots>; repeatable")
 	var strictPools poolSlotsFlag
 	flags.Var(&strictPools, "strict-pool", "a pool whose workers serve --strict, <name>=<slots>: it takes the job's test jobs and nothing else; repeatable")
+	poolHas := poolHasFlag{}
+	flags.Var(poolHas, "pool-has", "the toolchains every worker of a pool has, <name>=<toolchain>,...: units that require one go only there; repeatable")
 	priority := flags.Int("priority", 0, "the run's units' priority on its pools, 0 to 1000, highest handed out first")
 	ageEvery := flags.Duration("pool-age-every", 0, "lift a pool unit that waits this long, and again each time after, so a lower tier never starves; 0 is off")
 	ageStep := flags.Int("pool-age-step", 10, "how much higher each --pool-age-every lifts a waiting unit")
@@ -185,7 +187,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		for _, wanted := range append(append(poolSlotsFlag{}, pools...), strictPools...) {
 			strict := slices.Contains(strictPools, wanted)
 			machine := &coordinator.PoolMachine{Pool: wanted.name, Strict: strict, Priority: *priority, AgeEvery: *ageEvery, AgeStep: *ageStep, AgeCeiling: *ageCeiling,
-				Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
+				Has: poolHas[wanted.name], Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: poolPlatform, Log: stdout}
 			poolMachines[machine.Name()] = true
 			for range wanted.slots {
 				slots = append(slots, machine)

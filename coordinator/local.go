@@ -18,7 +18,11 @@ type LocalMachine struct {
 	Label string
 	// WorkspaceParent is where unit workspaces go; empty means the system's temporary directory.
 	WorkspaceParent string
+	// Has names the toolchains this machine has, for units that require them (protocol.Toolchains).
+	Has []string
 }
+
+func (machine LocalMachine) Toolchains() []string { return machine.Has }
 
 // Name is the label, or this computer's short hostname, which is what its runner reports in started events.
 func (machine LocalMachine) Name() string {

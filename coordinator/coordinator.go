@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -369,7 +370,14 @@ func (coordinator *coordinator) placeReady(runContext context.Context) bool {
 	})
 	started := false
 	for _, state := range ready {
-		slot := coordinator.pickSlot(state.lastSlot, state.planned.Unit.Test != nil, state.brokeOn)
+		if missing := coordinator.unfit(state); missing != "" {
+			// No machine of the run could ever take it: it's never placed, and the run is void for it.
+			state.status = "skipped"
+			coordinator.record.note(state.planned.Id, placeError("not placed: no machine of the run has %s", missing))
+			fmt.Fprintf(coordinator.config.Log, "%s: not placed, no machine of the run has %s\n", state.planned.Id, missing)
+			continue
+		}
+		slot := coordinator.pickSlot(state.lastSlot, state.planned.Unit.Test != nil, state.planned.Unit.Requires, state.brokeOn)
 		if slot < 0 {
 			// A test job may wait for a strict slot while an argv unit behind it takes a box's, or the other way round.
 			continue
@@ -441,8 +449,9 @@ func (coordinator *coordinator) preemptOverLimit() {
 
 // pickSlot returns a free slot that can run the unit, preferring one on another machine than avoid's, or -1 when
 // none is free. A machine at its slot limit offers none. A strict machine's slots take only test jobs; when the run
-// has any, a test job goes only to them, and an argv unit never does (#098rcha).
-func (coordinator *coordinator) pickSlot(avoid int, testJob bool, brokeOn map[string]bool) int {
+// has any, a test job goes only to them, and an argv unit never does (#098rcha). A machine without every toolchain
+// the unit requires offers none.
+func (coordinator *coordinator) pickSlot(avoid int, testJob bool, requires []string, brokeOn map[string]bool) int {
 	fallback := -1
 	strictSlots := false
 	for _, machine := range coordinator.config.Slots {
@@ -455,7 +464,7 @@ func (coordinator *coordinator) pickSlot(avoid int, testJob bool, brokeOn map[st
 		if strict := takesOnlyTestJobs(coordinator.config.Slots[index]); strict != (testJob && strictSlots) {
 			continue
 		}
-		if brokeOn[coordinator.config.Slots[index].Name()] {
+		if brokeOn[coordinator.config.Slots[index].Name()] || !fits(coordinator.config.Slots[index], requires) {
 			continue
 		}
 		if limit := coordinator.config.SlotLimit; limit != nil {
@@ -482,11 +491,45 @@ func (coordinator *coordinator) hasMachineFor(state *unitState) bool {
 		strictSlots = strictSlots || takesOnlyTestJobs(machine)
 	}
 	for _, machine := range coordinator.config.Slots {
-		if takesOnlyTestJobs(machine) == (state.planned.Unit.Test != nil && strictSlots) && !state.brokeOn[machine.Name()] {
+		if takesOnlyTestJobs(machine) == (state.planned.Unit.Test != nil && strictSlots) && !state.brokeOn[machine.Name()] && fits(machine, state.planned.Unit.Requires) {
 			return true
 		}
 	}
 	return false
+}
+
+// unfit names a toolchain the unit requires that no machine of the run has, or is empty when one could take it.
+func (coordinator *coordinator) unfit(state *unitState) string {
+	for _, toolchain := range state.planned.Unit.Requires {
+		found := false
+		for _, machine := range coordinator.config.Slots {
+			if fits(machine, []string{toolchain}) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return toolchain
+		}
+	}
+	return ""
+}
+
+// fits says whether the machine has every toolchain in requires. A machine that names none has none.
+func fits(machine Machine, requires []string) bool {
+	if len(requires) == 0 {
+		return true
+	}
+	declared, ok := machine.(interface{ Toolchains() []string })
+	if !ok {
+		return false
+	}
+	for _, toolchain := range requires {
+		if !slices.Contains(declared.Toolchains(), toolchain) {
+			return false
+		}
+	}
+	return true
 }
 
 // takesOnlyTestJobs says whether a machine runs only test jobs (a strict pool's).

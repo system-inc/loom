@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strconv"
@@ -823,5 +824,56 @@ func TestABrokenUnitIsPlacedAgainOnAnotherBox(t *testing.T) {
 	bad = &breakingMachine{LocalMachine: LocalMachine{Label: "box-bad"}}
 	if result := run(t, config(wire, bad, bad), unit); result.Verdict.Status != "void" || len(bad.ran) != 1 {
 		t.Fatalf("no other box: verdict %+v, ran %v", result.Verdict, bad.ran)
+	}
+}
+
+// A wasi shard on a runner without the WASI SDK skips every test and passes (Oct 9). A unit that requires a toolchain
+// runs only on a machine that has it, however many free slots the others hold.
+func TestAUnitThatRequiresAToolchainRunsOnlyWhereItIs(t *testing.T) {
+	wire := newFakeWire(t)
+	without, with := t.TempDir(), t.TempDir()
+	slots := []Machine{LocalMachine{Label: "box-a", WorkspaceParent: without}, LocalMachine{Label: "box-a", WorkspaceParent: without},
+		LocalMachine{Label: "box-b", WorkspaceParent: with, Has: []string{"clang", "wasiSdk"}}}
+	var units []protocol.JobUnit
+	for _, id := range []string{"wasi-0", "wasi-1", "wasi-2"} {
+		unit := shell(id, "pwd")
+		unit.Requires = []string{"wasiSdk"}
+		units = append(units, unit)
+	}
+	units = append(units, shell("plain-0", "pwd"), shell("plain-1", "pwd"))
+	result := run(t, config(wire, slots...), units...)
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	for _, id := range []string{"wasi-0", "wasi-1", "wasi-2"} {
+		said := ""
+		for _, event := range unitEventsOf(result.Events, id) {
+			if event.Type == "output" {
+				said += event.Text
+			}
+		}
+		resolved, _ := filepath.EvalSymlinks(with)
+		if !strings.Contains(said, with) && !strings.Contains(said, resolved) {
+			t.Fatalf("%s ran in %q, not on box-b (%s), the only machine with wasiSdk", id, strings.TrimSpace(said), with)
+		}
+	}
+}
+
+// A unit no machine of the run could take is never placed, and the run is void for it, never green without it.
+func TestAUnitNoMachineHasTheToolchainForIsNeverPlacedAndTheRunIsVoid(t *testing.T) {
+	wire := newFakeWire(t)
+	wasi := shell("wasi-0", "echo ran")
+	wasi.Requires = []string{"wasiSdk"}
+	result := run(t, config(wire), wasi, shell("plain", "echo plain"))
+	if result.Verdict.Status == "green" {
+		t.Fatalf("verdict %+v: green without its wasi unit", result.Verdict)
+	}
+	if len(unitEventsOf(result.Events, "plain")) == 0 || !strings.Contains(fmt.Sprint(unitEventsOf(result.Events, "wasi-0")), "no machine of the run has wasiSdk") {
+		t.Fatalf("plain should run and wasi-0 be noted unplaced: %+v", unitEventsOf(result.Events, "wasi-0"))
+	}
+	for _, event := range unitEventsOf(result.Events, "wasi-0") {
+		if event.Type == "started" {
+			t.Fatalf("wasi-0 started on %s, which has no wasiSdk", event.Machine)
+		}
 	}
 }
