@@ -41,6 +41,18 @@ PYTHON
 	[ "$(cat "${HOME}/.loom/before.published" 2> /dev/null)" = "${hash}" ] && before=(--before "${hash}")
 fi
 cd "${ahra}" || exit 1
+# The account's ceiling (Oct 9, 16:53 to 16:55Z: with about 310 Loom members plus the Circles' workers on
+# kirk@kirkouimet.com, 175 Loom sessions failed together on 429 Too Many Requests). Turns are sent only while the
+# three fleets' running members stay under ~/.loom/codex-ceiling, shared with the Circles' workers, so the pool
+# never again grows past what the account serves.
+ceiling=$(cat "${HOME}/.loom/codex-ceiling" 2> /dev/null || echo 80)
+running=0
+for fleet in loom-pool loom-side loom-star; do
+	count=$(./node_modules/.bin/ahra ai fleet "${fleet}" --json 2> /dev/null | python3 -c "
+import json, sys
+print(sum(1 for member in json.load(sys.stdin) if member.get('session', {}).get('status') == 'Running'))" 2> /dev/null || echo 0)
+	running=$((running + count))
+done
 # loom-star's members all serve the star's pool (@system_adamic, Oct 9 10:52Z: double the live star pool, measured in
 # steps of 20 against the account's concurrency cap); all of them, whatever their number.
 for pair in loom-pool:codex loom-side:codex-side loom-star:codex; do
@@ -59,6 +71,10 @@ for member in json.load(sys.stdin):
         number = re.search(r'-(\d+)$', member.get('label') or '')
         print('%s:%s' % (member['id'], number.group(1) if number else 0))"); do
 		id=${member%%:*} number=${member#*:}
+		if [ "${running}" -ge "${ceiling}" ]; then
+			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: held, ${running} members running at the account's ceiling of ${ceiling}"
+			continue
+		fi
 		memberPrompt=${prompt}
 		# loom-star is the star's pool whatever a member's number; only loom-pool past LOOM_STAR_INSTANCES serves side work.
 		if [ "${fleet}" = loom-pool ] && [ "${number}" -gt "${starInstances}" ]; then
@@ -71,11 +87,12 @@ for member in json.load(sys.stdin):
 		fi
 		if [ -n "${stagedPrompt}" ] && { [ -z "${stagedOn:-}" ] || [ "${stagedOn}" = "${id}" ]; }; then
 			./node_modules/.bin/ahra ai send "${id}" --message-file "${stagedPrompt}" > /dev/null 2>&1 || continue
+			running=$((running + 1))
 			stagedOn=${id}
 			echo "${staged} ${id}" > "${staging}"
 			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: next serve turn sent on the staged runner ${staged:0:12}"
 			continue
 		fi
-		./node_modules/.bin/ahra ai send "${id}" --message-file "${memberPrompt}" > /dev/null 2>&1 && echo "$(date -u +%H:%M:%S) ${fleet} ${id}: next serve turn sent ($(basename "${memberPrompt}" .md | sed 's/^rearm-//'))"
+		./node_modules/.bin/ahra ai send "${id}" --message-file "${memberPrompt}" > /dev/null 2>&1 && running=$((running + 1)) && echo "$(date -u +%H:%M:%S) ${fleet} ${id}: next serve turn sent ($(basename "${memberPrompt}" .md | sed 's/^rearm-//'))"
 	done
 done
