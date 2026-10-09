@@ -586,6 +586,7 @@ func plan(arguments []string) error {
 	remainder := flags.Bool("remainder", false, "also run, per package, every test the reference doesn't name (a gate, not a parity check)")
 	stages := flags.Bool("stages", false, "also run the gate's other stages as units (today: go build and go vet)")
 	phasesTools := flags.String("phases", "", "also run the whole gate's other phases as units, through run.py --phase at this tools sha")
+	loomTimes := flags.String("loom-times", "", "size each test by its seconds on Loom's own units (compare --times), where it has them")
 	phaseUnits := flags.String("phase-units", "", "with --phases, the units to run: one line each, <phase> or <phase> <unit> (run.py --list-units)")
 	flags.BoolVar(&splitAll, "split-all", false, "split every test with subtests over 30 s, not only the gate's audited parents")
 	if err := flags.Parse(arguments); err != nil {
@@ -597,6 +598,20 @@ func plan(arguments []string) error {
 	reference, err := readTestsFile(*referencePath, *only)
 	if err != nil {
 		return err
+	}
+	// A test Loom has timed is packed by that time: the box's wall on 64 cores understates a parallel test on 4 CPUs
+	// (8161285a's tsprinter TestMutants: 304 s on the Threadripper, 963 s on a Codex instance).
+	if *loomTimes != "" {
+		timed, err := readLoomTimes(*loomTimes)
+		if err != nil {
+			return err
+		}
+		for key, seconds := range timed {
+			if outcome, known := reference[key]; known {
+				outcome.seconds = seconds
+				reference[key] = outcome
+			}
+		}
 	}
 	opening := boxOpening
 	if *target == "codex" {
@@ -806,6 +821,27 @@ func plan(arguments []string) error {
 	encoder.SetIndent("", "  ")
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(job)
+}
+
+// readLoomTimes reads compare --times' file into each test's seconds on Loom, keyed "<package> <test>".
+func readLoomTimes(path string) (map[string]float64, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	timed := map[string]float64{}
+	for number, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
+		fields := strings.Split(line, "\t")
+		if number == 0 && len(fields) > 0 && fields[0] == "loom_seconds" {
+			continue
+		}
+		seconds, err := strconv.ParseFloat(fields[0], 64)
+		if len(fields) != 5 || err != nil {
+			return nil, fmt.Errorf("%s:%d: want loom_seconds, whole_gate_seconds, unit, package, test", path, number+1)
+		}
+		timed[fields[3]+" "+fields[4]] = seconds
+	}
+	return timed, nil
 }
 
 // phaseJobUnits is one unit per line of the phase list: run.py's own phase, or one unit of it, on the candidate.

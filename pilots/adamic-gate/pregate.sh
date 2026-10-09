@@ -72,12 +72,17 @@ pregate() {
 	inputs=$(cat "${HOME}/.loom/gate-inputs" 2> /dev/null)
 	# LOOM_PREGATE_WHOLE=1 asks for the whole set on the star's pool for a candidate no train branch names yet (a
 	# lane's next star, such as compiler's V2 on Oct 9).
+	split=()
 	if [ "${LOOM_PREGATE_WHOLE:-}" = 1 ] || star "${sha}"; then
 		pool=codex units=$((starSlots * 2)) only="" scope="the whole Go test set"
+		# Child by child, sized by Loom's own 4-CPU times where it has them (~/.loom/loom-times.tsv, compare --times of
+		# a recent whole set): cf04e18f's 851 s unit was tsprinter's TestMutants run whole, 304 s on a box.
+		split=(--split-all)
+		[ -s "${HOME}/.loom/loom-times.tsv" ] && split+=(--loom-times "${HOME}/.loom/loom-times.tsv")
 	else
 		pool=codex-side units=15 only=${packages} scope="the red-prone packages"
 	fi
-	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" > "${job}" 2> /dev/null || { void "${sha}" "planning failed"; return; }
+	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" ${split[@]+"${split[@]}"} > "${job}" 2> /dev/null || { void "${sha}" "planning failed"; return; }
 	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
 	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
 	"${planner}" reds --job "${job}" --record "${record}" > "${report}" 2>&1

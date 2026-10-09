@@ -90,3 +90,14 @@ func TestTheUnplannedSpecNamesTheKnownPackagesAndCompareReadsIt(t *testing.T) {
 		t.Fatalf("unitBody: %v %s", err, output)
 	}
 }
+
+func TestLoomTimesAreReadByPackageAndTest(t *testing.T) {
+	path := writeList(t, "loom_seconds\twhole_gate_seconds\tunit\tpackage\ttest\n962.80\t303.73\ttests-38\t"+module+"stage1/cohere/tsprinter\tTestMutants\n")
+	timed, err := readLoomTimes(path)
+	if err != nil || timed[module+"stage1/cohere/tsprinter TestMutants"] != 962.80 || len(timed) != 1 {
+		t.Fatalf("%v %v", timed, err)
+	}
+	if _, err := readLoomTimes(writeList(t, "loom_seconds\nx\ty\n")); err == nil {
+		t.Fatal("a malformed line was read")
+	}
+}
