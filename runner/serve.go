@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/system-inc/loom/protocol"
@@ -34,6 +36,15 @@ type ServeOptions struct {
 	// Report receives what goes wrong with the pool itself, one line each; a unit's events go to
 	// Unit.Events. Nil discards it.
 	Report io.Writer
+	// MinimumFreeMegabytes is the room a unit needs on the instance (#zzmz489): below it on the workspace's disk or a
+	// strict runner's root, serve asks the pool for nothing and looks again every UnfitPause, so a full instance stops
+	// taking units it can only break (Oct 9: instances at 0.15 s a unit drained the queue from 21:00Z). Zero means
+	// 1500, the units' own floor.
+	MinimumFreeMegabytes int64
+	// UnfitPause is how long serve waits before looking at an unfit disk again. Zero means 30 s.
+	UnfitPause time.Duration
+	// freeMegabytes reads a path's free room; nil means the file system's. Tests plant a full disk through it.
+	freeMegabytes func(path string) (int64, error)
 }
 
 // A ServeSummary is how a serving runner ended: how many units it ran and how each finished, how long it
@@ -45,11 +56,18 @@ type ServeSummary struct {
 	Broken  int
 	Seconds float64
 	Stopped string
+	// Unfit says why the instance couldn't take a unit when serving ended ("1200 MB free on /tmp"), or is empty. The
+	// summary line then ends "unfit: ...", which rearm.sh reads to leave the instance alone.
+	Unfit string
 }
 
 func (summary ServeSummary) String() string {
-	return fmt.Sprintf("loom-runner serve: %d units, %d passed, %d failed, %d broken in %.0f s; stopped %s",
+	line := fmt.Sprintf("loom-runner serve: %d units, %d passed, %d failed, %d broken in %.0f s; stopped %s",
 		summary.Units, summary.Passed, summary.Failed, summary.Broken, summary.Seconds, summary.Stopped)
+	if summary.Unfit != "" {
+		line += "; unfit: " + summary.Unfit
+	}
+	return line
 }
 
 // errPoolRefused is an answer from the pool that asking again can't change: a token it doesn't take, a pool
@@ -68,6 +86,22 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	if options.Report == nil {
 		options.Report = io.Discard
 	}
+	if options.MinimumFreeMegabytes == 0 {
+		options.MinimumFreeMegabytes = 1500
+	}
+	if options.UnfitPause == 0 {
+		options.UnfitPause = 30 * time.Second
+	}
+	if options.freeMegabytes == nil {
+		options.freeMegabytes = freeMegabytes
+	}
+	// The disks a unit writes: its workspace's, and a strict runner's root, where its test job keeps the checkout.
+	disks := []string{unitOptions.WorkspaceParent}
+	if root := unitOptions.Root; root != "" {
+		disks = append(disks, root)
+	} else if unitOptions.Strict {
+		disks = append(disks, "/tmp")
+	}
 	cpus := describeMachine().cpus
 	summary := ServeSummary{}
 	failures := 0
@@ -79,6 +113,18 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		if time.Until(options.Deadline) < options.Margin {
 			summary.Stopped = "at the deadline"
 			break
+		}
+		if unfit := unfitDisk(options, disks); unfit != summary.Unfit {
+			if unfit != "" {
+				fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; asking for no unit until there is room\n", unfit)
+			} else {
+				fmt.Fprintf(options.Report, "loom-runner serve: room again; asking for units\n")
+			}
+			summary.Unfit = unfit
+		}
+		if summary.Unfit != "" {
+			pause(serveContext, options.Deadline.Add(-options.Margin), options.UnfitPause)
+			continue
 		}
 		asked := time.Now()
 		unit, found, err := askForUnit(serveContext, options, unitOptions.Client, cpus)
@@ -141,6 +187,36 @@ func ReadTokenFile(path string) (string, error) {
 		return "", fmt.Errorf("the pool token file %s is empty", path)
 	}
 	return token, nil
+}
+
+// unfitDisk names the first disk with less room than a unit needs ("1200 MB free on /tmp"), or is empty. A disk it
+// can't read counts as unfit: serving blind is how a full instance eats the queue.
+func unfitDisk(options ServeOptions, disks []string) string {
+	for _, disk := range disks {
+		free, err := options.freeMegabytes(disk)
+		if err != nil {
+			return fmt.Sprintf("free room on %s unreadable: %v", disk, err)
+		}
+		if free < options.MinimumFreeMegabytes {
+			return fmt.Sprintf("%d MB free on %s, under %d", free, disk, options.MinimumFreeMegabytes)
+		}
+	}
+	return ""
+}
+
+// freeMegabytes is the room an unprivileged process may use on path's file system, read at its nearest existing
+// directory, since a fresh instance makes its workspace only with its first unit.
+func freeMegabytes(path string) (int64, error) {
+	var stat syscall.Statfs_t
+	err := syscall.Statfs(path, &stat)
+	for errors.Is(err, syscall.ENOENT) && filepath.Dir(path) != path {
+		path = filepath.Dir(path)
+		err = syscall.Statfs(path, &stat)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return int64(stat.Bavail * uint64(stat.Bsize) >> 20), nil
 }
 
 // serveBackoff doubles from a second to at most thirty while the pool keeps failing.

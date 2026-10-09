@@ -4,7 +4,9 @@
 # sends the next turn. Run every 2 minutes (LaunchAgent com.loom.rearm, StartInterval 120; at 10, 10 of the star's 72 sat
 # finished between passes, Oct 9), it sends the serve prompt to every
 # fleet member whose session has completed. A member whose last reply says Codex's approval review rejected the
-# runner is left alone: sending again only spends a turn on the same refusal.
+# runner is left alone: sending again only spends a turn on the same refusal. So is one whose serve ended unfit (its
+# summary line ends "unfit: <N> MB free on <path>", #zzmz489): its disk can't hold a unit, and another turn would only
+# stand down again.
 set -uo pipefail
 ahra=/Users/kirkouimet/Projects/ahra
 runner=${LOOM_RUNNER_SHA:-7f01c04925b5bcdf4c2359abcee90f0723b656867e696313db20391d08cdada7}
@@ -99,8 +101,8 @@ for member in json.load(sys.stdin):
 		# approval review blocked this worker", "I can't execute a worker that accepts unspecified remote jobs", "I haven't
 		# run it"): all 29 members re-sent between 19:50 and 20:25Z had refused, each re-sent about every 5 minutes.
 		summary=$(./node_modules/.bin/ahra ai summary "${id}" 2> /dev/null)
-		if grep -qiE "approval.{0,20}reject|approval review|can.t (execute|run)|(has|was|did) not run|(hasn|wasn|haven).t run|no command (was )?ran|is retired from this pool" <<< "${summary}"; then
-			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: left alone, $(grep -qi "is retired from this pool" <<< "${summary}" && echo "the pool retired its worker" || echo "Codex's approval review rejected the runner")"
+		if grep -qiE "approval.{0,20}reject|approval review|can.t (execute|run)|(has|was|did) not run|(hasn|wasn|haven).t run|no command (was )?ran|is retired from this pool|unfit: [0-9]+ MB free" <<< "${summary}"; then
+			echo "$(date -u +%H:%M:%S) ${fleet} ${id}: left alone, $(grep -qi "is retired from this pool" <<< "${summary}" && echo "the pool retired its worker" || { grep -qiE "unfit: [0-9]+ MB free" <<< "${summary}" && echo "its serve stood down on a full disk"; } || echo "Codex's approval review rejected the runner")"
 			continue
 		fi
 		if [ -n "${stagedPrompt}" ] && { [ -z "${stagedOn:-}" ] || [ "${stagedOn}" = "${id}" ]; }; then

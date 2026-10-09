@@ -219,3 +219,70 @@ func TestThePoolTokenFileIsReadOnceAndRemoved(t *testing.T) {
 		t.Fatalf("an empty token file was taken")
 	}
 }
+
+// A planted full disk (#zzmz489): serve asks the pool for nothing while there's no room for a unit, says so once,
+// and asks again once there is. The mutant that asks anyway (the stand-down's continue dropped) takes the unit while
+// the disk is full and fails here.
+func TestServeStandsDownOnAFullDiskAndAsksAgainOnceThereIsRoom(t *testing.T) {
+	pool := newTestPool(t)
+	pool.queue = []protocol.Unit{pool.unit("a", "true")}
+	var report lockedBuffer
+	options := pool.serveOptions(t, time.Now().Add(2*time.Second), 500*time.Millisecond, io.Discard)
+	options.Report, options.UnfitPause = &report, 20*time.Millisecond
+	var mutex sync.Mutex
+	full, asksWhileFull := true, 0
+	options.freeMegabytes = func(path string) (int64, error) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		pool.mutex.Lock()
+		asked := len(pool.askers)
+		pool.mutex.Unlock()
+		if full {
+			asksWhileFull = asked
+			return 900, nil
+		}
+		return 50000, nil
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		mutex.Lock()
+		full = false
+		mutex.Unlock()
+	}()
+	summary, err := Serve(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asksWhileFull != 0 {
+		t.Fatalf("asked the pool %d times with 900 MB free", asksWhileFull)
+	}
+	if summary.Units != 1 || summary.Passed != 1 || summary.Unfit != "" {
+		t.Fatalf("summary %+v", summary)
+	}
+	if text := string(report.Bytes()); strings.Count(text, "unfit: 900 MB free on ") != 1 || !strings.Contains(text, "room again") {
+		t.Fatalf("report %q", text)
+	}
+}
+
+// Full to the end: no unit taken, and the summary line says unfit, which rearm.sh reads to leave the instance alone.
+func TestServeFullToItsDeadlineTakesNothingAndSaysUnfit(t *testing.T) {
+	pool := newTestPool(t)
+	pool.queue = []protocol.Unit{pool.unit("a", "true")}
+	options := pool.serveOptions(t, time.Now().Add(1500*time.Millisecond), time.Second, io.Discard)
+	options.UnfitPause = 20 * time.Millisecond
+	options.freeMegabytes = func(path string) (int64, error) { return 12, nil }
+	summary, _ := Serve(context.Background(), options)
+	pool.mutex.Lock()
+	asks := len(pool.askers)
+	pool.mutex.Unlock()
+	if asks != 0 || summary.Units != 0 || !strings.HasSuffix(summary.String(), "; stopped at the deadline; unfit: 12 MB free on "+options.Unit.WorkspaceParent+", under 1500") {
+		t.Fatalf("asks %d, summary %q", asks, summary.String())
+	}
+}
+
+func TestFreeMegabytesReadsTheNearestDirectoryThatExists(t *testing.T) {
+	free, err := freeMegabytes(filepath.Join(t.TempDir(), "not", "made", "yet"))
+	if err != nil || free <= 0 {
+		t.Fatalf("free %d, %v", free, err)
+	}
+}
