@@ -363,18 +363,26 @@ if complete == "yes":
 json.dump(record, open(path, "w"), indent=2)
 PY
 	find "${record}" -type f -size +5M -name '*.jsonl' -exec gzip -9 {} \;
-	index=$(mktemp -u)
-	gitDirectory=$(git -C "${gate}" rev-parse --absolute-git-dir)
-	tree=$(cd "${record}" && GIT_INDEX_FILE=${index} git --git-dir="${gitDirectory}" --work-tree=. add -A -f . && GIT_INDEX_FILE=${index} git --git-dir="${gitDirectory}" write-tree)
-	commit=$(git -C "${gate}" commit-tree "${tree}" -m "Fast gate of ${sha} on Loom's side pool: ${verdict%%(*}")
-	git -C "${gate}" push -q origin "${commit}:refs/heads/gate-logs/${sha:0:12}/${stamp}/fast" || echo "fast: publishing ${sha:0:12}'s record failed"
-	# The merge's own record path too, so push-main lands the merge by its record (#11ymb02).
-	gated=$(cat "${work}/gate" 2> /dev/null)
-	if [[ ${gated} =~ ^[0-9a-f]{40}$ ]] && [ "${gated}" != "${sha}" ]; then
-		git -C "${gate}" push -q origin "${commit}:refs/heads/gate-logs/${gated:0:12}/${stamp}/fast" || echo "fast: publishing ${gated:0:12}'s record failed"
+	local recordPath=gate-logs/${sha:0:12}/${stamp}/fast
+	if [ "${LOOM_FAST_PUBLISH:-1}" = 0 ]; then
+		# A canary's record proves tools, not a candidate (#feg6ame): it stays in the job's work directory, where no
+		# watcher and no push-main reads it as a gate record.
+		recordPath=${work}/record-${stamp}
+		mv "${record}" "${recordPath}"
+	else
+		index=$(mktemp -u)
+		gitDirectory=$(git -C "${gate}" rev-parse --absolute-git-dir)
+		tree=$(cd "${record}" && GIT_INDEX_FILE=${index} git --git-dir="${gitDirectory}" --work-tree=. add -A -f . && GIT_INDEX_FILE=${index} git --git-dir="${gitDirectory}" write-tree)
+		commit=$(git -C "${gate}" commit-tree "${tree}" -m "Fast gate of ${sha} on Loom's side pool: ${verdict%%(*}")
+		git -C "${gate}" push -q origin "${commit}:refs/heads/gate-logs/${sha:0:12}/${stamp}/fast" || echo "fast: publishing ${sha:0:12}'s record failed"
+		# The merge's own record path too, so push-main lands the merge by its record (#11ymb02).
+		gated=$(cat "${work}/gate" 2> /dev/null)
+		if [[ ${gated} =~ ^[0-9a-f]{40}$ ]] && [ "${gated}" != "${sha}" ]; then
+			git -C "${gate}" push -q origin "${commit}:refs/heads/gate-logs/${gated:0:12}/${stamp}/fast" || echo "fast: publishing ${gated:0:12}'s record failed"
+		fi
+		rm -f "${index}" "${record}"/* && rmdir "${record}"
 	fi
-	rm -f "${index}" "${record}"/* && rmdir "${record}"
-	{ echo "${verdict}"; echo "record: gate-logs/${sha:0:12}/${stamp}/fast"; [ -s "${work}/phases-ref" ] && echo "phases: $(cat "${work}/phases-ref")"; } > "${jobs}/${sha}.verdict.partial"
+	{ echo "${verdict}"; echo "record: ${recordPath}"; [ -s "${work}/phases-ref" ] && echo "phases: $(cat "${work}/phases-ref")"; } > "${jobs}/${sha}.verdict.partial"
 	mv "${jobs}/${sha}.verdict.partial" "${jobs}/${sha}.verdict"
 	rm -f "${jobs}/${sha}.running"
 	echo "$(date -u +%H:%M:%S) ${verdict}"
