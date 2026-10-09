@@ -7,6 +7,8 @@ import { jsonResponse } from './Http';
 import type { TokenScope } from './Token';
 import { authorize } from './Worker';
 
+export { Queue } from './Queue';
+
 // A change is submitted with its owner's submit token; any of these reads one, and Changes.ts says which may do what.
 const changeScopes: TokenScope[] = ['submit', 'coordinator', 'board'];
 
