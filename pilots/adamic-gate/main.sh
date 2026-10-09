@@ -17,7 +17,8 @@ while true; do
 		LOOM_PREGATE_WHOLE=1 "${HOME}/.loom/bin/pregate.sh" --once "${tip}" > "${state}/${tip}.out" 2>&1
 		work=${HOME}/.loom/pregate
 		if [ -s "${work}/${tip}.record.jsonl" ]; then
-			"${planner}" reds --job "${work}/${tip}.job.json" --record "${work}/${tip}.record.jsonl" --tests "${state}/${tip}.tests.jsonl" > /dev/null 2>&1
+			gzip -dc "${work}/${tip}.tests.jsonl.gz" > "${state}/${tip}.tests.jsonl" 2> /dev/null ||
+				"${planner}" reds --job "${work}/${tip}.job.json" --record "${work}/${tip}.record.jsonl" --tests "${state}/${tip}.tests.jsonl" > /dev/null 2>&1
 			python3 "${burndown}" "${state}/${tip}.tests.jsonl" --run "main ${tip:0:12}, $(head -1 "${work}/${tip}.verdict" | cut -d' ' -f1)" > "${state}/${tip}.burndown.md"
 			(cd /Users/kirkouimet/Projects/ahra && ./node_modules/.bin/ahra tasks comment 5g5151k --role Agent --text-file "${state}/${tip}.burndown.md" > /dev/null 2>&1 || true)
 			gzip -9f "${state}/${tip}.tests.jsonl"

@@ -85,8 +85,15 @@ pregate() {
 	"${planner}" plan --target codex --remainder --gate-inputs "${inputs}" --reference "${reference}" --sha "${sha}" --units "${units}" --only "${only}" ${split[@]+"${split[@]}"} > "${job}" 2> /dev/null || { void "${sha}" "planning failed"; return; }
 	printf 'running\npre-gate of %s (%s) on %s since %s\n' "${sha}" "${scope}" "${pool}" "$(date -u +%H:%M:%SZ)" > "${verdicts}/${sha}"
 	"${loom}" run --uncached --slots none --pool "${pool}=$([ "${pool}" = codex ] && echo "${starSlots}" || echo 15)" --record "${record}" "${job}" > "${work}/${sha}.log" 2>&1
-	"${planner}" reds --job "${job}" --record "${record}" > "${report}" 2>&1
+	"${planner}" reds --job "${job}" --record "${record}" --tests "${work}/${sha}.tests.jsonl" > "${report}" 2>&1
 	case $? in 0) verdict=green ;; 1) verdict=red ;; *) verdict=void ;; esac
+	# Every run teaches the times table (#2en3b4t): its leaves and parents by their own seconds on 4 CPUs, then the
+	# p90s the next plan packs by.
+	if [ -s "${work}/${sha}.tests.jsonl" ]; then
+		python3 "${HOME}/.loom/bin/times.py" update "${work}/${sha}.tests.jsonl" --sha "${sha}" --run "$(head -1 "${report}" | awk '{print $2}' | tr -d :)" &&
+			python3 "${HOME}/.loom/bin/times.py" tsv > "${HOME}/.loom/loom-times.tsv.partial" && mv "${HOME}/.loom/loom-times.tsv.partial" "${HOME}/.loom/loom-times.tsv"
+		gzip -9f "${work}/${sha}.tests.jsonl"
+	fi
 	run=$(head -1 "${report}" | awk '{print $2}' | tr -d :)
 	summary="pre-gate of ${sha} (${scope}, ${pool}) in $((SECONDS - started)) s,$(head -1 "${report}" | cut -d, -f2-) (run ${run}, list ${report})"
 	echo "${verdict} ${summary}" > "${work}/${sha}.verdict"
