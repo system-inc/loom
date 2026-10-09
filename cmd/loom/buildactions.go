@@ -26,13 +26,15 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	home, _ := os.UserHomeDir()
 	tokenFile := flags.String("token-file", filepath.Join(home, ".loom", "build-token"), "file holding this builder's build token")
 	packages := flags.String("packages", "", "comma-separated import paths to build (default: every package with a product test)")
-	scratch := flags.String("scratch", "", "where each action's fresh cache directory goes (default: the system temporary directory)")
+	scratch := flags.String("scratch", "", "where each action's build log goes (default: the system temporary directory)")
+	cache := flags.String("cache", filepath.Join(home, "loom-builder", "cache"), "the build's buildcache directory, shared by its actions and kept between builds")
+	jobs := flags.Int("jobs", 4, "actions built at once")
 	list := flags.Bool("list", false, "print each action and its productKey, and build nothing")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		return 2
 	}
 	if *tree == "" || *gateTools == "" || (*write == "" && !*list) {
-		fmt.Fprintln(stderr, "usage: loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--read <url>] [--token-file <path>] [--packages a,b] [--scratch <dir>] [--list]")
+		fmt.Fprintln(stderr, "usage: loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--read <url>] [--token-file <path>] [--packages a,b] [--cache <dir>] [--jobs N] [--scratch <dir>] [--list]")
 		return 2
 	}
 	selected := []string{}
@@ -91,7 +93,9 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Store:   builder.Store{Read: strings.TrimSuffix(*read, "/"), Write: strings.TrimSuffix(*write, "/"), Token: strings.TrimSpace(string(token))},
 		Key:     key,
 		Run:     builder.GoTest(*tree),
+		Cache:   *cache,
 		Scratch: *scratch,
+		Jobs:    *jobs,
 	}
 	failed := 0
 	for _, result := range work.Build(actions) {
