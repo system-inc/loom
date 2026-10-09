@@ -93,7 +93,19 @@ rm -rf /tmp/go-build* /tmp/Test* /tmp/adamic-npm/replaced-* /tmp/adamic-npm/*.st
 # there, the markdown width dependencies, and that stays.
 find /tmp/adamic-gate -mindepth 1 -maxdepth 1 ! -name 'markdown-width-*' -exec rm -rf {} + 2> /dev/null
 find /tmp -maxdepth 1 -name 'loom-unit-*' ! -path "$(dirname "${PWD}")" ! -path "${PWD}" -exec rm -rf {} + 2> /dev/null
+# Phase units leave their stage 3 lane trees and a tools checkout per tools sha (Oct 9 08:0xZ: 940 MB of one lane and
+# 2.0 GB of tools on an instance with 1.3 GB free; 16 of main b524594354a2's 27 phase reds were full disks). No later
+# unit reads a lane tree, and only the newest tools checkout is likely to be wanted again.
+rm -rf /tmp/adamic-stage3-lane-* 2> /dev/null
+ls -1dt /tmp/adamic-gate-tools/*/ 2> /dev/null | tail -n +2 | while read -r stale; do rm -rf "${stale}"; done
 [ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
+# A home kept under /tmp shares the 8.8 GB with the tree (Oct 9: a8ff7263308d held /tmp/loom-home at 5.4 GB and
+# /tmp/adamic at 3.4 GB, 0 MB free, and voided every select unit it took for 20 minutes, each in under a second). The
+# tree and the npm cache are the things a unit makes again in a minute, so they go before the unit gives up.
+if [ "$(freeMegabytes)" -lt "${LOOM_MINIMUM_FREE_MB:-1500}" ]; then
+  echo "loom-pilot: $(freeMegabytes) MB free after trimming; the tree and the npm cache are made again"
+  rm -rf "${tree}" /tmp/adamic-npm
+fi
 free=$(freeMegabytes)
 [ "${free:-0}" -ge "${LOOM_MINIMUM_FREE_MB:-1500}" ] || { echo "loom-pilot: only ${free} MB free on the instance after trimming its caches: Loom's fault"; df -h "${HOME}" /tmp; du -xsh /tmp/* 2> /dev/null | sort -h | tail -8; exit 2; }
 # Submodules are recorded over ssh; a cloud instance reaches GitHub over HTTPS only. The rewrite rides in the
