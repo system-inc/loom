@@ -341,6 +341,9 @@ export class GitHubHistory implements History {
     }
 
     async facts(sha: string, base: string): Promise<GitFacts> {
+        if (this.token === '') {
+            throw new Error('the queue has no GitHub token to read git with');
+        }
         const forward = await this.compare(base, sha);
         if (forward === null) {
             return { shaExists: false, baseIsAncestor: false, baseOnMain: false, diffPaths: [] };
@@ -523,8 +526,15 @@ export class Queue extends DurableObject<Env> {
         if (typeof checked === 'string') {
             return jsonResponse(422, { reason: checked });
         }
-        // Git is asked before the object's turn is taken, since asking waits on the network.
-        const facts = await this.history.facts(checked.sha, checked.base);
+        // Git is asked before the object's turn is taken, since asking waits on the network. When git can't be asked,
+        // nothing is decided, so nothing is logged: the submitter tries again.
+        let facts: GitFacts;
+        try {
+            facts = await this.history.facts(checked.sha, checked.base);
+        }
+        catch (error) {
+            return jsonResponse(503, { reason: `git facts are unavailable, try again: ${(error as Error).message}` });
+        }
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
             const reason = refusalOf(checked, facts, state);
