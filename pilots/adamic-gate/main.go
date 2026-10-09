@@ -329,6 +329,29 @@ if [ "${vet}" = 0 ]; then echo "loom-stage: go vet ./... passed"; else echo "loo
 [ "${build}" = 0 ] && [ "${vet}" = 0 ]
 `
 
+// phaseBody runs one phase of the whole gate, or one unit of a phase, through the gate's own run.py from the tools
+// commit (run.py --full --phase, developer tools' file), so Loom never keeps a copy of the gate's logic. The tools
+// tree is a worktree of the instance's clone at the tools sha, made once per sha. run.py's out directory comes back
+// whole as phase.tar.gz; its exit is the unit's, and only a missing tools tree is Loom's fault (exit 2).
+const phaseBody = `toolsSha=$1 phase=$2 unitName=${3:-}
+[ -n "${tree:-}" ] && [ -d "${tree}/.git" ] && [ -n "${out:-}" ] || { echo "loom-phase: no tree (the opening never ran): Loom's fault"; exit 2; }
+gateTools=/tmp/adamic-gate-tools/${toolsSha:0:12}
+if [ ! -f "${gateTools}/cloud/fast-gate/run.py" ]; then
+  mkdir -p /tmp/adamic-gate-tools
+  git -C "${tree}" worktree prune
+  staging=/tmp/adamic-gate-tools/staging-$$
+  retry git -C "${tree}" fetch -q origin "${toolsSha}" && git -C "${tree}" worktree add -q --detach "${staging}" "${toolsSha}" && mv "${staging}" "${gateTools}" || { echo "loom-phase: tools checkout of ${toolsSha} failed: Loom's fault"; exit 2; }
+fi
+export ADAMIC_GATE_UNCACHED=1 ADAMIC_TEST_WASI=1 ADAMIC_ORACLE_WASI=1 ADAMIC_GATE_COHERE=1
+echo "loom-phase: $(hostname) ${phase}${unitName:+ ${unitName}} at ${sha:0:12}, tools ${toolsSha:0:12}, setup $(( SECONDS - started )) s"
+python3 "${gateTools}/cloud/fast-gate/run.py" --full --phase "${phase}" ${unitName:+--unit "${unitName}"} --tree "${tree}" --sha "${sha}" --base "${sha}" --tools "${gateTools}" --out "${out}/phase" > "${out}/phase.log" 2>&1
+code=$?
+tar -C "${out}" -czf "${out}/phase.tar.gz" phase phase.log
+echo "loom-phase: $(head -1 "${out}/phase/status.txt" 2> /dev/null || echo "no status.txt") (exit ${code}, $(( SECONDS - started )) s in all)"
+[ "${code}" = 0 ] || tail -20 "${out}/phase.log"
+exit "${code}"
+`
+
 // warmBody readies an instance for the sha's real units without running a test: every test binary built and
 // vetted (`-exec /bin/true` stands in for running it), so a run's units find the build cache warm.
 const warmBody = `cd "${tree}" || exit 2
@@ -540,6 +563,8 @@ func plan(arguments []string) error {
 	gateInputs := flags.String("gate-inputs", "", "on codex, the hash of the gate inputs' manifest in the public store")
 	remainder := flags.Bool("remainder", false, "also run, per package, every test the reference doesn't name (a gate, not a parity check)")
 	stages := flags.Bool("stages", false, "also run the gate's other stages as units (today: go build and go vet)")
+	phasesTools := flags.String("phases", "", "also run the whole gate's other phases as units, through run.py --phase at this tools sha")
+	phaseUnits := flags.String("phase-units", "", "with --phases, the units to run: one line each, <phase> or <phase> <unit> (run.py --list-units)")
 	flags.BoolVar(&splitAll, "split-all", false, "split every test with subtests over 30 s, not only the gate's audited parents")
 	if err := flags.Parse(arguments); err != nil {
 		return err
@@ -685,6 +710,13 @@ func plan(arguments []string) error {
 		}
 	}
 	job := protocol.Job{Name: "adamic-gate-pilot"}
+	if *phasesTools != "" {
+		units, err := phaseJobUnits(opening, *sha, *phasesTools, *phaseUnits)
+		if err != nil {
+			return err
+		}
+		job.Units = append(job.Units, units...)
+	}
 	if *stages {
 		job.Units = append(job.Units, protocol.JobUnit{
 			Id: "stage-build-vet", Argv: []string{"bash", "-c", opening + buildVetBody, "adamic-gate-stage", *sha}, TimeoutSeconds: 3600,
@@ -750,6 +782,43 @@ func plan(arguments []string) error {
 	encoder.SetEscapeHTML(false)
 	return encoder.Encode(job)
 }
+
+// phaseJobUnits is one unit per line of the phase list: run.py's own phase, or one unit of it, on the candidate.
+func phaseJobUnits(opening string, sha string, toolsSha string, listPath string) ([]protocol.JobUnit, error) {
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(toolsSha) {
+		return nil, fmt.Errorf("--phases takes the tools commit, a full 40-character sha")
+	}
+	content, err := os.ReadFile(listPath)
+	if err != nil {
+		return nil, fmt.Errorf("--phase-units: %w", err)
+	}
+	var units []protocol.JobUnit
+	seen := map[string]bool{}
+	for number, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) > 2 || !phaseName.MatchString(fields[0]) || (len(fields) == 2 && !phaseName.MatchString(fields[1])) {
+			return nil, fmt.Errorf("%s:%d: a line is <phase> or <phase> <unit>, letters, digits, dots, dashes and underscores", listPath, number+1)
+		}
+		id := "phase-" + strings.Join(fields, "-")
+		if seen[id] {
+			return nil, fmt.Errorf("%s:%d: %s listed twice", listPath, number+1, strings.Join(fields, " "))
+		}
+		seen[id] = true
+		argv := append([]string{"bash", "-c", opening + phaseBody, "adamic-gate-phase", sha, toolsSha}, fields...)
+		units = append(units, protocol.JobUnit{Id: id, Argv: argv, TimeoutSeconds: 3600,
+			Outputs: []protocol.Output{{Glob: "loom-out/phase.tar.gz"}}, Resources: protocol.Resources{Cpus: 4}})
+	}
+	if len(units) == 0 {
+		return nil, fmt.Errorf("%s lists no phase", listPath)
+	}
+	return units, nil
+}
+
+// phaseName is a phase or unit name as run.py names them (catalog entries are numbers, wasi fixtures words).
+var phaseName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // warm plans one warm-up unit per Codex instance in the pool: the opening (clone, the gate's setup.sh once) and
 // warmBody at the sha. Each instance holds one unit at a time, so units equal to the pool's width reach every
