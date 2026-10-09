@@ -42,7 +42,7 @@ PYTHON
 fi
 cd "${ahra}" || exit 1
 # loom-star's members all serve the star's pool (@system_adamic, Oct 9 10:52Z: double the live star pool, measured in
-# steps of 20 against the account's concurrency cap); numbered 1 to 72, so none falls past LOOM_STAR_INSTANCES.
+# steps of 20 against the account's concurrency cap); all of them, whatever their number.
 for pair in loom-pool:codex loom-side:codex-side loom-star:codex; do
 	fleet=${pair%%:*} pool=${pair#*:}
 	prompt=${HOME}/.loom/rearm-${pool}.md
@@ -60,7 +60,8 @@ for member in json.load(sys.stdin):
         print('%s:%s' % (member['id'], number.group(1) if number else 0))"); do
 		id=${member%%:*} number=${member#*:}
 		memberPrompt=${prompt}
-		if [ "${pool}" = codex ] && [ "${number}" -gt "${starInstances}" ]; then
+		# loom-star is the star's pool whatever a member's number; only loom-pool past LOOM_STAR_INSTANCES serves side work.
+		if [ "${fleet}" = loom-pool ] && [ "${number}" -gt "${starInstances}" ]; then
 			memberPrompt=${HOME}/.loom/rearm-codex-side.md
 			"${HOME}/.loom/bin/loom-pregate" pool prompt --runner "${runner}" ${before[@]+"${before[@]}"} --until 115m codex-side > "${memberPrompt}" || continue
 		fi
