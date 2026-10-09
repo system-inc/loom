@@ -391,14 +391,30 @@ while true; do
 	for request in "${jobs}"/*.cancel; do
 		[ -e "${request}" ] && cancel "$(basename "${request}" .cancel)"
 	done
-	for job in "${jobs}"/*.json; do
-		[ -e "${job}" ] || continue
-		sha=$(basename "${job}" .json)
-		[[ ${sha} =~ ^[0-9a-f]{40}$ ]] || continue
-		[ -f "${jobs}/${sha}.verdict" ] || [ -f "${jobs}/${sha}.running" ] || [ -f "${jobs}/${sha}.cancelled" ] && continue
-		[ "$(find "${jobs}" -maxdepth 1 -name '*.running' | wc -l)" -ge "${concurrent}" ] && break
+	# Waiting jobs start highest priority first (@system_adamic's tiers, Oct 9 09:25Z), and the star's (30 and up) never
+	# wait on the concurrency cap: on Oct 9 the star's job sat unstarted behind eight priority-0 jobs.
+	waiting=$(python3 - "${jobs}" <<'PYTHON'
+import json, os, re, sys
+jobs = sys.argv[1]
+ready = []
+for name in os.listdir(jobs):
+    sha = name[:-5] if name.endswith(".json") else ""
+    if not re.fullmatch(r"[0-9a-f]{40}", sha) or any(os.path.exists(os.path.join(jobs, sha + end)) for end in (".verdict", ".running", ".cancelled")):
+        continue
+    try:
+        priority = int(json.load(open(os.path.join(jobs, name))).get("priority", 0))
+    except (ValueError, OSError, TypeError):
+        priority = 0
+    ready.append((-priority, os.path.getmtime(os.path.join(jobs, name)), sha, priority))
+for _, _, sha, priority in sorted(ready):
+    print(sha, priority)
+PYTHON
+)
+	while read -r sha priority; do
+		[ -n "${sha}" ] || continue
+		[ "${priority}" -lt 30 ] && [ "$(find "${jobs}" -maxdepth 1 -name '*.running' | wc -l)" -ge "${concurrent}" ] && break
 		touch "${jobs}/${sha}.running"
 		within "${sha}" &
-	done
+	done <<< "${waiting}"
 	sleep 10
 done
