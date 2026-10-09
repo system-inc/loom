@@ -24,7 +24,10 @@ set -uo pipefail
 # after main's tip passes through them).
 export LOOM_BIN=${LOOM_BIN:-${HOME}/.loom/bin}
 bin=${LOOM_BIN}
-export LOOM_FAST_BUDGET=${LOOM_FAST_BUDGET-60}
+# Unset, ~/.loom/fast-budget decides (seconds or "off"), so the winner of canary 9's two runs (budget on against packed
+# products with it off, @system_adamic's (c), Oct 9 17:20Z) is set live by one file, never a redeploy; without it, 60.
+[ -n "${LOOM_FAST_BUDGET+set}" ] || LOOM_FAST_BUDGET=$(cat "${HOME}/.loom/fast-budget" 2> /dev/null || echo 60)
+export LOOM_FAST_BUDGET
 [ "${LOOM_FAST_BUDGET}" = off ] && LOOM_FAST_BUDGET=""
 sha=$1 packages=$2 requester=$3 slots=${4:-5} note=${5:-} pool=${LOOM_VERIFY_POOL:-codex-side}
 work=${LOOM_VERIFY_WORK:-${HOME}/.loom/verify/${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ)}

@@ -57,6 +57,9 @@ spec() { python3 -c 'import json, sys; job = json.load(open(sys.argv[1])); print
 # lands on).
 scenario; run $stubs/verify.sh off; check off-argv-is-today '[ "$(cat $T/argv)" = "$(today; products)" ]'
 scenario; run $stubs/verify.sh ""; check empty-argv-is-today '[ "$(cat $T/argv)" = "$(today; products)" ]'
+scenario; echo off > $home/.loom/fast-budget; run $stubs/verify.sh; check unset-reads-the-file-off '[ "$(cat $T/argv)" = "$(today; products)" ]'
+scenario; echo 45 > $home/.loom/fast-budget; run $stubs/verify.sh; check unset-reads-the-file-45 '[ "$(grep -A1 -x -- --budget $T/argv | tail -1)" = 45 ]'
+scenario; echo off > $home/.loom/fast-budget; run $stubs/verify.sh 60; check env-beats-the-file '[ "$(grep -A1 -x -- --budget $T/argv | tail -1)" = 60 ]'
 scenario; run $stubs/verify.sh; check unset-is-on-at-60 'grep -qx -- --budget $T/argv && [ "$(grep -A1 -x -- --budget $T/argv | tail -1)" = 60 ]'
 # A': off, the job is byte for byte the baseline's and its argv the baseline's and the products', even with a budgeted
 # attempt's only-tests.json left in the work directory (a re-plan reuses it).
