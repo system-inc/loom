@@ -57,8 +57,14 @@ job = json.load(open(work + "/tests.json"))
 # every package go list finds that the plan doesn't name; for a whole gate that's a package new since the reference,
 # but here the plan names only the selection, so it ran about 75 packages whole in one unit (Oct 9: 6b11cbda's and
 # trio 75d5288e's units ran past the 20-minute ceiling). A listed package the reference never saw is run below.
+# What the plan did name is kept, so the record can say how many packages it didn't run (@system_adamic, Oct 9 09:02Z).
+planned = set()
 for unit in job["units"]:
+    for spec in unit["argv"][5:]:
+        if spec.startswith("@unplanned="):
+            planned.update(name for name in spec[len("@unplanned="):].split(",") if name)
     unit["argv"] = unit["argv"][:5] + [spec for spec in unit["argv"][5:] if not spec.startswith("@unplanned=")]
+open(work + "/planned-packages.txt", "w").write("".join(name + "\n" for name in sorted(planned)))
 def quote(name):  # Go's regexp.QuoteMeta
     return "".join("\\" + c if c in "\\.+*?()|[]{}^$" else c for c in name)
 selection = json.load(open(selected)) if selected else {}

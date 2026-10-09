@@ -248,6 +248,13 @@ within() {
 # finish publishes the record and then writes the verdict, so the watcher never reads a verdict without its log.
 finish() {
 	local sha=$1 stamp=$2 verdict=$3 run=$4 work=${jobs}/$1.work record index gitDirectory tree commit gated
+	# A fast gate runs only its selection (verify.sh drops the planner's unplanned remainder): its record names how many
+	# packages with tests it didn't run, so nobody reads a fast green as covering them (@system_adamic, Oct 9 09:02Z).
+	local unplanned=""
+	if [ -s "${work}/planned-packages.txt" ]; then
+		unplanned=$(python3 "${HOME}/.loom/bin/treetests.py" "$(cat "${work}/gate" 2> /dev/null || echo "${sha}")" 2> /dev/null | cut -d' ' -f1 | sort -u | comm -23 - <(sort -u "${work}/planned-packages.txt") | wc -l | tr -d ' ')
+		[ -n "${unplanned}" ] && [ "${unplanned}" != 0 ] && verdict="${verdict}; unplanned: ${unplanned} packages, not run"
+	fi
 	# A job stopped at its ceiling (within) says so: its red stands, and a void names the ceiling, not Loom's breakage.
 	if [ -f "${work}/ceiling" ]; then
 		case "${verdict%%:*}" in
@@ -263,14 +270,16 @@ finish() {
 	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
 	# uncached_tests is the run's own mode, read from the coordinator's first line ("... units on N slots, uncached"),
 	# which push-main --fast-gate requires of a landing's Go-test record (integration, Oct 9 04:38Z).
-	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" "$(cat "${work}/gate" 2> /dev/null)" <<'PY'
+	python3 - "${record}/fast.json" "${verdict%%:*}" "${run}" "${sha}" "$(cat "${work}/branch" 2> /dev/null)" "$(cat "${work}/base" 2> /dev/null)" "$(head -1 "${work}/run.log" 2> /dev/null)" "$(cat "${work}/gate" 2> /dev/null)" "${unplanned}" <<'PY'
 import json, sys
-path, verdict, run, sha, branch, base, header, gate = sys.argv[1:]
+path, verdict, run, sha, branch, base, header, gate, unplanned = sys.argv[1:]
 record = {"finished": True, "verdict": verdict, "runner": "pool", "pool": "codex-side", "pool_run": run, "covers": "go-tests",
           "uncached_tests": header.rstrip().endswith(", uncached"), "sha": sha, "branch": branch, "base": base}
 # A gate of the tip merged onto main names both (#11ymb02), as the boxes' fast-gate.sh does.
 if gate and gate != sha:
     record.update({"candidate": sha, "gated": gate})
+if unplanned.isdigit():
+    record["unplanned_packages_not_run"] = int(unplanned)
 json.dump(record, open(path, "w"), indent=2)
 PY
 	find "${record}" -type f -size +5M -name '*.jsonl' -exec gzip -9 {} \;
