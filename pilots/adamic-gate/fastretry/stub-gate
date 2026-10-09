@@ -1,0 +1,11 @@
+#!/bin/bash
+# Stub adamic-gate plan: one unit per --phase-units line, named as the planner names them.
+units=
+while [ $# -gt 0 ]; do case $1 in --phase-units) units=$2; shift 2 ;; *) shift ;; esac; done
+python3 -c "
+import json, sys
+ids = []
+for line in open(sys.argv[1]):
+    kind, name = line.split()[0], line.split()[1]
+    ids.append('phase-fast' if kind == 'fast' else 'phase-stage3-' + name)
+print(json.dumps({'name': 'stub', 'units': [{'id': i, 'argv': ['true']} for i in ids]}))" "$units"

@@ -1,0 +1,3 @@
+#!/bin/bash
+# Stub curl: a PUT succeeds; a blob GET prints the phases tarball.
+case "$*" in *"-X PUT"*) exit 0 ;; *blobs*) cat $STUB/phase.tgz ;; *) exit 1 ;; esac

@@ -264,37 +264,56 @@ PY
 		--phases "${tools}" --phase-units "${work}/phases-units.txt" 2> "${work}/phases-plan.err" | python3 -c "
 import json, sys
 job = json.load(sys.stdin); job['name'] = 'adamic-gate-fast-phases'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/phases.json" || { echo "void: the phases couldn't be planned" > "${work}/phases-status"; return; }
-	"${bin}/loom-pregate" run --uncached --slots none --pool codex-side=1 --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/phases-record.jsonl" "${work}/phases.json" > "${work}/phases-run.log" 2>&1
-	run=$(head -1 "${work}/phases-run.log" | awk '{print $2}' | tr -d :)
-	token=$(python3 - "${run}" <<'PY'
+	# A phases unit Loom broke (no status.txt: the coordinator stopped, the worker was lost, the disk or the clone failed,
+	# a kill before run.py wrote its word; or exit 2) is placed once more, automatically, and only a second break voids,
+	# naming both (#ber4297; @system_adamic, Oct 9 14:21Z: the trio's phases voided on one coordinator stop and waited on
+	# a hand rerun). The Go tests' verdicts are untouched: the same test.jsonl is the input both times. Never past the
+	# job's ceiling or its cancel. The pool hands the unit to whichever worker asks next, so each attempt names its machine.
+	local attempt suffix broken first=""
+	for attempt in 1 2; do
+		suffix=$([ "${attempt}" = 1 ] || echo "-${attempt}")
+		"${bin}/loom-pregate" run --uncached --slots none --pool codex-side=1 --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/phases-record${suffix}.jsonl" "${work}/phases.json" > "${work}/phases-run${suffix}.log" 2>&1
+		run=$(head -1 "${work}/phases-run${suffix}.log" | awk '{print $2}' | tr -d :)
+		token=$(python3 - "${run}" <<'PY'
 import base64, hashlib, hmac, json, os, sys, time
 secret = open(os.path.expanduser("~/.loom/token-secret")).read().strip().encode()
 payload = base64.urlsafe_b64encode(json.dumps({"run": sys.argv[1], "scope": "coordinator", "expires": int(time.time()) + 600}, separators=(",", ":")).encode()).rstrip(b"=")
 print((payload + b"." + base64.urlsafe_b64encode(hmac.new(secret, payload, hashlib.sha256).digest()).rstrip(b"=")).decode())
 PY
 )
-	unitHash=$(python3 -c "
+		unitHash=$(python3 -c "
 import json, sys
 for line in open(sys.argv[1]):
     event = json.loads(line)
-    if event.get('type') == 'uploaded' and event.get('path') == 'loom-out/phase.tar.gz': print(event['sha256'])" "${work}/phases-record.jsonl" 2> /dev/null | tail -1)
-	# run.py's out directory, unpacked into a fresh directory of its own (kept, never deleted by a computed path).
-	out=$(mktemp -d)
-	echo "${out}" > "${work}/phases-out"
-	if [ -z "${unitHash}" ] || ! curl -fsS "https://loom-wire.kirk-ouimet.workers.dev/runs/${run}/blobs/${unitHash}" -H "Authorization: Bearer ${token}" | tar -xzf - -C "${out}" || [ ! -s "${out}/phase/status.txt" ]; then
-		echo "void: the phases unit left no status.txt (run ${run})" > "${work}/phases-status"
-		return
-	fi
-	# run.py's own word, unless the unit said the fault was Loom's (exit 2).
-	if grep -q '"type":"exit".*"code":2' "${work}/phases-record.jsonl"; then
-		echo "void: the phases unit exited 2, Loom's fault (run ${run})" > "${work}/phases-status"
+    if event.get('type') == 'uploaded' and event.get('path') == 'loom-out/phase.tar.gz': print(event['sha256'])" "${work}/phases-record${suffix}.jsonl" 2> /dev/null | tail -1)
+		# run.py's out directory, unpacked into a fresh directory of its own (kept, never deleted by a computed path).
+		out=$(mktemp -d)
+		echo "${out}" > "${work}/phases-out"
+		broken=""
+		if [ -z "${unitHash}" ] || ! curl -fsS "https://loom-wire.kirk-ouimet.workers.dev/runs/${run}/blobs/${unitHash}" -H "Authorization: Bearer ${token}" | tar -xzf - -C "${out}" || [ ! -s "${out}/phase/status.txt" ]; then
+			broken="left no status.txt"
+		elif grep -q '"type":"exit".*"code":2' "${work}/phases-record${suffix}.jsonl"; then
+			# run.py's own word, unless the unit said the fault was Loom's (exit 2).
+			broken="exited 2, Loom's fault"
+		fi
+		[ -z "${broken}" ] && break
+		[ -f "${work}/ceiling" ] || [ -f "${jobs}/${sha}.cancelled" ] && break
+		[ "${attempt}" = 2 ] && break
+		first="${broken} (run ${run} on $(python3 -c "
+import json, sys
+print(next((event.get('machine') for event in map(json.loads, open(sys.argv[1])) if event.get('type') == 'started'), None) or 'no worker')" "${work}/phases-record${suffix}.jsonl" 2> /dev/null || echo 'no worker'))"
+		echo "$(date -u +%H:%M:%S) phases: ${sha:0:12}'s unit ${first}; placed once more"
+	done
+	if [ -n "${broken}" ]; then
+		echo "void: the phases unit ${broken} (run ${run})${first:+; its first attempt ${first}}" > "${work}/phases-status"
+		[ -s "${out}/phase/status.txt" ] || return
 	else
 		head -1 "${out}/phase/status.txt" > "${work}/phases-status"
 	fi
 	[ -s "${work}/complete" ] && [ "$(cut -d: -f1 "${work}/phases-status")" != void ] && runStage3 "${sha}"
 	record=${out}/phase
 	cp "${out}/phase.log" "${record}/phase.log" 2> /dev/null
-	echo "loom side pool (codex-side), run ${run}" > "${record}/box.txt"
+	echo "loom side pool (codex-side), run ${run}${first:+; placed twice, its first attempt ${first}}" > "${record}/box.txt"
 	find "${record}" -type f -size +5M -name '*.jsonl' -exec gzip -9 {} \;
 	index=$(mktemp -u)
 	gitDirectory=$(git -C "${gate}" rev-parse --absolute-git-dir)
@@ -349,13 +368,57 @@ runStage3() {
 		--phases "${tools}" --phase-units "${work}/stage3-units.txt" 2> "${work}/stage3-plan.err" | python3 -c "
 import json, sys
 job = json.load(sys.stdin); job['name'] = 'adamic-gate-fast-stage3'; json.dump(job, open(sys.argv[1], 'w'))" "${work}/stage3.json" || { echo "void: the stage 3 lane couldn't be planned" > "${work}/phases-status"; return; }
-	"${bin}/loom-pregate" run --uncached --slots none --pool "$([ "$(cat "${work}/priority" 2> /dev/null || echo 0)" -ge 30 ] && echo codex || echo codex-side)=3" --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/stage3-record.jsonl" "${work}/stage3.json" > "${work}/stage3-run.log" 2>&1
-	run=$(head -1 "${work}/stage3-run.log" | awk '{print $2}' | tr -d :)
-	if grep -q '"type":"exit".*"code":2' "${work}/stage3-record.jsonl" 2> /dev/null || grep -qE ': (broken|void)|never finished' "${work}/stage3-run.log"; then
-		echo "void: the stage 3 lane broke for Loom's own reasons (run ${run})" > "${work}/phases-status"
-	elif grep -qE ': failed' "${work}/stage3-run.log"; then
-		echo "red: stage 3 landing lane failed: $(grep -E ': failed' "${work}/stage3-run.log" | cut -d: -f1 | tr '\n' ' ')(run ${run})" > "${work}/phases-status"
-	fi
+	# A unit Loom broke (exit 2, broken, dropped when the coordinator stopped, never finished) is placed once more, the
+	# lane's other units' verdicts kept, and only a second break voids, naming both runs (#ber4297). A unit that failed on
+	# its own is the lane's red whatever else broke. Never past the job's ceiling or its cancel.
+	local attempt suffix job=${work}/stage3.json classes broken failed first=""
+	for attempt in 1 2; do
+		suffix=$([ "${attempt}" = 1 ] || echo "-${attempt}")
+		"${bin}/loom-pregate" run --uncached --slots none --pool "$([ "$(cat "${work}/priority" 2> /dev/null || echo 0)" -ge 30 ] && echo codex || echo codex-side)=3" --priority "$(cat "${work}/priority" 2> /dev/null || echo 0)" --record "${work}/stage3-record${suffix}.jsonl" "${job}" > "${work}/stage3-run${suffix}.log" 2>&1
+		run=$(head -1 "${work}/stage3-run${suffix}.log" | awk '{print $2}' | tr -d :)
+		# Each planned unit's class from the run's own record: passed, failed (on its own), or broken (Loom's).
+		classes=$(python3 - "${job}" "${work}/stage3-record${suffix}.jsonl" <<'PY'
+import json, sys
+units = [unit["id"] for unit in json.load(open(sys.argv[1]))["units"]]
+exits, finished = {}, {}
+try:
+    for line in open(sys.argv[2]):
+        event = json.loads(line)
+        if event.get("type") == "exit":
+            exits[event.get("unit")] = event.get("code")
+        elif event.get("type") == "finished":
+            finished[event.get("unit")] = event.get("status")
+except (OSError, ValueError):
+    pass
+broken = [unit for unit in units if exits.get(unit) == 2 or finished.get(unit) not in ("passed", "failed")]
+failed = [unit for unit in units if unit not in broken and finished.get(unit) == "failed"]
+print(" ".join(broken) + "|" + " ".join(failed))
+PY
+)
+		broken=${classes%%|*} failed=${classes#*|}
+		if [ -n "${failed}" ]; then
+			echo "red: stage 3 landing lane failed: ${failed} (run ${run})" > "${work}/phases-status"
+			return
+		fi
+		[ -z "${broken}" ] && return
+		[ -f "${work}/ceiling" ] || [ -f "${jobs}/${sha}.cancelled" ] && break
+		[ "${attempt}" = 2 ] && break
+		first="${broken} (run ${run})"
+		echo "$(date -u +%H:%M:%S) stage3: ${sha:0:12}'s ${broken} broke on Loom's side (run ${run}); placed once more"
+		python3 - "${work}/stage3.json" "${work}/stage3-again.json" ${broken} <<'PY'
+import json, sys
+job, keep = json.load(open(sys.argv[1])), set(sys.argv[3:])
+job["name"] += "-again"
+job["units"] = [unit for unit in job["units"] if unit["id"] in keep]
+for unit in job["units"]:
+    unit["needs"] = [need for need in unit.get("needs") or [] if need in keep]
+    if not unit["needs"]:
+        unit.pop("needs", None)
+json.dump(job, open(sys.argv[2], "w"))
+PY
+		job=${work}/stage3-again.json
+	done
+	echo "void: the stage 3 lane broke for Loom's own reasons: ${broken} (run ${run})${first:+; its first attempt broke ${first}}" > "${work}/phases-status"
 }
 
 # finish publishes the record and then writes the verdict, so the watcher never reads a verdict without its log.
