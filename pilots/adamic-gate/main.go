@@ -611,10 +611,12 @@ func splitParents(reference map[string]result) map[string]map[string]float64 {
 	return split
 }
 
-// A result is one top-level test's terminal action and its seconds.
+// A result is one top-level test's terminal action and its seconds. An untimed one is new in the tree and timed by no
+// record, Loom's or the reference's: its seconds are fromTheTree's guess.
 type result struct {
 	action  string
 	seconds float64
+	untimed bool
 }
 
 // readTests reads go test -json lines (gzipped or not) into each top-level test's last terminal action,
@@ -820,6 +822,7 @@ func plan(arguments []string) error {
 		key, parent, child string
 		seconds            float64
 		needs              string // a setup family's X_Setup key: a unit holding this test runs that one too, once
+		untimed            bool   // a whole test no record timed, its seconds a guess
 	}
 	var items []item
 	setup := map[string]float64{}
@@ -832,7 +835,7 @@ func plan(arguments []string) error {
 		}
 		children, isSplit := split[key]
 		if !isSplit {
-			items = append(items, item{key: key, seconds: outcome.seconds})
+			items = append(items, item{key: key, seconds: outcome.seconds, untimed: outcome.untimed})
 			continue
 		}
 		within := 0.0
@@ -915,6 +918,24 @@ func plan(arguments []string) error {
 		}
 		return items[left].key+"/"+items[left].child < items[right].key+"/"+items[right].child
 	})
+	// With a budget, a test no record has timed (#h0xnmmf) is never sized by fromTheTree's guess, which ran about 15
+	// times high (f18497c), nor packed with others: it runs in an untimed unit of its own, killed at the budget's kill
+	// like any packed unit so a hung new test can't stall the run, and the times that run records size it in the next
+	// plan. One test a unit, even for a package's several: together they could pass the kill, and then the tests after
+	// the one running at it would go untimed again, and be killed together again, run after run.
+	var untimed []item
+	if *budget > 0 {
+		kept := items[:0]
+		for _, candidate := range items {
+			if candidate.untimed {
+				untimed = append(untimed, candidate)
+				continue
+			}
+			kept = append(kept, candidate)
+		}
+		items = kept
+		sort.Slice(untimed, func(left, right int) bool { return untimed[left].key < untimed[right].key })
+	}
 	// With a budget, an item that alone can't fit it is the burn-down: it gets a unit of its own, run to the end with
 	// the long timeout so its verdict still counts, and is named on stderr. The rest pack into as few units as fit
 	// the budget, setup included, each killed at budget plus a quarter (cooked, never failed).
@@ -1098,10 +1119,19 @@ func plan(arguments []string) error {
 		setupsOf = append(setupsOf, map[string]bool{})
 		place(len(loads)-1, candidate)
 	}
+	untimedUnits := map[int]bool{}
+	for _, candidate := range untimed {
+		loads = append(loads, 0)
+		assigned = append(assigned, map[string][]string{})
+		childrenOf = append(childrenOf, map[string][]string{})
+		setupsOf = append(setupsOf, map[string]bool{})
+		place(len(loads)-1, candidate)
+		untimedUnits[len(loads)-1] = true
+	}
 	// A packed unit under a budget is killed at budget plus a half (90 s for 60, Kirk, Oct 9 03:17Z), and that kill is
 	// a red; an unbudgeted or over-budget unit runs long.
 	timeout := func(index int) int {
-		if *budget > 0 && index < packed {
+		if *budget > 0 && (index < packed || untimedUnits[index]) {
 			return int(math.Ceil(*budget * 1.5))
 		}
 		return 3*3600 + 600
@@ -1160,6 +1190,9 @@ func plan(arguments []string) error {
 			for index := range loads {
 				if index >= packed && remainderUnit < 0 {
 					continue // an over-budget unit runs long already; leave it to its test
+				}
+				if untimedUnits[index] {
+					continue // an untimed unit runs its one test alone
 				}
 				if (parentKey == "" && len(assigned[index][packageName]) > 0) || (parentKey != "" && len(childrenOf[index][parentKey]) > 0) {
 					if best < 0 || loads[index] < loads[best] {
@@ -1293,15 +1326,24 @@ func plan(arguments []string) error {
 		}
 		// The coordinator places by this, longest first; the remainder unit runs what no record timed (988 s on main
 		// c869cea9), so it goes first.
-		expected := loads[index]
+		// An untimed unit has no prediction: it is placed as a full unit, its id and its line naming it untimed, a line
+		// score.py and solve.py don't read as one.
+		id, expected := fmt.Sprintf("tests-%02d", index), loads[index]
 		if index == remainderUnit {
 			expected = 3600
 		}
+		if untimedUnits[index] {
+			id, expected = fmt.Sprintf("tests-untimed-%02d", index), *budget
+		}
 		job.Units = append(job.Units, protocol.JobUnit{
-			Id: fmt.Sprintf("tests-%02d", index), Needs: needs, Argv: argv, TimeoutSeconds: timeout(index), ExpectedSeconds: max(expected, 1),
+			Id: id, Needs: needs, Argv: argv, TimeoutSeconds: timeout(index), ExpectedSeconds: max(expected, 1),
 			Outputs:   []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}},
 			Resources: protocol.Resources{Cpus: 12},
 		})
+		if untimedUnits[index] {
+			fmt.Fprintf(os.Stderr, "%s: untimed, %s timed by no record, alone and killed at %d s\n", id, strings.Join(argv[5:], " "), timeout(index))
+			continue
+		}
 		fmt.Fprintf(os.Stderr, "tests-%02d: %d packages, %.0f s by the reference\n", index, len(packages), loads[index])
 	}
 	// No argument may pass Linux's MAX_ARG_STRLEN (128 KiB, with room for the kernel's own accounting): a unit that
@@ -1326,6 +1368,7 @@ func plan(arguments []string) error {
 // test-only landings behind main (Oct 9: 7 of the 18 tests over 180 s in a plan were already split away). A new test
 // is sized by Loom's own time for it; else, in a package that lost tests, by an even share of the lost seconds with
 // 1.5x headroom, since a split keeps the work it divides; else by twice its package's median, or 30 s in a new package.
+// Those guesses mark it untimed and size it only unbudgeted: under a budget plan runs it in an untimed unit of its own.
 func fromTheTree(reference map[string]result, path string, only string, timed map[string]float64) error {
 	pattern, err := regexp.Compile(only)
 	if err != nil {
@@ -1392,7 +1435,7 @@ func fromTheTree(reference map[string]result, path string, only string, timed ma
 			default:
 				seconds = 30
 			}
-			reference[key] = result{action: "pass", seconds: seconds}
+			reference[key] = result{action: "pass", seconds: seconds, untimed: !wasTimed}
 			added++
 		}
 	}

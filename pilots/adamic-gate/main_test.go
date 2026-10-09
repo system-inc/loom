@@ -405,6 +405,109 @@ func TestABudgetPacksAPackagesTestsTogether(t *testing.T) {
 	}
 }
 
+// Under a budget a test no record has timed runs in an untimed unit of its own, killed at the budget's kill and needing
+// its package's products, never packed by a guess (#h0xnmmf): the timed tests pack exactly as they would without it,
+// and no remainder rides with it. Unbudgeted, it packs by the guess as it always has.
+func TestATestNoRecordTimedRunsInAnUntimedUnitOfItsOwn(t *testing.T) {
+	var reference bytes.Buffer
+	writer := gzip.NewWriter(&reference)
+	fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"TestProduct_P","Elapsed":20}`+"\n", module)
+	for test := range 6 {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sa","Test":"TestA%02d","Elapsed":7}`+"\n", module, test)
+	}
+	for test := range 3 {
+		fmt.Fprintf(writer, `{"Action":"pass","Package":"%sb","Test":"TestB%02d","Elapsed":12}`+"\n", module, test)
+	}
+	writer.Close()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "reference.jsonl.gz")
+	os.WriteFile(path, reference.Bytes(), 0o644)
+	times := filepath.Join(directory, "times.tsv")
+	os.WriteFile(times, []byte("loom_seconds\twhole_gate_seconds\tunit\tpackage\ttest\n9\t0\ttests-01\t"+module+"a\tTestNewTimed\n"), 0o644)
+	timedTree := module + "a TestProduct_P\n" + module + "a TestNewTimed\n"
+	for test := range 6 {
+		timedTree += fmt.Sprintf("%sa TestA%02d\n", module, test)
+	}
+	for test := range 3 {
+		timedTree += fmt.Sprintf("%sb TestB%02d\n", module, test)
+	}
+	plain := filepath.Join(directory, "timed.txt")
+	os.WriteFile(plain, []byte(timedTree), 0o644)
+	withNew := filepath.Join(directory, "tree.txt")
+	os.WriteFile(withNew, []byte(timedTree+module+"a TestNewOne\n"+module+"a TestNewTwo\n"+module+"c TestC\n"), 0o644)
+	planned := func(extra ...string) protocol.Job {
+		read, write, _ := os.Pipe()
+		stdout := os.Stdout
+		os.Stdout = write
+		var printed bytes.Buffer
+		done := make(chan struct{})
+		go func() {
+			printed.ReadFrom(read)
+			close(done)
+		}()
+		err := plan(append([]string{"--reference", path, "--sha", testSha, "--target", "codex", "--loom-times", times, "--only", "^" + module + "(a|b|c)$"}, extra...))
+		write.Close()
+		os.Stdout = stdout
+		<-done
+		if err != nil {
+			t.Fatal(err)
+		}
+		var job protocol.Job
+		if err := protocol.Decode(&printed, &job); err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+	budget := []string{"--budget", "60", "--unit-setup", "10", "--package-setup", "5"}
+	job := planned(append(budget, "--tree-tests", withNew)...)
+	var packed []protocol.JobUnit
+	untimed := map[string]protocol.JobUnit{}
+	for _, unit := range job.Units {
+		if !strings.HasPrefix(unit.Id, "tests-untimed-") {
+			packed = append(packed, unit)
+			continue
+		}
+		if len(unit.Argv) != 6 {
+			t.Fatalf("%s holds more than its test: %v", unit.Id, unit.Argv[5:])
+		}
+		if unit.TimeoutSeconds != 90 || unit.ExpectedSeconds != 60 {
+			t.Fatalf("%s is killed at %d s and expected at %g s, want 90 and 60", unit.Id, unit.TimeoutSeconds, unit.ExpectedSeconds)
+		}
+		untimed[unit.Argv[5]] = unit
+	}
+	want := map[string][]string{module + "a=^(TestNewOne)$": {"product-00"}, module + "a=^(TestNewTwo)$": {"product-00"}, module + "c=^(TestC)$": nil}
+	if len(untimed) != len(want) {
+		t.Fatalf("%d untimed units, want %d: %v", len(untimed), len(want), untimed)
+	}
+	for spec, needs := range want {
+		if unit, held := untimed[spec]; !held || !slices.Equal(unit.Needs, needs) {
+			t.Fatalf("%s: unit %q needs %v, want %v", spec, unit.Id, unit.Needs, needs)
+		}
+	}
+	// TestNewTimed is new too, but Loom timed it: it packs with the rest, which pack as if no test were untimed.
+	if alone := planned(append(budget, "--tree-tests", plain)...); !reflect.DeepEqual(packed, alone.Units) {
+		t.Fatalf("the timed tests packed differently beside the untimed ones:\n%v\nwithout them:\n%v", packed, alone.Units)
+	}
+	// With the remainder, package c's skip spec finds no packed unit of its package and goes to the remainder unit.
+	for _, unit := range planned(append(budget, "--tree-tests", withNew, "--remainder")...).Units {
+		if strings.HasPrefix(unit.Id, "tests-untimed-") && len(unit.Argv) != 6 {
+			t.Fatalf("%s carries a remainder: %v", unit.Id, unit.Argv[5:])
+		}
+	}
+	// Unbudgeted, the plan is today's: three units, the untimed tests in them by their guess.
+	unbudgeted := planned("--units", "3", "--tree-tests", withNew)
+	specs := ""
+	for _, unit := range unbudgeted.Units {
+		if strings.Contains(unit.Id, "untimed") || (strings.HasPrefix(unit.Id, "tests-") && unit.TimeoutSeconds != 3*3600+600) {
+			t.Fatalf("unbudgeted, %s is killed at %d s", unit.Id, unit.TimeoutSeconds)
+		}
+		specs += strings.Join(unit.Argv[5:], " ") + " "
+	}
+	if len(unbudgeted.Units) != 4 || !strings.Contains(specs, "TestNewOne") || !strings.Contains(specs, module+"c=^(TestC)$") {
+		t.Fatalf("unbudgeted, %d units: %s", len(unbudgeted.Units), specs)
+	}
+}
+
 // A unit holding any of a setup family's tests (X_000, X_001, ..., XPlantedFailure) runs X_Setup too, once: its shards
 // read what X_Setup made in their own process. Without it they failed "shared setup is absent" (proof 3, Oct 9).
 func TestEveryUnitHoldingAShardRunsItsSetup(t *testing.T) {
