@@ -70,6 +70,8 @@ func FinishedFromEvents(events []protocol.Event) (finished Finished, found bool)
 		case "finished":
 			finishedStatus = event.Status
 			attempt.FinishedAt = event.Time
+			// The runner's own check of the unit's toolchains (#vv28ewd): structure, so Decide voids it, never red.
+			finished.MissingTools = event.MissingTools
 		case "error":
 			// The runner's budget (Kirk, Oct 10 03:0xZ): 30 s to ready, 60 s to run, reported as an error event in
 			// the start or run phase whose message begins with the cause, then finished failed (Web: no wire change).

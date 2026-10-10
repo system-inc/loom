@@ -12,3 +12,6 @@
 {"run":"r-fixture","unit":"tests[shard=0]","sequence":3,"time":"2026-10-08T19:00:00.003Z","type":"finished","status":"failed"}
 {"run":"r-fixture","unit":"cached","sequence":0,"time":"2026-10-08T19:00:00.000Z","type":"cached","key":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","fromRun":"r-earlier","events":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
 {"run":"r-fixture","unit":"cached","sequence":1,"time":"2026-10-08T19:00:00.001Z","type":"finished","status":"passed"}
+{"run":"r-fixture","unit":"unfit","sequence":0,"time":"2026-10-08T19:00:00.000Z","type":"started","machine":"box","runnerVersion":"v0-dev"}
+{"run":"r-fixture","unit":"unfit","sequence":1,"time":"2026-10-08T19:00:00.001Z","type":"error","phase":"start","message":"the unit requires wasiSdk, which this machine lacks"}
+{"run":"r-fixture","unit":"unfit","sequence":2,"time":"2026-10-08T19:00:00.002Z","type":"finished","status":"broken","missingTools":["wasiSdk"]}
