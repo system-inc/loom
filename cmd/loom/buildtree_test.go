@@ -32,17 +32,17 @@ func TestATreeThatWontGoIsAWarningOnceItsIndexIsUp(t *testing.T) {
 	tree := filepath.Join(base, strings.Repeat("a", 40))
 	os.MkdirAll(filepath.Join(tree, "out"), 0o755)
 	var stderr bytes.Buffer
-	if code := finishTree(&stderr, base, tree, "k", 0, false); code != 1 {
+	if code := finishTree(&stderr, base, tree, "k", 0, false, nil); code != 1 {
 		t.Fatalf("a kept index: %d", code)
 	}
 	if _, err := os.Stat(tree); err != nil {
 		t.Fatal("a tree whose index didn't go up was removed")
 	}
 	stderr.Reset()
-	if code := finishTree(&stderr, base, filepath.Join(base, "not-a-tree"), "k", 0, true); code != 0 || !strings.Contains(stderr.String(), "warning: removing the tree's directory") {
+	if code := finishTree(&stderr, base, filepath.Join(base, "not-a-tree"), "k", 0, true, nil); code != 0 || !strings.Contains(stderr.String(), "warning: removing the tree's directory") {
 		t.Fatalf("a removal that fails after the index is up: %d %q", code, stderr.String())
 	}
-	if code := finishTree(&stderr, base, tree, "k", 0, true); code != 0 {
+	if code := finishTree(&stderr, base, tree, "k", 0, true, nil); code != 0 {
 		t.Fatalf("a clean finish: %d", code)
 	}
 	if _, err := os.Stat(tree); !os.IsNotExist(err) {

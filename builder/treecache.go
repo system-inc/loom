@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -71,10 +73,29 @@ func TreeCache(base, tree string, keep int) (string, error) {
 	sort.Slice(caches, func(left, right int) bool { return caches[left].modified > caches[right].modified })
 	for index, old := range caches {
 		if index >= max(1, keep) && old.path != directory {
-			if err = RemoveTree(base, old.path); err != nil {
+			// A tree another build still holds stays until a later build finds it free.
+			if err = RemoveTree(base, old.path); err != nil && !errors.Is(err, ErrTreeInUse) {
 				return "", err
 			}
 		}
+	}
+	// A tree's lock file outlives its directory; one whose tree is gone and that no build holds goes too.
+	for _, entry := range entries {
+		hash, isLock := strings.CutSuffix(entry.Name(), ".lock")
+		if !isLock || !treeHashPattern.MatchString(hash) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(base, hash)); err == nil {
+			continue
+		}
+		lock, err := os.OpenFile(filepath.Join(base, entry.Name()), os.O_RDWR, 0o644)
+		if err != nil {
+			continue
+		}
+		if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			os.Remove(filepath.Join(base, entry.Name()))
+		}
+		lock.Close()
 	}
 	return directory, nil
 }

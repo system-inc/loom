@@ -77,13 +77,20 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "build-tree: trimmed %.1f GB from Go's build cache, least recently used first\n", float64(trimmed)/float64(builder.GB))
 	}
 	watched := buildTreeWatches(*cache, strings.TrimSpace(string(goCache)), os.TempDir(), floor, tempFloor)
-	if err = builder.CheckFloor(watched, nil); err != nil {
+	// What killed removals left goes before the floor is read, or it could keep every later build from starting.
+	if err = builder.Ready(*cache, watched, nil); err != nil {
 		return fail(fmt.Errorf("not starting: %w", err))
 	}
 	directory, err := builder.TreeCache(*cache, *tree, *keep)
 	if err != nil {
 		return fail(err)
 	}
+	// The tree is this build's until it ends: no other build-tree removes it meanwhile.
+	treeLock, err := builder.LockTree(directory)
+	if err != nil {
+		return fail(err)
+	}
+	defer treeLock.Close()
 	treeHash := filepath.Base(directory)
 	goVersion, err := exec.Command("go", "env", "GOVERSION").Output()
 	if err != nil {
@@ -171,7 +178,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"seconds": time.Since(started).Seconds(), "sourceBytes": len(source),
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
-	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten)
+	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten, treeLock)
 }
 
 // buildTreeWatches are the filesystems a build writes, each with its floor: the cache base and Go's build cache keep
@@ -188,8 +195,8 @@ func buildTreeWatches(cache, goCache, temporary string, floor, temporaryFloor ui
 // finishTree removes the tree's working directory once its index is up (kept otherwise, for a retry) and exits. A
 // removal that fails is warned about and left for the next TreeCache to sweep, and never fails the build: the index
 // is up, and that is what runners read.
-func finishTree(stderr io.Writer, cache, directory, treeKey string, failed int, indexWritten bool) int {
-	if err := builder.TreeDone(cache, directory, indexWritten); err != nil {
+func finishTree(stderr io.Writer, cache, directory, treeKey string, failed int, indexWritten bool, lock *builder.TreeLock) int {
+	if err := builder.TreeDone(cache, directory, indexWritten, lock); err != nil {
 		fmt.Fprintln(stderr, "build-tree: warning: removing the tree's directory:", err)
 	}
 	return buildTreeExit(stderr, treeKey, failed, indexWritten)

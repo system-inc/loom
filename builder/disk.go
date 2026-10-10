@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"math"
@@ -74,37 +75,122 @@ const removingPrefix = ".removing-"
 // remove removes one file or empty directory; a variable so a test can stop a removal partway.
 var remove = os.Remove
 
-// RemoveTree removes one tree's working directory, base/<tree hash>, by name. It first renames the directory to
-// base/.removing-<hash>, in one step, so a removal stopped partway (a kill, a full disk) never leaves a tree
-// directory with some products' files gone and their directories still there, which buildcache would count as hits
-// and PublishTree would archive hollow; TreeCache sweeps what such a removal left. Then every file and link goes, one
-// at a time, then each directory once it is empty, deepest first. A link is removed as itself and never followed, and
-// a directory that isn't a tree's under base is refused, so nothing outside the tree can go.
+// ErrTreeInUse is a tree's directory another build-tree is building in, which is left alone.
+var ErrTreeInUse = errors.New("another build holds the tree")
+
+// A TreeLock is a build's hold on one tree: a shared flock on base/<tree hash>.lock for as long as the build runs.
+// Builds of the same tree share it; a removal takes it exclusively and goes no further when it can't.
+type TreeLock struct {
+	file *os.File
+}
+
+// treeLockPath is the lock file beside a tree's directory.
+func treeLockPath(directory string) string {
+	return filepath.Clean(directory) + ".lock"
+}
+
+// LockTree holds the tree whose directory is directory for a build, until Close.
+func LockTree(directory string) (*TreeLock, error) {
+	file, err := os.OpenFile(treeLockPath(directory), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(file.Fd()), syscall.LOCK_SH); err != nil {
+		file.Close()
+		return nil, err
+	}
+	return &TreeLock{file: file}, nil
+}
+
+// Close lets the tree go.
+func (lock *TreeLock) Close() error {
+	return lock.file.Close()
+}
+
+// RemoveTree removes one tree's working directory, base/<tree hash>, by name, unless a build holds the tree
+// (ErrTreeInUse). It first renames the directory to base/.removing-<hash>-<pid>, in one step, so a removal stopped
+// partway (a kill, a full disk) never leaves a tree directory with some products' files gone and their directories
+// still there, which buildcache would count as hits and PublishTree would archive hollow; SweepRemoving finishes what
+// such a removal left. A name left by an earlier process with the same pid gets a fresh suffix. Then every file and
+// link goes, one at a time, then each directory once it is empty, deepest first. A link is removed as itself and
+// never followed, and a directory that isn't a tree's under base is refused, so nothing outside the tree can go.
 func RemoveTree(base, directory string) error {
 	if filepath.Dir(filepath.Clean(directory)) != filepath.Clean(base) || !treeHashPattern.MatchString(filepath.Base(directory)) {
 		return fmt.Errorf("%s isn't a tree's directory under %s", directory, base)
 	}
-	removing := filepath.Join(base, removingPrefix+filepath.Base(directory)+"-"+strconv.Itoa(os.Getpid()))
-	if err := os.Rename(directory, removing); err != nil {
+	lock, err := os.OpenFile(treeLockPath(directory), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
 		return err
 	}
-	return removeRenamed(base, removing)
+	defer lock.Close()
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return fmt.Errorf("%s: %w", directory, ErrTreeInUse)
+	}
+	stem := filepath.Join(base, removingPrefix+filepath.Base(directory)+"-"+strconv.Itoa(os.Getpid()))
+	for attempt := 0; ; attempt++ {
+		removing := stem
+		if attempt > 0 {
+			removing = stem + "." + strconv.Itoa(attempt)
+		}
+		err = os.Rename(directory, removing)
+		if err == nil {
+			return removeRenamed(base, removing)
+		}
+		if !errors.Is(err, syscall.ENOTEMPTY) && !errors.Is(err, syscall.EEXIST) || attempt >= 100 {
+			return err
+		}
+	}
 }
 
-// SweepRemoving finishes every removal under base that stopped partway: each .removing- directory goes.
+// removingPid is the pid a .removing- directory's name carries, .removing-<hash>-<pid>[.<n>], or 0.
+func removingPid(name string) int {
+	rest := strings.TrimPrefix(name, removingPrefix)
+	dash := strings.LastIndex(rest, "-")
+	if dash < 0 {
+		return 0
+	}
+	digits, _, _ := strings.Cut(rest[dash+1:], ".")
+	pid, err := strconv.Atoi(digits)
+	if err != nil || pid <= 0 {
+		return 0
+	}
+	return pid
+}
+
+// running reports whether a process with pid is alive (signal 0 reaches it, or it exists and isn't ours to signal).
+func running(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// SweepRemoving finishes every removal under base that stopped partway: each .removing- directory whose process
+// is no longer running goes. One whose process still runs is that process's to finish.
 func SweepRemoving(base string) error {
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), removingPrefix) {
-			if err = removeRenamed(base, filepath.Join(base, entry.Name())); err != nil {
-				return err
-			}
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), removingPrefix) {
+			continue
+		}
+		if pid := removingPid(entry.Name()); pid > 0 && running(pid) {
+			continue
+		}
+		if err = removeRenamed(base, filepath.Join(base, entry.Name())); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// Ready readies the cache base for a build: it first sweeps what killed removals left, which can be tens of GB, and
+// only then checks the floors, so a stopped cleanup never keeps every later build from starting.
+func Ready(base string, watched map[string]Watch, free func(path string) (uint64, error)) error {
+	if err := SweepRemoving(base); err != nil {
+		return err
+	}
+	return CheckFloor(watched, free)
 }
 
 // removeRenamed removes a directory RemoveTree renamed, file by file, deepest directories last.
@@ -116,10 +202,14 @@ func removeRenamed(base, directory string) error {
 }
 
 // removeFiles removes directory and everything in it, each file and link by name, never following a link, then each
-// directory once it is empty, deepest first.
+// directory once it is empty, deepest first. Anything already gone is fine: another removal of the same directory
+// (a sweep beside its owner) may have taken it first.
 func removeFiles(directory string) error {
 	files, directories := []string{}, []string{}
 	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -134,12 +224,12 @@ func removeFiles(directory string) error {
 		return err
 	}
 	for _, file := range files {
-		if err = remove(file); err != nil {
+		if err = remove(file); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
 	for index := len(directories) - 1; index >= 0; index-- {
-		if err = remove(directories[index]); err != nil {
+		if err = remove(directories[index]); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
@@ -148,8 +238,11 @@ func removeFiles(directory string) error {
 
 // TreeDone is a tree's working directory once the build is over: removed when its index went up, since everything a
 // runner needs is in the store, and kept when it didn't, so a retry needn't build it all again (TreeCache keeps the
-// newest few).
-func TreeDone(base, directory string, published bool) error {
+// newest few). The build lets its own hold on the tree go first; a tree another build still holds stays.
+func TreeDone(base, directory string, published bool, lock *TreeLock) error {
+	if lock != nil {
+		lock.Close()
+	}
 	if !published {
 		return nil
 	}

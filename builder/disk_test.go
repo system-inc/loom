@@ -141,13 +141,13 @@ func TestATreesDirectoryIsRemovedOnceItsIndexIsUp(t *testing.T) {
 	}
 	os.MkdirAll(filepath.Join(directory, "empty", "deeper"), 0o755)
 	os.Symlink(outside, filepath.Join(directory, "cache", "link-out"))
-	if err := TreeDone(base, directory, false); err != nil {
+	if err := TreeDone(base, directory, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(directory, "out", "a.test")); err != nil {
 		t.Fatal("a tree whose index didn't go up was removed")
 	}
-	if err := TreeDone(base, directory, true); err != nil {
+	if err := TreeDone(base, directory, true, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Lstat(directory); !os.IsNotExist(err) {
@@ -271,6 +271,8 @@ func TestAnInterruptedCleanupLeavesNoHollowTree(t *testing.T) {
 		t.Fatalf("a stopped removal left the tree's product directory where TreeCache finds it: %v", err)
 	}
 	remove = os.Remove
+	// The removal's process is gone: its directory is named for a pid no longer running.
+	killed(t, base)
 	again, err := TreeCache(base, tree, 2)
 	if err != nil || again != directory {
 		t.Fatalf("the tree's directory again: %s %v", again, err)
@@ -278,7 +280,162 @@ func TestAnInterruptedCleanupLeavesNoHollowTree(t *testing.T) {
 	if entries, _ := os.ReadDir(again); len(entries) != 0 {
 		t.Fatalf("the tree's directory came back holding %s", entries[0].Name())
 	}
-	if entries, _ := os.ReadDir(base); len(entries) != 1 {
-		t.Fatalf("the stopped removal wasn't finished: %d entries under the base", len(entries))
+	if leftovers := removingUnder(base); len(leftovers) != 0 {
+		t.Fatalf("the stopped removal wasn't finished: %v", leftovers)
+	}
+}
+
+// deadPid is the pid of a process that has exited.
+func deadPid(t *testing.T) int {
+	t.Helper()
+	command := exec.Command("true")
+	if err := command.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return command.Process.Pid
+}
+
+// killed renames every .removing- directory under base to carry a pid no longer running, as one whose process was
+// killed would.
+func killed(t *testing.T, base string) {
+	t.Helper()
+	pid := deadPid(t)
+	for _, name := range removingUnder(base) {
+		hash := strings.TrimPrefix(name, removingPrefix)[:40]
+		os.Rename(filepath.Join(base, name), filepath.Join(base, fmt.Sprintf("%s%s-%d", removingPrefix, hash, pid)))
+	}
+}
+
+// removingUnder names every .removing- directory under base.
+func removingUnder(base string) []string {
+	names := []string{}
+	entries, _ := os.ReadDir(base)
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), removingPrefix) {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+// A leftover of a killed removal that holds the disk under its floor is swept before the floor is read, so the
+// build starts instead of every later build refusing until someone deletes it by hand.
+func TestALeftoverRemovalIsSweptBeforeTheFloorIsRead(t *testing.T) {
+	base := t.TempDir()
+	leftover := filepath.Join(base, fmt.Sprintf("%s%s-%d", removingPrefix, strings.Repeat("a", 40), deadPid(t)))
+	os.MkdirAll(filepath.Join(leftover, "cache"), 0o755)
+	os.WriteFile(filepath.Join(leftover, "cache", "huge"), []byte("tens of GB"), 0o644)
+	free := func(string) (uint64, error) {
+		if _, err := os.Stat(leftover); err == nil {
+			return 120 * GB, nil
+		}
+		return 320 * GB, nil
+	}
+	if err := Ready(base, map[string]Watch{"the cache base": {base, 200 * GB}}, free); err != nil {
+		t.Fatalf("a leftover under the floor: %v", err)
+	}
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatal("the leftover is still there")
+	}
+}
+
+// Two removals of one directory never fail each other: a sweep takes only a removal whose process has ended, and a
+// file or directory already gone is already removed.
+func TestASweepAndItsOwnerNeverTripEachOther(t *testing.T) {
+	base := t.TempDir()
+	hash := strings.Repeat("b", 40)
+	mine := filepath.Join(base, fmt.Sprintf("%s%s-%d", removingPrefix, hash, os.Getpid()))
+	dead := filepath.Join(base, fmt.Sprintf("%s%s-%d.1", removingPrefix, hash, deadPid(t)))
+	for _, directory := range []string{mine, dead} {
+		os.MkdirAll(filepath.Join(directory, "a", "b"), 0o755)
+		os.WriteFile(filepath.Join(directory, "a", "b", "f"), []byte("x"), 0o644)
+		os.WriteFile(filepath.Join(directory, "g"), []byte("x"), 0o644)
+	}
+	// The owner of the dead one's directory races the sweep: it takes the whole directory before the sweep's first
+	// removal lands.
+	raced := false
+	remove = func(path string) error {
+		if !raced && strings.HasPrefix(path, dead) {
+			raced = true
+			os.RemoveAll(dead)
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { remove = os.Remove })
+	if err := SweepRemoving(base); err != nil {
+		t.Fatalf("a sweep beside another removal: %v", err)
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Fatal("a removal whose process still runs was swept")
+	}
+	if _, err := os.Stat(dead); !os.IsNotExist(err) {
+		t.Fatal("a removal whose process ended wasn't swept")
+	}
+	if err := removeFiles(filepath.Join(base, "gone")); err != nil {
+		t.Fatalf("a directory already gone: %v", err)
+	}
+}
+
+// A build holds its tree: a removal while another build holds it leaves the tree be, and goes once it is let go;
+// TreeCache passes over a held old tree; and a removal named for a pid an earlier process used takes a fresh name.
+func TestATreeAnotherBuildHoldsIsLeftAlone(t *testing.T) {
+	base := t.TempDir()
+	directory := filepath.Join(base, strings.Repeat("c", 40))
+	os.MkdirAll(filepath.Join(directory, "out"), 0o755)
+	held, err := LockTree(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = RemoveTree(base, directory); !errors.Is(err, ErrTreeInUse) {
+		t.Fatalf("a removal of a held tree: %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(directory, "out")); err != nil {
+		t.Fatal("a held tree was removed")
+	}
+	// The build's own hold goes before its own removal.
+	if err = TreeDone(base, directory, true, held); err != nil {
+		t.Fatalf("a build removing the tree it held: %v", err)
+	}
+	if _, err = os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatal("the tree is still there")
+	}
+	// An earlier process with this pid left a .removing- directory of this name: the removal takes another.
+	os.MkdirAll(filepath.Join(directory, "out"), 0o755)
+	earlier := filepath.Join(base, fmt.Sprintf("%s%s-%d", removingPrefix, filepath.Base(directory), os.Getpid()))
+	os.MkdirAll(filepath.Join(earlier, "kept"), 0o755)
+	if err = RemoveTree(base, directory); err != nil {
+		t.Fatalf("a removal whose name was taken: %v", err)
+	}
+	if _, err = os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatal("the tree is still there")
+	}
+}
+
+// TreeCache passes over an old tree another build holds rather than failing, and removes it once it is free.
+func TestTreeCachePassesOverAHeldOldTree(t *testing.T) {
+	base := t.TempDir()
+	old := gitTree(t, map[string]string{"go.mod": "module m\n", "x": "1\n"})
+	next := gitTree(t, map[string]string{"go.mod": "module m\n", "x": "2\n"})
+	oldDirectory, err := TreeCache(base, old, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, _ := LockTree(oldDirectory)
+	time.Sleep(10 * time.Millisecond)
+	if _, err = TreeCache(base, next, 1); err != nil {
+		t.Fatalf("a TreeCache beside a held old tree: %v", err)
+	}
+	if _, err = os.Stat(oldDirectory); err != nil {
+		t.Fatal("a held old tree was removed")
+	}
+	held.Close()
+	if _, err = TreeCache(base, next, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(oldDirectory); !os.IsNotExist(err) {
+		t.Fatal("a free old tree stayed")
+	}
+	if _, err = os.Stat(oldDirectory + ".lock"); !os.IsNotExist(err) {
+		t.Fatal("the old tree's lock file outlived it")
 	}
 }
