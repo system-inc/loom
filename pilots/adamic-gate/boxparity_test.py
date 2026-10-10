@@ -5,6 +5,11 @@ disagree are each not comparable. The mutant that ignores tests absent from the 
 
 	python3 pilots/adamic-gate/boxparity_test.py
 	sed 's/if box.get(key) != new.get(key):/if key in new and box.get(key) != new.get(key):/' boxparity.py > m.py && python3 boxparity_test.py m.py   # fails
+	sed 's/if box is None and new == "pass":/if new is None or (box is None and new == "pass"):/' boxparity.py > m.py && python3 boxparity_test.py m.py   # fails
+
+Stages: each phase stage agrees with the box's stages_exit; a phase that fails where the box passed, and a box stage with
+no phase unit, are each named; tests, products and census aren't phases; gofmt, which the box doesn't run, differs only
+when it fails; --no-stages compares tests alone. The second mutant, which lets a box stage with no phase pass, must fail.
 """
 
 import json
@@ -25,12 +30,13 @@ def check(name, condition, output):
     failures += 0 if condition else 1
 
 
-def plant(root, tests, stopped=None, notRun=0):
-    """A box record: fast.json and test.jsonl holding each (test, action), each test started before it ends."""
+def plant(root, tests, stopped=None, notRun=0, stages=None):
+    """A box record: fast.json (with stages_exit when given) and test.jsonl holding each (test, action), each test
+    started before it ends."""
     directory = tempfile.mkdtemp(dir=root)
     outcomes = [{"package": package, "test": test, "status": "passed"} for test, _ in tests]
     outcomes += [{"package": package, "test": "TestNeverRan%d" % index, "status": "not run"} for index in range(notRun)]
-    json.dump({"sha": "a" * 40, "base": "b" * 40, "stopped": stopped, "test_outcomes": outcomes}, open(os.path.join(directory, "fast.json"), "w"))
+    json.dump({"sha": "a" * 40, "base": "b" * 40, "stopped": stopped, "test_outcomes": outcomes, "stages_exit": stages or {}}, open(os.path.join(directory, "fast.json"), "w"))
     with open(os.path.join(directory, "test.jsonl"), "w") as stream:
         for test, action in tests:
             stream.write(json.dumps({"Action": "run", "Package": package, "Test": test}) + "\n")
@@ -39,13 +45,15 @@ def plant(root, tests, stopped=None, notRun=0):
     return directory
 
 
-def verdicts(root, units):
-    """A new path's verdict records: units is [(unitKey, status, [(test, outcome)])]."""
+def verdicts(root, units, phases=()):
+    """A new path's verdict records: units is [(unitKey, status, [(test, outcome)])], phases [(unitKey, status, line)]."""
     path = tempfile.mktemp(dir=root, suffix=".jsonl")
     with open(path, "w") as stream:
         for unitKey, status, tests in units:
             stream.write(json.dumps({"unitKey": unitKey, "change": "chg_test", "status": status,
                                      "tests": [{"package": package, "test": test, "outcome": outcome} for test, outcome in tests]}) + "\n")
+        for unitKey, status, line in phases:
+            stream.write(json.dumps({"unitKey": unitKey, "change": "chg_test", "status": status, "tests": [], "phase": line}) + "\n")
     return path
 
 
@@ -89,6 +97,24 @@ zipped = plant(root, [("TestA", "pass"), ("TestB", "fail"), ("TestC", "skip"), (
 subprocess.run(["gzip", os.path.join(zipped, "test.jsonl")], check=True)
 code, output = run(zipped, verdicts(root, same))
 check("an older record's test.jsonl.gz is read the same, exit 0", code == 0 and "4 tests the same" in output, output)
+
+boxStages = {"vet": 0, "build": 0, "smoke": 0, "tests": 1, "products": 0, "census": 0}
+staged = plant(root, [("TestA", "pass"), ("TestB", "fail"), ("TestC", "skip"), ("TestA/sub", "pass")], stages=boxStages)
+phases = [("p1", "passed", "vet"), ("p2", "passed", "build"), ("p3", "passed", "smoke 1"), ("p4", "passed", "smoke 2"), ("p5", "passed", "gofmt")]
+code, output = run(staged, verdicts(root, same, phases))
+check("every phase stage agrees with the box's stages_exit, exit 0", code == 0 and "4 stages the same, 0 differ" in output, output)
+
+code, output = run(staged, verdicts(root, same, phases[:2] + [("p3", "passed", "smoke 1"), ("p4", "failed", "smoke 2"), phases[4]]))
+check("a stage with one failed unit where the box passed is named with its unit, exit 1", code == 1 and "stage smoke: box pass, new fail (units p4)" in output, output)
+
+code, output = run(staged, verdicts(root, same, phases[:2] + [phases[4]]))
+check("a box stage with no phase unit is named, exit 1", code == 1 and "stage smoke: box pass, new no phase unit" in output, output)
+
+code, output = run(staged, verdicts(root, same, phases[:4] + [("p5", "failed", "gofmt")]))
+check("gofmt, which the box doesn't run, differs when it fails, exit 1", code == 1 and "stage gofmt: box absent, new fail" in output, output)
+
+code, output = run(staged, verdicts(root, same, phases[:2] + [phases[4]]), "--no-stages")
+check("--no-stages compares tests alone, exit 0", code == 0 and "stages not compared" in output, output)
 
 code, output = run(os.path.join(root, "missing"), verdicts(root, same))
 check("a missing box record is unreadable, exit 2", code == 2, output)

@@ -18,12 +18,23 @@ The first line is the summary; each difference follows, sorted. Exit 0 when ever
 	pilots/adamic-gate/boxparity.py gate-logs/26b08c000a07/20261009T211158Z/fast verdicts.jsonl [--top-level]
 
 --top-level compares top-level tests only (no '/' in the name), for a new path whose tests[] carries no subtests.
+
+Stages too (Loom's ruling, Oct 10 01:41Z): the box's verdict is its stages as well as its tests. A new-path phase unit's
+record names its stage (parityverdicts.py's "phase", run.py's own unit line, whose first word is the stage), and a stage
+passes there when every unit of it passed. Each stage is compared with the box's stages_exit (0 passes). The stages the
+new path decides another way aren't phases: tests and products (their units, compared test for test above) and census
+(the judge's census step). A stage the box ran that the new path has no phase for is a difference, since the new path
+didn't check what the box did; a phase the box doesn't run (gofmt) differs only when it fails. --no-stages compares
+tests alone, and the summary says so.
 """
 
 import gzip
 import json
 import os
 import sys
+
+# The box stages the new path decides without a phase unit, and how.
+decidedOtherwise = {"tests": "test units", "products": "product units", "census": "the judge's census step"}
 
 
 def boxSide(directory, topLevel):
@@ -52,34 +63,60 @@ def boxSide(directory, topLevel):
 
 def newSide(path, topLevel):
     """The new path's outcomes by (package, test) with the unitKey that ran each, and why it isn't comparable, or None."""
-    outcomes, units, changes = {}, {}, set()
+    outcomes, units, changes, stages = {}, {}, set(), {}
     for number, line in enumerate(open(path, errors="replace"), 1):
         if not line.strip():
             continue
         verdict = json.loads(line)
         changes.add(verdict.get("change"))
         if verdict.get("status") not in ("passed", "failed"):
-            return None, None, changes, "verdict %s (line %d) is %s, not passed or failed" % (verdict.get("unitKey"), number, verdict.get("status"))
+            return None, None, changes, None, "verdict %s (line %d) is %s, not passed or failed" % (verdict.get("unitKey"), number, verdict.get("status"))
+        if verdict.get("phase") is not None:
+            stage = (verdict["phase"].split() or [""])[0]
+            stages.setdefault(stage, []).append((verdict.get("unitKey"), verdict["status"]))
+            continue
         for entry in verdict.get("tests") or []:
             test = entry.get("test") or ""
             if not test or (topLevel and "/" in test):
                 continue
             key = (entry.get("package") or "", test)
             if key in outcomes and outcomes[key] != entry.get("outcome"):
-                return None, None, changes, "%s %s: units %s and %s disagree (%s, %s)" % (key[0], key[1], units[key], verdict.get("unitKey"), outcomes[key], entry.get("outcome"))
+                return None, None, changes, None, "%s %s: units %s and %s disagree (%s, %s)" % (key[0], key[1], units[key], verdict.get("unitKey"), outcomes[key], entry.get("outcome"))
             outcomes[key], units[key] = entry.get("outcome"), verdict.get("unitKey")
-    return outcomes, units, changes, None
+    return outcomes, units, changes, stages, None
+
+
+def stageDifferences(summary, stages):
+    """Each stage whose outcome differs, and how many stages agree."""
+    boxExits = summary.get("stages_exit") or {}
+    differences, same = [], 0
+    for stage in sorted(set(boxExits) | set(stages)):
+        if stage in decidedOtherwise and stage not in stages:
+            continue
+        box = None if stage not in boxExits else ("pass" if boxExits[stage] == 0 else "fail (exit %s)" % boxExits[stage])
+        units = stages.get(stage)
+        new = None if units is None else ("pass" if all(status == "passed" for _, status in units) else "fail")
+        if box is None and new == "pass":
+            same += 1
+            continue
+        if box is not None and new is not None and box.split()[0] == new:
+            same += 1
+            continue
+        named = "" if not units else " (units %s)" % ", ".join(sorted(unitKey[:12] for unitKey, status in units if status != "passed" or new == "pass"))
+        differences.append("stage %s: box %s, new %s%s" % (stage, box or "absent", new or "no phase unit", named))
+    return differences, same
 
 
 def main():
     arguments = [argument for argument in sys.argv[1:] if not argument.startswith("--")]
     topLevel = "--top-level" in sys.argv
+    withStages = "--no-stages" not in sys.argv
     if len(arguments) != 2:
         print(__doc__.strip().splitlines()[0])
         return 2
     try:
         box, summary, boxReason = boxSide(arguments[0], topLevel)
-        new, units, changes, newReason = newSide(arguments[1], topLevel)
+        new, units, changes, stages, newReason = newSide(arguments[1], topLevel)
     except (OSError, ValueError) as error:
         print("boxparity: unreadable: %s" % error)
         return 2
@@ -92,9 +129,14 @@ def main():
         if box.get(key) != new.get(key):
             differences.append("%s %s: box %s, new %s%s" % (key[0], key[1], box.get(key, "absent"), new.get(key, "absent"), " (unit %s)" % units[key] if key in units else ""))
     same = len(set(box) | set(new)) - len(differences)
-    print("boxparity: %s, %s at %s: %d tests the same, %d differ (box %d, new %d, from %d units)" % (
+    stageLine = "stages not compared (--no-stages)"
+    if withStages:
+        stageDiffers, stagesSame = stageDifferences(summary, stages)
+        stageLine = "%d stages the same, %d differ" % (stagesSame, len(stageDiffers))
+        differences += stageDiffers
+    print("boxparity: %s, %s at %s: %d tests the same, %d differ (box %d, new %d, from %d units); %s" % (
         "identical" if not differences else "differs", summary.get("sha", "?")[:12], summary.get("base", "?")[:12], same,
-        len(differences), len(box), len(new), len(set(units.values()))))
+        len(differences) - (len(stageDiffers) if withStages else 0), len(box), len(new), len(set(units.values())), stageLine))
     for line in differences:
         print(line)
     return 1 if differences else 0

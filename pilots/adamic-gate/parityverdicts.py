@@ -18,6 +18,10 @@ checked proves nothing. A record whose tests are already a list is taken as it i
 	pilots/adamic-gate/parityverdicts.py events.jsonl > verdicts.jsonl
 	pilots/adamic-gate/boxparity.py <box record dir> verdicts.jsonl
 
+A phase unit (keyParts.kind phase, Loom's ruling 01:41Z) gets a "phase" field, its plan's select.run (run.py's own unit
+line, such as "vet" or "products <unit>"), from the slice's unit.planned events, so boxparity.py can pair it with the
+box's stage.
+
 --store names the blob store: a URL (default https://adamic-store.kirkouimet.com) or a local directory of blobs named
 by sha256, for tests. Exit 1 when the slice holds no verdict.decided event, since an empty side would compare as
 everything absent.
@@ -77,11 +81,19 @@ def main():
     if len(arguments) != 1:
         print(__doc__.strip().splitlines()[0])
         return 2
-    latest = {}
+    latest, phases = {}, {}
     for line in open(arguments[0], errors="replace"):
         try:
             event = json.loads(line)
         except ValueError:
+            continue
+        if event.get("type") == "unit.planned":
+            # A phase unit's record names no stage, so its plan does: select.run is run.py's own unit line.
+            data = event.get("data") or {}
+            parts = data.get("keyParts") or {}
+            unitKey = (event.get("subject") or {}).get("unitKey") or data.get("unitKey")
+            if parts.get("kind") == "phase" and unitKey:
+                phases[unitKey] = (parts.get("select") or {}).get("run") or ""
             continue
         if event.get("type") != "verdict.decided":
             continue
@@ -99,6 +111,8 @@ def main():
         print("parityverdicts: %s" % error, file=sys.stderr)
         return 1
     for verdict in records:
+        if verdict["unitKey"] in phases:
+            verdict = dict(verdict, phase=phases[verdict["unitKey"]])
         print(json.dumps(verdict, sort_keys=True, separators=(",", ":")))
     return 0
 

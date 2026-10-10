@@ -83,6 +83,16 @@ failing = blob(store, tests + [{"outcome": "fail", "package": "github.com/system
 code, output, error = run(events(root, [{"unitKey": "k1", "status": "failed", "tests": {"sha256": failing, "passed": 2, "failed": 1, "skipped": 0, "inline": []}}]), store)
 check("inline missing a failed row fails, exit 1", code == 1 and "tests.inline" in error, output + error)
 
+planned = events(root, [{"unitKey": "p1", "status": "passed", "tests": []}, {"unitKey": "k1", "status": "passed", "tests": good}])
+with open(planned, "a") as stream:
+    for unitKey, kind, line in (("p1", "phase", "products go-cohere"), ("k1", "test", "")):
+        stream.write(json.dumps({"seq": 9, "type": "unit.planned", "subject": {"unitKey": unitKey},
+                                 "data": {"keyParts": {"kind": kind, "select": {"run": line}}}}) + "\n")
+code, output, error = run(planned, store)
+records = {record["unitKey"]: record for record in map(json.loads, output.splitlines())}
+check("a phase unit's record names its plan's run line, a test unit's names none",
+      code == 0 and records["p1"].get("phase") == "products go-cohere" and "phase" not in records["k1"], output + error)
+
 code, output, error = run(events(root, []), store)
 check("a slice with no verdict fails, exit 1", code == 1 and "no verdict.decided" in error, output + error)
 
