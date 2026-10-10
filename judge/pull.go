@@ -44,6 +44,9 @@ type PlannedUnitWire struct {
 	KeyParts json.RawMessage `json:"keyParts"`
 	Decision string          `json:"decision"` // run or reuse
 	Reused   *string         `json:"reused"`
+	// Resources is the unit's declared need (Planner's unit-needs), placement only, outside the key: a rerun alone is
+	// placed by it as the first placement was, or it lands on a tier that can't hold it.
+	Resources protocol.Resources `json:"resources"`
 }
 
 // FutureSource lists the futures waiting for a verdict.
@@ -100,10 +103,10 @@ func (NoMainRecords) Latest(base, unitKey string) ([]TestOutcome, bool, error) {
 // Puller judges every ready future one pass at a time.
 type Puller struct {
 	Source FutureSource
-	RunOf  func(tree string, attempt int) string                                // coordinator.FutureRun
-	Read   func(run string) ([]protocol.Event, error)                           // coordinator.ReadRunEvents, bound
-	Rerun  func(keyParts json.RawMessage, sha string) ([]protocol.Event, error) // planner.JobUnitFor, then coordinator.RerunAlone
-	Log    func(run, sha256 string) ([]byte, error)                             // coordinator.ReadRunBlob, bound: each attempt's test log
+	RunOf  func(tree string, attempt int) string                                                              // coordinator.FutureRun
+	Read   func(run string) ([]protocol.Event, error)                                                         // coordinator.ReadRunEvents, bound
+	Rerun  func(keyParts json.RawMessage, resources protocol.Resources, sha string) ([]protocol.Event, error) // planner.JobUnitFor with the unit's resources, then coordinator.RerunAlone
+	Log    func(run, sha256 string) ([]byte, error)                                                           // coordinator.ReadRunBlob, bound: each attempt's test log
 	Main   MainRecords
 	Queue  Queue
 	Loop   Loop // its Now is used; its collaborators are set per future
@@ -238,9 +241,10 @@ func (puller Puller) VoidOne(tree string, attempt int, cause string) (FuturePost
 // jobOf is the loop and job that judge one listed future from its run's events.
 func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.Event) (Loop, Job) {
 	parts := map[string]json.RawMessage{}
+	resources := map[string]protocol.Resources{}
 	plan := []PlanUnit{}
 	for _, unit := range future.Units {
-		parts[unit.UnitKey] = unit.KeyParts
+		parts[unit.UnitKey], resources[unit.UnitKey] = unit.KeyParts, unit.Resources
 		planUnit := PlanUnit{UnitKey: unit.UnitKey}
 		var parts struct {
 			Kind  string `json:"kind"`
@@ -266,7 +270,7 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	loop := puller.Loop
 	loop.Runs = EventRuns{Read: func(string) ([]protocol.Event, error) { return events, nil }, Log: puller.Log}
 	loop.Fabric = EventFabric{Rerun: func(unitKey, tree string) ([]protocol.Event, error) {
-		return puller.Rerun(parts[unitKey], tree)
+		return puller.Rerun(parts[unitKey], resources[unitKey], tree)
 	}, Log: puller.Log}
 	loop.Main, loop.Queue = puller.Main, puller.Queue
 	record := ChangeRecord{Change: future.Change.Change, Sha: future.Change.Sha, Base: future.Change.Base, Owner: future.Change.Owner}
@@ -361,4 +365,69 @@ func runsOf(run string, events []protocol.Event, earlier map[string][]protocol.E
 		}
 		return earlier[asked], nil
 	}
+}
+
+// adamicModule is the import path prefix a unit key's package carries; unit-needs.json names packages by directory.
+const adamicModule = "github.com/system-inc/adamic/"
+
+// NeedOf is a unit's declared need for a rerun, read the way the placer reads it (Planner, Oct 10 02:02Z): the
+// listing's resources when the plan carried them, else the gate tools' unit-needs.json by the unit's directory and run
+// pattern (planner.UnitNeeds.For). A need no live tier meets is an error, so the rerun is never placed to wait.
+func NeedOf(listed protocol.Resources, keyParts json.RawMessage, needs planner.UnitNeeds) (protocol.Resources, error) {
+	if listed.MemoryMegabytes > 0 || listed.Cpus > 0 {
+		return listed, nil
+	}
+	var parts struct {
+		Package string `json:"package"`
+		Select  struct {
+			Run string `json:"run"`
+		} `json:"select"`
+	}
+	if err := json.Unmarshal(keyParts, &parts); err != nil {
+		return protocol.Resources{}, fmt.Errorf("a unit's keyParts: %w", err)
+	}
+	need, err := needs.For(strings.TrimPrefix(parts.Package, adamicModule), parts.Select.Run)
+	if err != nil || need == nil {
+		return protocol.Resources{}, err
+	}
+	return *need, nil
+}
+
+// A PoolEntry is one pool of workshop's ~/.loom/pools.json (Fabric's, Oct 10 02:02Z): its name on the wire, its tier,
+// the runner its workers serve, and each worker's memory and cpus. The placer and the judge's reruns read the same file.
+type PoolEntry struct {
+	Name            string `json:"name"`
+	Tier            string `json:"tier"`
+	Runner          string `json:"runner"`
+	MemoryMegabytes int    `json:"memoryMegabytes"`
+	Cpus            int    `json:"cpus"`
+}
+
+// LoadPools reads pools.json, refusing a pool without a name, a runner, or positive memory and cpus.
+func LoadPools(content []byte) ([]PoolEntry, error) {
+	var table struct {
+		Pools []PoolEntry `json:"pools"`
+	}
+	if err := json.Unmarshal(content, &table); err != nil {
+		return nil, fmt.Errorf("pools.json: %w", err)
+	}
+	for _, pool := range table.Pools {
+		if pool.Name == "" || pool.Runner == "" || pool.MemoryMegabytes <= 0 || pool.Cpus <= 0 {
+			return nil, fmt.Errorf("pools.json: pool %+v needs a name, a runner and positive memoryMegabytes and cpus", pool)
+		}
+	}
+	return table.Pools, nil
+}
+
+// FitPools is every pool a rerun of a unit may go to: it serves the runner the unit's key names (a unit runs only on
+// its key's runner), and each worker holds the unit's declared need. None means the rerun can't be placed: void,
+// with that cause, never silent.
+func FitPools(pools []PoolEntry, runner string, need protocol.Resources) []PoolEntry {
+	fit := []PoolEntry{}
+	for _, pool := range pools {
+		if (runner == "" || pool.Runner == runner) && pool.MemoryMegabytes >= need.MemoryMegabytes && pool.Cpus >= need.Cpus {
+			fit = append(fit, pool)
+		}
+	}
+	return fit
 }

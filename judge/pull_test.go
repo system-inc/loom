@@ -3,10 +3,12 @@ package judge
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -33,7 +35,7 @@ func TestThePullerJudgesOnlyFinishedFuturesAndRerunsByKeyParts(t *testing.T) {
 		Source: source,
 		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 		Read:   func(run string) ([]protocol.Event, error) { return streams[run], nil },
-		Rerun: func(keyParts json.RawMessage, sha string) ([]protocol.Event, error) {
+		Rerun: func(keyParts json.RawMessage, _ protocol.Resources, sha string) ([]protocol.Event, error) {
 			reruns = append(reruns, string(keyParts)+"@"+sha[:1])
 			if sha == baseTree {
 				return finishedStream("job-on-base", "passed"), nil
@@ -76,7 +78,7 @@ func TestVoidOnePostsTheListedAttemptOnlyAndNeverReruns(t *testing.T) {
 		Source: source,
 		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 		Read:   func(run string) ([]protocol.Event, error) { return finishedStream(unit, "passed"), nil },
-		Rerun: func(json.RawMessage, string) ([]protocol.Event, error) {
+		Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) {
 			t.Fatal("a void reran a unit")
 			return nil, nil
 		},
@@ -122,7 +124,7 @@ func TestTheBackstopVoidsOnlyARunQuietForFortyFiveMinutes(t *testing.T) {
 				Source: listedFutures{{Future: tree, Base: baseTree, Change: PlannedChange{Change: "chg_A"}, Units: units}},
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-1" },
 				Read:   func(string) ([]protocol.Event, error) { return c.events, nil },
-				Rerun: func(json.RawMessage, string) ([]protocol.Event, error) {
+				Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) {
 					t.Fatal("the backstop placed a unit")
 					return nil, nil
 				},
@@ -192,8 +194,11 @@ func TestAnEarlierAttemptsPassIsCarriedOnlyWithinTheSameFuture(t *testing.T) {
 	}
 	pullerFor := func(source listedFutures, queue *StubQueue) Puller {
 		return NewPuller(Puller{Source: source, RunOf: runOf, Read: func(run string) ([]protocol.Event, error) { return streams[run], nil },
-			Rerun: func(json.RawMessage, string) ([]protocol.Event, error) { t.Fatal("placed a unit"); return nil, nil },
-			Main:  NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now}})
+			Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) {
+				t.Fatal("placed a unit")
+				return nil, nil
+			},
+			Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now}})
 	}
 	queue := &StubQueue{}
 	if judged, err := pullerFor(listing(carried, placed), queue).PullOnce(); err != nil || judged != 1 {
@@ -281,7 +286,7 @@ func TestThePullerReadsAUnitsKindAndRunnerFromItsKey(t *testing.T) {
 				return []protocol.Event{{Unit: unit, Type: "started", RunnerSha256: ranOn}, {Unit: unit, Type: "exit", Code: code(1)}, {Unit: unit, Type: "finished", Status: "failed"}}, nil
 			},
 			// A phase red is never rerun alone; a void attempt is placed again, and this placement never reports.
-			Rerun: func(json.RawMessage, string) ([]protocol.Event, error) { return nil, nil },
+			Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) { return nil, nil },
 			Main:  NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now, RequireTestLog: true},
 		})
 		if judged, err := puller.PullOnce(); err != nil || judged != 1 {
@@ -294,5 +299,71 @@ func TestThePullerReadsAUnitsKindAndRunnerFromItsKey(t *testing.T) {
 	}
 	if post := pull(strings.Repeat("b", 64)); post.Decision.Status != "void" {
 		t.Fatalf("decision %+v: want void, on a runner other than keyParts.tools.runner", post.Decision)
+	}
+}
+
+func TestARerunsNeedIsTheListingsElseUnitNeeds(t *testing.T) {
+	needs := planner.UnitNeeds{Tiers: []planner.NeedTier{{Name: "codex-strict", MemoryMegabytes: 16384, Cpus: 4}, {Name: "box-strict", MemoryMegabytes: 65536, Cpus: 8}},
+		Units: []planner.UnitNeed{{Package: "stage1/cohere/typeaware", MemoryMegabytes: 32768, Cpus: 4, Record: "r"}}}
+	typeaware := json.RawMessage(`{"package":"github.com/system-inc/adamic/stage1/cohere/typeaware","select":{"run":""}}`)
+	if need, err := NeedOf(protocol.Resources{}, typeaware, needs); err != nil || need.MemoryMegabytes != 32768 {
+		t.Fatalf("need %+v (%v), want unit-needs' 32768 MB for a plan that carried none", need, err)
+	}
+	if need, _ := NeedOf(protocol.Resources{MemoryMegabytes: 2048, Cpus: 1}, typeaware, needs); need.MemoryMegabytes != 2048 {
+		t.Fatalf("need %+v, want the listing's own", need)
+	}
+	if need, err := NeedOf(protocol.Resources{}, json.RawMessage(`{"package":"github.com/system-inc/adamic/internal/oracle"}`), needs); err != nil || need != (protocol.Resources{}) {
+		t.Fatalf("need %+v (%v), want none declared", need, err)
+	}
+	needs.Units[0].MemoryMegabytes = 131072
+	if _, err := NeedOf(protocol.Resources{}, typeaware, needs); err == nil {
+		t.Fatal("a need no tier meets was placed")
+	}
+}
+
+func TestARerunGoesOnlyToAPoolServingItsRunnerThatHoldsItsNeed(t *testing.T) {
+	content, err := os.ReadFile("testdata/pools.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pools, err := LoadPools(content)
+	if err != nil || len(pools) != 4 {
+		t.Fatalf("pools %+v (%v)", pools, err)
+	}
+	keyRunner := "8a70ebce11315bce6395da08b0226f32f592cbb747d4f329438594bf7056b7f0"
+	names := func(fit []PoolEntry) string {
+		list := []string{}
+		for _, pool := range fit {
+			list = append(list, pool.Name)
+		}
+		return strings.Join(list, ",")
+	}
+	if got := names(FitPools(pools, keyRunner, protocol.Resources{})); got != "codex-strict,box-strict-8a70" {
+		t.Fatalf("fit %s, want both pools serving its key's runner", got)
+	}
+	if got := names(FitPools(pools, keyRunner, protocol.Resources{MemoryMegabytes: 32768, Cpus: 4})); got != "box-strict-8a70" {
+		t.Fatalf("fit %s, want only the box serving its runner for a 32 GB need", got)
+	}
+	if got := FitPools(pools, keyRunner, protocol.Resources{MemoryMegabytes: 131072}); len(got) != 0 {
+		t.Fatalf("fit %v for a need no pool holds", got)
+	}
+	if _, err := LoadPools([]byte(`{"pools":[{"name":"p","runner":"","memoryMegabytes":1,"cpus":1}]}`)); err == nil {
+		t.Fatal("read a pool with no runner")
+	}
+}
+
+func TestARerunThatCantBePlacedIsVoidNeverAnError(t *testing.T) {
+	h := newHarness()
+	h.runs["u"] = failedWith("TestB")
+	loop := Loop{Runs: h.runs, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now,
+		Fabric: EventFabric{Rerun: func(string, string) ([]protocol.Event, error) {
+			return []protocol.Event{{Type: "error", Phase: protocol.PhasePlace, Message: "not placed: a \"phase\" unit has no job yet"}}, nil
+		}}}
+	post, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "u"}))
+	if err != nil {
+		t.Fatalf("an unplaceable rerun stalled the future: %v", err)
+	}
+	if record := recordOf(t, post, "u"); record.Status != Void || record.Infra != InfraNeverPlaced {
+		t.Fatalf("%+v, want void neverPlaced", record)
 	}
 }

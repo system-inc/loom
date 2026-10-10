@@ -1,0 +1,9 @@
+{
+ "about": "The pool table, one file the placer and the judge's reruns both read (workshop ~/.loom/pools.json, Fabric's). Each pool: its name on the wire, its tier (unit-needs.json's tiers), the runner its workers serve (a unit runs only where its key's keyParts.tools.runner is served), and each worker's memory and cpus. A unit whose declared need a pool can't hold never goes there.",
+ "pools": [
+  {"name": "codex-strict", "tier": "codex-strict", "runner": "8a70ebce11315bce6395da08b0226f32f592cbb747d4f329438594bf7056b7f0", "memoryMegabytes": 16384, "cpus": 4},
+  {"name": "box-strict-8a70", "tier": "box-strict", "runner": "8a70ebce11315bce6395da08b0226f32f592cbb747d4f329438594bf7056b7f0", "memoryMegabytes": 65536, "cpus": 8},
+  {"name": "codex-strict-cold", "tier": "codex-strict", "runner": "62b615decb5eb37fb4f7df7c599aba8f8f14472f760dc1da177fe0d82a23c310", "memoryMegabytes": 16384, "cpus": 4},
+  {"name": "box-strict", "tier": "box-strict", "runner": "62b615decb5eb37fb4f7df7c599aba8f8f14472f760dc1da177fe0d82a23c310", "memoryMegabytes": 65536, "cpus": 8}
+ ]
+}

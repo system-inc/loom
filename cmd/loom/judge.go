@@ -54,6 +54,8 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	postParity := flags.Bool("post-parity", false, "with --dry-run, post the batches of parity futures (which never land) and print the rest: the steady judge before cutover")
 	void := flags.String("void", "", "post one listed future's run as void and exit, <tree>:<attempt> (the attempt Queue lists); needs --cause")
 	cause := flags.String("cause", "", "with --void, why the run is void, which leads the decision's problems")
+	poolsPath := flags.String("pools", "", "the pool table, workshop's ~/.loom/pools.json: a rerun goes only to a pool serving its key's runner whose workers hold its declared need")
+	needsGit := flags.String("needs-git", "", "with --pools, a clone of Adamic whose origin's loom/planner-reads holds unit-needs.json, for a unit whose plan carried no need")
 	requireRunner := flags.Bool("require-runner", false, "void an attempt whose runner reports no sha256 (the logged fail-closed switch, a cutover condition, once every pool's runner sends it); a mismatch is void either way")
 	censusRows := flags.String("census-rows", "", "the skip census's rows, comma-separated files (the tools tree's skips.json and census-extra.json); every unit whose tests pass is held to it")
 	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
@@ -61,7 +63,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
-	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0) {
+	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0 && *poolsPath == "") {
 		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]] [--void <tree>:<attempt> --cause <why>]; loom judge carried --tree <tree> --attempt <N> ...")
 		return 2
 	}
@@ -80,8 +82,26 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	for range *local {
 		slots = append(slots, coordinator.LocalMachine{})
 	}
+	version := ""
+	if len(pools) > 0 || *poolsPath != "" {
+		version, err = runnerVersion(*source)
+		if err != nil {
+			fmt.Fprintln(stderr, "judge:", err)
+			return 1
+		}
+	}
+	var table []judge.PoolEntry
+	if *poolsPath != "" {
+		content, err := os.ReadFile(*poolsPath)
+		if err == nil {
+			table, err = judge.LoadPools(content)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, "judge:", err)
+			return 1
+		}
+	}
 	if len(pools) > 0 {
-		version, err := runnerVersion(*source)
 		if err != nil {
 			fmt.Fprintln(stderr, "judge:", err)
 			return 1
@@ -104,16 +124,45 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Read: func(run string) ([]protocol.Event, error) {
 			return coordinator.ReadRunEvents(runContext, *wire, secret, run)
 		},
-		Rerun: func(keyParts json.RawMessage, sha string) ([]protocol.Event, error) {
+		Rerun: func(keyParts json.RawMessage, resources protocol.Resources, sha string) ([]protocol.Event, error) {
 			var parts planner.KeyParts
 			if err := json.Unmarshal(keyParts, &parts); err != nil {
 				return nil, fmt.Errorf("a planned unit's keyParts: %w", err)
 			}
 			unit, err := planner.JobUnitFor(parts, sha)
 			if err != nil {
-				return nil, err
+				// A unit the planner can't rebuild as a job (a phase or product unit, or a test keyed on
+				// ADAMIC_GATE_CHANGED's file hash) can't be placed again: its rerun is void with that cause, and never
+				// an error that would stall its whole future on every pass.
+				return []protocol.Event{{Type: "error", Phase: protocol.PhasePlace, Message: "not placed: " + err.Error()}}, nil
 			}
-			result, err := coordinator.RerunAlone(runContext, config, unit)
+			// Placed by its declared need, as its first placement was: a pool that can't hold it never takes it.
+			unit.Resources = resources
+			rerunConfig := config
+			if table != nil {
+				// One table (Loom, Oct 10 02:02Z): the pools serving the key's runner whose workers hold the unit's need,
+				// read from the listing or else unit-needs.json, one slot each, a strict unit's silence up to its ceiling.
+				needs, err := loadNeeds(*needsGit)
+				if err != nil {
+					return nil, err
+				}
+				need, err := judge.NeedOf(resources, keyParts, needs)
+				if err != nil {
+					return []protocol.Event{{Unit: unit.Id, Type: "error", Phase: protocol.PhasePlace, Message: "not placed: " + err.Error()}}, nil
+				}
+				unit.Resources = need
+				fit := judge.FitPools(table, parts.Tools.Runner, need)
+				if len(fit) == 0 {
+					return []protocol.Event{{Unit: unit.Id, Type: "error", Phase: protocol.PhasePlace,
+						Message: fmt.Sprintf("not placed: no pool serves runner %.12s with %d MB and %d cpus", parts.Tools.Runner, need.MemoryMegabytes, need.Cpus)}}, nil
+				}
+				rerunConfig.Slots = nil
+				for _, pool := range fit {
+					rerunConfig.Slots = append(rerunConfig.Slots, &coordinator.PoolMachine{Pool: pool.Name, Has: poolHas[pool.Name], Wire: *wire, Secret: secret,
+						Version: version, GoPlatform: poolPlatform, Log: stdout, MemoryMegabytes: pool.MemoryMegabytes, SilenceDrop: strictSilence})
+				}
+			}
+			result, err := coordinator.RerunAlone(runContext, rerunConfig, unit)
 			return result.Events, err
 		},
 		Log: func(run, sha256 string) ([]byte, error) {
@@ -491,4 +540,37 @@ func gateReport(suiteText string, events []judge.LogEvent, canaryTree string) ([
 		lines = append(lines, "hold: "+reason)
 	}
 	return lines, false, nil
+}
+
+// strictSilence is how long a strict rerun may go silent before its worker counts as gone: the unit's 1800 s ceiling,
+// since a strict runner says nothing while a package's go test runs (Loom, Oct 10 01:57Z).
+const strictSilence = 1800 * time.Second
+
+// loadNeeds reads unit-needs.json from origin's loom/planner-reads tip through the judge's own clone, fetched fresh
+// into a ref of its own, so a declared need lands in the next rerun. No clone means no needs beyond the listing's.
+func loadNeeds(repository string) (planner.UnitNeeds, error) {
+	if repository == "" {
+		return planner.UnitNeeds{}, nil
+	}
+	if output, err := exec.Command("git", "-C", repository, "fetch", "-q", "origin", "+refs/heads/loom/planner-reads:refs/judge/planner-reads").CombinedOutput(); err != nil {
+		return planner.UnitNeeds{}, fmt.Errorf("fetching loom/planner-reads: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	content, err := exec.Command("git", "-C", repository, "show", "refs/judge/planner-reads:cloud/fast-gate/unit-needs.json").Output()
+	if err != nil {
+		// The tools carry no unit-needs.json: they declare no needs.
+		return planner.UnitNeeds{}, nil
+	}
+	directory, err := os.MkdirTemp("", "judge-needs-")
+	if err != nil {
+		return planner.UnitNeeds{}, err
+	}
+	defer os.RemoveAll(directory)
+	path := filepath.Join(directory, "cloud", "fast-gate")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return planner.UnitNeeds{}, err
+	}
+	if err := os.WriteFile(filepath.Join(path, "unit-needs.json"), content, 0o644); err != nil {
+		return planner.UnitNeeds{}, err
+	}
+	return planner.LoadUnitNeeds(directory)
 }
