@@ -38,10 +38,10 @@ const DefaultPort = 7380
 // store.
 const ConnectTimeout = 2 * time.Second
 
-// HeaderTimeout bounds a client's wait for the house cache's answer to one ask. A miss is answered once the cache
-// holds the whole blob, checked: a source chunk is about half a megabyte and a product under 20, a few seconds over the
-// house's shared link. Past it the client reads that blob from the store, and the cache's fetch goes on for the others.
-// A variable only so tests can shorten it.
+// HeaderTimeout bounds a client's wait for the house cache's answer to one ask. A hit is answered at once, and a miss
+// as soon as the store answers the cache, its bytes streamed as they arrive (Server), so this bounds a cache that is
+// frozen, never one fetching over a slow link. Past it the client reads that blob from the store. A variable only so
+// tests can shorten it.
 var HeaderTimeout = 15 * time.Second
 
 // IdleWindow and IdleBytes bound a body's trickle: a client gives up on the house cache's answer once a window passes

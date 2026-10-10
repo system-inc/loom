@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,14 @@ type store struct {
 	gets    map[string]int
 	arrived chan string
 	gate    chan struct{}
-	server  *httptest.Server
+	// trickle is a pause before each 4 KB the store sends; cutAfter, when set, drops its connection once it has sent
+	// that many bytes.
+	trickle  time.Duration
+	cutAfter int
+	noLength bool
+	// linger holds the connection open that long after the last byte, before the store's answer ends.
+	linger time.Duration
+	server *httptest.Server
 }
 
 func newStore(t *testing.T) *store {
@@ -48,7 +56,36 @@ func newStore(t *testing.T) *store {
 			http.NotFound(writer, request)
 			return
 		}
-		writer.Write(content)
+		// As R2 does: the length first (unless noLength), then the bytes, as slowly as the test's trickle says.
+		upstream.mutex.Lock()
+		trickle, noLength := upstream.trickle, upstream.noLength
+		upstream.mutex.Unlock()
+		if !noLength {
+			writer.Header().Set("Content-Length", fmt.Sprint(len(content)))
+		}
+		writer.WriteHeader(http.StatusOK)
+		for len(content) > 0 {
+			piece := min(len(content), 4096)
+			if trickle > 0 {
+				time.Sleep(trickle)
+			}
+			if _, err := writer.Write(content[:piece]); err != nil {
+				return
+			}
+			writer.(http.Flusher).Flush()
+			content = content[piece:]
+			upstream.mutex.Lock()
+			cut := upstream.cutAfter > 0 && len(upstream.objects[request.URL.Path])-len(content) >= upstream.cutAfter
+			upstream.mutex.Unlock()
+			if cut {
+				// The store's connection drops midway.
+				panic(http.ErrAbortHandler)
+			}
+		}
+		upstream.mutex.Lock()
+		linger := upstream.linger
+		upstream.mutex.Unlock()
+		time.Sleep(linger)
 	}))
 	t.Cleanup(upstream.server.Close)
 	return upstream
@@ -133,6 +170,38 @@ type answer struct {
 	how    string
 }
 
+// try is a GET whose failure is the test's to judge: no answer, a status but 200 (a fetch that failed before the answer
+// started, as a small blob's can), or a body cut midway.
+func try(url string) (answer, error) {
+	response, err := http.Get(url)
+	if err != nil {
+		return answer{}, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	got := answer{status: response.StatusCode, body: body, length: response.Header.Get("Content-Length"), how: response.Header.Get("X-Loom-House-Cache")}
+	if err == nil && response.StatusCode != http.StatusOK {
+		err = fmt.Errorf("answered %s", response.Status)
+	}
+	return got, err
+}
+
+// settled waits for the cache's fetches to end: no partial left, which a failed fetch removes as it returns.
+func settled(t *testing.T, cache *Server) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if !strings.Contains(held(cache), partialPrefix) {
+			cache.mutex.Lock()
+			flying := len(cache.flights)
+			cache.mutex.Unlock()
+			if flying == 0 {
+				return
+			}
+		}
+	}
+	t.Fatalf("the cache's fetches never ended: %q", held(cache))
+}
+
 func get(t *testing.T, url string) answer {
 	t.Helper()
 	response, err := http.Get(url)
@@ -201,7 +270,8 @@ func TestAMissFillsTheCacheAndAHitIsServedFromDisk(t *testing.T) {
 }
 
 // A store that gives bytes that don't hash to the name asked for is refused: nothing kept, not even a partial, and the
-// client is told so; once the store gives the right bytes, they are what is kept.
+// client's answer is cut short before its last byte, so its read fails and it reads the store; once the store gives
+// the right bytes, they are what is kept.
 func TestTheStoresCorruptBytesAreRefusedAndNothingKept(t *testing.T) {
 	upstream := newStore(t)
 	content := []byte("the tree's source")
@@ -209,10 +279,11 @@ func TestTheStoresCorruptBytesAreRefusedAndNothingKept(t *testing.T) {
 	upstream.set("/blobs/"+sum, []byte("the tree's source, poisoned"))
 	cache, served := newCache(t, upstream, 1<<20, 0, 1<<30)
 
-	refused := get(t, served.URL+"/blobs/"+sum)
-	if refused.status != http.StatusBadGateway || bytes.Contains(refused.body, []byte("poisoned")) {
-		t.Fatalf("corrupt upstream bytes answered %d: %q", refused.status, refused.body)
+	refused, err := try(served.URL + "/blobs/" + sum)
+	if err == nil || bytes.Contains(refused.body, []byte("the tree's source, poisoned")) {
+		t.Fatalf("corrupt upstream bytes answered %d whole: %q", refused.status, refused.body)
 	}
+	settled(t, cache)
 	if got := held(cache); got != "" {
 		t.Fatalf("a refused fetch left %q", got)
 	}
@@ -402,9 +473,10 @@ func TestAStalledFetchIsAbandoned(t *testing.T) {
 	served := httptest.NewServer(cache)
 	defer served.Close()
 	started := time.Now()
-	if got := get(t, served.URL+"/blobs/"+sum); got.status != http.StatusBadGateway || time.Since(started) > 5*time.Second {
-		t.Fatalf("a stalled store answered %d after %v", got.status, time.Since(started))
+	if got, err := try(served.URL + "/blobs/" + sum); err == nil || time.Since(started) > 5*time.Second {
+		t.Fatalf("a stalled store answered %d whole after %v", got.status, time.Since(started))
 	}
+	settled(t, cache)
 	if got := held(cache); got != "" {
 		t.Fatalf("a stalled fetch left %q", got)
 	}
@@ -475,11 +547,124 @@ func TestGateInputsChunksAreServedAndTheirManifestNever(t *testing.T) {
 		t.Fatalf("a chunk answered %d", got.status)
 	}
 	for range 2 {
-		if got := get(t, served.URL+"/gate-inputs/"+tarSum); got.status != http.StatusBadGateway {
-			t.Fatalf("the manifest answered %d: %q", got.status, got.body)
+		if got, err := try(served.URL + "/gate-inputs/" + tarSum); err == nil {
+			t.Fatalf("the manifest answered %d whole: %q", got.status, got.body)
 		}
+		settled(t, cache)
 	}
 	if got := held(cache); got != chunkSum {
 		t.Fatalf("the cache holds %q, not the chunk alone", got)
+	}
+}
+
+// A miss streams: every client asking for one blob while it is fetched gets its first bytes as soon as the store sends
+// them, long before the whole blob is in, all from the one fetch, and the whole blob each.
+func TestConcurrentAskersStreamOneFetch(t *testing.T) {
+	upstream := newStore(t)
+	content := bytes.Repeat([]byte("a chunk of the tree's source "), 1<<13)
+	sum := upstream.put(content)
+	upstream.trickle = 20 * time.Millisecond // about 1.2 s for the whole blob
+	cache, served := newCache(t, upstream, 1<<30, 0, 1<<40)
+	const clients = 4
+	var group sync.WaitGroup
+	firsts := make([]time.Duration, clients)
+	bodies := make([][]byte, clients)
+	started := time.Now()
+	for index := range clients {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			response, err := http.Get(served.URL + "/blobs/" + sum)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			defer response.Body.Close()
+			first := make([]byte, 1)
+			if _, err := io.ReadFull(response.Body, first); err != nil {
+				t.Error(err)
+				return
+			}
+			firsts[index] = time.Since(started)
+			rest, err := io.ReadAll(response.Body)
+			if err != nil {
+				t.Error(err)
+			}
+			bodies[index] = append(first, rest...)
+		}()
+	}
+	group.Wait()
+	whole := time.Since(started)
+	for index := range clients {
+		if !bytes.Equal(bodies[index], content) {
+			t.Fatalf("client %d got %d bytes, not the blob", index, len(bodies[index]))
+		}
+		if firsts[index] > whole/2 {
+			t.Fatalf("client %d's first byte came after %v of the %v the blob took: the answer waited on the whole fetch", index, firsts[index], whole)
+		}
+	}
+	if upstream.total() != 1 || cache.Fetches.Load() != 1 {
+		t.Fatalf("%d clients streaming one blob made %d fetches", clients, upstream.total())
+	}
+	settled(t, cache)
+	if got := held(cache); got != sum {
+		t.Fatalf("the cache holds %q, not the blob", got)
+	}
+}
+
+// A store whose connection drops midway, its length known or not, cuts every answer streaming from it short, so each
+// client's read fails and it reads the store; nothing is kept, and the next ask fetches the blob whole.
+func TestAStoreFailingMidStreamCutsEveryAnswer(t *testing.T) {
+	for _, noLength := range []bool{false, true} {
+		upstream := newStore(t)
+		content := bytes.Repeat([]byte("a product's archive "), 1<<13)
+		sum := upstream.put(content)
+		upstream.trickle, upstream.cutAfter, upstream.noLength = 5*time.Millisecond, 64<<10, noLength
+		cache, served := newCache(t, upstream, 1<<30, 0, 1<<40)
+		var group sync.WaitGroup
+		for index := range 3 {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				if got, err := try(served.URL + "/blobs/" + sum); err == nil {
+					t.Errorf("with length %v: client %d read %d bytes whole from a store that dropped midway", !noLength, index, len(got.body))
+				}
+			}()
+		}
+		group.Wait()
+		settled(t, cache)
+		if got := held(cache); got != "" {
+			t.Fatalf("with length %v: a fetch cut midway left %q", !noLength, got)
+		}
+		upstream.mutex.Lock()
+		upstream.cutAfter = 0
+		upstream.mutex.Unlock()
+		if got, err := try(served.URL + "/blobs/" + sum); err != nil || !bytes.Equal(got.body, content) {
+			t.Fatalf("with length %v: the blob again: %v, %d bytes", !noLength, err, len(got.body))
+		}
+	}
+}
+
+// A blob that hashes to another name, its length known or not, is streamed to its last byte but one and then cut
+// short: no client ever reads it whole, so its own check fails and it reads the store; nothing is kept. The store
+// lingers after its last byte, so every byte is in before the cache can know the hash is wrong.
+func TestABlobThatHashesWrongIsCutBeforeItsEnd(t *testing.T) {
+	for _, noLength := range []bool{false, true} {
+		upstream := newStore(t)
+		content := bytes.Repeat([]byte("the tree's source "), 1<<12)
+		sum := upstream.put(content)
+		poisoned := append([]byte{}, content...)
+		poisoned[len(poisoned)-1] ^= 1
+		upstream.set("/blobs/"+sum, poisoned)
+		upstream.trickle, upstream.noLength, upstream.linger = 2*time.Millisecond, noLength, 300*time.Millisecond
+		cache, served := newCache(t, upstream, 1<<30, 0, 1<<40)
+		got, err := try(served.URL + "/blobs/" + sum)
+		if err == nil || len(got.body) >= len(content) {
+			t.Fatalf("with length %v: a blob that hashes wrong was read whole (%d bytes, %v)", !noLength, len(got.body), err)
+		}
+		settled(t, cache)
+		if held := held(cache); held != "" {
+			t.Fatalf("with length %v: a blob that hashes wrong left %q", !noLength, held)
+		}
 	}
 }

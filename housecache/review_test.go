@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -58,12 +59,19 @@ func raw(t *testing.T, address, line string) string {
 
 func TestReviewPaths(t *testing.T) {
 	served, asked, name := reviewServer(t)
+	// The first ask fetches and streams it; read whole, the blob is held once it ends.
+	if response, err := http.Get(served.URL + "/blobs/" + name); err != nil || response.StatusCode != http.StatusOK || asked.Load() != 1 {
+		t.Fatalf("the first ask: %v, the store asked %d times", err, asked.Load())
+	} else {
+		io.ReadAll(response.Body)
+		response.Body.Close()
+	}
 	cases := []struct {
 		path   string
 		status string
 		asks   int64
 	}{
-		{"/blobs/" + name, "200", 1},
+		{"/blobs/" + name, "200", 0},
 		// The path is decoded before it is matched: the same object, the same bytes, checked the same.
 		{"/blobs%2F" + name, "200", 0},
 		{"http://evil.example/blobs/" + name, "200", 0},
@@ -90,7 +98,11 @@ func TestReviewPaths(t *testing.T) {
 	if got := raw(t, fresh.URL, "HEAD /blobs/"+freshName); got != "404" || freshAsked.Load() != 0 {
 		t.Fatalf("HEAD of a miss answered %s and asked the store %d times", got, freshAsked.Load())
 	}
-	if raw(t, fresh.URL, "GET /blobs/"+freshName); raw(t, fresh.URL, "HEAD /blobs/"+freshName) != "200" || freshAsked.Load() != 1 {
+	if response, err := http.Get(fresh.URL + "/blobs/" + freshName); err == nil {
+		io.ReadAll(response.Body)
+		response.Body.Close()
+	}
+	if raw(t, fresh.URL, "HEAD /blobs/"+freshName) != "200" || freshAsked.Load() != 1 {
 		t.Fatalf("HEAD of a held blob, or the store asked %d times", freshAsked.Load())
 	}
 }

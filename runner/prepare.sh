@@ -174,16 +174,16 @@ fi
 # staging and moved into place whole, so a unit that fails anywhere between (a full disk, its deadline) leaves no marker
 # naming inputs that aren't there, and the next unit fetches them again. Staging goes when this ends, however it ends,
 # short of a kill, whose leavings the next trim takes. With LOOM_HOUSE_CACHE set (docs/house-cache.md), each chunk is
-# asked of the house cache first, within 2 s to connect and never under a byte a second for 10 s; the first chunk it
-# doesn't give whole and hashing to its name is read from the store, and so is every chunk after it. The manifest,
-# whose name isn't its own hash, always comes from the store.
+# asked of the house cache first, within 2 s to connect, never under a byte a second for 10 s and 2 minutes in all (a
+# chunk is about half a megabyte); the first chunk it doesn't give whole and hashing to its name is read from the
+# store, and so is every chunk after it. The manifest, whose name isn't its own hash, always comes from the store.
 tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs
 if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/null)" != "${gateInputs}" ]; then
 	fetch() { curl -fsS --retry 3 -o "$2" "https://artifacts.loom.system.inc/gate-inputs/$1"; }
 	house=${LOOM_HOUSE_CACHE:-}
 	chunk() { # chunk <sha256> <path>: from the house cache while it gives each chunk whole, else from the store
 		if [ -n "${house}" ]; then
-			curl -fsS --connect-timeout 2 --speed-limit 1 --speed-time 10 -o "$2" "${house%/}/gate-inputs/$1" 2> /dev/null &&
+			curl -fsS --connect-timeout 2 --speed-limit 1 --speed-time 10 -m 120 -o "$2" "${house%/}/gate-inputs/$1" 2> /dev/null &&
 				echo "$1  $2" | sha256sum -c --quiet > /dev/null 2>&1 && return 0
 			say "the house cache didn't give gate inputs chunk $1; the store gives it and the rest"
 			house=

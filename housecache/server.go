@@ -22,10 +22,12 @@ import (
 //
 //   - A hit is served from disk with its length, and hashed as it goes out: a copy the disk corrupted is removed once
 //     it is found, and the client, which checks every hash, reads that blob from the store this once.
-//   - A miss fetches the blob from Upstream once, however many clients ask for it meanwhile: they all wait for that one
-//     fetch. It goes into a partial file, hashed as it comes, and only a whole blob that hashes to its name is made
-//     read-only and renamed to it, so a name only ever holds the whole, checked blob. One that doesn't hash to its
-//     name is refused, nothing kept, and every waiting client is told so and reads from the store.
+//   - A miss fetches the blob from Upstream once, however many clients ask for it meanwhile, and streams it to every
+//     one of them as it arrives: each answer starts once the store answers, so no client waits on the whole blob over
+//     a slow link. It goes into a partial file, hashed as it comes, and only a whole blob that hashes to its name is
+//     made read-only and renamed to it, so a name only ever holds the whole, checked blob. Every answer holds back its
+//     last byte until then: a blob that doesn't hash to its name, or a store that fails midway, cuts every answer
+//     short, so each client's own read fails and it reads the store, and nothing is kept.
 //   - The disk is bounded: before a blob is fetched, and after, the least recently served blobs go until the cache
 //     holds at most Limit bytes, fetches in flight counted, and its disk keeps Floor bytes free. A blob that can't fit
 //     is never fetched, and its clients read from the store.
@@ -70,10 +72,31 @@ const partialPrefix = ".partial-"
 // lockName is the directory's lock, held by its one server for as long as it runs.
 const lockName = ".lock"
 
-// A flight is one fetch from Upstream that every client asking for its blob meanwhile waits for.
+// A flight is one fetch from Upstream, streamed to every client asking for its path meanwhile.
 type flight struct {
-	done chan struct{}
-	err  error
+	// started closes once the store answered, or failed to: refused is why it failed before answering, length its
+	// Content-Length (-1 unknown), partial the file the bytes arrive in. Each is written only before started closes.
+	started chan struct{}
+	refused error
+	length  int64
+	partial string
+
+	mutex sync.Mutex
+	// written is how many bytes the partial holds; finished says the fetch ended, and then err says how (nil: the
+	// blob is whole, checked and stored). moved closes and is replaced each time either changes.
+	written  int64
+	finished bool
+	err      error
+	moved    chan struct{}
+}
+
+// note changes the flight under its lock and wakes every client streaming it.
+func (fetching *flight) note(change func()) {
+	fetching.mutex.Lock()
+	change()
+	close(fetching.moved)
+	fetching.moved = make(chan struct{})
+	fetching.mutex.Unlock()
 }
 
 // errNotUpstream is a blob the store doesn't hold.
@@ -155,8 +178,16 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 			http.Error(writer, "the house cache doesn't hold it; a GET fetches it", http.StatusNotFound)
 			return
 		}
-		if err = server.fill(request.Context(), request.URL.Path, sum); err == nil {
-			file, err = os.Open(path)
+		var fetching *flight
+		if fetching, err = server.fill(request.Context(), request.URL.Path, sum); err == nil {
+			if fetching == nil {
+				// A fetch that finished since this client looked: a hit after all.
+				how = "hit"
+				file, err = os.Open(path)
+			} else {
+				server.stream(writer, request, fetching, sum)
+				return
+			}
 		}
 	}
 	if err != nil {
@@ -203,48 +234,143 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	}
 }
 
-// fill has the blob on disk: one fetch from Upstream of its path, which every client asking for that path meanwhile
-// waits for. A waiting client that goes away leaves the fetch running for the others.
-func (server *Server) fill(waitContext context.Context, path, sum string) error {
+// stream answers one client from a flight: once the store answered, the bytes as they arrive in the partial, all but
+// the last until the blob is whole and checked. A flight that ends otherwise aborts the answer (http.ErrAbortHandler),
+// cut short, so the client's read fails and it reads the store.
+func (server *Server) stream(writer http.ResponseWriter, request *http.Request, fetching *flight, sum string) {
+	select {
+	case <-fetching.started:
+	case <-request.Context().Done():
+		return
+	}
+	if fetching.refused != nil {
+		status := http.StatusBadGateway
+		switch {
+		case errors.Is(fetching.refused, errNotUpstream):
+			status = http.StatusNotFound
+		case errors.Is(fetching.refused, errNoRoom):
+			status = http.StatusServiceUnavailable
+		}
+		server.say("miss %s: %v", request.URL.Path, fetching.refused)
+		http.Error(writer, fetching.refused.Error(), status)
+		return
+	}
+	file, err := os.Open(fetching.partial)
+	if err != nil {
+		// The fetch finished and renamed it, or failed and removed it.
+		if failed := fetching.wait(); failed != nil {
+			http.Error(writer, failed.Error(), http.StatusBadGateway)
+			return
+		}
+		if file, err = os.Open(filepath.Join(server.Directory, sum)); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+	defer file.Close()
+	writer.Header().Set("Content-Type", "application/octet-stream")
+	if fetching.length >= 0 {
+		writer.Header().Set("Content-Length", fmt.Sprint(fetching.length))
+	}
+	writer.Header().Set("X-Loom-House-Cache", "miss")
+	writer.WriteHeader(http.StatusOK)
+	controller := http.NewResponseController(writer)
+	sent := int64(0)
+	for {
+		fetching.mutex.Lock()
+		written, finished, failed, moved := fetching.written, fetching.finished, fetching.err, fetching.moved
+		fetching.mutex.Unlock()
+		if finished && failed != nil {
+			panic(http.ErrAbortHandler)
+		}
+		ready := written
+		if !finished {
+			ready--
+		}
+		if ready > sent {
+			copied, err := io.CopyN(writer, file, ready-sent)
+			sent += copied
+			if err != nil {
+				return
+			}
+			controller.Flush()
+			continue
+		}
+		if finished {
+			return
+		}
+		select {
+		case <-moved:
+		case <-request.Context().Done():
+			return
+		}
+	}
+}
+
+// wait waits for the flight to finish and says how it ended.
+func (fetching *flight) wait() error {
+	for {
+		fetching.mutex.Lock()
+		finished, failed, moved := fetching.finished, fetching.err, fetching.moved
+		fetching.mutex.Unlock()
+		if finished {
+			return failed
+		}
+		<-moved
+	}
+}
+
+// fill joins, or starts, the one fetch from Upstream of this path, which every client asking for it meanwhile streams.
+// It is nil when the blob is already on disk. A client that goes away leaves the fetch running for the others.
+func (server *Server) fill(waitContext context.Context, path, sum string) (*flight, error) {
 	server.mutex.Lock()
+	defer server.mutex.Unlock()
 	if _, err := os.Stat(filepath.Join(server.Directory, sum)); err == nil {
-		// A fetch that finished since this client looked.
-		server.mutex.Unlock()
-		return nil
+		return nil, nil
 	}
 	if server.flights == nil {
 		server.flights = map[string]*flight{}
 	}
 	fetching := server.flights[path]
 	if fetching == nil {
-		fetching = &flight{done: make(chan struct{})}
+		fetching = &flight{started: make(chan struct{}), length: -1, moved: make(chan struct{})}
 		server.flights[path] = fetching
 		go func() {
-			fetching.err = server.fetch(path, sum)
+			server.fetch(fetching, path, sum)
 			server.mutex.Lock()
 			delete(server.flights, path)
 			server.mutex.Unlock()
-			close(fetching.done)
 		}()
 	}
-	server.mutex.Unlock()
-	select {
-	case <-fetching.done:
-		return fetching.err
-	case <-waitContext.Done():
-		return waitContext.Err()
-	}
+	return fetching, nil
 }
 
-// fetch reads one blob from Upstream into a partial file, hashing it as it comes, and renames it to its sha256,
-// read-only, only when it is whole and hashes to it.
-func (server *Server) fetch(path, sum string) error {
+// fetch reads one blob from Upstream into a partial file, hashing it as it comes and telling the flight's clients of
+// every byte, and renames it to its sha256, read-only, only when it is whole and hashes to it. Its outcome is the
+// flight's err: set before started closes when it failed before the store answered, else when it finishes.
+func (server *Server) fetch(fetching *flight, path, sum string) {
+	startedOnce := sync.Once{}
+	start := func() { startedOnce.Do(func() { close(fetching.started) }) }
+	finish := func(err error) {
+		start()
+		fetching.note(func() { fetching.err, fetching.finished = err, true })
+	}
+	fail := func(err error) {
+		// Before the store answered, the clients hear it as a status.
+		select {
+		case <-fetching.started:
+		default:
+			fetching.refused = err
+		}
+		finish(err)
+	}
 	server.Fetches.Add(1)
 	fetchContext, cancel := context.WithTimeout(context.Background(), FetchBound)
 	defer cancel()
 	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, strings.TrimSuffix(server.Upstream, "/")+path, nil)
 	if err != nil {
-		return err
+		fail(err)
+		return
 	}
 	client := server.Client
 	if client == nil {
@@ -252,18 +378,22 @@ func (server *Server) fetch(path, sum string) error {
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("fetching it from the store: %w", err)
+		fail(fmt.Errorf("fetching it from the store: %w", err))
+		return
 	}
 	defer response.Body.Close()
 	switch {
 	case response.StatusCode == http.StatusNotFound:
-		return errNotUpstream
+		fail(errNotUpstream)
+		return
 	case response.StatusCode != http.StatusOK:
-		return fmt.Errorf("the store answered %s", response.Status)
+		fail(fmt.Errorf("the store answered %s", response.Status))
+		return
 	}
 	partial, err := os.CreateTemp(server.Directory, partialPrefix+sum+"-")
 	if err != nil {
-		return err
+		fail(err)
+		return
 	}
 	keep := false
 	defer func() {
@@ -274,9 +404,12 @@ func (server *Server) fetch(path, sum string) error {
 	}()
 	name := filepath.Base(partial.Name())
 	if err = server.makeRoom(sum, name, max(response.ContentLength, 0)); err != nil {
-		return err
+		fail(err)
+		return
 	}
 	defer server.release(name)
+	fetching.length, fetching.partial = response.ContentLength, partial.Name()
+	start()
 	stall := server.Stall
 	if stall == 0 {
 		stall = time.Minute
@@ -285,35 +418,57 @@ func (server *Server) fetch(path, sum string) error {
 	watched.last.Store(time.Now().UnixNano())
 	go watched.watch(fetchContext, cancel, stall)
 	hash := sha256.New()
-	size, err := io.Copy(io.MultiWriter(partial, hash), watched)
-	switch {
-	case err != nil:
-		return fmt.Errorf("fetching it from the store, %d bytes in: %w", size, err)
-	case response.ContentLength >= 0 && size != response.ContentLength:
-		return fmt.Errorf("the store sent %d bytes of %d", size, response.ContentLength)
+	buffer := make([]byte, 256<<10)
+	size := int64(0)
+	for {
+		count, readErr := watched.Read(buffer)
+		if count > 0 {
+			if _, err = partial.Write(buffer[:count]); err != nil {
+				finish(fmt.Errorf("writing it, %d bytes in: %w", size, err))
+				return
+			}
+			hash.Write(buffer[:count])
+			size += int64(count)
+			fetching.note(func() { fetching.written = size })
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			server.say("fetching %s from the store failed %d bytes in: %v", path, size, readErr)
+			finish(fmt.Errorf("fetching it from the store, %d bytes in: %w", size, readErr))
+			return
+		}
+	}
+	if response.ContentLength >= 0 && size != response.ContentLength {
+		finish(fmt.Errorf("the store sent %d bytes of %d", size, response.ContentLength))
+		return
 	}
 	if actual := hex.EncodeToString(hash.Sum(nil)); actual != sum {
-		server.say("refused %s: the store's bytes hash to %s, so nothing is kept", path, actual)
-		return fmt.Errorf("the store's bytes hash to %s: refused, nothing kept", actual)
+		server.say("refused %s: the store's bytes hash to %s, so nothing is kept and every answer is cut short", path, actual)
+		finish(fmt.Errorf("the store's bytes hash to %s: refused, nothing kept", actual))
+		return
 	}
-	if err = partial.Chmod(0o444); err != nil {
-		return err
+	if err = partial.Chmod(0o444); err == nil {
+		err = partial.Sync()
 	}
-	if err = partial.Sync(); err != nil {
-		return err
+	if err == nil {
+		err = os.Rename(partial.Name(), filepath.Join(server.Directory, sum))
 	}
-	if err = os.Rename(partial.Name(), filepath.Join(server.Directory, sum)); err != nil {
-		return err
+	if err != nil {
+		finish(err)
+		return
 	}
 	keep = true
 	now := server.now()
 	os.Chtimes(filepath.Join(server.Directory, sum), now, now)
+	finish(nil)
+	server.say("fetched %s, %d bytes, from the store", path, size)
 	// A store that sent no length was given no room ahead; the bound holds again now.
 	server.release(name)
 	if err = server.makeRoom(sum, "", 0); err != nil {
 		server.say("after fetching %s: %v", path, err)
 	}
-	return nil
 }
 
 // progress is a fetch's body, noting when it last gave a byte, so a stalled store is abandoned rather than waited on.

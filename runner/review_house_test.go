@@ -180,3 +180,55 @@ func TestPrepareIsGivenTheHouseCacheUnlessItIsSkipped(t *testing.T) {
 		t.Fatal("prepare.sh was given a house cache the process is skipping")
 	}
 }
+
+// The second review's stampede: four boxes miss one blob together while the house's shared link brings it slowly,
+// longer than a client waits for an answer. The cache streams it as it arrives, so every box reads it through the
+// cache's one fetch: the store is asked once, not once per box.
+func TestReview2SlowLinkStampedeAsksTheStoreOnce(t *testing.T) {
+	quickHouseCache(t, time.Second, time.Second) // stand for 15 s and 10 s
+	content := make([]byte, 2<<20)
+	for index := range content {
+		content[index] = byte(index * 7)
+	}
+	sum := hashOf(content)
+	var gets atomic.Int64
+	store := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		gets.Add(1)
+		// R2 answers at once; the shared link brings the bytes over 2 s, longer than the answer wait.
+		writer.Header().Set("Content-Length", fmt.Sprint(len(content)))
+		writer.WriteHeader(http.StatusOK)
+		for piece := 0; piece < len(content); piece += 64 << 10 {
+			time.Sleep(60 * time.Millisecond)
+			writer.Write(content[piece:min(piece+64<<10, len(content))])
+			writer.(http.Flusher).Flush()
+		}
+	}))
+	t.Cleanup(store.Close)
+	house := houseCacheBefore(t, store.URL)
+	served := &blobServer{server: store}
+	var group sync.WaitGroup
+	fetches := make([]blobFetch, 4)
+	for box := range 4 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			cache := housed(testCache(t, served, 1<<30), house.URL)
+			file, fetch, err := cache.open(context.Background(), sum)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			file.Close()
+			fetches[box] = fetch
+		}()
+	}
+	group.Wait()
+	for box, fetch := range fetches {
+		if !fetch.house {
+			t.Errorf("box %d read the blob from the store: %s", box, fetch.unhoused)
+		}
+	}
+	if gets.Load() != 1 {
+		t.Fatalf("four boxes, one blob, a slow link: the store was asked %d times", gets.Load())
+	}
+}
