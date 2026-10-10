@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -25,19 +26,21 @@ var unitTemplate string
 // UnitName is the unit's name under ~/.config/systemd/user.
 const UnitName = "loom-serve.service"
 
-// A Config is ~/.loom/serve.conf: the pool this box serves, and whether it also takes phase jobs (box-phase's
-// workers do, through run.py at the gate tools' commit). Every box worker serves --strict: the placer sends a pool
-// nothing but test jobs.
+// A Config is ~/.loom/serve.conf: the pool this box serves, whether it also takes phase jobs (box-phase's workers do,
+// through run.py at the gate tools' commit), and how many units it runs at once (#ef2rgaq: a 64-thread box holds
+// several). Every box worker serves --strict: the placer sends a pool nothing but test jobs.
 type Config struct {
 	Pool      string
 	PhaseJobs bool
+	// Units is serve's --units, the most units at once; 1 when absent.
+	Units int
 }
 
 // ReadConfig reads serve.conf as the updater reads update.conf: key = value lines, # comments, blank lines skipped.
-// pool is required and is a name the wire takes; phase-jobs is yes or no, no when absent. Any other key or line is
-// refused, so a typo never serves the wrong pool quietly.
+// pool is required and is a name the wire takes; phase-jobs is yes or no, no when absent; units is a whole number from 1
+// to 64, 1 when absent. Any other key or line is refused, so a typo never serves the wrong pool quietly.
 func ReadConfig(content string) (Config, error) {
-	config := Config{}
+	config := Config{Units: 1}
 	seen := map[string]bool{}
 	for number, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)
@@ -64,8 +67,14 @@ func ReadConfig(content string) (Config, error) {
 			default:
 				return Config{}, fmt.Errorf("serve.conf line %d: phase-jobs is yes or no, not %q", number+1, value)
 			}
+		case "units":
+			units, err := strconv.Atoi(value)
+			if err != nil || units < 1 || units > 64 || strconv.Itoa(units) != value {
+				return Config{}, fmt.Errorf("serve.conf line %d: units is a whole number from 1 to 64, not %q", number+1, value)
+			}
+			config.Units = units
 		default:
-			return Config{}, fmt.Errorf("serve.conf line %d: no setting %q (pool, phase-jobs)", number+1, key)
+			return Config{}, fmt.Errorf("serve.conf line %d: no setting %q (pool, phase-jobs, units)", number+1, key)
 		}
 	}
 	if config.Pool == "" {
@@ -83,6 +92,9 @@ func Unit(config Config, worker, houseCache string) string {
 	}
 	if houseCache != "" {
 		flags += " --house-cache " + houseCache
+	}
+	if config.Units > 1 {
+		flags += " --units " + strconv.Itoa(config.Units)
 	}
 	lines := strings.Split(unitTemplate, "\n")
 	for index, line := range lines {

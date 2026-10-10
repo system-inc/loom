@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -88,9 +89,26 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	started := time.Now()
 	deadline := started.Add(time.Duration(run.unit.TimeoutSeconds) * time.Second)
 	root, tree := run.options.testRoot(), run.options.Tree
+	if job.GateInputs != "" {
+		// Held for the unit's life: another unit's preparation removes gate inputs only when no unit holds them.
+		release, err := holdGateInputs(runContext, root, job.GateInputs)
+		if err != nil {
+			run.fail(protocol.PhaseStart, fmt.Errorf("holding the gate inputs %s: %w (the instance's, never the change's)", job.GateInputs, err))
+			return protocol.StatusBroken
+		}
+		defer release()
+	}
 	if job.Tree != "" {
 		return run.runPrebuilt(runContext, job, root, started, deadline)
 	}
+	// The checkout is the root's one tree, so this unit holds the root alone, and its preparation's trim (a strict
+	// runner's) takes only leavings.
+	releaseRoot, err := holdRoot(runContext, root, true, nil)
+	if err != nil {
+		run.fail(protocol.PhaseStart, fmt.Errorf("holding %s alone: %w (the instance's, never the change's)", root, err))
+		return protocol.StatusBroken
+	}
+	defer releaseRoot()
 	if tree == "" {
 		// /tmp/adamic for a strict runner: the checkout the instance's opening clones, kept across units.
 		tree = filepath.Join(root, "adamic")
@@ -175,7 +193,7 @@ func (options Options) testRoot() string {
 	}
 }
 
-// runPackages runs each of the job's packages with runOne, as many at once as half the CPUs, each writing its go test
+// runPackages runs each of the job's packages with runOne, as many at once as half the unit's CPUs, each writing its go test
 // -json lines to <part>.jsonl. The parts become loom-out/test.jsonl.gz, their CPU seconds loom-out/cpu.tsv. Failed: a
 // package's tests failed or the unit ran out of time. Broken: a package couldn't be run at all, the runner was
 // stopped, or the disk filled.
@@ -202,7 +220,7 @@ func (run *unitRun) runPackages(runContext context.Context, job *protocol.TestJo
 			}
 		}
 	}()
-	slots := make(chan struct{}, max(1, runtime.NumCPU()/2))
+	slots := make(chan struct{}, run.options.share.packagesAtOnce(runtime.NumCPU()))
 	var group sync.WaitGroup
 	for index := range job.Packages {
 		group.Add(1)
@@ -578,6 +596,22 @@ func (run *unitRun) testEnvironment(environmentFile string, job *protocol.TestJo
 		return nil, err
 	}
 	environment["ADAMIC_BUILD_CACHE_DIR"] = adamicCache
+	// The unit's temporary files are its own, gone with its directory, so units running at once never meet there and a
+	// killed one leaves nothing for a trim.
+	temporary := filepath.Join(run.directory, "tmp")
+	if err := os.MkdirAll(temporary, 0o755); err != nil {
+		return nil, err
+	}
+	environment["TMPDIR"] = temporary
+	// The cycle ledger's output is written by the tests, so it is the unit's own, never a file in the gate inputs that
+	// every unit holding them shares (the gate-inputs review, Oct 10 15:47Z).
+	if _, found := environment["ADAMIC_CYCLE_LEDGER_OUTPUT"]; found {
+		environment["ADAMIC_CYCLE_LEDGER_OUTPUT"] = filepath.Join(run.directory, "cycle-ledger-output.json")
+	}
+	if run.options.share != nil {
+		// Go reads its cgroup's cpu.max already; said here too, so a unit without a cgroup keeps to its share.
+		environment["GOMAXPROCS"] = strconv.Itoa(run.options.share.cpus)
+	}
 	if len(job.ChangedPaths) > 0 {
 		changed := filepath.Join(run.directory, "changed-paths.txt")
 		if err := os.WriteFile(changed, []byte(strings.Join(job.ChangedPaths, "\n")+"\n"), 0o644); err != nil {
@@ -679,6 +713,7 @@ func (run *unitRun) groupCommand(commandContext context.Context, argv []string, 
 	command.Args[0] = argv[0]
 	command.Env, command.Dir, command.Stdout, command.Stderr = environment, directory, stdout, stderr
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	run.options.share.attach(command.SysProcAttr)
 	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGTERM) }
 	command.WaitDelay = run.options.KillGrace
 	if err := command.Start(); err != nil {
