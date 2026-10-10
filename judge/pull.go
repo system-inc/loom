@@ -21,13 +21,16 @@ import (
 
 // A PlannedFuture is one future Queue holds planned and undecided.
 type PlannedFuture struct {
-	Future  string            `json:"future"`
-	Base    string            `json:"base"`
-	Attempt int               `json:"attempt"` // the run attempt to read; 0 is read as 1
-	Parity  bool              `json:"parity"`  // a parity run's future: tested on exactly its tree, never landed
-	Empty   bool              `json:"empty"`   // a docs-only future planned with no units, the docs lane's to decide
-	Change  PlannedChange     `json:"change"`
-	Units   []PlannedUnitWire `json:"units"`
+	Future  string `json:"future"`
+	Base    string `json:"base"`
+	Attempt int    `json:"attempt"` // the run attempt to read; 0 is read as 1
+	// FirstAttempt is the future's own first attempt when an earlier future of the same tree (a witness of the same sha
+	// again) ran the ones before it: those are never carried from. 0 is read as 1.
+	FirstAttempt int               `json:"firstAttempt"`
+	Parity       bool              `json:"parity"` // a parity run's future: tested on exactly its tree, never landed
+	Empty        bool              `json:"empty"`  // a docs-only future planned with no units, the docs lane's to decide
+	Change       PlannedChange     `json:"change"`
+	Units        []PlannedUnitWire `json:"units"`
 }
 
 // PlannedChange is the future's newest change's record, what a kick needs.
@@ -361,11 +364,11 @@ func (puller Puller) CarriedFrom(future PlannedFuture, attempt int) ([]CarriedUn
 	return carried(future, order, earlier, puller.Loop.Warm), nil
 }
 
-// earlier reads a future's attempts before attempt, newest first: only these are ever carried from.
+// earlier reads a future's attempts before attempt, back to its first, newest first: only these are ever carried from.
 func (puller Puller) earlier(future PlannedFuture, attempt int) ([]string, map[string][]protocol.Event, error) {
 	earlier := map[string][]protocol.Event{}
 	order := []string{}
-	for prior := attempt - 1; prior >= 1; prior-- {
+	for prior := attempt - 1; prior >= max(future.FirstAttempt, 1); prior-- {
 		run := puller.RunOf(future.Future, prior)
 		events, err := puller.Read(run)
 		if err != nil {

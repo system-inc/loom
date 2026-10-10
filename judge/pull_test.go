@@ -251,6 +251,36 @@ func TestCarriedListsTheUnitsAndSourceRunsTheLoopCarries(t *testing.T) {
 	}
 }
 
+// A witness of the same sha again is a new future of the same tree: Queue lists it from attempt 3 with firstAttempt 3,
+// and nothing the earlier witness passed in attempts 1 and 2 is carried into it, by the loop or the placer's list.
+func TestNothingIsCarriedFromAnEarlierFutureOfTheSameTree(t *testing.T) {
+	tree := strings.Repeat("d", 40)
+	early, late := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	runOf := func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) }
+	streams := map[string][]protocol.Event{
+		runOf(tree, 1): append(finishedStream(early, "passed"), finishedStream(late, "passed")...),
+		runOf(tree, 2): finishedStream(late, "passed"),
+		runOf(tree, 4): finishedStream(late, "passed"),
+	}
+	units := []PlannedUnitWire{{UnitKey: early, Decision: "run"}, {UnitKey: late, Decision: "run"}}
+	read := func(run string) ([]protocol.Event, error) { return streams[run], nil }
+	again := Puller{Source: listedFutures{{Future: tree, Attempt: 3, FirstAttempt: 3, Units: units}}, RunOf: runOf, Read: read}
+	if got, err := again.Carried(tree, 3); err != nil || len(got) != 0 {
+		t.Fatalf("carried %+v (%v) into a new future's first attempt from an earlier future's runs", got, err)
+	}
+	queue := &StubQueue{}
+	judging := NewPuller(Puller{Source: listedFutures{{Future: tree, Attempt: 3, FirstAttempt: 3, Change: PlannedChange{Change: "chg_W"}, Units: units}}, RunOf: runOf, Read: read,
+		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now}})
+	if judged, err := judging.PullOnce(); err != nil || judged != 0 || len(queue.Posts) != 0 {
+		t.Fatalf("judged %d (%v): attempt 3 ran nothing yet, so nothing is decided", judged, err)
+	}
+	// Within the new future, an attempt's pass is carried as before.
+	within := Puller{Source: listedFutures{{Future: tree, Attempt: 5, FirstAttempt: 3, Units: units}}, RunOf: runOf, Read: read}
+	if got, err := within.Carried(tree, 5); err != nil || len(got) != 1 || got[0] != (CarriedUnit{late, runOf(tree, 4)}) {
+		t.Fatalf("carried %+v (%v): want late from attempt 4, the new future's own", got, err)
+	}
+}
+
 func TestAnEmptyFutureIsLeftAndOneFuturesErrorNeverStopsTheRest(t *testing.T) {
 	docs, broken, ready := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
 	unit := strings.Repeat("1", 64)

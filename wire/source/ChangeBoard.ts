@@ -1,7 +1,7 @@
 // loom's board of changes: one line per change on its way to main. The Queue object pushes each change's
 // summary here as it moves (contracts v1.1: {change, owner, sha, state, future, units, updatedAt}, at most once a
-// second), and the board never polls. It keeps every change still on its way, and a landed, red, parked or refused
-// one for a day after it last moved. One Durable Object, named `board`. Viewers watch it over hibernating WebSockets:
+// second), and the board never polls. It keeps every change still on its way, and a landed, red, parked, refused or
+// witnessed one (a witness of main decided green, which never lands) for a day after it last moved. One Durable Object, named `board`. Viewers watch it over hibernating WebSockets:
 // a snapshot when they connect, then each change as it is recorded, so an open page costs nothing between pushes.
 
 import { DurableObject } from 'cloudflare:workers';
@@ -12,9 +12,9 @@ import { jsonResponse, readBodyText } from './Http';
 export const ChangeBoardName = 'board';
 export const MaximumChangeSummaryBytes = 64 * 1024;
 export const FinishedChangeMilliseconds = 24 * 60 * 60 * 1000;
-export const ChangeStates = ['queued', 'building', 'testing', 'landed', 'red', 'parked', 'refused'] as const;
+export const ChangeStates = ['queued', 'building', 'testing', 'landed', 'red', 'parked', 'refused', 'witnessed'] as const;
 export type ChangeState = (typeof ChangeStates)[number];
-const finishedStates: readonly ChangeState[] = ['landed', 'red', 'parked', 'refused'];
+const finishedStates: readonly ChangeState[] = ['landed', 'red', 'parked', 'refused', 'witnessed'];
 
 export interface ChangeUnits {
     planned: number;

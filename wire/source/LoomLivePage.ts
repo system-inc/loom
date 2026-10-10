@@ -5,7 +5,8 @@
 // nothing loaded from elsewhere. The board token rides after the # once; the page keeps it in this browser and takes
 // it out of the address bar, and it goes to the stream only as a subprotocol. Parts the log can't feed yet (the
 // block, the build) keep their place and say what they wait on. A landing gets a celebration and, once the viewer
-// turns sound on, a chime made in the page.
+// turns sound on, a chime made in the page. A witness of main decided green never lands: it finishes as witnessed,
+// the whole track done, its last step named for it.
 
 import { loomMark } from './LoomMark';
 import { phosphorIcon, type PhosphorIconName } from './PhosphorIcons';
@@ -253,7 +254,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     var stepIcons = ${JSON.stringify(stepIcons)};
     var phaseIcons = ${JSON.stringify(phaseIcons)};
     var phaseWords = { queued: 'setup', building: 'building', testing: 'testing', parked: 'parked' };
-    var icons = ${JSON.stringify(iconMarkup([...stepIcons, ...Object.values(phaseIcons), 'XCircle'], 16))};
+    var icons = ${JSON.stringify(iconMarkup([...stepIcons, ...Object.values(phaseIcons), 'XCircle', 'CheckCircle'], 16))};
     var stages = [['Posted', 'owners submit'], ['Block', 'the next block forms'], ['Build', 'products, once each'], ['Test', 'only what changed'], ['Verdict', 'by written rule'], ['Landed', 'main moves']];
     var panels = ['panel-posted', 'panel-block', 'panel-build', 'panel-test', 'panel-verdict', 'panel-landed'];
 
@@ -314,7 +315,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     function stageOf(line) {
         if (!line) { return -1; }
         var decided = line.units.planned > 0 && finishedUnits(line.units) >= line.units.planned && !voided(line);
-        return { queued: 0, parked: 0, refused: 0, building: 2, testing: decided ? 4 : 3, red: 5, landed: 6 }[line.state];
+        return { queued: 0, parked: 0, refused: 0, building: 2, testing: decided ? 4 : 3, red: 5, landed: 6, witnessed: 6 }[line.state];
     }
 
     function renderTrack(line) {
@@ -329,9 +330,10 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             var name = stage[0];
             var sub = stage[1];
             if (index === 5 && line && line.state === 'red') { name = 'Red'; sub = 'to its owner, with a repro'; }
+            if (index === 5 && line && line.state === 'witnessed') { name = 'Witnessed'; sub = 'main itself, green; a witness never lands'; }
             if (index === 0 && line && line.state === 'parked') { sub = 'parked, waits to restack'; }
             if (index === 0 && line && line.state === 'refused') { sub = 'refused at the door'; }
-            head.appendChild(icon(index === 5 && line && line.state === 'red' ? 'XCircle' : stepIcons[index]));
+            head.appendChild(icon(index === 5 && line && line.state === 'red' ? 'XCircle' : index === 5 && line && line.state === 'witnessed' ? 'CheckCircle' : stepIcons[index]));
             head.appendChild(element('span', 'name', name));
             var time = element('span', 'mono time', '');
             // The step it's on counts up from when the change reached its state; the last step, once it's there,
@@ -418,6 +420,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         var why = document.getElementById('verdict-why');
         var verdict = ['deciding', '', 'waits for every planned unit; a missing one is void, never green'];
         if (line && line.state === 'landed') { verdict = ['Green', 'green', 'every planned unit passed, and the units equal the plan']; }
+        else if (line && line.state === 'witnessed') { verdict = ['Green', 'green', 'a witness of main: every planned unit passed on main itself, uncached, and nothing lands']; }
         else if (line && line.state === 'red') { verdict = ['Red', 'red', line.units.failed + ' of ' + line.units.planned + ' units failed; its owner has the failing test and a repro']; }
         else if (line && line.state === 'parked') { verdict = ['Parked', 'held', 'held behind a change it stacks on; it restacks by itself']; }
         else if (line && voided(line)) { verdict = ['Void', 'held', line.units.void + ' of ' + line.units.planned + ' units never finished, so nothing is decided; the next attempt runs them again']; }
@@ -571,6 +574,8 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             focusId = line.change;
             celebrate(line, false);
         }
+        // A witness that just finished green stays in view once nothing else moves.
+        if (before && before.state !== 'witnessed' && line.state === 'witnessed') { focusId = line.change; }
     }
 
     function apply(frame) {

@@ -49,12 +49,15 @@ export type EventType =
     | 'change.kicked'
     | 'change.restacked'
     | 'change.parked'
+    // A witness of main decided green (#6gj7n9p): it never lands, so this is where it finishes.
+    | 'change.witnessed'
     | 'rule.changed'
-    // Main's red pause (#3ypyka5): the newest decided witness of main's tip was red, then a later one cleared it.
+    // Main's red pause (#3ypyka5): the newest decided witness of main's tip was red. main.green: a green witness of the
+    // tip as the log knows it (#6gj7n9p), which clears a standing red and, on a fresh queue, records main green.
     | 'main.red'
     | 'main.green';
 
-export type ChangeState = 'queued' | 'building' | 'testing' | 'landed' | 'red' | 'parked' | 'refused';
+export type ChangeState = 'queued' | 'building' | 'testing' | 'landed' | 'red' | 'parked' | 'refused' | 'witnessed';
 
 export interface ChangeRecord {
     change: string;
@@ -228,8 +231,12 @@ export interface FutureEntry {
     // The run that decided the future and how: a judge's batch, today's gate's whole verdict, or a plan that reused
     // every unit. A void lets the next run decide it.
     decided: { run: string; status: Decision['status'] } | null;
-    // How many runs have decided it void: the judge's next run is attempt voids + 1.
+    // How many runs have decided it void: the judge's next run is attempt attemptsBefore + voids + 1.
     voids: number;
+    // The attempts an earlier future of the same tree may have run (a witness of the same sha again, #6gj7n9p): its runs
+    // keep their ids, future-<tree>-<attempt>, so this one's start after them and the judge never carries from them.
+    // Logged on future.built when it isn't 0, so a log from before it replays with 0.
+    attemptsBefore: number;
     // Whether any verdict was ever logged for it, a unit's or a whole one: after that its plan stands.
     judged: boolean;
 }
@@ -290,6 +297,9 @@ export interface QueueState {
     // Main held red by the newest decided witness of its tip, or null (#3ypyka5): while set, only a fix-forward naming
     // that main or a revert gets a landing order, and every other green change waits.
     mainRed: { witness: string; main: string; units: string[] } | null;
+    // Main's tip as the log knows it (#6gj7n9p): the sha of the newest witness git's facts cleared, or the main of the
+    // newest landing, whichever came later. A green witness records main.green only for this sha, never a stale one.
+    mainTip: string | null;
 }
 
 const shaPattern = /^[0-9a-f]{40}$/;
@@ -299,7 +309,7 @@ const base32 = '0123456789abcdefghjkmnpqrstvwxyz';
 const statuses: readonly string[] = ['passed', 'failed', 'void'];
 const causes: readonly string[] = ['change', 'mainRed', 'flake', 'infra'];
 // A change in one of these is finished: nothing more is planned, decided or landed for it.
-const finishedStates: readonly ChangeState[] = ['landed', 'red', 'parked', 'refused'];
+const finishedStates: readonly ChangeState[] = ['landed', 'red', 'parked', 'refused', 'witnessed'];
 
 // Canonical JSON: sorted keys, no insignificant whitespace (contracts v1, the preamble).
 export function canonical(value: unknown): string {
@@ -609,8 +619,15 @@ export function parityOf(state: QueueState, future: FutureEntry): boolean {
     });
 }
 
+// What a future.built on a tree that already had a future logs (#6gj7n9p): every attempt the earlier one may have run,
+// so the new one's runs never take an earlier run's id. Nothing when the tree is new, so a first future logs as before.
+export function attemptsBeforeOf(state: QueueState, tree: string): { attemptsBefore?: number } {
+    const earlier = state.futures.get(tree);
+    return earlier === undefined ? {} : { attemptsBefore: earlier.attemptsBefore + earlier.voids + 1 };
+}
+
 export function emptyState(): QueueState {
-    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 }, outsideVerdicts: { refused: false } }, blocks: new Map(), mainRed: null };
+    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 }, outsideVerdicts: { refused: false } }, blocks: new Map(), mainRed: null, mainTip: null };
 }
 
 // A whole verdict's decision, by the judge's rule: a failure that is main's red (excused, as Green excuses it) doesn't
@@ -704,7 +721,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'future.built') {
         const tree = event.subject.future ?? '';
         const changes = event.data.changes as string[];
-        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, empty: null, whole: null, decided: null, voids: 0, judged: false });
+        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, empty: null, whole: null, decided: null, voids: 0, judged: false, attemptsBefore: (event.data.attemptsBefore ?? 0) as number });
         // A block's prefix future (main, +A, +B) is the newest change's own; the changes ahead of it keep theirs.
         const tested = event.data.block === undefined ? changes : changes.slice(-1);
         for (const change of tested) {
@@ -714,6 +731,10 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
                 member.checked = true;
                 if (event.data.facts !== undefined) {
                     member.revertOf = ((event.data.facts ?? null) as GitFacts | null)?.revertOf ?? null;
+                }
+                // Git cleared a witness's sha as on main, and witnesses are posted of main's tip.
+                if (member.record.witness === true) {
+                    state.mainTip = member.record.sha;
                 }
             }
         }
@@ -813,10 +834,15 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'change.parked' && entry !== undefined) {
         entry.state = 'parked';
     }
+    else if (event.type === 'change.witnessed' && entry !== undefined) {
+        entry.state = 'witnessed';
+        entry.verdict = (event.data.decision ?? null) as Record<string, unknown> | null;
+    }
     else if (event.type === 'change.landed' && entry !== undefined) {
         entry.state = 'landed';
         entry.landed = event.data.main as string;
         state.landedMain = entry.landed;
+        state.mainTip = entry.landed;
         state.line = state.line.filter(function (id) {
             return id !== entry.record.change;
         });
@@ -1561,7 +1587,11 @@ export class Queue extends DurableObject<Env> {
                 await this.parkDependents(change);
             }
             for (const [index, prefix] of prefixes.entries()) {
-                await this.append('future.built', { change: added[index], future: String(prefix.tree) }, { base: base, changes: added.slice(0, index + 1), block: block });
+                await this.append(
+                    'future.built',
+                    { change: added[index], future: String(prefix.tree) },
+                    { base: base, changes: added.slice(0, index + 1), block: block, ...attemptsBeforeOf(await this.current(), String(prefix.tree)) },
+                );
             }
             await this.append('block.built', {}, { block: block, base: base });
             await this.decideBlock(block);
@@ -1593,7 +1623,8 @@ export class Queue extends DurableObject<Env> {
 
     // Slice 1: a checked change is its own future, its tree its sha. Speculation (#j3t4qbg) builds main+A+B instead.
     private async buildFuture(record: ChangeRecord, facts: GitFacts): Promise<void> {
-        await this.append('future.built', { change: record.change, future: record.sha }, { base: record.base, changes: [record.change], facts: facts });
+        const state = await this.current();
+        await this.append('future.built', { change: record.change, future: record.sha }, { base: record.base, changes: [record.change], facts: facts, ...attemptsBeforeOf(state, record.sha) });
     }
 
     // The changes waiting for git's facts, oldest first, for the bridge.
@@ -1721,7 +1752,7 @@ export class Queue extends DurableObject<Env> {
                 await this.append(
                     'future.built',
                     { change: checked.change, future: checked.verdict.future },
-                    { base: checked.gateMerge.base, changes: [checked.change], gateMergeOf: entry.future },
+                    { base: checked.gateMerge.base, changes: [checked.change], gateMergeOf: entry.future, ...attemptsBeforeOf(state, checked.verdict.future) },
                 );
             }
             const future = this.liveFuture(state, checked.verdict.future);
@@ -1936,6 +1967,10 @@ export class Queue extends DurableObject<Env> {
                 await this.append('change.red', { change: batch.change, future: tree, run: batch.run }, { decision: logged, kicks: batch.kicks });
                 await this.parkDependents(batch.change);
             }
+            // A witness never lands, so its green is where it finishes, and the same sha may be witnessed again.
+            if (decision.status === 'green' && state.changes.get(batch.change)?.record.witness === true) {
+                await this.append('change.witnessed', { change: batch.change, future: tree, run: batch.run }, { decision: logged });
+            }
             await this.decideBlock(state.changes.get(batch.change)?.block ?? null);
             await this.witnessMain(batch.change, decision);
             return jsonResponse(200, { future: tree, decided: decision.status, landable: futureLandable(future) });
@@ -1943,11 +1978,18 @@ export class Queue extends DurableObject<Env> {
     }
 
     // Main's red pause (#3ypyka5, push-main l.25-31): a decided witness of main that's newer than every other decided one
-    // holds main red when it's red (the judge's red leaves out what it quarantined), and clears the hold when it's green.
+    // holds main red when it's red (the judge's red leaves out what it quarantined). A green witness of main's tip as the
+    // log knows it records main.green (#6gj7n9p), clearing a standing red or not, and a stale sha's green says nothing.
     private async witnessMain(change: string, decision: Decision): Promise<void> {
         const state = await this.current();
         const entry = state.changes.get(change);
         if (entry?.record.witness !== true || decision.status === 'void') {
+            return;
+        }
+        if (decision.status === 'green') {
+            if (state.mainTip === entry.record.sha) {
+                await this.append('main.green', { change: change }, { witness: change, main: entry.record.sha, cleared: state.mainRed?.witness ?? null });
+            }
             return;
         }
         const newer = [...state.changes.values()].some(function (other) {
@@ -1958,15 +2000,10 @@ export class Queue extends DurableObject<Env> {
             return;
         }
         const future = state.futures.get(entry.future ?? '');
-        if (decision.status === 'red') {
-            const units = decision.red.map(function (key) {
-                return future?.units?.get(key)?.name ?? key;
-            });
-            await this.append('main.red', { change: change }, { witness: change, main: entry.record.sha, units: units });
-        }
-        else if (state.mainRed !== null) {
-            await this.append('main.green', { change: change }, { witness: change, main: entry.record.sha, cleared: state.mainRed.witness });
-        }
+        const units = decision.red.map(function (key) {
+            return future?.units?.get(key)?.name ?? key;
+        });
+        await this.append('main.red', { change: change }, { witness: change, main: entry.record.sha, units: units });
     }
 
     // Every change on its way that stacks on `base`, however deep, parked with the reason (#05b5c2f): a dependent's
@@ -2137,7 +2174,9 @@ export class Queue extends DurableObject<Env> {
                     future: future.tree,
                     base: future.base,
                     parity: parityOf(state, future),
-                    attempt: future.voids + 1,
+                    attempt: future.attemptsBefore + future.voids + 1,
+                    // The first attempt that is this future's: the judge carries a pass only from here on.
+                    ...(future.attemptsBefore === 0 ? {} : { firstAttempt: future.attemptsBefore + 1 }),
                     ...(future.empty === null ? {} : { empty: true, reason: future.empty.reason, rule: DocsRule }),
                     change: { change: record?.change, sha: record?.sha, base: record?.base, owner: record?.owner },
                     units: [...(future.units?.values() ?? [])].map(function (unit) {

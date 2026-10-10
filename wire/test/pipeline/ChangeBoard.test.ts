@@ -63,7 +63,7 @@ describe('the board of changes', function () {
         const refused: [unknown, string][] = [
             [{ ...summary(change), extra: 1 }, 'the summary is exactly change, owner, sha, state, future, units and updatedAt'],
             [summary('chg_X'), 'change is a change id'],
-            [summary(change, { state: 'merged' as ChangeSummary['state'] }), 'state is one of queued, building, testing, landed, red, parked, refused'],
+            [summary(change, { state: 'merged' as ChangeSummary['state'] }), 'state is one of queued, building, testing, landed, red, parked, refused, witnessed'],
             [summary(change, { sha: 'abc' }), 'sha is a commit'],
             [summary(change, { units: { planned: 1, passed: -1, failed: 0, void: 0 } }), 'units is exactly planned, passed, failed and void, each a count'],
             [summary(change, { updatedAt: 'yesterday' }), 'updatedAt is an RFC 3339 UTC time'],
@@ -89,6 +89,23 @@ describe('the board of changes', function () {
         });
         expect(kept).not.toContain(landed);
         expect(kept).toContain(waiting);
+    });
+
+    it('takes a witness of main finished green as witnessed, finished like a landing, and its page shows it so', async function () {
+        const witnessed = changeId();
+        expect((await push(summary(witnessed, { state: 'testing', updatedAt: '2026-10-10T16:00:00.000Z' }))).status).toBe(200);
+        expect((await push(summary(witnessed, { state: 'witnessed', updatedAt: '2026-10-10T16:01:00.000Z' }))).status).toBe(200);
+        const line = (await lines()).find(function (held) {
+            return held.change === witnessed;
+        }) as BoardLine | undefined;
+        expect(line).toMatchObject({ state: 'witnessed' });
+        expect(line?.finishedAt).toMatch(/^\d{4}-/);
+        // The page puts it at the end of the track, green, named for what it is, and never in the line on its way.
+        const html = await (await call('/board')).text();
+        expect(html).toContain('landed: 6, witnessed: 6 }[line.state]');
+        expect(html).toContain("line.state === 'witnessed') { name = 'Witnessed';");
+        expect(html).toContain("line.state === 'witnessed') { verdict = ['Green', 'green',");
+        expect(html).toContain("var onTheWay = ['queued', 'building', 'testing', 'parked'];");
     });
 
     it('serves its line to a board token only, and its page with no data and no token', async function () {
