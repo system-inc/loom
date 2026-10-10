@@ -12,6 +12,12 @@
 //
 // With Trees set (#w7agfa9), every test and product unit's job names Workshop's build of its tree (the key its plan
 // carries), and an attempt is held, neither started nor voided, until the tree builder has put that tree's index up.
+//
+// A plan can go stale under Loom: a release that moves the runner pin re-keys every unit, so a plan made before it
+// names a runner no pool serves, and a plan from before tree keys names no tree. An attempt voided only for that asks
+// Queue to plan the future again (Unplan, #r12yqbg) right after its void, so a pin move never strands a future. A
+// future whose fresh plan is as stale as the last is asked about once and left for a hand: the pools, not the plan,
+// are what's missing.
 package placer
 
 import (
@@ -92,6 +98,8 @@ type Record struct {
 	// Held is what the attempt waits on, its tree's build, since At: written once when it starts waiting, so a restart
 	// waits out the same bound. The attempt is still the placer's.
 	Held string `json:"held,omitempty"`
+	// Replan is why the placer asked Queue to plan the future again after this attempt's void: its plan was stale.
+	Replan string `json:"replan,omitempty"`
 }
 
 // placed says the attempt is the placer's no more: started, voided, or with nothing to run.
@@ -158,6 +166,10 @@ type Placer struct {
 	RunStarted func(run string) (bool, error)
 	// Void posts the listed attempt void as Loom's, neverPlaced, with the cause (judge.Puller.VoidListed).
 	Void func(future judge.PlannedFuture, attempt int, cause string) error
+	// Unplan asks Queue to withdraw the future's plan so the planner plans it again (POST /futures/<tree>/unplan, by
+	// the placer, with reason), which Queue takes only after a void and while no green or red stands (#0zndrgw). Nil
+	// never asks.
+	Unplan func(future judge.PlannedFuture, reason string) error
 	// Ledger is what was placed, by future and attempt (FileLedger), so a restart never places twice.
 	Ledger Ledger
 	// PoolSlots is the most units of one run queued on one pool at once; zero means every unit that may go there.
@@ -423,6 +435,8 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 		carried[unit.UnitKey] = true
 	}
 	record := Record{Future: future.Future, Attempt: attempt, Run: run, PlanHash: PlanHash(future.Units)}
+	// stale are the unplaced causes a new plan fixes: a key naming a runner no pool serves, a unit with no tree key.
+	stale := []string{}
 	candidates := []candidate{}
 	var changed []string
 	trees := map[string]bool{}
@@ -459,12 +473,16 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 		fit, why := pass.fit(parts, job)
 		if len(fit) == 0 {
 			record.Unplaced = append(record.Unplaced, fmt.Sprintf("%s: %s", unitName(unit, parts.Kind), why))
+			if !pass.serves(parts.Tools.Runner) {
+				stale = append(stale, fmt.Sprintf("%s: its key names runner %.12s, which no pool serves", unitName(unit, parts.Kind), parts.Tools.Runner))
+			}
 			continue
 		}
 		if placer.Trees && planner.ReadsTreeBuild(parts.Kind) {
 			if unit.Tree == "" {
 				// A plan from before the planner keyed trees: no build is named for it, so it never runs one.
 				record.Unplaced = append(record.Unplaced, fmt.Sprintf("%s: its plan carries no tree key", unitName(unit, parts.Kind)))
+				stale = append(stale, fmt.Sprintf("%s: its plan carries no tree key", unitName(unit, parts.Kind)))
 				continue
 			}
 			trees[unit.Tree] = true
@@ -477,7 +495,14 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 	record.Unplaced = append(record.Unplaced, pass.pin(candidates)...)
 	record.At = placer.Now().UTC().Format(time.RFC3339)
 	if len(record.Unplaced) > 0 {
-		return false, pass.void(future, attempt, record, "unplaced: "+strings.ReplaceAll(strings.Join(record.Unplaced, "; "), run, "<run>"))
+		previous, _ := placer.Ledger.LastVoid(future.Future)
+		if err := pass.void(future, attempt, record, "unplaced: "+strings.ReplaceAll(strings.Join(record.Unplaced, "; "), run, "<run>")); err != nil || !pass.voided {
+			return false, err
+		}
+		if len(stale) == len(record.Unplaced) {
+			return false, pass.replan(future, attempt, stale, previous)
+		}
+		return false, nil
 	}
 	if len(candidates) == 0 {
 		// Every unit reused or carried: the judge decides the attempt from the earlier runs, with nothing to run.
@@ -608,6 +633,35 @@ func (pass *pass) void(future judge.PlannedFuture, attempt int, record Record, h
 	record.Void, record.Hold, record.At, pass.voided = cause, hold, placer.Now().UTC().Format(time.RFC3339), true
 	fmt.Fprintf(placer.Log, "void %s: %s\n", record.Run, cause)
 	return placer.Ledger.Append(record)
+}
+
+// replan asks Queue to plan the future again after the void just posted for attempt, every one of whose unplaced causes
+// is its plan's staleness, and records the ask on the attempt. A future whose last ask was for this same plan (its
+// fresh plan is as stale as the one before) is never asked again: it's said once, for a hand.
+func (pass *pass) replan(future judge.PlannedFuture, attempt int, stale []string, previous Record) error {
+	placer := pass.placer
+	if placer.Unplan == nil {
+		return nil
+	}
+	run, hash := coordinator.FutureRun(future.Future, attempt), PlanHash(future.Units)
+	if previous.Replan != "" && previous.PlanHash == hash {
+		placer.note(run+" replan", fmt.Sprintf("%s: its plan is as stale as when attempt %d asked for a new one (%s); the pools need a hand, not a replan", run, previous.Attempt, previous.Replan))
+		return nil
+	}
+	reason := "not placed: " + strings.Join(stale, "; ") + "; the plan predates the pools' runners or tree keys, so the placer asks for a new one (#r12yqbg)"
+	if err := placer.Unplan(future, reason); err != nil {
+		return fmt.Errorf("asking Queue to plan it again after attempt %d's void: %w", attempt, err)
+	}
+	record, _ := placer.Ledger.Find(future.Future, attempt)
+	record.Replan, record.At = reason, placer.Now().UTC().Format(time.RFC3339)
+	fmt.Fprintf(placer.Log, "replan %s: %s\n", run, reason)
+	return placer.Ledger.Append(record)
+}
+
+// serves says whether a pool of the table serves runner, the one a unit's key names; a key naming none (a product's)
+// is served by any.
+func (pass *pass) serves(runner string) bool {
+	return runner == "" || slices.ContainsFunc(pass.pools, func(pool Pool) bool { return pool.Runner == runner })
 }
 
 // need is the unit's declared need, as the judge reads it for a rerun: the listing's, else unit-needs.json's.

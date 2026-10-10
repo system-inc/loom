@@ -253,3 +253,30 @@ func TestATreeWhoseGoIsntItsUnitsIsNotPlanned(t *testing.T) {
 		t.Fatalf("its own release: %v, tree %q", err, results[0].Tree)
 	}
 }
+
+// Unplan posts {by, reason} to the future's unplan route with the client's token, and a refusal comes back as an error
+// naming Queue's answer (#r12yqbg).
+func TestUnplanAsksQueueByTheFuturesRouteAndReportsARefusal(t *testing.T) {
+	t.Parallel()
+	var asked []string
+	refuse := false
+	queue := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		asked = append(asked, request.Method+" "+request.URL.Path+" "+request.Header.Get("Authorization")+" "+string(body))
+		if refuse {
+			http.Error(writer, `{"error":"future was decided green or red, so its plan stands"}`, http.StatusConflict)
+		}
+	}))
+	defer queue.Close()
+	client := QueueClient{Base: queue.URL, Token: "placer-token"}
+	if err := client.Unplan("abc", "loom place", "not placed: stale"); err != nil {
+		t.Fatal(err)
+	}
+	if want := `POST /futures/abc/unplan Bearer placer-token {"by":"loom place","reason":"not placed: stale"}`; len(asked) != 1 || asked[0] != want {
+		t.Fatalf("asked %q, want %q", asked, want)
+	}
+	refuse = true
+	if err := client.Unplan("abc", "loom place", "again"); err == nil || !strings.Contains(err.Error(), "409") || !strings.Contains(err.Error(), "its plan stands") {
+		t.Fatalf("a refusal: %v", err)
+	}
+}

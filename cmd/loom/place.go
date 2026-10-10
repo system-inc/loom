@@ -186,6 +186,9 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			_, err := voider.VoidListed(future, attempt, judge.InfraNeverPlaced, cause)
 			return err
 		},
+		Unplan: func(future judge.PlannedFuture, reason string) error {
+			return queueClient.Unplan(future.Future, "loom place", reason)
+		},
 		Ledger:     ledger,
 		PoolSlots:  *settings.poolSlots,
 		UnfitEvery: *settings.unfitEvery,
