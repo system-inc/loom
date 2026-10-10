@@ -240,6 +240,17 @@ func (run *unitRun) testEnvironment(environmentFile string, job *protocol.TestJo
 	if job.Sample != "" {
 		environment["ADAMIC_GATE_SAMPLE"] = job.Sample
 	}
+	// Go's build cache is the unit's own, empty when it starts and gone with its directory, and no GOCACHEPROG serves
+	// it. Go doesn't hash a header reached through #cgo -I outside the package, so a cache that outlives a unit (the
+	// instance's ~/.cache/go-build, Oct 10: internal/buildcache read a stale header on two warm Codex instances) can
+	// test an object built from the old header: a change to that header would read green. Slower, never looser (Loom,
+	// 01:42Z), until the key covers out-of-package cgo inputs.
+	goCache := filepath.Join(run.directory, "gocache")
+	if err := os.MkdirAll(goCache, 0o755); err != nil {
+		return nil, err
+	}
+	environment["GOCACHE"] = goCache
+	delete(environment, "GOCACHEPROG")
 	if len(job.ChangedPaths) > 0 {
 		changed := filepath.Join(run.directory, "changed-paths.txt")
 		if err := os.WriteFile(changed, []byte(strings.Join(job.ChangedPaths, "\n")+"\n"), 0o644); err != nil {

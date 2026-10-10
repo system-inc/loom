@@ -24,6 +24,7 @@ import (
 //	prepare.sh fetching the commit into the checkout, not an empty store (a planted local commit then passes): TestPrepareRefusesACommitGitHubDoesntHave
 //	a trim reaching the host's /tmp (as a mutant, only /tmp/go-buildloom-canary-*): TestPrepareNamesNoHostPath, TestPrepareTouchesNothingOutsideItsRoot
 //	a strict runner's root anything but /tmp: TestAStrictRunnersRootIsTmpAndOthersKeepTheirOwn
+//	the unit's own GOCACHE dropped, or GOCACHEPROG kept: TestEachTestUnitBuildsOnAGoCacheOfItsOwn
 
 const testSha = "0123456789abcdef0123456789abcdef01234567"
 
@@ -357,5 +358,53 @@ func TestAStrictRunnersRootIsTmpAndOthersKeepTheirOwn(t *testing.T) {
 	}
 	if trim, _ := os.ReadFile(filepath.Join(fixture.directory, "trim")); string(trim) != "keep\n" {
 		t.Errorf("a box runner prepared with %q, not keep", trim)
+	}
+}
+
+// Go's build cache doesn't hash a header reached through #cgo -I outside the package, so a cache shared across units
+// can serve an object built from an old header (Oct 10, internal/buildcache on two warm Codex instances). Each unit's
+// go runs on a cache of its own, empty at its start, whatever the instance's environment names, and no GOCACHEPROG.
+func TestEachTestUnitBuildsOnAGoCacheOfItsOwn(t *testing.T) {
+	fixture := newStrictFixture(t, 0)
+	shared := filepath.Join(fixture.directory, "shared-gocache")
+	os.MkdirAll(shared, 0o755)
+	os.WriteFile(filepath.Join(shared, "stale-object"), []byte("built from the old header"), 0o644)
+	seen := filepath.Join(fixture.directory, "seen")
+	os.MkdirAll(seen, 0o755)
+	bin := filepath.Join(fixture.directory, "bin")
+	os.WriteFile(filepath.Join(bin, "go"), []byte(`#!/bin/bash
+printf '%s %s %s\n' "${GOCACHE}" "${GOCACHEPROG-unset}" "$(ls -A "${GOCACHE}" | wc -l)" > "`+seen+`/go-$$"
+case "$*" in *-exec*) exit 0 ;; esac
+printf '{"Action":"pass","Package":"%s","Test":"TestA"}\n' "${!#}"
+`), 0o755)
+	prepareScript = []byte(`#!/bin/bash
+mkdir -p "$1"
+printf 'PATH=%s\0HOME=%s\0GOCACHE=%s\0GOCACHEPROG=%s\0' "` + bin + `:/usr/bin:/bin" "${HOME}" "` + shared + `" "` + bin + `/cacheprog" > "$5"
+`)
+	caches := map[string]bool{}
+	for range 2 {
+		before, _ := os.ReadDir(seen)
+		result, events, _ := runUnit(t, testJobUnit(goodTestJob()), fixture.options(t))
+		if result.Status != protocol.StatusPassed {
+			t.Fatalf("the unit %s; errors %q", result.Status, errorPhases(events))
+		}
+		entries, _ := os.ReadDir(seen)
+		if len(entries) <= len(before) {
+			t.Fatal("go never ran")
+		}
+		for _, entry := range entries[len(before):] {
+			line, _ := os.ReadFile(filepath.Join(seen, entry.Name()))
+			fields := strings.Fields(string(line))
+			if len(fields) != 3 || fields[0] == shared || !strings.Contains(fields[0], "loom-unit-") || fields[1] != "unset" {
+				t.Fatalf("go ran with GOCACHE, GOCACHEPROG and entries %q: not the unit's own cache", line)
+			}
+			caches[fields[0]] = true
+		}
+	}
+	if len(caches) != 2 {
+		t.Fatalf("two units shared a Go cache: %v", caches)
+	}
+	if _, err := os.Stat(filepath.Join(shared, "stale-object")); err != nil {
+		t.Fatal("the instance's cache was touched")
 	}
 }
