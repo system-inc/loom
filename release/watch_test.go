@@ -568,6 +568,42 @@ func TestABoxThatDoesntFollowIsNamedLagging(t *testing.T) {
 	}
 }
 
+// A hold is known only from a box's reports, so a box last heard held long ago is named silent and lagging, never
+// held forever; one that comes back and takes the release in time isn't named at all.
+func TestABoxLastHeardHeldLongAgoIsSilentNotHeld(t *testing.T) {
+	w := newWorld(t)
+	w.reportHeld("Server", commit("a"), "current")
+	w.reportHeld("Home", commit("a"), "current")
+	w.advance(time.Hour)
+	w.head = commit("b")
+	w.tick()
+	w.advance(time.Minute)
+	w.report("Cloud", commit("b"), commit("b"), serveUp)
+	w.tick()
+	w.soakHealthy(commit("b"))
+	if w.state().Phase != PhaseFleet {
+		t.Fatalf("%+v\n%s", w.state(), w.log.String())
+	}
+	w.advance(time.Minute)
+	for _, box := range []string{"Workshop", "Chonchon"} {
+		w.report(box, commit("b"), commit("b"))
+	}
+	w.reportHeld("Home", commit("b"), commit("b")) // back, held at the release itself
+	w.tick()
+	if w.state().Phase != PhaseFleet {
+		t.Fatalf("done while Server was silent: %+v", w.state())
+	}
+	w.advance(15 * time.Minute)
+	w.tick()
+	state := w.state()
+	if state.Phase != PhaseDone || len(state.Held) != 0 || len(state.Lagging) != 1 || !strings.HasPrefix(state.Lagging[0], "Server (silent for 1h") {
+		t.Fatalf("%+v\n%s", state, w.log.String())
+	}
+	if !strings.Contains(w.log.String(), "SILENT: Server (silent for 1h") || strings.Contains(w.log.String(), "HELD:") {
+		t.Fatalf("the log:\n%s", w.log.String())
+	}
+}
+
 // Two watchers on one out directory (a second one started by hand, say) never publish at once: whoever holds the lock
 // publishes, and the other's pass changes nothing.
 func TestTwoWatchersNeverPublishAtOnce(t *testing.T) {
