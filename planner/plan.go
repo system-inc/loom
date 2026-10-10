@@ -71,6 +71,37 @@ func ChangedPathsFile(directory string, paths []string) (string, error) {
 	return file.Name(), nil
 }
 
+// RunNames is the inverse of a parity unit's run pattern: the exact top-level test names ^(A|B)$ names, and true, or
+// nil and false for any other pattern (empty runs every test, so it names none). Judge reads it to check every named
+// test ran (Loom's zerorun rule, Oct 10 01:12Z).
+func RunNames(run string) ([]string, bool) {
+	inner, found := strings.CutPrefix(run, "^(")
+	if inner, found = strings.CutSuffix(inner, ")$"); !found || inner == "" {
+		return nil, false
+	}
+	names := []string{}
+	for _, quoted := range strings.Split(inner, "|") {
+		name := unquoteMeta(quoted)
+		if name == "" || regexp.QuoteMeta(name) != quoted {
+			return nil, false
+		}
+		names = append(names, name)
+	}
+	return names, true
+}
+
+// unquoteMeta undoes regexp.QuoteMeta: a backslash escapes the byte after it.
+func unquoteMeta(quoted string) string {
+	var name strings.Builder
+	for index := 0; index < len(quoted); index++ {
+		if quoted[index] == '\\' && index+1 < len(quoted) {
+			index++
+		}
+		name.WriteByte(quoted[index])
+	}
+	return name.String()
+}
+
 // exactRun is the run pattern that selects exactly the named top-level tests. A subtest's name can't be one, since go
 // test splits a -run pattern at its slashes.
 func exactRun(tests []string) (string, error) {

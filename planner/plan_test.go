@@ -152,3 +152,21 @@ func TestAParityRunWithoutASelectionPlansEveryTestedPackageWithItsInputs(t *test
 		}
 	}
 }
+
+// RunNames reads back exactly the names exactRun wrote, and refuses any pattern exactRun can't have written.
+func TestRunNamesIsExactRunsInverse(t *testing.T) {
+	t.Parallel()
+	names := []string{"TestA", "TestZ.1", "TestWASIUnit03"}
+	run, err := exactRun(names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := RunNames(run); !ok || strings.Join(got, ",") != "TestA,TestWASIUnit03,TestZ.1" {
+		t.Fatalf("RunNames(%q) = %v %v", run, got, ok)
+	}
+	for _, other := range []string{"", "TestA", "^TestA", "^(TestA|Test.*)$", "^()$"} {
+		if names, ok := RunNames(other); ok {
+			t.Errorf("RunNames(%q) read names %v from a pattern exactRun never writes", other, names)
+		}
+	}
+}
