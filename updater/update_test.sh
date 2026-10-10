@@ -64,16 +64,25 @@ republish() { # republish <commit>: that commit's kept manifest becomes current.
 }
 serve() { cp "$1" "${T}/www/current.txt"; } # serve <file>: what the server hands out as current.txt, as it is
 
-# The web server: python3's http.server on the served directory, plus a POST /report that keeps each body.
+# The web server: python3's http.server on the served directory, plus a POST /report that keeps each body signed as
+# Workshop's receiver checks it (release.Receiver): the claims header is the report token's first half, and the
+# signature header the HMAC-SHA256 of the body keyed by the whole token. Anything else is refused with a 401.
 mkdir -p "${T}/www"
+token=eyJydW4iOiJyZXBvcnQtdGVzdCIsInNjb3BlIjoicmVwb3J0IiwiZXhwaXJlcyI6MTgyMjQ2NDAwMH0.c2lnbmF0dXJlLW9mLXRoZS10ZXN0LXRva2VuLWZvci1ob21lcw
 cat > "${T}/server.py" << 'PYTHON'
-import functools, http.server, sys
-www, reports, port_file = sys.argv[1:]
+import functools, hashlib, hmac, http.server, sys
+www, reports, port_file, token = sys.argv[1:]
 class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("content-length", 0)))
         if self.path != "/report":
             self.send_error(404)
+            return
+        signature = hmac.new(token.encode(), body, hashlib.sha256).hexdigest()
+        if self.headers.get("X-Loom-Report-Claims") != token.split(".")[0] or not hmac.compare_digest(self.headers.get("X-Loom-Report-Signature", ""), signature):
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b"not signed by its report token\n")
             return
         with open(reports, "ab") as handle:
             handle.write(body + b"\n")
@@ -85,14 +94,17 @@ server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Han
 open(port_file, "w").write(str(server.server_address[1]))
 server.serve_forever()
 PYTHON
-python3 "${T}/server.py" "${T}/www" "${T}/reports" "${T}/port" 2> "${T}/access.log" &
+python3 "${T}/server.py" "${T}/www" "${T}/reports" "${T}/port" "${token}" 2> "${T}/access.log" &
 server=$!
 trap 'kill ${server} 2> /dev/null' EXIT
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "${T}/port" ] && break; sleep 0.2; done
 base=http://127.0.0.1:$(cat "${T}/port")
 
-# update <home> <host> [report path]: one updater run as that machine; its exit code lands in ${T}/code.
+# update <home> <host> [report path]: one updater run as that machine, its report token in place unless the home
+# already holds one; its exit code lands in ${T}/code.
 update() {
+	mkdir -p "${T}/$1/.loom"
+	[ -e "${T}/$1/.loom/report-token" ] || printf '%s\n' "${token}" > "${T}/$1/.loom/report-token"
 	HOME=${T}/$1 LOOM_UPDATE_HOST=$2 LOOM_UPDATE_BASE=${base} LOOM_UPDATE_REPORT=${3:+${base}$3} "${updater}" > "${T}/run.log" 2>&1
 	echo $? > "${T}/code"
 }
@@ -178,6 +190,19 @@ update home Home /nowhere
 check report-failure-is-not-fatal 'code 0 && [ "$(now home version)" = "${b}" ] && grep -q "report of ${b} to .* failed" ${T}/home/.loom/update.log && [ ! -e ${T}/home/.loom/reported ]'
 update home Home /report
 check report-retried 'code 0 && grep -q "\"version\":\"${b}\"" ${T}/home/.loom/reported &&[ "$(tail -1 ${T}/reports | python3 -c "import json,sys; print(json.load(sys.stdin)[\"host\"])")" = Home ]'
+
+# A report is signed with the machine's own report token: one signed with another token is refused, and the run logs
+# the receiver's answer; with no token none is sent, and the log says how to mint one.
+mkdir -p "${T}/forged/.loom" "${T}/untokened/.loom"
+printf '%s\n' "${token%?}x" > "${T}/forged/.loom/report-token"
+: > "${T}/untokened/.loom/report-token"
+sent=$(reports)
+update forged Forged /report
+check report-signed-by-another-token-refused 'code 0 && [ "$(reports)" = "${sent}" ] && grep -q "report of ${b} to .* failed (401: not signed by its report token); the next run tries again" ${T}/forged/.loom/update.log && [ ! -e ${T}/forged/.loom/reported ]'
+posts=$(grep -c '"POST /report' "${T}/access.log")
+update untokened Untokened /report
+check report-without-token-not-sent 'code 0 && [ "$(grep -c "\"POST /report" ${T}/access.log)" = "${posts}" ] && grep -q "not sent: no report token in .*/report-token (on Workshop: loom release report-token Untokened)" ${T}/untokened/.loom/update.log'
+check report-leaves-no-files '[ -z "$(ls -A ${T}/home/.loom ${T}/forged/.loom | grep "^report\.")" ]'
 
 # A hook that fails runs again on the next run, which finds the version installed, and stops once it passes.
 mkdir -p "${T}/flaky/.loom/updated.d"

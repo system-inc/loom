@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -27,6 +28,7 @@ import (
 //	loom release mark <commit> <step>      a step the release's order names is done
 //	loom release rollback                  ends a canary: every box follows the fleet's release again
 //	loom release resume [--retry]          a stopped watcher releases again
+//	loom release report-token <box>        the token a box signs its reports with, its ~/.loom/report-token
 //
 // Each reads ~/.loom/release.conf (--config) over Workshop's defaults.
 func releaseCommand(arguments []string, stdout io.Writer, stderr io.Writer) int {
@@ -41,12 +43,25 @@ func releaseCommand(arguments []string, stdout io.Writer, stderr io.Writer) int 
 	configPath := flags.String("config", filepath.Join(home, ".loom", "release.conf"), "the release settings")
 	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin, for when each box's serve last asked")
 	retry := flags.Bool("retry", false, "resume: release again the commit that stopped the watcher")
+	days := flags.Int("days", 365, "report-token: days until the token expires")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return 3
 	}
 	fail := func(err error) int {
 		fmt.Fprintf(stderr, "loom release %s: %v\n", verb, err)
 		return 1
+	}
+	if verb == "report-token" && flags.NArg() == 1 && *days >= 1 {
+		secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+		if err != nil {
+			return fail(err)
+		}
+		token, err := release.MintReportToken(secret, flags.Arg(0), time.Now().Add(time.Duration(*days)*24*time.Hour))
+		if err != nil {
+			return fail(err)
+		}
+		fmt.Fprintln(stdout, token)
+		return 0
 	}
 	if verb == "install" && flags.NArg() == 0 {
 		paths := release.HomeInstallPaths(home)
@@ -127,17 +142,25 @@ func poolAsked(callContext context.Context, wire string, secret []byte, pools []
 	return asked, nil
 }
 
+// releaseWatch runs the watcher and the report receiver. It refuses to start without the token secret, which every
+// report's signature is checked against, and without release.conf's listen, so the receiver never binds every interface.
 func releaseWatch(config release.Config, steps release.Steps, wire, home string, stderr io.Writer) int {
-	if secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret")); err == nil {
-		steps.PoolSeen = func(callContext context.Context, host string) (time.Time, error) {
-			asked, err := poolAsked(callContext, wire, secret, config.Pools)
-			return asked[strings.ToLower(host)], err
-		}
-	} else {
-		fmt.Fprintf(stderr, "loom release: no token secret (%v): the canary's serve is judged by its own report, not by the pools\n", err)
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom release watch: no token secret, so no box's report could be checked: %v\n", err)
+		return 1
 	}
-	server := &http.Server{Addr: config.Listen, ReadHeaderTimeout: 10 * time.Second,
-		Handler: release.Receiver{Directory: filepath.Join(config.State, "reports"), Hosts: config.Boxes, Now: time.Now}}
+	if config.Listen == "" {
+		fmt.Fprintf(stderr, "loom release watch: release.conf needs listen = <Workshop's LAN address>:7381; the receiver binds that address alone, never every interface\n")
+		return 1
+	}
+	steps.PoolSeen = func(callContext context.Context, host string) (time.Time, error) {
+		asked, err := poolAsked(callContext, wire, secret, config.Pools)
+		return asked[strings.ToLower(host)], err
+	}
+	receiver := &release.Receiver{Directory: filepath.Join(config.State, "reports"), Hosts: config.Boxes, Secret: secret,
+		Addresses: config.Addresses, Resolve: net.DefaultResolver.LookupHost, Now: time.Now, Log: stderr}
+	server := &http.Server{Addr: config.Listen, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, Handler: receiver}
 	served := make(chan error, 1)
 	go func() { served <- server.ListenAndServe() }()
 	callContext, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

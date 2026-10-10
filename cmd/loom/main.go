@@ -79,6 +79,7 @@ const usage = `usage:
   loom release mark <commit> <step> [--config <file>]
   loom release rollback [--config <file>]
   loom release resume [--retry] [--config <file>]
+  loom release report-token <box> [--days N]
 `
 
 func main() {

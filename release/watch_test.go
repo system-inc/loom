@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,6 +48,10 @@ func newWorld(t *testing.T) *world {
 	directory := t.TempDir()
 	config := DefaultConfig(directory)
 	config.Out, config.State = filepath.Join(directory, "out"), filepath.Join(directory, "state")
+	config.Listen = "10.0.0.1:7381"
+	for index, box := range config.Boxes {
+		config.Addresses[strings.ToLower(box)] = []string{fmt.Sprintf("10.0.0.%d", index+1)}
+	}
 	w := &world{t: t, config: config, now: time.Date(2026, 10, 10, 16, 0, 0, 0, time.UTC), head: commit("a"), orders: map[string]string{}, descends: true}
 	os.MkdirAll(filepath.Join(config.Out, "manifests"), 0o755)
 	os.WriteFile(filepath.Join(config.Out, "manifests", commit("a")+".txt"), []byte(manifestOf(commit("a"))), 0o644)
@@ -125,23 +130,55 @@ func (w *world) published() Manifest {
 	return manifest
 }
 
-// report posts a box's report through the receiver, as its updater does, at the world's time.
-func (w *world) report(host, version, hooked string, services ...string) {
-	w.t.Helper()
-	body, _ := json.Marshal(Report{Host: host, Version: version, Hooked: hooked, Services: services, At: w.clock().Format(time.RFC3339)})
+// testSecret is the token secret the world's receiver checks reports against.
+var testSecret = []byte("the house's token secret, for tests")
+
+// receiver is the watcher's own report receiver, as `loom release watch` runs it.
+func (w *world) receiver() *Receiver {
+	return &Receiver{Directory: filepath.Join(w.config.State, "reports"), Hosts: w.config.Boxes, Secret: testSecret, Addresses: w.config.Addresses, Now: w.clock}
+}
+
+// reportToken is the host's report token, as `loom release report-token <host>` mints it.
+func reportToken(t *testing.T, host string) string {
+	t.Helper()
+	token, err := MintReportToken(testSecret, host, time.Date(2027, 10, 10, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+// signed is a report's request as an updater sends it: signed with token, from the address.
+func signed(token string, body []byte, from string) *http.Request {
 	request := httptest.NewRequest(http.MethodPost, "/report", bytes.NewReader(body))
+	claims, _, _ := strings.Cut(token, ".")
+	request.Header.Set(ClaimsHeader, claims)
+	request.Header.Set(SignatureHeader, SignReport(token, body))
+	request.RemoteAddr = net.JoinHostPort(from, "41234")
+	return request
+}
+
+// post sends a report as the host's own updater does, at the world's time, and fails the test if it is refused.
+func (w *world) post(report Report) {
+	w.t.Helper()
+	report.At = w.clock().Format(time.RFC3339)
+	body, _ := json.Marshal(report)
 	recorder := httptest.NewRecorder()
-	Receiver{Directory: filepath.Join(w.config.State, "reports"), Hosts: w.config.Boxes, Now: w.clock}.ServeHTTP(recorder, request)
+	w.receiver().ServeHTTP(recorder, signed(reportToken(w.t, report.Host), body, w.config.Addresses[strings.ToLower(report.Host)][0]))
 	if recorder.Code != http.StatusNoContent {
 		w.t.Fatalf("the receiver answered %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
 
+// report posts a box's report through the receiver, as its updater does, at the world's time.
+func (w *world) report(host, version, hooked string, services ...string) {
+	w.t.Helper()
+	w.post(Report{Host: host, Version: version, Hooked: hooked, Services: services})
+}
+
 func (w *world) reportHeld(host, version, held string) {
 	w.t.Helper()
-	body, _ := json.Marshal(Report{Host: host, Version: version, Hooked: version, Held: held})
-	recorder := httptest.NewRecorder()
-	Receiver{Directory: filepath.Join(w.config.State, "reports"), Hosts: w.config.Boxes, Now: w.clock}.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/report", bytes.NewReader(body)))
+	w.post(Report{Host: host, Version: version, Hooked: version, Held: held})
 }
 
 const serveUp = "loom-serve.service active running restarts=0"
@@ -200,6 +237,42 @@ func TestACanaryThatNeverReportsIsNotPromoted(t *testing.T) {
 	w.tick()
 	if w.publishes.Load() != 1 || len(w.promoted) != 0 || w.state().Phase != PhaseStopped {
 		t.Fatalf("a stopped watcher moved: %d published, promoted %q", w.publishes.Load(), w.promoted)
+	}
+}
+
+// A canary that never installs the release isn't promoted by reports that only claim to be its own: one posted from
+// another machine on the LAN, unsigned, signed with another box's token, Cloud's own token sent from elsewhere, or
+// Cloud's claims (they cross the network in the open) with a signature only guessed, sent from Cloud's own address.
+func TestASpoofedCanaryReportPromotesNothing(t *testing.T) {
+	w := newWorld(t)
+	w.head = commit("b")
+	w.tick()
+	if w.state().Phase != PhaseCanary {
+		t.Fatalf("%+v", w.state())
+	}
+	spoof := func(token, from string) int {
+		body, _ := json.Marshal(Report{Host: "cloud", Version: commit("b"), Hooked: commit("b"), Services: []string{serveUp}, At: w.clock().Format(time.RFC3339)})
+		request := signed(token, body, from)
+		if token == "" {
+			request.Header.Del(ClaimsHeader)
+			request.Header.Del(SignatureHeader)
+		}
+		recorder := httptest.NewRecorder()
+		w.receiver().ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+	for range 4 {
+		w.advance(4 * time.Minute)
+		claims, _, _ := strings.Cut(reportToken(t, "Cloud"), ".")
+		for _, attempt := range [][2]string{{"", "10.66.66.66"}, {"", "10.0.0.2"}, {reportToken(t, "Server"), "10.0.0.3"}, {reportToken(t, "Cloud"), "10.66.66.66"}, {claims + ".guessed", "10.0.0.2"}} {
+			if code := spoof(attempt[0], attempt[1]); code/100 == 2 {
+				t.Fatalf("a report claiming Cloud from %s was taken: %d", attempt[1], code)
+			}
+		}
+		w.tick()
+	}
+	if state := w.state(); state.Phase != PhaseStopped || len(w.promoted) != 0 || w.published().Top() != commit("a") {
+		t.Fatalf("Cloud never installed %s: %+v, promoted %q", short(commit("b")), state, w.promoted)
 	}
 }
 

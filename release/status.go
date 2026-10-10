@@ -36,7 +36,7 @@ func Boxes(config Config, published Manifest, asked map[string]time.Time, now ti
 		}
 		status := BoxStatus{Box: box, Report: report, Wants: published.For(box), Asked: asked[strings.ToLower(box)]}
 		if report == nil {
-			status.Problems = append(status.Problems, "NEVER REPORTED: its update.conf needs report = http://<Workshop>"+config.Listen+"/report")
+			status.Problems = append(status.Problems, "NEVER REPORTED: its update.conf needs report = http://"+orWorkshop(config.Listen)+"/report, and ~/.loom/report-token from `loom release report-token "+box+"`")
 			boxes = append(boxes, status)
 			continue
 		}
@@ -68,6 +68,14 @@ func Boxes(config Config, published Manifest, asked map[string]time.Time, now ti
 		boxes = append(boxes, status)
 	}
 	return boxes, nil
+}
+
+// orWorkshop is the listen address, or what it stands for when release.conf names none yet.
+func orWorkshop(listen string) string {
+	if listen == "" {
+		return "<Workshop's LAN address>:7381"
+	}
+	return listen
 }
 
 func orNothing(version string) string {
