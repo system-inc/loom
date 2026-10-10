@@ -25,7 +25,7 @@ func planFixture(t *testing.T) (tree, gateTools string) {
 	writeFiles(t, gateTools, map[string]string{
 		"cloud/fast-gate/executors.txt": "# no reads\n",
 		// run.py's --list-units as the gate tools hold it: the phase units it lists, one per line.
-		"cloud/fast-gate/run.py": "import sys\nif '--list-units' in sys.argv:\n    print('build')\n    print('vet')\n",
+		"cloud/fast-gate/run.py": "import sys\nif '--list-units' in sys.argv:\n    print('build')\n    print('vet')\n    print('census')\n",
 	})
 	for _, directory := range []string{tree, gateTools} {
 		for _, arguments := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixture"}} {
@@ -253,7 +253,7 @@ func TestAChangeKeysGateInputsEverywhereAndItsPathsOnlyOnGateSampleReaders(t *te
 	}
 }
 
-// A future's phase units are run.py's own list at the gate tools plus gofmt, each kind phase, run, keyed on the
+// A future's phase units are run.py's own list at the gate tools (but census, the judge's step) plus gofmt, each kind phase, run, keyed on the
 // tree's object and the tools commit, with gofmt alone carrying the change's paths. Another tree moves every phase key.
 func TestPhaseUnitsAreRunPysListPlusGofmtKeyedOnTheWholeTree(t *testing.T) {
 	t.Parallel()

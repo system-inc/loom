@@ -15,6 +15,9 @@ import (
 // Oct 10 01:42Z). Its key carries the change's paths, since what it checks is exactly them.
 const GofmtPhase = "gofmt"
 
+// JudgedPhase is the run.py phase the judge's census step runs on the new path, so it isn't planned as a unit.
+const JudgedPhase = "census"
+
 // PhaseUnits are a future's phase units (Loom, Oct 10 01:41Z): one per unit the box fast gate runs on this change, as
 // run.py itself lists them at the gate tools (run.py --list-units, never retyped here), plus gofmt. A phase is keyed on
 // the whole tree (its git tree object) and the gate tools commit, so it never reuses across trees, and it always runs
@@ -34,7 +37,9 @@ func PhaseUnits(tree, gateTools, base, sha string, tools Tools, inputs ParityInp
 	}
 	lines := []string{}
 	for _, line := range strings.Split(string(output), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
+		// The census reads the run's merged test log, so it runs as the judge's census step after the tests, never
+		// as a unit of its own (Judge and Loom, Oct 10 01:47Z): planned alone it would red every future.
+		if line = strings.TrimSpace(line); line != "" && strings.Fields(line)[0] != JudgedPhase {
 			lines = append(lines, line)
 		}
 	}
