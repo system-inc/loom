@@ -161,9 +161,8 @@ func TestARemoteThatCantBeReadChecksNothingThisTick(t *testing.T) {
 	if _, err := made.clone.fetchSha(strings.Repeat("9", 40)); !errors.As(err, &gitError) {
 		t.Fatalf("fetching from a gone origin: %v", err)
 	}
-	queue := newQueue()
-	queue.unchecked = []map[string]any{{"change": change, "sha": made.base, "base": made.base, "paths": []string{}}}
-	Bridge{Queue: queue, Gate: made.clone, Decides: true, Log: func(string) {}}.Tick(newMemory())
+	queue := &fakeQueue{unchecked: []map[string]any{{"change": change, "sha": made.base, "base": made.base, "paths": []string{}}}}
+	tick(queue, made.clone)
 	if posts := queue.posts(); len(posts) != 0 {
 		t.Fatalf("posted %+v", posts)
 	}
@@ -183,38 +182,5 @@ func TestGitsExitCodeIsCheckedEverywhere(t *testing.T) {
 	}
 	if _, err := made.clone.isAncestor(strings.Repeat("9", 40), made.base); !errors.As(err, &gitError) {
 		t.Fatalf("an unknown sha's ancestry: %v", err)
-	}
-	if parents, err := made.clone.Parents(strings.Repeat("9", 40)); len(parents) != 0 || err != nil {
-		t.Fatalf("a sha origin lacks: %q, %v", parents, err)
-	}
-	if record, err := made.clone.Record(made.base); record != nil || err != nil {
-		t.Fatalf("no record yet: %+v, %v", record, err)
-	}
-}
-
-// A record is the newest finished one of the tree: one still running (no status yet) is passed over, and the sha it
-// gated comes from fast.json.
-func TestTheNewestFinishedRecordIsTheTreesVerdictInput(t *testing.T) {
-	made := newWorld(t)
-	record := func(stamp string, files map[string]string) {
-		elsewhere := filepath.Join(made.root, "record-"+stamp)
-		gitIn(t, made.root, "init", "-q", "-b", "record", elsewhere)
-		for name, text := range files {
-			os.WriteFile(filepath.Join(elsewhere, name), []byte(text), 0o644)
-		}
-		gitIn(t, elsewhere, "add", "-A")
-		gitIn(t, elsewhere, "commit", "-q", "-m", "record")
-		gitIn(t, elsewhere, "push", "-q", made.origin, "HEAD:refs/heads/gate-logs/"+made.base[:12]+"/"+stamp+"/fast")
-	}
-	record("20261010T0100", map[string]string{"status.txt": "red: one failed\n", "fast.json": `{"sha":"` + made.base + `"}`})
-	record("20261010T0200", map[string]string{"status.txt": "green\n", "fast.json": `{"gated":"` + strings.Repeat("5", 40) + `","sha":"` + made.base + `"}`})
-	record("20261010T0300", map[string]string{"log.txt": "running\n"})
-	got, err := made.clone.Record(made.base)
-	if err != nil || got == nil || *got != (Record{Ref: "gate-logs/" + made.base[:12] + "/20261010T0200/fast", Status: "green", Gated: strings.Repeat("5", 40)}) {
-		t.Fatalf("record %+v, %v", got, err)
-	}
-	// A record that names no test events can't be excused.
-	if names, ok := made.clone.Failing(got.Ref); ok {
-		t.Fatalf("failing %q from a record with no test.jsonl.gz", names)
 	}
 }

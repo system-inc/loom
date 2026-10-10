@@ -2,24 +2,17 @@ package queuebridge
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
-
-// github is the repository today's gate queues trees on.
-const github = "system-inc/adamic"
 
 // A GitError is git exiting with a code its caller didn't allow, or timing out: what it printed says nothing, so
 // nothing is decided from it this pass (#6gj7n9p: a fetch that failed whole left origin/main old, and its head went to
@@ -32,12 +25,10 @@ func (err *GitError) Error() string {
 	return err.Text
 }
 
-// Clone is today's gate through this machine's clone of adamic, whose origin is GitHub: git's facts, the records on
-// origin, gh for the branch that queues a tree, requeue.sh, and push-main.sh in check-only mode.
+// Clone is git's facts through this machine's clone of adamic, whose origin is GitHub. It must be a clone that keeps
+// refs/remotes/origin/* (git clone --no-checkout, not --bare), since main's ancestry is read from origin/main.
 type Clone struct {
 	Repository string
-	PushMain   string
-	RequeueSh  string
 }
 
 // run runs a command with a time limit: its stdout, stderr and exit code, and an error when it couldn't run or ran out
@@ -156,6 +147,10 @@ func (clone Clone) historyOf(base, sha string) ([]string, error) {
 	return pathLines(listed), err
 }
 
+// testOnlyPattern is push-main.sh's testOnlyPattern, the same list by ruling (Kirk, Oct 8): a file it matches is a
+// test, and naming a Python test doesn't make it gate logic.
+var testOnlyPattern = regexp.MustCompile(`(_test\.go$|_test\.py$|-test\.py$|(^|/)test_[^/]*\.py$|/testdata/|^review/|(^|/)shards\.json$|^stage3/fixtures/|^stage3/meter/|^README\.md$)`)
+
 // pythonTestPattern is push-main's Python test names: a test a non-test file names is gate logic (l.787-795).
 var pythonTestPattern = regexp.MustCompile(`(_test\.py$|-test\.py$|(^|/)test_[^/]*\.py$)`)
 
@@ -269,145 +264,4 @@ func (clone Clone) Facts(sha, base string) (map[string]any, error) {
 	}
 	return map[string]any{"shaExists": true, "baseIsAncestor": baseIsAncestor, "baseOnMain": baseOnMain, "diffPaths": diffPaths,
 		"historyPaths": history, "gateNamed": gateNamed, "revertOf": reverts, "mainHead": head}, nil
-}
-
-// Record is tree's newest finished fast record on origin, or nil while none has finished.
-func (clone Clone) Record(tree string) (*Record, error) {
-	listed, err := clone.git([]string{"ls-remote", "origin", fmt.Sprintf("refs/heads/gate-logs/%s/*", tree[:min(12, len(tree))])})
-	if err != nil {
-		return nil, err
-	}
-	var refs []string
-	for _, line := range strings.Split(listed, "\n") {
-		if _, ref, ok := strings.Cut(line, "\t"); ok && strings.HasSuffix(ref, "/fast") {
-			refs = append(refs, strings.TrimPrefix(ref, "refs/heads/"))
-		}
-	}
-	// gate-logs/<tree12>/<stamp>/fast, newest stamp first.
-	stamp := func(ref string) string {
-		if parts := strings.Split(ref, "/"); len(parts) > 2 {
-			return parts[2]
-		}
-		return ""
-	}
-	sort.SliceStable(refs, func(left, right int) bool { return stamp(refs[left]) > stamp(refs[right]) })
-	if len(refs) == 0 {
-		return nil, nil
-	}
-	fetch := []string{"fetch", "-q", "--no-tags", "origin"}
-	for _, ref := range refs {
-		fetch = append(fetch, fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", ref, ref))
-	}
-	if _, err := clone.git(fetch); err != nil {
-		return nil, err
-	}
-	for _, ref := range refs {
-		// A record still running may not have written its status or fast.json yet: only the files it holds are read.
-		held, err := clone.git([]string{"ls-tree", "--name-only", "origin/" + ref})
-		if err != nil {
-			return nil, err
-		}
-		files := strings.Split(held, "\n")
-		status := ""
-		if slices.Contains(files, "status.txt") {
-			text, err := clone.git([]string{"show", "origin/" + ref + ":status.txt"})
-			if err != nil {
-				return nil, err
-			}
-			line, _, _ := strings.Cut(text, "\n")
-			word, _, _ := strings.Cut(line, ":")
-			status = strings.TrimSpace(word)
-		}
-		if status != "green" && status != "red" && status != "void" {
-			continue
-		}
-		fast := map[string]any{}
-		if slices.Contains(files, "fast.json") {
-			text, err := clone.git([]string{"show", "origin/" + ref + ":fast.json"})
-			if err != nil {
-				return nil, err
-			}
-			if json.Unmarshal([]byte(text), &fast) != nil {
-				fast = map[string]any{}
-			}
-		}
-		gated, _ := fast["gated"].(string)
-		if gated == "" {
-			gated, _ = fast["sha"].(string)
-		}
-		return &Record{Ref: ref, Status: status, Gated: gated}, nil
-	}
-	return nil, nil
-}
-
-// Failing is a record's failing top-level tests, from its test.jsonl.gz and fast.json, and false when the record can't
-// be read that way (failingTests).
-func (clone Clone) Failing(ref string) ([]string, bool) {
-	raw, _, code, err := run(5*time.Minute, "", nil, nil, "git", "-C", clone.Repository, "show", "origin/"+ref+":test.jsonl.gz")
-	var events []string
-	if err == nil && code == 0 && raw != "" {
-		reader, err := gzip.NewReader(strings.NewReader(raw))
-		if err != nil {
-			return nil, false
-		}
-		text, err := io.ReadAll(reader)
-		if err != nil {
-			return nil, false
-		}
-		events = strings.Split(strings.TrimSuffix(string(text), "\n"), "\n")
-	}
-	text, err := clone.git([]string{"show", "origin/" + ref + ":fast.json"})
-	if err != nil {
-		return nil, false
-	}
-	fast := map[string]any{}
-	if text != "" && json.Unmarshal([]byte(text), &fast) != nil {
-		return nil, false
-	}
-	return failingTests(events, fast)
-}
-
-// Parents are sha's parents, from git (a gate merge lives under refs/gate-merges, so it is fetched by sha): none when
-// origin lacks it.
-func (clone Clone) Parents(sha string) ([]string, error) {
-	if !clone.holds(sha) {
-		fetched, err := clone.fetchSha(sha)
-		if err != nil || !fetched {
-			return nil, err
-		}
-	}
-	listed, err := clone.git([]string{"rev-list", "--parents", "-n", "1", sha})
-	if err != nil {
-		return nil, err
-	}
-	fields := strings.Fields(listed)
-	if len(fields) == 0 {
-		return nil, nil
-	}
-	return fields[1:], nil
-}
-
-// Queue puts tree in front of fast-gate-watch as a cloud/land-* tip. True when the branch is there.
-func (clone Clone) Queue(tree string) bool {
-	branch := "cloud/land-queue-" + tree[:min(8, len(tree))]
-	stdout, stderr, code, err := run(time.Minute, "", nil, nil, "gh", "api", "-X", "POST", "repos/"+github+"/git/refs", "-f", "ref=refs/heads/"+branch, "-f", "sha="+tree)
-	return err == nil && (code == 0 || strings.Contains(stdout+stderr, "Reference already exists"))
-}
-
-// Requeue serves sha's fast job again (requeue.sh). True when it started.
-func (clone Clone) Requeue(sha string) bool {
-	_, _, code, err := run(2*time.Minute, "", nil, nil, "bash", clone.RequeueSh, sha)
-	return err == nil && code == 0
-}
-
-// Check is push-main.sh in check-only mode (PUSH_MAIN_CHECK_ONLY=1), run from the checkout that holds it: every check it
-// runs, the landing commit built, nothing pushed. A push-main that couldn't run reads as exit -1, which is never a
-// refusal, so the check runs again next pass.
-func (clone Clone) Check(arguments []string, label string) (int, string, string) {
-	checkout := filepath.Dir(filepath.Dir(filepath.Dir(clone.PushMain)))
-	stdout, stderr, code, err := run(time.Hour, checkout, []string{"PUSH_MAIN_CHECK_ONLY=1"}, nil, "bash", append(append([]string{clone.PushMain}, arguments...), label)...)
-	if err != nil {
-		return -1, stdout, stderr + "\npush-main didn't run: " + err.Error()
-	}
-	return code, stdout, stderr
 }

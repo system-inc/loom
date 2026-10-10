@@ -1,7 +1,7 @@
 #!/bin/sh
 # The updater's hook for the queue bridge (package queuebridge), written by `loom queue-bridge install`: after every
-# release it installs that release's units (systemd on Linux, launchd on macOS), and never enables, starts or stops
-# them. Only the bridge carries git's facts: without ~/.loom/queue-bridge.conf this machine isn't it, and the hook passes
+# release it installs that release's loom-queue-bridge.service and loom-queue-bridge.timer, and never enables, starts or
+# stops them. Only the bridge carries git's facts: without ~/.loom/queue-bridge.conf this machine isn't it, and the hook passes
 # having installed nothing. A release from before `loom queue-bridge` (a rollback past it) has nothing to install, so
 # the units are left as they are and the hook passes.
 if [ ! -f "${HOME}/.loom/queue-bridge.conf" ]; then

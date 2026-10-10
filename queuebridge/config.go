@@ -8,36 +8,29 @@ import (
 )
 
 // A Config is ~/.loom/queue-bridge.conf, whose being there is what makes a machine the bridge: the queue it carries
-// git's facts to, the adamic clone it reads them from, its state directory (the lock and memory.json), the token secret
-// it mints from, today's gate's push-main.sh and requeue.sh, and whether today's gate still decides futures here.
+// git's facts to, the adamic clone it reads them from, its state directory (the lock) and the token secret it mints
+// from.
 type Config struct {
 	Queue      string
 	Repository string
 	State      string
 	Secret     string
-	PushMain   string
-	Requeue    string
-	Decides    bool
 }
 
-// DefaultConfig is Kirk's Mac's, where the bridge has run: loom.system.inc, ~/Projects/system/adamic, ~/.loom/queue-bridge,
-// ~/.loom/token-secret, the push-main checkout ~/.adamic-merge-tree, ~/.loom/bin/requeue.sh, and deciding.
+// DefaultConfig is Workshop's: loom.system.inc, ~/loom-queue-bridge/adamic (git clone --no-checkout of
+// git@github-lander:system-inc/adamic.git), ~/loom-queue-bridge/state and ~/.loom/token-secret.
 func DefaultConfig(home string) Config {
 	return Config{
 		Queue:      "https://loom.system.inc",
-		Repository: filepath.Join(home, "Projects", "system", "adamic"),
-		State:      filepath.Join(home, ".loom", "queue-bridge"),
+		Repository: filepath.Join(home, "loom-queue-bridge", "adamic"),
+		State:      filepath.Join(home, "loom-queue-bridge", "state"),
 		Secret:     filepath.Join(home, ".loom", "token-secret"),
-		PushMain:   filepath.Join(home, ".adamic-merge-tree", "cloud", "integration", "push-main.sh"),
-		Requeue:    filepath.Join(home, ".loom", "bin", "requeue.sh"),
-		Decides:    true,
 	}
 }
 
 // ReadConfig reads queue-bridge.conf as the lander reads push.conf: key = value lines, # comments, blank lines skipped,
-// every setting optional over DefaultConfig. A path may start ~/ for home, and decides is yes or no (no once Judge
-// decides every future, #xvvf6cn). Any other key, a key twice, or a line that isn't key = value is refused, so a typo
-// never leaves today's gate deciding quietly.
+// every setting optional over DefaultConfig. A path may start ~/ for home. Any other key, a key twice, or a line that
+// isn't key = value is refused, so a typo never sends facts from the wrong clone quietly.
 func ReadConfig(content, home string) (Config, error) {
 	config := DefaultConfig(home)
 	seen := map[string]bool{}
@@ -62,19 +55,13 @@ func ReadConfig(content, home string) (Config, error) {
 				return Config{}, fmt.Errorf("queue-bridge.conf line %d: queue %q isn't an http(s) address", number+1, value)
 			}
 			config.Queue = value
-		case "decides":
-			if value != "yes" && value != "no" {
-				return Config{}, fmt.Errorf("queue-bridge.conf line %d: decides is yes or no, not %q", number+1, value)
-			}
-			config.Decides = value == "yes"
-		case "repository", "state", "secret", "push-main", "requeue":
+		case "repository", "state", "secret":
 			if !filepath.IsAbs(value) {
 				return Config{}, fmt.Errorf("queue-bridge.conf line %d: %s %q isn't an absolute path or ~/", number+1, key, value)
 			}
-			*map[string]*string{"repository": &config.Repository, "state": &config.State, "secret": &config.Secret,
-				"push-main": &config.PushMain, "requeue": &config.Requeue}[key] = value
+			*map[string]*string{"repository": &config.Repository, "state": &config.State, "secret": &config.Secret}[key] = value
 		default:
-			return Config{}, fmt.Errorf("queue-bridge.conf line %d: no setting %q (queue, repository, state, secret, push-main, requeue, decides)", number+1, key)
+			return Config{}, fmt.Errorf("queue-bridge.conf line %d: no setting %q (queue, repository, state, secret)", number+1, key)
 		}
 	}
 	return config, nil
