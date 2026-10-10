@@ -149,8 +149,11 @@ func (build TreeBuild) perJob() string {
 }
 
 // ProductBuildFlags are the flags adamic's buildcache.GoBuild gives every Go product build (its reproducible(), in
-// internal/buildcache/gobuild.go): -trimpath changes how each package compiles, so a product build shares nothing
-// with a test build's cache unless Warm compiled the same packages with the same flags.
+// internal/buildcache/gobuild.go). Warm uses them so its builds are the products' own; measured on go1.27, none of
+// them changes a package's compile in the build cache (the compiler always trims paths, and -ldflags and -buildvcs
+// reach only the link), so what a product build was missing was the packages no test compiles: a main package's
+// closure outside every test's (cohere's command/cohere, for the grain formatter), and plain builds of packages the
+// tests compile only with their test files.
 var ProductBuildFlags = []string{"-trimpath", "-ldflags=-buildid=", "-buildvcs=false"}
 
 // mainPackages lists every main package of the tree's module and of the modules it replaces (cohere and its
