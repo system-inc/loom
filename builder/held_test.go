@@ -115,7 +115,7 @@ func heldBuild(t *testing.T, store Store, version string) (TreeIndex, string) {
 	t.Helper()
 	tree := gitTree(t, map[string]string{"go.mod": "module example.com/held\n\ngo 1.22\n", "p/p_test.go": buildcacheTest, "p/version.txt": version})
 	work := t.TempDir()
-	build := TreeBuild{Tree: tree, Cache: filepath.Join(work, "cache"), Out: filepath.Join(work, "out"), Environment: GateEnvironment(), Jobs: 1}
+	build := TreeBuild{Tree: tree, Cache: filepath.Join(work, "cache"), Out: filepath.Join(work, "out"), Environment: planner.GateEnvironmentList(), Jobs: 1}
 	os.MkdirAll(build.Cache, 0o755)
 	os.MkdirAll(build.Out, 0o755)
 	held, err := ServeHeldProducts(store, t.TempDir())

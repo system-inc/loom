@@ -22,12 +22,17 @@ import (
 // Workshop is the house's only builder, so build-tree keeps its disk and its threads (#ckv0pmg, #eqebk7b): it trims
 // Go's build cache under --go-cache-gb, refuses to start while any filesystem it writes has under --floor-gb free and
 // starts no job while one does, and removes the tree's working directory once its index is up.
+//
+// --tree-key is the key the plan carries for the tree (`loom build-trees` passes it): a tree that keys otherwise here
+// (another tree hash, Go release or platform than the planner read) is refused before anything is built, naming both,
+// since an index under another key is one no unit of the plan would ever read.
 func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("build-tree", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	home, _ := os.UserHomeDir()
 	tree := flags.String("tree", "", "the future's checked-out tree")
 	future := flags.String("future", "", "the future's commit")
+	wantKey := flags.String("tree-key", "", "the tree key the plan carries for this tree: refused before building when the tree keys otherwise")
 	storeFlags := addStoreFlags(flags)
 	cache := flags.String("cache", filepath.Join(home, "loom-builder", "trees"), "the base of each tree's own build directory, <base>/<tree hash>")
 	keep := flags.Int("keep", 2, "tree directories kept under --cache, newest first, when a tree's upload fails")
@@ -37,13 +42,21 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tempFloorGB := flags.Uint64("temp-floor-gb", 20, "free space the temporary directory keeps, in GB (it may be memory)")
 	goCacheGB := flags.Uint64("go-cache-gb", 150, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
 		return 2
 	}
 	started := time.Now()
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "build-tree:", err)
 		return 1
+	}
+	// The tree's identity, by the one function the planner keys its plan's trees with, read before anything is built.
+	identity, err := planner.ReadTreeIdentity(*tree)
+	if err != nil {
+		return fail(err)
+	}
+	if err = checkTreeKey(identity, *wantKey); err != nil {
+		return fail(err)
 	}
 	requests := &builder.Requests{}
 	store, err := storeFlags.open(requests)
@@ -91,18 +104,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return fail(err)
 	}
 	defer treeLock.Close()
-	treeHash := filepath.Base(directory)
-	goVersion, err := exec.Command("go", "env", "GOVERSION").Output()
-	if err != nil {
-		return fail(err)
-	}
-	// The platform the binaries are built for, which the tree's key names: a runner on another can't run them.
-	platform, err := exec.Command("go", "env", "GOOS", "GOARCH").Output()
-	if err != nil {
-		return fail(err)
-	}
-	goos, goarch, _ := strings.Cut(strings.TrimSpace(string(platform)), "\n")
-	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: builder.GateEnvironment(),
+	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: planner.GateEnvironmentList(),
 		Jobs: *jobs, Compile: *compile, Watched: watched}
 	for _, path := range []string{build.Cache, build.Out, filepath.Join(directory, "logs")} {
 		if err = os.MkdirAll(path, 0o755); err != nil {
@@ -161,8 +163,9 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(fmt.Errorf("the tree's modules: %w", err))
 	}
-	treeIndex := builder.TreeIndex{Tree: treeHash, Future: *future, Go: strings.TrimSpace(string(goVersion)), Goos: strings.TrimSpace(goos),
-		Goarch: strings.TrimSpace(goarch), Packages: map[string]builder.TreePackage{}}
+	// The platform the binaries are built for is in the key: a runner on another can't run them.
+	treeIndex := builder.TreeIndex{Tree: identity.Tree, Future: *future, Go: identity.Go, Goos: identity.Goos, Goarch: identity.Goarch,
+		Packages: map[string]builder.TreePackage{}}
 	for _, result := range built {
 		result.Products = products[result.Package]
 		if result.Products == nil {
@@ -194,13 +197,22 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		encoder.Encode(treeIndex.Packages[result.Package])
 	}
 	encoder.Encode(map[string]any{
-		"tree": treeHash, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json", "indexWritten": indexWritten,
+		"tree": identity.Tree, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json", "indexWritten": indexWritten,
 		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products), "productsFetched": len(held.Held()),
 		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
 		"seconds": time.Since(started).Seconds(), "sourceBytes": len(source),
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
 	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten, treeLock)
+}
+
+// checkTreeKey refuses a tree whose identity doesn't key as the plan's tree key want does (empty: no plan names one).
+func checkTreeKey(identity planner.TreeIdentity, want string) error {
+	if want == "" || identity.Key() == want {
+		return nil
+	}
+	return fmt.Errorf("the plan carries tree key %s, and this tree keys %s (tree %s, %s, %s/%s): the planner and the builder read the tree apart",
+		want, identity.Key(), identity.Tree, identity.Go, identity.Goos, identity.Goarch)
 }
 
 // buildTreeWatches are the filesystems a build writes, each with its floor: the cache base and Go's build cache keep

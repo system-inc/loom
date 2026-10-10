@@ -42,14 +42,24 @@ func TreeGoVersion(tree string) (string, error) {
 }
 
 func treeGoVersion(tree string, bound time.Duration) (string, error) {
+	// The last GOTOOLCHAIN in an environment is the one go gets, so a planner's own GOTOOLCHAIN=local can't win.
+	values, err := goEnv(tree, append(os.Environ(), "GOTOOLCHAIN=auto"), bound, "GOVERSION")
+	if err != nil {
+		return "", err
+	}
+	return values[0], nil
+}
+
+// goEnv is go env's answer for each name, asked inside the tree under environment, one value a name. go runs in a
+// process group of its own, which the bound kills whole, so nothing go started outlives it, as the runner's goCommand
+// does; past the bound the tree is refused, never waited on.
+func goEnv(tree string, environment []string, bound time.Duration, names ...string) ([]string, error) {
 	versionContext, cancel := context.WithTimeout(context.Background(), bound)
 	defer cancel()
-	command := exec.CommandContext(versionContext, "go", "env", "GOVERSION")
+	asked := "go env " + strings.Join(names, " ")
+	command := exec.CommandContext(versionContext, "go", append([]string{"env"}, names...)...)
 	command.Dir = tree
-	// The last GOTOOLCHAIN in an environment is the one go gets, so a planner's own GOTOOLCHAIN=local can't win.
-	command.Env = append(os.Environ(), "GOTOOLCHAIN=auto")
-	// go runs in a process group of its own, which the bound kills whole, so nothing go started outlives it, as the
-	// runner's goCommand does.
+	command.Env = environment
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
 	command.WaitDelay = 5 * time.Second
@@ -57,13 +67,21 @@ func treeGoVersion(tree string, bound time.Duration) (string, error) {
 	command.Stderr = &stderr
 	output, err := command.Output()
 	if versionContext.Err() != nil {
-		return "", fmt.Errorf("go env GOVERSION in %s didn't answer within %v (a Go release its go.mod names that can't be fetched?), so the tree isn't planned", tree, bound)
+		return nil, fmt.Errorf("%s in %s didn't answer within %v (a Go release its go.mod names that can't be fetched?), so the tree isn't planned", asked, tree, bound)
 	}
-	version := strings.TrimSpace(string(output))
-	if err != nil || version == "" {
-		return "", fmt.Errorf("go env GOVERSION in %s: %v: %s", tree, err, strings.TrimSpace(stderr.String()))
+	values := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if err == nil && len(values) != len(names) {
+		err = fmt.Errorf("%d values for %d names", len(values), len(names))
 	}
-	return version, nil
+	for index := range values {
+		if values[index] = strings.TrimSpace(values[index]); err == nil && values[index] == "" {
+			err = fmt.Errorf("no %s", names[index])
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s in %s: %v: %s", asked, tree, err, strings.TrimSpace(stderr.String()))
+	}
+	return values, nil
 }
 
 func firstLine(name string, arguments ...string) string {

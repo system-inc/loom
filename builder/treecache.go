@@ -2,15 +2,15 @@ package builder
 
 import (
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/system-inc/loom/planner"
 )
 
 // treeHashPattern is a git tree hash, the name of one tree's buildcache directory.
@@ -25,18 +25,11 @@ var treeHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // recent tree caches stay; older ones are removed file by file (RemoveTree), and only directories named by a tree
 // hash are touched.
 func TreeCache(base, tree string, keep int) (string, error) {
-	status, err := exec.Command("git", "-C", tree, "status", "--porcelain", "--untracked-files=no").Output()
+	hash, err := planner.TreeHash(tree)
 	if err != nil {
-		return "", fmt.Errorf("git status in %s: %w", tree, err)
+		return "", err
 	}
-	if strings.TrimSpace(string(status)) != "" {
-		return "", fmt.Errorf("%s has changes to tracked files, so its tree hash wouldn't name what's built:\n%s", tree, status)
-	}
-	hash, err := exec.Command("git", "-C", tree, "rev-parse", "HEAD^{tree}").Output()
-	if err != nil {
-		return "", fmt.Errorf("git rev-parse HEAD^{tree} in %s: %w", tree, err)
-	}
-	directory := filepath.Join(base, strings.TrimSpace(string(hash)))
+	directory := filepath.Join(base, hash)
 	// A removal that stopped partway left a .removing- directory, never a tree's: finish it.
 	if err = os.MkdirAll(base, 0o755); err != nil {
 		return "", err

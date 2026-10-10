@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/runner/test2json"
 )
@@ -248,7 +249,7 @@ func (run *unitRun) treeIndex(runContext context.Context, treeKey string) (build
 	if err != nil {
 		return builder.TreeIndex{}, err
 	}
-	if key := builder.TreeKey(index.Tree, index.Go, index.Goos, index.Goarch, builder.GateEnvironment()); key != treeKey {
+	if key := planner.TreeKey(index.Tree, index.Go, index.Goos, index.Goarch); key != treeKey {
 		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s describes tree %s on %s for %s/%s, whose key is %s: the store is poisoned", name, index.Tree, index.Go, index.Goos, index.Goarch, key)
 	}
 	return index, nil

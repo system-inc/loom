@@ -25,6 +25,7 @@ import (
 
 	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/builder/moduletest"
+	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -257,7 +258,7 @@ func newPrebuiltTree(t *testing.T, store *prebuiltStore) *prebuiltTree {
 
 // rekey publishes the index under the key its own tree, Go and platform name.
 func (tree *prebuiltTree) rekey(t *testing.T) {
-	tree.key = builder.TreeKey(tree.index.Tree, tree.index.Go, tree.index.Goos, tree.index.Goarch, builder.GateEnvironment())
+	tree.key = planner.TreeKey(tree.index.Tree, tree.index.Go, tree.index.Goos, tree.index.Goarch)
 	tree.publish(t)
 }
 

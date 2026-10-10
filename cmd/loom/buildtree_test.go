@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/planner"
 )
 
 // build-tree exits 1 when a package failed, and when the store kept an earlier build's index, saying so.
@@ -22,6 +23,25 @@ func TestBuildTreeExitsNonZeroWhenTheIndexWasKept(t *testing.T) {
 	}
 	if code := buildTreeExit(&stderr, "k", 0, false); code != 1 || !strings.Contains(stderr.String(), "trees/k.json keeps an earlier build's index") {
 		t.Fatalf("a kept index: %d %q", code, stderr.String())
+	}
+}
+
+// build-tree refuses a tree that keys otherwise than the plan's tree key, naming both, before anything is built: an
+// index under another key is one no unit of the plan would read. No key asked, or the same one, builds. Mutant: the
+// check dropped.
+func TestBuildTreeRefusesATreeThatKeysOtherwiseThanThePlan(t *testing.T) {
+	identity := planner.TreeIdentity{Tree: strings.Repeat("a", 40), Go: "go1.27.1", Goos: "linux", Goarch: "amd64"}
+	if err := checkTreeKey(identity, ""); err != nil {
+		t.Fatalf("no key asked: %v", err)
+	}
+	if err := checkTreeKey(identity, identity.Key()); err != nil {
+		t.Fatalf("the same key: %v", err)
+	}
+	other := identity
+	other.Goos, other.Goarch = "darwin", "arm64"
+	if err := checkTreeKey(identity, other.Key()); err == nil || !strings.Contains(err.Error(), other.Key()) || !strings.Contains(err.Error(), identity.Key()) ||
+		!strings.Contains(err.Error(), "linux/amd64") {
+		t.Fatalf("a tree keying for another platform: %v", err)
 	}
 }
 

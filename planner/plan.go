@@ -30,6 +30,16 @@ type PlannedResult struct {
 	Reused   string   `json:"reused,omitempty"`
 	// Resources is what the unit needs from its machine (unit-needs.json), for placement only, never keyed.
 	Resources *protocol.Resources `json:"resources,omitempty"`
+	// Tree is the tree key of the future's tree (ReadTreeIdentity's Key), on every test and product unit: the build of
+	// test binaries Workshop makes for it (`loom build-trees`), which the placer names on the unit's job (#w7agfa9).
+	// Placement only, never keyed: a unit's verdict doesn't depend on which build of its tree ran it.
+	Tree string `json:"tree,omitempty"`
+}
+
+// RunsTreeBuild says whether a unit of the kind runs a package's test binary from its tree's build: a test or product
+// unit's go test job, never a phase's.
+func RunsTreeBuild(kind string) bool {
+	return kind == "test" || kind == "product"
 }
 
 // PlanTree plans every package with tests on a checked-out tree: one test unit per package, keyed by KeyFor and

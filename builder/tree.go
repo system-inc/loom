@@ -2,8 +2,6 @@ package builder
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,19 +26,13 @@ import (
 // every test package's binary (go test -c, with the unit's env and flags), the products its tests use (built by its
 // product tests into the tree's own buildcache), and the tree's source (tests read testdata), all in the action store.
 //
-// A tree key T names the build: sha256 of "loom-tree-v2", the tree hash, the Go version, the platform the binaries were
-// built for (GOOS/GOARCH: a Linux binary is no use to a Mac runner) and the gate env. Its index is
-// trees/<T>.json in the store (store.go): each package's test binary, gzipped, as a blob; the buildcache products its
-// tests read, each its own archive under refs/action/<buildcache key>, so a product no tree changed is built and goes
-// up once and later trees fetch it (held.go); and
-// the tree's source archive, one blob every package shares. A runner reads the index, then only its own package's
-// binary, products and the source, each by sha256.
-
-// TreeKey is the key of one tree's build for the platform goos/goarch.
-func TreeKey(treeHash, goVersion, goos, goarch string, environment []string) string {
-	sum := sha256.Sum256([]byte("loom-tree-v2\n" + treeHash + "\n" + goVersion + "\n" + goos + "/" + goarch + "\n" + strings.Join(environment, "\n")))
-	return hex.EncodeToString(sum[:])
-}
+// A tree key T names the build (planner.TreeKey, of planner.ReadTreeIdentity): sha256 of "loom-tree-v2", the tree
+// hash, the Go version, the platform the binaries were built for (GOOS/GOARCH: a Linux binary is no use to a Mac
+// runner) and the gate env. Its index is trees/<T>.json in the store (store.go): each package's test binary, gzipped,
+// as a blob; the buildcache products its tests read, each its own archive under refs/action/<buildcache key>, so a
+// product no tree changed is built and goes up once and later trees fetch it (held.go); and the tree's source archive,
+// one blob every package shares. A runner reads the index, then only its own package's binary, products and the
+// source, each by sha256.
 
 // A package's build failure is the change's (ChangeFailure: go test -c exited normally with its diagnostics, a compile
 // or vet error, which go test reports as the package's red) or Workshop's (WorkshopFailure: anything else, a kill, a
@@ -592,7 +584,7 @@ func each(count, jobs int, work func(index int) error) error {
 // in the index and nothing more. It fills in treeIndex's blobs as it goes, and reports whether it wrote the index
 // (writeIndex keeps one with fewer failed packages).
 func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte, held map[string]string) (string, bool, error) {
-	treeKey := TreeKey(treeIndex.Tree, treeIndex.Go, treeIndex.Goos, treeIndex.Goarch, GateEnvironment())
+	treeKey := planner.TreeKey(treeIndex.Tree, treeIndex.Go, treeIndex.Goos, treeIndex.Goarch)
 	var err error
 	if treeIndex.Source, err = store.PutBlob(source); err != nil {
 		return "", false, fmt.Errorf("the source archive: %w", err)

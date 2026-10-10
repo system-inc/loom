@@ -66,7 +66,7 @@ type TestJob struct {
 	// Go is the Go release the gofmt phase's key names (keyParts.tools.go, go env GOVERSION): the runner runs only a
 	// gofmt that release built. A gofmt phase job's only.
 	Go string `json:"go,omitempty"`
-	// Tree is the tree key of Workshop's build of the job's tree (builder.TreeKey, as `loom build-tree` prints it):
+	// Tree is the tree key of Workshop's build of the job's tree (planner.TreeKey, as `loom build-tree` prints it):
 	// the runner reads trees/<Tree>.json from the action store and runs the prebuilt test binaries it names, each
 	// fetched by sha256 with the tree's source and the products its tests read, and never builds. A go test job's only.
 	// Empty: the runner compiles the packages with go test, as before Workshop built every tree.

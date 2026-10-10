@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/system-inc/loom/planner"
 )
 
 // An Action is one product test on a tree.
@@ -288,7 +290,7 @@ func (builder Builder) buildAndUpload(action Action, key string, result *Result,
 	}
 	defer os.RemoveAll(logs)
 	log := filepath.Join(logs, "builds.log")
-	environment := append(GateEnvironment(), "ADAMIC_BUILD_CACHE_DIR="+builder.Cache, "ADAMIC_BUILD_LOG="+log, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on")
+	environment := append(planner.GateEnvironmentList(), "ADAMIC_BUILD_CACHE_DIR="+builder.Cache, "ADAMIC_BUILD_LOG="+log, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on")
 	if output, err := builder.Run(action, environment); err != nil {
 		tail := output
 		if len(tail) > 4000 {

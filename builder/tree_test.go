@@ -53,7 +53,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		"c/c.go":              "package c\n",
 	})
 	work := t.TempDir()
-	build := TreeBuild{Tree: tree, Cache: filepath.Join(work, "cache"), Out: filepath.Join(work, "out"), Environment: GateEnvironment(), Jobs: 2}
+	build := TreeBuild{Tree: tree, Cache: filepath.Join(work, "cache"), Out: filepath.Join(work, "out"), Environment: planner.GateEnvironmentList(), Jobs: 2}
 	os.MkdirAll(build.Out, 0o755)
 	packages, err := TestPackages(tree)
 	if err != nil || len(packages) != 2 {
@@ -87,7 +87,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	}
 	fake, store := serve(t)
 	treeKey, written, err := PublishTree(store, &index, build.Out, build.Cache, source, nil)
-	if err != nil || !written || treeKey != TreeKey(index.Tree, index.Go, index.Goos, index.Goarch, GateEnvironment()) {
+	if err != nil || !written || treeKey != planner.TreeKey(index.Tree, index.Go, index.Goos, index.Goarch) {
 		t.Fatal(treeKey, err)
 	}
 	// The layout: the tree's index, one ref (the product), and four blobs (the source, the product, two binaries).
@@ -267,7 +267,7 @@ func TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy(t *testing.T) {
 	})
 	// Each as real go 1.27 says it: a compile error, a vet error, a missing import, an import cycle, a package with no
 	// Go files, and one whose build constraints exclude every file.
-	build := TreeBuild{Tree: tree, Cache: t.TempDir(), Out: t.TempDir(), Environment: GateEnvironment(), Jobs: 2, Compile: 2}
+	build := TreeBuild{Tree: tree, Cache: t.TempDir(), Out: t.TempDir(), Environment: planner.GateEnvironmentList(), Jobs: 2, Compile: 2}
 	failing := []planner.ProductTest{}
 	for _, directory := range []string{"broken", "unvetted", "missing", "cycle/a", "nogo", "constrained"} {
 		failing = append(failing, planner.ProductTest{Package: "example.com/failing/" + directory, Directory: directory})
@@ -303,7 +303,7 @@ func TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy(t *testing.T) {
 			t.Errorf("%s: %s, want %s", name, got, test.want)
 		}
 	}
-	if TreeKey("t", "go1.27.1", "linux", "amd64", nil) == TreeKey("t", "go1.27.1", "darwin", "arm64", nil) {
+	if planner.TreeKey("t", "go1.27.1", "linux", "amd64") == planner.TreeKey("t", "go1.27.1", "darwin", "arm64") {
 		t.Error("two platforms' builds share a key")
 	}
 }
@@ -315,7 +315,7 @@ func TestWarmCompilesEveryPackageOnceAndNamesOneThatDoesNotCompile(t *testing.T)
 		"good/g_test.go": "package good\n\nimport \"testing\"\n\nfunc TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(\"answer\")\n\t}\n}\n",
 		"bad/b_test.go":  "package bad\n\nimport \"testing\"\n\nfunc TestBroken(t *testing.T) { undefinedThing() }\n",
 	})
-	build := TreeBuild{Tree: tree, Cache: t.TempDir(), Environment: GateEnvironment(), Jobs: 1, Compile: 1}
+	build := TreeBuild{Tree: tree, Cache: t.TempDir(), Environment: planner.GateEnvironmentList(), Jobs: 1, Compile: 1}
 	if err := build.Warm([]planner.ProductTest{{Package: "example.com/warm/good", Directory: "good"}}); err != nil {
 		t.Fatalf("a package that compiles: %v", err)
 	}
@@ -456,7 +456,7 @@ func TestAProductBuildAfterWarmCompilesNothing(t *testing.T) {
 	})
 	packages := []planner.ProductTest{{Package: "example.com/warmed/lib", Directory: "lib"}}
 	warmed := func(full bool) TreeBuild {
-		build := TreeBuild{Tree: tree, Cache: t.TempDir(), Environment: append(GateEnvironment(), "GOCACHE="+t.TempDir()), Jobs: 1}
+		build := TreeBuild{Tree: tree, Cache: t.TempDir(), Environment: append(planner.GateEnvironmentList(), "GOCACHE="+t.TempDir()), Jobs: 1}
 		var err error
 		if full {
 			err = build.Warm(packages)

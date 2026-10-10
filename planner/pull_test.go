@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -120,6 +122,39 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	if got := decisions("fut-3"); len(got) != 1 || got["example.com/plan/a"] != "run" {
 		t.Errorf("fut-3 is a parity run of a alone, run though a's key passed: %v", got)
 	}
+	// Every test unit carries the tree key build-tree writes this tree's index under: its git tree hash, the Go
+	// release and platform go reports inside it, and the gate environment, read here apart from the planner's code.
+	want := buildTreeKey(t, tree)
+	for future, units := range posted {
+		for _, unit := range units {
+			if wanted := map[bool]string{true: "", false: want}[unit.KeyParts.Kind == "phase"]; unit.Tree != wanted {
+				t.Errorf("%s posted %s (%s) with tree %q, want %q", future, unit.Name, unit.KeyParts.Kind, unit.Tree, wanted)
+			}
+		}
+	}
+}
+
+// buildTreeKey is the key build-tree writes a checked-out tree's index under, read with git and go themselves: sha256
+// of "loom-tree-v2", the tree hash, go env GOVERSION, GOOS/GOARCH, and the gate environment's sorted lines.
+func buildTreeKey(t *testing.T, tree string) string {
+	t.Helper()
+	read := func(name string, arguments ...string) string {
+		command := exec.Command(name, arguments...)
+		command.Dir = tree
+		output, err := command.Output()
+		if err != nil {
+			t.Fatalf("%s %v: %v", name, arguments, err)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	lines := []string{}
+	for name, value := range GateEnvironment {
+		lines = append(lines, name+"="+value)
+	}
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte("loom-tree-v2\n" + read("git", "rev-parse", "HEAD^{tree}") + "\n" + read("go", "env", "GOVERSION") + "\n" +
+		read("go", "env", "GOOS") + "/" + read("go", "env", "GOARCH") + "\n" + strings.Join(lines, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // A future moving no unit's key posts an empty plan, decided from the keys: a Markdown edit nothing reads is empty,
@@ -168,6 +203,12 @@ func TestAFutureMovingNoKeyPostsAnEmptyPlan(t *testing.T) {
 				content = append(append([]byte{}, content...), "\n// moved\n"...)
 			}
 			os.WriteFile(filepath.Join(tree, path), content, 0o644)
+		}
+		// Each checkout is a commit, as GitCheckout's is: a tree with changes to tracked files has no tree key.
+		for _, arguments := range [][]string{{"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", sha}} {
+			if output, err := exec.Command("git", append([]string{"-C", tree}, arguments...)...).CombinedOutput(); err != nil {
+				return "", nil, fmt.Errorf("git %v: %v %s", arguments, err, output)
+			}
 		}
 		return tree, func() {}, nil
 	}

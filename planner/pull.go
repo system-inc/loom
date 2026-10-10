@@ -214,14 +214,18 @@ type Checkout func(sha string) (tree string, cleanup func(), err error)
 
 // GitCheckout checks a sha out in the clone's own working tree, fetching it first if absent, with every submodule
 // at its recorded commit (adamic's go.work and replaces reach into cohere and cohere's TypeScript, so go list needs
-// them). The clone is the planner's alone and plans one future at a time, so one tree serves every future and its
-// submodules' objects stay fetched. Submodules recorded over ssh are fetched from GitHub over https, as the runner's
-// prepare.sh does.
+// them). The clone is its caller's alone (the planner's, or Workshop's tree builder's) and checks out one future at a
+// time, so one tree serves every future and its submodules' objects stay fetched. Submodules recorded over ssh are
+// fetched from GitHub over https, as the runner's prepare.sh does.
+//
+// It is keyless: git reads no system or global configuration and no credential helper, and never prompts, so the
+// tree comes only from what its origin serves to anyone, as a runner's checkout does.
 func GitCheckout(repository string) Checkout {
 	return func(sha string) (string, func(), error) {
 		git := func(arguments ...string) error {
-			command := exec.Command("git", append([]string{"-c", "url.https://github.com/.insteadOf=git@github.com:", "-C", repository}, arguments...)...)
-			command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+			command := exec.Command("git", append([]string{"-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "credential.helper=", "-c", "core.askPass=",
+				"-C", repository}, arguments...)...)
+			command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ASKPASS=", "SSH_ASKPASS=")
 			if output, err := command.CombinedOutput(); err != nil {
 				return fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
 			}
@@ -303,6 +307,9 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 				phases, err = PhaseUnits(tree, gateTools, future.Base, future.Tree, tools, phaseInputs)
 			}
 		}
+		if err == nil {
+			err = carryTree(tree, results)
+		}
 		cleanup()
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
@@ -333,6 +340,22 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 		return planned, fmt.Errorf("futures not planned: %s", strings.Join(failures, "; "))
 	}
 	return planned, nil
+}
+
+// carryTree sets the checked-out tree's key on every unit of its plan that runs the tree's build (#w7agfa9), read here
+// where the tree is, by the one function `loom build-tree` keys it with, so the placer can name the build a unit runs
+// and Workshop's builder knows what to build. A tree that can't be keyed isn't planned.
+func carryTree(tree string, results []PlannedResult) error {
+	identity, err := ReadTreeIdentity(tree)
+	if err != nil {
+		return fmt.Errorf("the tree's key: %w", err)
+	}
+	for index := range results {
+		if RunsTreeBuild(results[index].KeyParts.Kind) {
+			results[index].Tree = identity.Key()
+		}
+	}
+	return nil
 }
 
 // unmoved says a future moves no unit's key: every unit keys at the future's tree as it keys at its base. That is read
