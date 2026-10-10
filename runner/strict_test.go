@@ -474,3 +474,27 @@ func TestAPhaseJobRunsRunPyFromTheGateToolsAtItsCommit(t *testing.T) {
 		t.Errorf("a phase line with no unit passed --unit: %q", argv)
 	}
 }
+
+// A package that compiles and tests in silence past the heartbeat still has the runner saying the unit is running,
+// so the coordinator never takes a live unit for a dead worker (Oct 10: units over 360 s dropped live all night).
+// Mutant: the ticker gone, and the stream is silent until the exit.
+func TestASilentGoTestStillHeartbeats(t *testing.T) {
+	fixture := newStrictFixture(t, 0)
+	bin := filepath.Join(fixture.directory, "bin")
+	os.WriteFile(filepath.Join(bin, "go"), []byte("#!/bin/bash\ncase \"$*\" in *-exec*) exit 0 ;; esac\nsleep 1\nprintf '{\"Action\":\"pass\",\"Package\":\"%s\",\"Test\":\"TestA\"}\\n' \"${!#}\"\n"), 0o755)
+	options := fixture.options(t)
+	options.Heartbeat = 200 * time.Millisecond
+	result, events, _ := runUnit(t, testJobUnit(goodTestJob()), options)
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("the unit %s; errors %q", result.Status, errorPhases(events))
+	}
+	beats := 0
+	for _, line := range outputLines(events, "runner") {
+		if strings.Contains(line, "still running after") {
+			beats++
+		}
+	}
+	if beats == 0 {
+		t.Fatalf("a go test silent for 1 s past a 200 ms heartbeat sent no heartbeat: %q", outputLines(events, "runner"))
+	}
+}

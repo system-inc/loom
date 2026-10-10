@@ -148,6 +148,25 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	testContext, cancel := context.WithDeadline(runContext, deadline)
 	defer cancel()
 	results := make([]packageResult, len(job.Packages))
+	// The packages' go test runs outside run.stream, so nothing would speak for a live unit while a package compiles
+	// and tests in silence, and the coordinator dropped it after three missed heartbeats (Oct 10: every strict unit over
+	// 360 s, ec123b7f three times). This ticker says the unit is still running for as long as its packages do.
+	quiet := make(chan struct{})
+	defer close(quiet)
+	go func() {
+		ticker := time.NewTicker(run.options.Heartbeat / 4)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-quiet:
+				return
+			case <-ticker.C:
+				if run.emitter.silentFor() >= run.options.Heartbeat {
+					run.say(fmt.Sprintf("still running after %.0f s", time.Since(started).Seconds()))
+				}
+			}
+		}
+	}()
 	slots := make(chan struct{}, max(1, runtime.NumCPU()/2))
 	var group sync.WaitGroup
 	for index, testPackage := range job.Packages {
