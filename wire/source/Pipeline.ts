@@ -2,7 +2,6 @@
 // anyone with a reason reads one, and the Mac's bridge reads what owners act on; its board shows a line per change.
 // The tokens are checked by the same verifier as loom-runs's; Changes.ts checks the rest and asks the Queue object.
 
-import { handleAction } from './Actions';
 import { ChangeBoardName, changeBoardOf, ChangeBoardSubprotocol } from './ChangeBoard';
 import { handleChanges, queueOf } from './Changes';
 import { jsonResponse } from './Http';
@@ -55,11 +54,6 @@ export default {
             // Only the body's type crosses: the caller's token stays at the door.
             const headers = { 'Content-Type': request.headers.get('Content-Type') ?? 'application/json' };
             return queue.fetch(new Request(`https://queue${path}${url.search}`, { method: request.method, headers: headers, body: request.body }));
-        }
-        // The action store checks its own build token, since no other scope may reach it.
-        const action = await handleAction(request, environment);
-        if (action !== null) {
-            return action;
         }
         // The board of changes, at the bare address too: its page holds no data and no token; its one read needs a
         // board token. Only the Queue object reaches the board's push, through its binding, never from outside.

@@ -12,11 +12,8 @@
     "preview_urls": false,
     "routes": [{ "pattern": "loom.system.inc", "custom_domain": true }],
     "observability": { "enabled": true },
-    "r2_buckets": [
-        // The action store (Actions.ts): refs/action/<productKey>, its manifest and the outputs, in the public bucket
-        // anyone reads at artifacts.loom.system.inc. Only a build token writes it, through this Worker.
-        { "binding": "PublicStore", "bucket_name": "loom-artifacts" }
-    ],
+    // No bucket: the action store (loom-artifacts) is written straight through R2's S3 interface by a builder's own
+    // key (builder/store.go) and read by anyone at artifacts.loom.system.inc, never through this Worker.
     "durable_objects": {
         "bindings": [
             { "name": "ChangeBoard", "class_name": "ChangeBoard" },

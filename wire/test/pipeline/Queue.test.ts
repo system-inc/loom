@@ -1141,7 +1141,7 @@ describe("loom's queue seams", function () {
             // A board token reads the log and its head, and nothing else.
             const readsLog = method === 'GET' && (path.startsWith('/log') || path === '/head');
             expect((await call(path, { method: method, body: body, bearer: board })).status === 403, `board ${path}`).toBe(!readsLog);
-            for (const scope of ['submit', 'runner', 'pool', 'build'] as const) {
+            for (const scope of ['submit', 'runner', 'pool'] as const) {
                 expect((await call(path, { method: method, body: body, bearer: await token('system_adamic_loom', scope) })).status, `${scope} ${path}`).toBe(403);
             }
         }

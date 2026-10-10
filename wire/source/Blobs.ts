@@ -56,9 +56,7 @@ export async function getBlob(store: R2Bucket, sha256: string): Promise<Response
     });
 }
 
-// cacheControl, when given, is stored with the blob and served with it from the public domain: loom's
-// action store marks its blobs immutable, since a blob is named by its own hash and never replaced.
-export async function putBlob(store: R2Bucket, sha256: string, request: Request, cacheControl?: string): Promise<BlobPut> {
+export async function putBlob(store: R2Bucket, sha256: string, request: Request): Promise<BlobPut> {
     const lengthText = request.headers.get('Content-Length');
     if (lengthText === null || !/^\d+$/.test(lengthText)) {
         return refused(jsonResponse(411, { error: 'a blob PUT needs a Content-Length' }));
@@ -84,7 +82,7 @@ export async function putBlob(store: R2Bucket, sha256: string, request: Request,
     try {
         await store.put(blobKey(sha256), request.body ?? new Uint8Array(0), {
             sha256: sha256,
-            httpMetadata: cacheControl === undefined ? { contentType: 'application/octet-stream' } : { contentType: 'application/octet-stream', cacheControl: cacheControl },
+            httpMetadata: { contentType: 'application/octet-stream' },
         });
     }
     catch (error) {
