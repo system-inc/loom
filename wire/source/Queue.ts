@@ -952,7 +952,7 @@ export class GitHubHistory implements History {
         }
         const forward = await this.compare(base, sha);
         if (forward === null) {
-            return { shaExists: false, baseIsAncestor: false, baseOnMain: false, diffPaths: [] };
+            return { shaExists: false, baseIsAncestor: false, baseOnMain: false, diffPaths: [], ...(await this.mainHead()) };
         }
         const onMain = await this.compare(base, 'main');
         return {
@@ -1422,11 +1422,17 @@ export class Queue extends DurableObject<Env> {
             const asOf = (await this.current()).seq;
             try {
                 facts = await this.history.facts(checked.sha, checked.base);
-                facts = typeof facts.mainHead === 'string' ? { ...facts, asOf: asOf } : facts;
             }
             catch (error) {
                 return jsonResponse(503, { reason: `git facts are unavailable, try again: ${(error as Error).message}` });
             }
+            // Facts without main's head would check the change for good, and a witness checked so is silent about main
+            // forever (#6gj7n9p): nothing is decided, and the submitter tries again.
+            if (typeof facts.mainHead !== 'string') {
+                console.warn(`queue: main's head is unreadable, so ${checked.sha} isn't taken; the submitter tries again`);
+                return jsonResponse(503, { reason: "main's head can't be read from GitHub, try again" });
+            }
+            facts = { ...facts, asOf: asOf };
         }
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();

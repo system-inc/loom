@@ -224,6 +224,34 @@ func TestAnEarlierAttemptsPassIsCarriedOnlyWithinTheSameFuture(t *testing.T) {
 	}
 }
 
+// A phase unit carried from an earlier attempt names that run on its record too, so Queue can refuse a run from an
+// earlier future of the tree (#6gj7n9p, G2); one run in this attempt names only its rule.
+func TestACarriedPhaseNamesItsRun(t *testing.T) {
+	tree := strings.Repeat("d", 40)
+	carried, placed := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	runOf := func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) }
+	streams := map[string][]protocol.Event{
+		runOf(tree, 1): finishedStream(carried, "passed"),
+		runOf(tree, 2): finishedStream(placed, "passed"),
+	}
+	phase := json.RawMessage(`{"kind":"phase","phase":"vet"}`)
+	units := []PlannedUnitWire{{UnitKey: carried, Decision: "run", KeyParts: phase}, {UnitKey: placed, Decision: "run", KeyParts: phase}}
+	queue := &StubQueue{}
+	puller := NewPuller(Puller{Source: listedFutures{{Future: tree, Attempt: 2, Change: PlannedChange{Change: "chg_P"}, Units: units}}, RunOf: runOf,
+		Read: func(run string) ([]protocol.Event, error) { return streams[run], nil },
+		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now}})
+	if judged, err := puller.PullOnce(); err != nil || judged != 1 {
+		t.Fatalf("judged %d (%v)", judged, err)
+	}
+	post := queue.Posts[tree][0]
+	if !strings.Contains(string(post.Verdicts[0]), `"rule":"`+RulePhase+` carried `+runOf(tree, 1)+`"`) {
+		t.Fatalf("carried phase record %s: want its source run in the rule", post.Verdicts[0])
+	}
+	if !strings.Contains(string(post.Verdicts[1]), `"rule":"`+RulePhase+`"`) {
+		t.Fatalf("placed phase record %s", post.Verdicts[1])
+	}
+}
+
 func TestCarriedListsTheUnitsAndSourceRunsTheLoopCarries(t *testing.T) {
 	tree := strings.Repeat("d", 40)
 	early, late, red, killed := strings.Repeat("1", 64), strings.Repeat("2", 64), strings.Repeat("3", 64), strings.Repeat("4", 64)

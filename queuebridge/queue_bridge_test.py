@@ -25,6 +25,8 @@ class FakePipeline:
         self.calls.append((method, path, body))
         if path.startswith("/submissions") and method == "GET":
             return 200, {"changes": self.unchecked}
+        if path == "/head":
+            return 200, {"seq": 7, "head": "0" * 64}
         if path.startswith("/futures"):
             return 200, {"futures": self.futures}
         if path.startswith("/changes/") and method == "GET":
@@ -54,7 +56,7 @@ class FakeGate:
         return {other: [old, tree], "3" * 40: [old, "4" * 40]}.get(sha, [])
 
     def facts(self, sha, base):
-        return {"shaExists": True, "baseIsAncestor": True, "baseOnMain": base == old, "diffPaths": ["a.go"]}
+        return {"shaExists": True, "baseIsAncestor": True, "baseOnMain": base == old, "diffPaths": ["a.go"], "mainHead": new}
 
     def queue(self, tree):
         self.queued.append(tree)
@@ -105,9 +107,9 @@ class Tick(unittest.TestCase):
     def test_every_unchecked_change_gets_gits_facts(self):
         pipeline = FakePipeline(unchecked=[{"change": change, "sha": tree, "base": old, "paths": ["a.go"]}])
         queue_bridge.tick(pipeline, FakeGate(), memory())
-        self.assertEqual(pipeline.posts(), [("/submissions/%s/facts" % change, {"shaExists": True, "baseIsAncestor": True, "baseOnMain": True, "diffPaths": ["a.go"]})])
+        self.assertEqual(pipeline.posts(), [("/submissions/%s/facts" % change, {"shaExists": True, "baseIsAncestor": True, "baseOnMain": True, "diffPaths": ["a.go"], "mainHead": new, "asOf": 7})])
 
-    def test_main_s_head_rides_with_the_queue_s_seq_read_before_git_or_not_at_all(self):
+    def test_main_s_head_rides_with_the_queue_s_seq_read_before_git_or_the_change_waits_a_tick(self):
         submitted = [{"change": change, "sha": tree, "base": old, "paths": ["a.go"]}]
 
         class HeadPipeline(FakePipeline):
@@ -122,19 +124,24 @@ class Tick(unittest.TestCase):
                 return super().call(method, path, body)
 
         class HeadGate(FakeGate):
+            def __init__(self, head=new):
+                super().__init__()
+                self.head, self.asked = head, []
+
             def facts(self, sha, base):
-                self.askedAfter = [path for method, path, body in pipeline.calls]
-                return {**super().facts(sha, base), "mainHead": new}
+                self.asked.append([path for method, path, body in pipeline.calls])
+                facts = super().facts(sha, base)
+                return {**facts, "mainHead": self.head} if self.head else {key: value for key, value in facts.items() if key != "mainHead"}
 
         pipeline, gate = HeadPipeline((200, {"seq": 7, "head": "0" * 64})), HeadGate()
         queue_bridge.tick(pipeline, gate, memory())
-        self.assertEqual(gate.askedAfter, ["/submissions?state=unchecked", "/head"])
+        self.assertEqual(gate.asked, [["/submissions?state=unchecked", "/head"]])
         self.assertEqual(pipeline.posts()[0][1], {"shaExists": True, "baseIsAncestor": True, "baseOnMain": True, "diffPaths": ["a.go"], "mainHead": new, "asOf": 7})
-        # No seq to order it by: the facts say nothing of main's head.
-        for answer in ((503, {"error": "down"}), (200, {"seq": "7"}), (200, {"seq": True})):
-            pipeline, gate = HeadPipeline(answer), HeadGate()
+        # No seq to order it by, or no head: nothing is posted, so the change stays unchecked and is read again next tick.
+        for answer, head in (((503, {"error": "down"}), new), ((429, {"error": "slow"}), new), ((200, {"seq": "7"}), new), ((200, {"seq": True}), new), ((200, {"seq": -1}), new), ((200, {"seq": 7}), None)):
+            pipeline, gate = HeadPipeline(answer), HeadGate(head)
             queue_bridge.tick(pipeline, gate, memory())
-            self.assertEqual(pipeline.posts()[0][1], {"shaExists": True, "baseIsAncestor": True, "baseOnMain": True, "diffPaths": ["a.go"]})
+            self.assertEqual(pipeline.posts(), [], (answer, head))
 
     def test_a_future_with_no_record_is_queued_once_and_decided_by_nothing(self):
         pipeline, gate, held = FakePipeline([future]), FakeGate(), memory()

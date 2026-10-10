@@ -407,6 +407,10 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		if verdict.RuleId == Rule {
 			verdict.RuleId = RulePhase
 		}
+		// A carried pass names its run, as a test unit's does: Queue refuses a run from an earlier future of the tree.
+		if carried != "" && verdict.RuleId == RulePhase {
+			verdict.RuleId = RulePhase + " carried " + carried
+		}
 		verdict.DecidedAt = loop.Now().UTC().Format(time.RFC3339)
 		return verdict, nonNil(decision.Flaky), nil
 	}

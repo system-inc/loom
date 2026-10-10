@@ -27,10 +27,17 @@ async function freshQueue(answers: Record<string, GitFacts> = {}): Promise<Durab
     const namespace = (env as unknown as { Queue: DurableObjectNamespace<Queue> }).Queue;
     const stub = namespace.get(namespace.idFromName('queue-' + crypto.randomUUID()));
     await runInDurableObject(stub, function (instance: Queue) {
+        // main's head as git last read it: an answer that names one moves it, and every other reading says the same
+        // head, as git would between pushes. An answer whose mainHead is undefined is a reading that couldn't say.
+        let head = main;
         instance.history = {
             // A base other than the main these tests start from is one main has moved past: nothing descends from it here.
             async facts(asked: string, base: string): Promise<GitFacts> {
-                return answers[asked] ?? (base === main ? facts() : facts({ baseIsAncestor: false }));
+                const answer = answers[asked] ?? (base === main ? facts() : facts({ baseIsAncestor: false }));
+                if (typeof answer.mainHead === 'string') {
+                    head = answer.mainHead;
+                }
+                return 'mainHead' in answer ? answer : { ...answer, mainHead: head };
             },
         };
         let tick = 0;
@@ -1275,18 +1282,43 @@ describe('a green witness of main', function () {
         expect(await (await queue.fetch('https://queue/head')).json()).toMatchObject({ mainRed: { witness: tip, main: sha(162) } });
     });
 
-    it("says nothing about main for a witness whose git facts never read main's head, even of main's tip", async function () {
-        const queue = await freshQueue({ [sha(165)]: facts({}, []), [sha(166)]: facts({}, []) });
-        // A landing makes 165 main's tip as the log knows it; the witness's own facts, from a bridge before mainHead, don't say.
+    it("says nothing about main for a witness a bridge from before mainHead checked, even of main's tip", async function () {
+        const { queue, post } = await bridged();
+        // A landing makes 165 main's tip as the log knows it; the witnesses' facts, from a bridge before mainHead, don't say.
         const landing = await idOf(queue, change(164));
+        expect((await post(landing, facts())).status).toBe(200);
         expect((await postWhole(queue, landing, sha(164), 'passed', null)).status).toBe(200);
         expect((await report(queue, landing, { main: sha(165), from: main, landed: sha(164) })).status).toBe(200);
         const red = await idOf(queue, witnessOf(165));
+        expect((await post(red, facts({}, []))).status).toBe(200);
         await judge(queue, red, sha(165), runOf(sha(165), 1), 'red');
         const green = await idOf(queue, witnessOf(166));
+        expect((await post(green, facts({}, []))).status).toBe(200);
         await judge(queue, green, sha(166), runOf(sha(166), 1), 'green');
         expect([await stateOf(queue, red), await stateOf(queue, green)]).toEqual(['red', 'witnessed']);
         expect(await mainEvents(queue)).toEqual([]);
+    });
+
+    it("takes nothing on the GitHub path when main's head can't be read, so no change is checked without it (G1)", async function () {
+        const queue = await freshQueue({ [sha(167)]: { ...facts({}, []), mainHead: undefined }, [sha(168)]: { ...facts(), mainHead: undefined } });
+        for (const request of [witnessOf(167), change(168)]) {
+            const answer = await submit(queue, request);
+            expect(answer.status).toBe(503);
+            expect(await answer.json()).toEqual({ reason: "main's head can't be read from GitHub, try again" });
+        }
+        expect(await logOf(queue)).toEqual([]);
+        // Read again with its head, the witness is taken, of main's head.
+        await runInDurableObject(queue, function (instance: Queue) {
+            const history = instance.history;
+            instance.history = {
+                async facts(asked: string, base: string): Promise<GitFacts> {
+                    return asked === sha(167) ? headOf(167) : (history?.facts(asked, base) ?? facts());
+                },
+            };
+        });
+        const id = await idOf(queue, witnessOf(167));
+        await judge(queue, id, sha(167), runOf(sha(167), 1), 'green');
+        expect(await mainEvents(queue)).toEqual([['main.green', id, sha(167)]]);
     });
 
     it("orders readings of main's head by when they began, so facts that arrive late never move the tip back (F2)", async function () {
@@ -1395,6 +1427,8 @@ describe('a green witness of main', function () {
             [runOf(sha(221), 1)],
             // This attempt's run, carrying the old run's pass.
             [runOf(sha(221), 2), `judge-v1 carried ${runOf(sha(221), 1)}`],
+            // A phase unit's carried pass, as the judge names it (G2).
+            [runOf(sha(221), 2), `judge-v1 phase carried ${runOf(sha(221), 1)}`],
             // A run that names no attempt of this tree.
             ['run-x'],
             [runOf(sha(222), 2)],

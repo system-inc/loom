@@ -415,15 +415,19 @@ shaPattern = re.compile(r"^[0-9a-f]{40}$")
 
 def withHead(pipeline, read):
     """git's facts, read after the queue's seq is noted: asOf orders their mainHead against the queue's own log, so a
-    landing logged while git answered outranks the head it read. Without the seq, the facts say nothing of main's head,
-    and a witness cleared by them never records main.green or main.red."""
+    landing logged while git answered outranks the head it read. Facts that can't say main's head (the queue's seq or
+    origin/main unreadable) are None: posted, they'd check the change for good, and a witness checked without its
+    head never records main.green or main.red, so the change waits for the next tick instead (#6gj7n9p)."""
     status, head = pipeline.call("GET", "/head")
-    facts = read()
     seq = head.get("seq") if status == 200 and isinstance(head, dict) else None
-    if "mainHead" in facts and isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
-        return {**facts, "asOf": seq}
-    facts.pop("mainHead", None)
-    return facts
+    if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+        log("the queue's seq is unreadable (%d %s): no facts posted this tick" % (status, str(head)[:200]))
+        return None
+    facts = read()
+    if "mainHead" not in facts:
+        log("origin/main is unreadable: no facts posted this tick")
+        return None
+    return {**facts, "asOf": seq}
 
 
 def tick(pipeline, gate, memory):
@@ -434,6 +438,9 @@ def tick(pipeline, gate, memory):
         return
     for submitted in unchecked["changes"]:
         facts = withHead(pipeline, lambda: gate.facts(submitted["sha"], submitted["base"]))
+        if facts is None:
+            log("facts for %s wait for the next tick" % submitted["change"])
+            continue
         status, answer = pipeline.call("POST", "/submissions/%s/facts" % submitted["change"], facts)
         log("facts for %s: %d %s" % (submitted["change"], status, answer))
     # Once outside verdicts are refused, Judge decides every future and this only carries git's facts (#hkmzefm).
