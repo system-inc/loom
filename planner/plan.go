@@ -294,6 +294,10 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 			}
 		}
 	}
+	wasiSdk, err := TreeWasiSdk(tree)
+	if err != nil {
+		return nil, err
+	}
 	results := []PlannedResult{}
 	planned := []PlannedUnit{}
 	parts := map[string]KeyParts{}
@@ -319,7 +323,11 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 				return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
 			}
 		}
-		keyParts, err := keyFor(tree, gateTools, unit, tools, compilers)
+		packageTools, err := unitTools(tools, listed, wasiSdk)
+		if err != nil {
+			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
+		}
+		keyParts, err := keyFor(tree, gateTools, unit, packageTools, compilers)
 		if err != nil {
 			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
 		}
