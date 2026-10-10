@@ -24,6 +24,8 @@ export const MaximumPoolPriority = 1000;
 // A worker's live status (#yk0q0kj) is at most this long, and lists at most this many units in hand.
 export const MaximumLiveBodyBytes = 16 * 1024;
 export const MaximumLiveUnits = 64;
+// A pool keeps at most this many workers' live statuses, the newest; a box pool has a handful of workers.
+export const MaximumLiveRows = 256;
 
 const textEncoder = new TextEncoder();
 
@@ -591,7 +593,11 @@ export class Pool extends DurableObject<Env> {
 
     // ---------- Live ----------
 
-    // A worker's newest live status replaces its last.
+    // A worker's newest live status replaces its last. A pool token names its pool, not a worker, so a status is kept
+    // only for a worker this pool has seen ask within the window and hasn't retired, and the pool keeps at most
+    // MaximumLiveRows of them, the newest: a holder of the token can't add rows under made-up names, nor keep a retired
+    // worker's (Loom's review, Oct 10). A token naming its worker would bind each status to its own; until then a
+    // worker that asked can still be spoken for by another holder of the same pool's token.
     private async acceptLive(request: Request): Promise<Response> {
         const body = await readBodyText(request, MaximumLiveBodyBytes);
         if (body === null) {
@@ -601,20 +607,36 @@ export class Pool extends DurableObject<Env> {
         if (typeof live === 'string') {
             return jsonResponse(400, { error: live });
         }
-        this.sql.exec(
-            `INSERT INTO live (worker, status, at) VALUES (?, ?, ?)
-             ON CONFLICT (worker) DO UPDATE SET status = excluded.status, at = excluded.at`,
-            live.worker,
-            live.status,
-            Date.now(),
-        );
+        const asked = this.sql
+            .exec<{ worker: string }>(
+                'SELECT worker FROM workers WHERE worker = ? AND seenAt > ? AND worker NOT IN (SELECT worker FROM retired)',
+                live.worker,
+                Date.now() - WorkerWindowMilliseconds,
+            )
+            .toArray();
+        if (asked.length === 0) {
+            return jsonResponse(403, { error: `worker ${live.worker} hasn't asked this pool lately, or is retired: its status isn't kept` });
+        }
+        this.ctx.storage.transactionSync(() => {
+            this.sql.exec(
+                `INSERT INTO live (worker, status, at) VALUES (?, ?, ?)
+                 ON CONFLICT (worker) DO UPDATE SET status = excluded.status, at = excluded.at`,
+                live.worker,
+                live.status,
+                Date.now(),
+            );
+            this.sql.exec(
+                'DELETE FROM live WHERE worker NOT IN (SELECT worker FROM live ORDER BY at DESC, worker LIMIT ?)',
+                MaximumLiveRows,
+            );
+        });
         return jsonResponse(200, { kept: live.worker });
     }
 
     // Each worker's newest live status from the last four hours, by name, with when this object took it: a reader tells
     // a box gone quiet by at. Older ones are forgotten here, lazily.
     private live(): { worker: string; at: string; status: unknown }[] {
-        this.sql.exec('DELETE FROM live WHERE at <= ?', Date.now() - WorkerWindowMilliseconds);
+        this.sql.exec('DELETE FROM live WHERE at <= ? OR worker IN (SELECT worker FROM retired)', Date.now() - WorkerWindowMilliseconds);
         return this.sql
             .exec<{ worker: string; status: string; at: number }>('SELECT worker, status, at FROM live ORDER BY worker')
             .toArray()
