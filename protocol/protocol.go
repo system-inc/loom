@@ -67,8 +67,9 @@ type JobUnit struct {
 
 // KindCeilings is each kind's hard ceiling in seconds, the longest timeout a unit of it may carry (Loom, contracts
 // v1.1: a test unit is 60 s by design and killed at 90 s; a product gets 600 s). A phase gets the hour every phase
-// unit carries today, until a ruling names its own.
-var KindCeilings = map[string]int{"test": 90, "build": 120, "product": 600, "phase": 3600}
+// unit carries today, until a ruling names its own. A build unit's is the build law's 15 minutes (Kirk, Oct 10): past
+// 60 s it's slow, green with a warning and never killed for it, and only a hang reaches the ceiling, void.
+var KindCeilings = map[string]int{"test": 90, "build": 900, "product": 600, "phase": 3600}
 
 // Toolchains are the names a unit may require and a machine may have, the unit key's tools (contract v1).
 var Toolchains = []string{"go", "clang", "node", "wasiSdk"}
