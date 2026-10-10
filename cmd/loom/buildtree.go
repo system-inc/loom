@@ -134,6 +134,16 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"seconds": time.Since(started).Seconds(), "sourceBytes": len(source),
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
+	return buildTreeExit(stderr, treeKey, failed, indexWritten)
+}
+
+// buildTreeExit is build-tree's exit: 1 when a package failed, or when the store kept an earlier build's index, so
+// what runners read isn't this build, said aloud rather than left for someone to notice.
+func buildTreeExit(stderr io.Writer, treeKey string, failed int, indexWritten bool) int {
+	if !indexWritten {
+		fmt.Fprintf(stderr, "build-tree: trees/%s.json keeps an earlier build's index, which failed fewer packages; this build's isn't what runners read\n", treeKey)
+		return 1
+	}
 	if failed > 0 {
 		return 1
 	}

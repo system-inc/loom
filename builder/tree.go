@@ -509,7 +509,8 @@ func (index TreeIndex) failures() int {
 // writeIndex writes trees/<treeKey>.json, once every blob and ref it names is up, and reports whether it did. An
 // index the bucket already holds is replaced only by one with no more failed packages, and only over the very object
 // read (If-Match on its ETag; If-None-Match: * when there is none), so a worse build never takes a better one's place
-// and two builds racing are each held to what the other wrote.
+// and two builds racing are each held to what the other wrote. An index kept that way is kept fresh, it and every blob
+// it names (keep), unless a blob it names is gone, when it can't be kept and the worse but whole one replaces it.
 func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error) {
 	encoded, err := treeIndex.encode()
 	if err != nil {
@@ -528,7 +529,13 @@ func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error
 		default:
 			var held TreeIndex
 			if json.Unmarshal(content, &held) == nil && treeIndex.failures() > held.failures() {
-				return false, nil
+				kept, err := store.keep(key, held, content, object)
+				if errors.Is(err, r2.ErrChanged) {
+					continue
+				}
+				if err != nil || kept {
+					return false, err
+				}
 			}
 			options.IfMatch = object.ETag
 		}
@@ -539,6 +546,60 @@ func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error
 		}
 	}
 	return false, fmt.Errorf("%s kept changing while it was written", key)
+}
+
+// blobs are every blob the index names: the source archive, each product's archive, each built package's binary.
+func (index TreeIndex) blobs() []string {
+	named := map[string]bool{index.Source: true}
+	for _, sum := range index.Products {
+		named[sum] = true
+	}
+	for _, built := range index.Packages {
+		if built.Error == "" {
+			named[built.Binary] = true
+		}
+	}
+	sums := []string{}
+	for sum := range named {
+		if sum != "" {
+			sums = append(sums, sum)
+		}
+	}
+	sort.Strings(sums)
+	return sums
+}
+
+// keep keeps a held index runnable when a worse build declines to replace it, rather than letting what it names
+// expire under its runners near day 7: every blob it names that was uploaded more than FreshFor ago is read and put
+// again, its own bytes, and so is the index itself, over the ETag read (r2.ErrChanged when another build wrote it
+// meanwhile, for the caller to read it again). Refreshing beats calling an old index replaceable: that would hand
+// runners the worse build, failed packages and all, when the better one only needed its blobs kept. An index naming a
+// blob the store no longer holds can't be kept, and keep reports false, so the worse but whole index takes its place.
+func (store Store) keep(key string, held TreeIndex, content []byte, object r2.Object) (bool, error) {
+	for _, sum := range held.blobs() {
+		store.read()
+		blob, err := store.Bucket.Head("blobs/" + sum)
+		if errors.Is(err, r2.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if store.stale(blob.Modified) {
+			if _, err = store.heldBlob(sum); errors.Is(err, ErrNotStored) {
+				return false, nil
+			} else if err != nil {
+				return false, err
+			}
+		}
+	}
+	if store.stale(object.Modified) {
+		store.wrote()
+		if err := store.Bucket.Put(key, content, r2.PutOptions{ContentType: "application/json", CacheControl: "no-cache", IfMatch: object.ETag}); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // Tree reads trees/<treeKey>.json from the public domain, refusing an index that names anything but a sha256 for a

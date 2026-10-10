@@ -285,3 +285,49 @@ func TestARefWhoseBlobIsGoneIsPointedAtTheRebuild(t *testing.T) {
 		})
 	}
 }
+
+// A worse build that keeps a better build's index keeps it runnable: every blob it names that is past FreshFor is
+// put again with its own bytes, and so is the index, over its ETag. An index naming a blob that is gone can't be kept,
+// and the worse but whole one takes its place.
+func TestAKeptIndexAndEverythingItNamesAreKeptFresh(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-6 * 24 * time.Hour)
+	source, product, binary := []byte("a source archive"), []byte("a product's archive"), []byte("a test binary")
+	better := TreeIndex{Tree: "t", Source: digest(source), Products: map[string]string{keyOf("p"): digest(product)},
+		Packages: map[string]TreePackage{"a": {Package: "a", Binary: digest(binary), Products: []string{keyOf("p")}}, "b": {Package: "b", Binary: digest(binary)}}}
+	worse := TreeIndex{Tree: "t", Source: digest(source), Products: map[string]string{},
+		Packages: map[string]TreePackage{"a": {Package: "a", Error: "a conflict"}, "b": {Package: "b", Binary: digest(binary)}}}
+	plant := func(t *testing.T) (*r2test.Fake, Store) {
+		fake, store := clocked(t, &now)
+		for _, blob := range [][]byte{source, product, binary} {
+			fake.Set("blobs/"+digest(blob), blob, old)
+		}
+		encoded, _ := better.encode()
+		fake.Set("trees/k.json", encoded, old)
+		return fake, store
+	}
+	fake, store := plant(t)
+	if written, err := store.writeIndex("k", &worse); err != nil || written {
+		t.Fatalf("a worse build: written %v, %v", written, err)
+	}
+	for _, key := range []string{"blobs/" + digest(source), "blobs/" + digest(product), "blobs/" + digest(binary), "trees/k.json"} {
+		if !fake.Modified(key).Equal(now) {
+			t.Errorf("%s wasn't kept fresh: %v", key, fake.Modified(key))
+		}
+	}
+	if content, _ := fake.Object("trees/k.json"); !strings.Contains(string(content), digest(product)) {
+		t.Fatalf("the kept index changed: %s", content)
+	}
+	// A day later nothing needs writing.
+	now = now.Add(24 * time.Hour)
+	fake.ResetRequests()
+	if written, err := store.writeIndex("k", &worse); err != nil || written || fake.Count("PUT", "") != 0 {
+		t.Fatalf("a fresh kept index: %v %v %v", written, err, fake.Requests())
+	}
+	// With the product's blob gone, the better index can't be kept.
+	fake, store = plant(t)
+	fake.Delete("blobs/" + digest(product))
+	if written, err := store.writeIndex("k", &worse); err != nil || !written {
+		t.Fatalf("an index naming a gone blob was kept: %v %v", written, err)
+	}
+}
