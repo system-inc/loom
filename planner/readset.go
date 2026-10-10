@@ -238,7 +238,7 @@ func readSetReads(tree string, files [][2]string, set ReadSet) (string, error) {
 	}
 	pairs := append([][2]string{}, files...)
 	for _, name := range set.Paths {
-		state, err := index.pathState(tree, name)
+		state, err := index.pathState(name)
 		if err != nil {
 			return "", err
 		}
@@ -263,6 +263,7 @@ func readSetReads(tree string, files [][2]string, set ReadSet) (string, error) {
 // A submoduleIndex is what the tree's submodules track, nested ones included, read from their own indexes: each
 // tracked path's mode and object, and each directory's tracked children (a directory's name ends in /).
 type submoduleIndex struct {
+	tree     string
 	gitlinks map[string]string // the superproject's gitlinks, path to commit
 	entries  map[string][2]string
 	children map[string]map[string]bool
@@ -300,7 +301,7 @@ func submoduleIndexOf(tree string) (*submoduleIndex, error) {
 	if found && cached.signature == signature {
 		return cached.index, nil
 	}
-	index := &submoduleIndex{gitlinks: gitlinks, entries: map[string][2]string{}, children: map[string]map[string]bool{}}
+	index := &submoduleIndex{tree: tree, gitlinks: gitlinks, entries: map[string][2]string{}, children: map[string]map[string]bool{}}
 	if len(names) > 0 {
 		command := exec.Command("git", append([]string{"-C", tree, "ls-files", "-s", "-z", "--recurse-submodules", "--"}, names...)...)
 		var stderr bytes.Buffer
@@ -362,21 +363,15 @@ func (index *submoduleIndex) checkedOut(name string) error {
 	return nil
 }
 
-// pathState is a path's state on the tree: its content when a submodule tracks it (a symlink its target, a nested
-// gitlink its commit), "directory" when a tracked file sits under it, else "absent".
-func (index *submoduleIndex) pathState(tree, name string) (string, error) {
+// pathState is a path's state on the tree: when a submodule tracks it, its mode and the object its index records (a
+// file's content, a symlink's target, a nested gitlink's commit), so keying a 66k-file set reads no file; "directory"
+// when a tracked file sits under it; else "absent". The planner's checkouts are clean, so the index is the checkout.
+func (index *submoduleIndex) pathState(name string) (string, error) {
 	if err := index.checkedOut(name); err != nil {
 		return "", err
 	}
 	if entry, tracked := index.entries[name]; tracked {
-		if entry[0] == "160000" {
-			return "gitlink " + entry[1], nil
-		}
-		digest, err := fileDigest(filepath.Join(tree, filepath.FromSlash(name)))
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", name, err)
-		}
-		return digest, nil
+		return entry[0] + " " + entry[1], nil
 	}
 	if index.children[name] != nil {
 		return "directory", nil

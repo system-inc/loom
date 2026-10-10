@@ -158,6 +158,24 @@ func TestAReadSetKeysOnlyTheSubmodulePathsItNames(t *testing.T) {
 	}
 }
 
+// A set's paths key by the objects the submodule's index records, never by reading the files, so a set of cohere's 66k
+// TypeScript files keys in a map lookup each (a file read each cost about 1.8 s a unit). An edit the submodule hasn't
+// staged doesn't move the key; a committed one does. Mutant that fails it: a set path keyed by reading its file.
+func TestAReadSetKeysTheIndexsObjectsNotTheFiles(t *testing.T) {
+	useReadSets(t)
+	fixture := newReadSetFixture(t)
+	fixture.record(t, ReadSet{Paths: []string{"sub/data.txt"}})
+	_, base := fixture.key(t)
+	writeFiles(t, filepath.Join(fixture.tree, "sub"), map[string]string{"data.txt": "unstaged\n"})
+	if _, key := fixture.key(t); key != base {
+		t.Fatal("an edit the submodule's index doesn't hold moved the key: the set's files were read")
+	}
+	fixture.bump(t, map[string]string{"data.txt": "committed\n"})
+	if _, key := fixture.key(t); key == base {
+		t.Fatal("a committed edit to a set's file left the key where it was")
+	}
+}
+
 // A read set is the code key's: an edit to the unit's closure (or its declared reads, products, tools, env or
 // selection) is another code key, with no set, so the unit keys the submodule's commit again until a traced run
 // records one. Mutant that fails it: a set looked up by the unit's package and selection alone.

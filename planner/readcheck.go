@@ -20,7 +20,7 @@ type Finding struct {
 	UnitKey string `json:"unitKey,omitempty"`
 	Package string `json:"package"`
 	Path    string `json:"path"`
-	Sha256  string `json:"sha256"` // a gitlink's is its recorded commit; empty beyond the key when the path isn't a tracked file
+	Sha256  string `json:"sha256"` // a gitlink's is its recorded commit; empty beyond the key, where State says it
 	// BeyondKey marks a read beyond the key's read set (ReadSet, its id); Listing marks a directory the run listed;
 	// State is the path's state on the tree, as a key on a set naming it would hold it.
 	BeyondKey bool   `json:"beyondKey,omitempty"`
@@ -268,8 +268,8 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 		var err error
 		if listing {
 			finding.State, err = index.listingState(relative)
-		} else if finding.State, err = index.pathState(tree, relative); err == nil && Sha256Hex(finding.State) {
-			finding.Sha256 = finding.State
+		} else {
+			finding.State, err = index.pathState(relative)
 		}
 		findings = append(findings, finding)
 		return err
