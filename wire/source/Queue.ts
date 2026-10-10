@@ -155,12 +155,25 @@ export interface GitFacts {
     historyPaths?: string[];
     // Each Python test in the diff that a non-test file names, with those files (#xz7j9ea). Absent, refused too.
     gateNamed?: { path: string; users: string[] }[];
+    // Every gitlink in sha's tree at any depth (adamic's cohere, cohere's TypeScript), each proven fetchable or not by
+    // a keyless fetch from its .gitmodules url, as a runner fetches it (#yt2jw5q). Absent, refused too.
+    pins?: Pin[];
     // main's head when the facts were read, and asOf, the queue's seq when the reading began (#6gj7n9p): what the queue
     // knows of main's tip, ordered against its own log. Both or neither. Absent, the facts say nothing about main's
     // head: the change can still be cleared, but a witness without them is never of main's tip, so it records no
     // main.green or main.red.
     mainHead?: string;
     asOf?: number;
+}
+
+// A submodule pin as the bridge proved it: its path from adamic's root, its url, the commit it pins, and whether a
+// machine with no key could fetch that commit from that url, with the remote's reason when it couldn't.
+export interface Pin {
+    path: string;
+    url: string;
+    sha: string;
+    fetchable: boolean;
+    reason?: string;
 }
 
 export interface History {
@@ -533,6 +546,20 @@ export function gitRefusalOf(request: Omit<ChangeRecord, 'change' | 'submittedAt
     const named = facts.gateNamed[0];
     if (named !== undefined) {
         return `${named.path} is named by ${named.users.slice(0, 3).join(', ')}, which isn't a test, so it's gate logic: send it to Loom for a gate`;
+    }
+    // Every runner fetches every pin with no key, so a pin it can't fetch (a commit never pushed, an ssh url, a private
+    // remote) would pass every rule here and fail later on every runner (#yt2jw5q). Facts with no pins are no clearance.
+    if (facts.pins === undefined) {
+        return "git's facts carry no submodule pins, so the change can't be cleared";
+    }
+    const unfetchable = facts.pins.filter(function (pin) {
+        return !pin.fetchable;
+    });
+    if (unfetchable.length > 0) {
+        const named = unfetchable.slice(0, 5).map(function (pin) {
+            return `${pin.path} at ${pin.sha.slice(0, 12)} from ${pin.url === '' ? 'no url' : pin.url} (${pin.reason ?? 'unfetchable'})`;
+        });
+        return `${unfetchable.length} submodule pin${unfetchable.length === 1 ? '' : 's'} a runner can't fetch without a key: ${named.join('; ')}; push the pinned commit to its public remote and resubmit`;
     }
     return null;
 }
@@ -1740,6 +1767,20 @@ export class Queue extends DurableObject<Env> {
         if (parsed.gateNamed !== undefined && !(Array.isArray(parsed.gateNamed) && parsed.gateNamed.every(isNamed))) {
             return jsonResponse(400, { error: 'gateNamed is [{path, users}]: each Python test a non-test file names' });
         }
+        const isPin = function (item: unknown): item is Pin {
+            return (
+                isPlainObject(item) &&
+                typeof item.path === 'string' &&
+                typeof item.url === 'string' &&
+                typeof item.sha === 'string' &&
+                shaPattern.test(item.sha) &&
+                typeof item.fetchable === 'boolean' &&
+                (item.reason === undefined || typeof item.reason === 'string')
+            );
+        };
+        if (parsed.pins !== undefined && !(Array.isArray(parsed.pins) && parsed.pins.every(isPin))) {
+            return jsonResponse(400, { error: 'pins is [{path, url, sha, fetchable, reason?}]: every gitlink at any depth, proven keyless-fetchable or not' });
+        }
         const readsHead = parsed.mainHead !== undefined || parsed.asOf !== undefined;
         if (readsHead && (typeof parsed.mainHead !== 'string' || !shaPattern.test(parsed.mainHead) || !Number.isSafeInteger(parsed.asOf) || (parsed.asOf as number) < 0)) {
             return jsonResponse(400, { error: "mainHead and asOf come together: main's head as git read it, and the queue's seq when the reading began" });
@@ -1752,6 +1793,13 @@ export class Queue extends DurableObject<Env> {
             ...(typeof parsed.revertOf === 'string' ? { revertOf: parsed.revertOf } : {}),
             ...(Array.isArray(parsed.historyPaths) ? { historyPaths: [...(parsed.historyPaths as string[])].sort() } : {}),
             ...(Array.isArray(parsed.gateNamed) ? { gateNamed: parsed.gateNamed as { path: string; users: string[] }[] } : {}),
+            ...(Array.isArray(parsed.pins)
+                ? {
+                      pins: (parsed.pins as Pin[]).map(function (pin) {
+                          return { path: pin.path, url: pin.url, sha: pin.sha, fetchable: pin.fetchable, ...(pin.reason === undefined ? {} : { reason: pin.reason }) };
+                      }),
+                  }
+                : {}),
             ...(readsHead ? { mainHead: parsed.mainHead as string, asOf: parsed.asOf as number } : {}),
         };
         return this.ctx.blockConcurrencyWhile(async () => {
