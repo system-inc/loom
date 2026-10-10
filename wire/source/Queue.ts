@@ -243,8 +243,11 @@ export interface FutureEntry {
     // keep their ids, future-<tree>-<attempt>, so this one's start after them and the judge never carries from them.
     // Logged on future.built when it isn't 0, so a log from before it replays with 0.
     attemptsBefore: number;
-    // Whether any verdict was ever logged for it, a unit's or a whole one: after that its plan stands.
+    // Whether any verdict was ever logged for it, a unit's or a whole one.
     judged: boolean;
+    // Whether a green or red ever decided it: after that its plan stands. A void is Loom's failure, not a verdict on the
+    // change, so a future decided only void may still be replanned (#0zndrgw).
+    decisive: boolean;
 }
 
 export interface ChangeEntry {
@@ -752,7 +755,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'future.built') {
         const tree = event.subject.future ?? '';
         const changes = event.data.changes as string[];
-        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, empty: null, whole: null, decided: null, voids: 0, judged: false, attemptsBefore: (event.data.attemptsBefore ?? 0) as number });
+        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, empty: null, whole: null, decided: null, voids: 0, judged: false, decisive: false, attemptsBefore: (event.data.attemptsBefore ?? 0) as number });
         // A block's prefix future (main, +A, +B) is the newest change's own; the changes ahead of it keep theirs.
         const tested = event.data.block === undefined ? changes : changes.slice(-1);
         for (const change of tested) {
@@ -808,6 +811,15 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
         if (future !== undefined) {
             future.units = null;
             future.empty = null;
+            // Withdrawn after a void (#0zndrgw): the withdrawn plan's attempts are retired with it, the one the judge
+            // may already have started among them, so the new plan's runs start past them and nothing run on the old
+            // plan decides or is carried into the new one (firstAttempt). A plan withdrawn before any verdict, the only
+            // kind before this, keeps its numbering, so an older log replays as it did.
+            if (future.decided !== null) {
+                future.attemptsBefore += future.voids + 1;
+                future.voids = 0;
+                future.decided = null;
+            }
             for (const change of future.changes) {
                 const member = state.changes.get(change);
                 if (member !== undefined && member.state === 'testing') {
@@ -833,12 +845,14 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
         else if (event.data.decision !== undefined && future !== undefined) {
             future.decided = { run: event.subject.run ?? '', status: (event.data.decision as Decision).status };
             future.voids += future.decided.status === 'void' ? 1 : 0;
+            future.decisive = future.decisive || future.decided.status !== 'void';
         }
         else if (event.data.verdict !== undefined && future !== undefined) {
             const verdict = event.data.verdict as Verdict;
             future.whole = verdict;
             future.decided = { run: verdict.run, status: decisionOf(verdict) };
             future.voids += future.decided.status === 'void' ? 1 : 0;
+            future.decisive = future.decisive || future.decided.status !== 'void';
             if (entry !== undefined) {
                 entry.verdict = verdict as unknown as Record<string, unknown>;
                 entry.state = entry.state === 'queued' ? 'testing' : entry.state;
@@ -1951,8 +1965,10 @@ export class Queue extends DurableObject<Env> {
         });
     }
 
-    // Withdraws a future's plan by a ruling ({by, reason}), so the planner plans it again: only while nothing has judged
-    // it, so no verdict ever stands on a plan that was withdrawn (Loom, Oct 10 00:3xZ, parity proof 1's replan).
+    // Withdraws a future's plan by a ruling ({by, reason}), so the planner plans it again (Loom, Oct 10 00:3xZ, parity
+    // proof 1's replan): only while no green or red has decided it, so no verdict on the change ever stands on a plan
+    // that was withdrawn. A future decided only void may be replanned (#0zndrgw): a void is Loom's failure, and its plan
+    // is what should be replaced when Loom changes under it, as a pin move re-keys every unit.
     private async unplan(request: Request, tree: string): Promise<Response> {
         const body = await readBodyText(request, MaximumChangeBodyBytes);
         const parsed = parseJson(body ?? '');
@@ -1968,8 +1984,9 @@ export class Queue extends DurableObject<Env> {
             if (future.units === null) {
                 return jsonResponse(409, { error: `future ${tree} has no plan to withdraw` });
             }
-            if (future.judged || future.decided !== null) {
-                return jsonResponse(409, { error: `future ${tree} has verdicts, so its plan stands` });
+            // Unit records with no decision yet are a verdict in the making, so they hold the plan too.
+            if (future.decisive || (future.judged && future.decided === null)) {
+                return jsonResponse(409, { error: `future ${tree} was decided green or red, so its plan stands` });
             }
             await this.append('future.unplanned', { change: future.changes[0], future: tree }, { by: parsed.by, reason: parsed.reason });
             return jsonResponse(200, { future: tree, planned: false });

@@ -906,12 +906,14 @@ describe('a resubmit', function () {
         expect((await resubmit(planned, 54)).status).toBe(409);
         expect((await unplan(sha(53))).status).toBe(200);
         expect((await resubmit(planned, 54)).status).toBe(200);
-        // Judged (a void run): the plan can't be withdrawn, and the change can't move.
+        // Judged (a void run): the change can't move. Its plan may be withdrawn, since a void is no verdict on the
+        // change (#0zndrgw), and it still can't move after.
         const judged = await idOf(55);
         expect((await postPlan(queue, sha(55), units)).status).toBe(200);
         const key = units[0]?.unitKey ?? '';
         expect((await postBatch(queue, sha(55), batch(judged, sha(55), 'run-1', [record(judged, key, 'run-1', 'void', 'infra')], 'void'))).status).toBe(200);
-        expect((await unplan(sha(55))).status).toBe(409);
+        expect((await resubmit(judged, 56)).status).toBe(409);
+        expect((await unplan(sha(55))).status).toBe(200);
         expect((await resubmit(judged, 56)).status).toBe(409);
         expect((await replay(await logOf(queue))).changes.get(planned)?.record.sha).toBe(sha(54));
     });
@@ -960,7 +962,7 @@ describe("a plan's tree key", function () {
 });
 
 describe('a withdrawn plan', function () {
-    it('goes back to the planner while nothing judged it, logged with who and why, and never after a verdict', async function () {
+    it('goes back to the planner while nothing decided it green or red, logged with who and why, and never after one', async function () {
         const queue = await freshQueue();
         const id = ((await (await submit(queue, change(21, { parity: true }))).json()) as { change: string }).change;
         const unplan = function (body: unknown): Promise<Response> {
@@ -974,15 +976,50 @@ describe('a withdrawn plan', function () {
         expect((await unplan(ruling)).status).toBe(200);
         expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'queued', units: { planned: 0 } });
         expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: { future: string }[] }).futures.map((future) => future.future)).toEqual([sha(21)]);
-        // The replan with other keys is taken now, and once a batch judges it the plan stands.
+        // The replan with other keys is taken now.
         const replanned = await planOf(['b']);
         expect((await postPlan(queue, sha(21), replanned)).status).toBe(200);
-        const voided = batch(id, sha(21), 'run-1', [record(id, replanned[0]?.unitKey ?? '', 'run-1', 'void', 'infra')], 'void');
+        const run = function (attempt: number): string {
+            return `future-${sha(21)}-${attempt}`;
+        };
+        const voided = batch(id, sha(21), run(1), [record(id, replanned[0]?.unitKey ?? '', run(1), 'void', 'infra')], 'void');
         expect((await postBatch(queue, sha(21), voided)).status).toBe(200);
+        // A void is Loom's failure, not a verdict on the change (#0zndrgw): the plan can still be withdrawn, and the
+        // future goes back to the planner, past the withdrawn plan's attempts, the one the judge started after the void
+        // (2) among them.
+        const pinMoved = { by: 'system_adamic_loom', reason: "release 5 moved the pin: the plan's keys name a runner no pool serves" };
+        expect((await unplan(pinMoved)).status).toBe(200);
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: { future: string }[] }).futures.map((future) => future.future)).toEqual([sha(21)]);
+        const third = await planOf(['c']);
+        expect((await postPlan(queue, sha(21), third)).status).toBe(200);
+        const planned = ((await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: { future: string; attempt: number; firstAttempt?: number }[] }).futures;
+        expect(planned.find((future) => future.future === sha(21))).toMatchObject({ attempt: 3, firstAttempt: 3 });
+        // Nothing run on the withdrawn plan decides the new one: the attempt in flight when it was withdrawn is refused.
+        const stale = batch(id, sha(21), run(2), [record(id, third[0]?.unitKey ?? '', run(2), 'failed', 'change')], 'red', [], [third[0]?.unitKey ?? '']);
+        expect((await postBatch(queue, sha(21), stale)).status).toBe(422);
+        // Once a red decides it, its plan stands.
+        const red = batch(id, sha(21), run(3), [record(id, third[0]?.unitKey ?? '', run(3), 'failed', 'change')], 'red', [], [third[0]?.unitKey ?? '']);
+        expect((await postBatch(queue, sha(21), red)).status).toBe(200);
         expect((await unplan(ruling)).status).toBe(409);
-        const logged = (await logOf(queue)).find((event) => event.type === 'future.unplanned');
-        expect(logged).toMatchObject({ subject: { change: id, future: sha(21) }, data: ruling });
-        expect((await replay(await logOf(queue))).futures.get(sha(21))?.units?.size).toBe(1);
+        const logged = (await logOf(queue)).filter((event) => event.type === 'future.unplanned');
+        expect(logged).toMatchObject([{ subject: { change: id, future: sha(21) }, data: ruling }, { subject: { change: id, future: sha(21) }, data: pinMoved }]);
+        const replayed = (await replay(await logOf(queue))).futures.get(sha(21));
+        expect([replayed?.units?.size, replayed?.attemptsBefore, replayed?.decided?.status]).toEqual([1, 2, 'red']);
+    });
+
+    it('stands once a green decides it, even after a void before it', async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(26, { parity: true }))).json()) as { change: string }).change;
+        const run = function (attempt: number): string {
+            return `future-${sha(26)}-${attempt}`;
+        };
+        const units = await planOf(['a']);
+        await postPlan(queue, sha(26), units);
+        expect((await postBatch(queue, sha(26), batch(id, sha(26), run(1), [record(id, units[0]?.unitKey ?? '', run(1), 'void', 'infra')], 'void'))).status).toBe(200);
+        expect((await postBatch(queue, sha(26), batch(id, sha(26), run(2), [record(id, units[0]?.unitKey ?? '', run(2), 'passed', null)], 'green'))).status).toBe(200);
+        const refused = await queue.fetch(`https://queue/futures/${sha(26)}/unplan`, { method: 'POST', body: JSON.stringify({ by: 'system_adamic_loom', reason: 'replan' }) });
+        expect(refused.status).toBe(409);
+        expect(await refused.json()).toEqual({ error: `future ${sha(26)} was decided green or red, so its plan stands` });
     });
 });
 
@@ -1474,6 +1511,10 @@ describe('a green witness of main', function () {
         for (const [, future] of older.futures) {
             expect(future.attemptsBefore).toBe(0);
             delete future.attemptsBefore;
+            // decisive is derived, true exactly where a green or red decided the future.
+            const decided = future.decided as { status: string } | null;
+            expect(future.decisive).toBe(decided !== null && decided.status !== 'void');
+            delete future.decisive;
         }
         for (const [, entry] of older.changes) {
             expect(entry.mainHead).toBe(null);
@@ -1565,7 +1606,7 @@ describe('a landing order', function () {
                     return [key, { unitKey: key, name: `u${index}`, keyParts: {}, decision: 'run' as const, reused: null, resources: null, tree: null, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
                 }),
             );
-            return { tree: sha(1), base: main, changes: [], units: units, empty: null, whole: null, decided: { run: 'r', status: 'green' }, voids: 0, judged: true, attemptsBefore: 0 };
+            return { tree: sha(1), base: main, changes: [], units: units, empty: null, whole: null, decided: { run: 'r', status: 'green' }, voids: 0, judged: true, decisive: true, attemptsBefore: 0 };
         };
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'failed', 'mainRed')]))).toBe(true);
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'void', 'infra')]))).toBe(false);
