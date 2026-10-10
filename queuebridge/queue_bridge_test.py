@@ -131,6 +131,23 @@ class Tick(unittest.TestCase):
                          ["stage1/cohere/gitignore TestThePortAnswersAsGoCohereAndGitDo_026=" + queue_bridge.mainReds[0][2]])
         self.assertIsNone(queue_bridge.excusedNames(["stage1/cohere/estree TestThePortAnswersAsGoCohereAndGitDo_026"]))
 
+    def test_a_failure_outside_any_test_makes_a_record_unexcusable(self):
+        import json
+        def event(action, test=None, package="github.com/system-inc/adamic/stage1/cohere/gitignore"):
+            return json.dumps({"Action": action, "Package": package, **({"Test": test} if test else {})})
+        shard = "TestThePortAnswersAsGoCohereAndGitDo_022"
+        clean = [event("run", shard), event("fail", shard)]
+        self.assertEqual(queue_bridge.failingTests(clean, {"stages_exit": {"build": 0, "tests": 1}}), ["stage1/cohere/gitignore " + shard])
+        # A package-level fail (a build break, a binary dying outside any test) beside the ruled red.
+        self.assertIsNone(queue_bridge.failingTests(clean + [event("fail", package="github.com/system-inc/adamic/internal/lower")], {}))
+        # A test that started and never ended.
+        self.assertIsNone(queue_bridge.failingTests(clean + [event("run", "TestOther", "github.com/system-inc/adamic/internal/lower")], {}))
+        # A stage other than tests that didn't pass.
+        self.assertIsNone(queue_bridge.failingTests(clean, {"stages_exit": {"build": 2, "tests": 1}}))
+        # No test record at all.
+        self.assertIsNone(queue_bridge.failingTests(None, {}))
+        self.assertIsNone(queue_bridge.excusedNames(queue_bridge.failingTests(clean + [event("fail", package="github.com/system-inc/adamic/internal/lower")], {}) or []))
+
     def test_a_first_red_is_served_again_and_only_a_second_red_is_the_changes(self):
         pipeline, held = FakePipeline([future]), memory()
         gate = FakeGate({"ref": "gate-logs/r1/fast", "status": "red", "gated": tree})

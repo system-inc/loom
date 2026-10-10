@@ -62,6 +62,35 @@ def excusedNames(failing):
     return names or None
 
 
+def failingTests(lines, fast):
+    """The failing top-level tests in a record's test events, or None when a failure could hide outside them (Loom's
+    guard, 00:34Z): a fail with no test (a build failure, a binary dying outside any test), a test that started and never
+    ended, a stage other than tests that didn't pass, or no test record at all. None is never excusable."""
+    if lines is None:
+        return None
+    stages = fast.get("stages_exit") or {}
+    if any(code != 0 for stage, code in stages.items() if stage != "tests"):
+        return None
+    names, started, ended = set(), set(), set()
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        action, test, package = event.get("Action"), event.get("Test"), event.get("Package", "")
+        if action == "fail" and not test:
+            return None
+        if test and action == "run":
+            started.add((package, test))
+        if test and action in ("pass", "fail", "skip"):
+            ended.add((package, test))
+        if action == "fail" and test:
+            names.add(package.split("/adamic/")[-1] + " " + test.split("/")[0])
+    if started - ended:
+        return None
+    return sorted(names)
+
+
 def docsOnly(paths):
     """Whether a change touches only Markdown, which the ruled gate lands with its census and no product suite."""
     return bool(paths) and all(path.endswith(".md") for path in paths)
@@ -148,21 +177,15 @@ class Gate:
         return None
 
     def failing(self, ref):
-        """The failing top-level tests of a record, "<package under the module> <Test>", from its test.jsonl.gz."""
+        """The failing top-level tests of a record, "<package under the module> <Test>", from its test.jsonl.gz and
+        fast.json; None when the record can't be read that way (see failingTests)."""
         raw = subprocess.run(["git", "-C", repository, "show", "origin/%s:test.jsonl.gz" % ref], capture_output=True).stdout
-        names = set()
         try:
-            lines = gzip.decompress(raw).decode(errors="replace").splitlines() if raw else []
-        except OSError:
+            lines = gzip.decompress(raw).decode(errors="replace").splitlines() if raw else None
+            fast = json.loads(git("show", "origin/%s:fast.json" % ref) or "{}")
+        except (OSError, ValueError):
             return None
-        for line in lines:
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if event.get("Action") == "fail" and event.get("Test"):
-                names.add(event.get("Package", "").split("/adamic/")[-1] + " " + event["Test"].split("/")[0])
-        return sorted(names)
+        return failingTests(lines, fast)
 
     def queue(self, tree):
         """Puts tree in front of fast-gate-watch as a cloud/land-* tip. True when the branch is there."""
