@@ -78,7 +78,7 @@ type Result struct {
 // the sha (a branch called <sha>) can stand in for it. The sha must be a commit that contains from, which makes the push
 // a fast-forward; it then goes with --force-with-lease=<branch>:<from>, so GitHub takes it only while the branch is still
 // at from, which refuses a branch that moved or was deleted since the read and never creates one. A push GitHub accepted
-// has landed only when the branch reads back as the sha.
+// has landed only when the branch reads back as the sha, or as a commit that contains it (another landing already on top).
 func (hands Hands) Push(sha, from string) Result {
 	local := "refs/loom/land/" + sha
 	defer Git(hands.Repository, nil, "update-ref", "-d", local)
@@ -103,10 +103,41 @@ func (hands Hands) Push(sha, from string) Result {
 	if err != nil {
 		return Result{Classify(stdout, stderr, hands.Ref()), said(stdout, stderr, err)}
 	}
-	if tip := hands.Tip(); tip != sha {
-		return Result{Failed, fmt.Sprintf("the push was answered, but %s reads as %q, not %s", hands.Ref(), tip, sha)}
+	if tip := hands.Tip(); tip != sha && !hands.contains(tip, sha) {
+		return Result{Failed, fmt.Sprintf("the push was answered, but %s reads as %q, which isn't %s and doesn't contain it", hands.Ref(), tip, sha)}
 	}
 	return Result{Kind: Landed}
+}
+
+// contains is whether tip, a commit on GitHub, has sha in its history: fetched into the clone, then asked of git. A tip
+// git can't fetch or answer for doesn't contain it.
+func (hands Hands) contains(tip, sha string) bool {
+	if !shaPattern.MatchString(tip) {
+		return false
+	}
+	if _, _, err := Git(hands.Repository, nil, "fetch", "-q", "--no-tags", "origin", tip); err != nil {
+		return false
+	}
+	_, _, err := Git(hands.Repository, nil, "merge-base", "--is-ancestor", sha, tip)
+	return err == nil
+}
+
+// Sweep deletes every refs/loom/land/ ref the lander's clone holds, and says how many: each push deletes its own when it
+// returns, but a pass systemd killed mid-push never does. A pass sweeps first, under the lock, so no other pass's ref is
+// in flight.
+func (hands Hands) Sweep() (int, error) {
+	stdout, stderr, err := Git(hands.Repository, nil, "for-each-ref", "--format=%(refname)", "refs/loom/land/")
+	if err != nil {
+		return 0, fmt.Errorf("listing refs/loom/land/: %s", said("", stderr, err))
+	}
+	swept := 0
+	for _, ref := range strings.Fields(stdout) {
+		if _, stderr, err := Git(hands.Repository, nil, "update-ref", "-d", ref); err != nil {
+			return swept, fmt.Errorf("deleting %s: %s", ref, said("", stderr, err))
+		}
+		swept++
+	}
+	return swept, nil
 }
 
 // said is what a refused push said, as one line of at most 300 bytes: git's refused ref lines, then what the remote and
@@ -196,13 +227,18 @@ type Pass struct {
 	Unread               bool
 }
 
-// Land is one pass over the landing orders. Each is checked to be a change and a sha before git sees it, so an order
+// Land is one pass over the landing orders, after sweeping the landing refs a killed pass left. Each is checked to be a change and a sha before git sees it, so an order
 // can never name a ref, an option or a forced refspec; the branch's tip is read before each push and reported as the
 // main it moved from, or the main a refusal found. A branch already at the order's sha is a landing whose report was
 // lost: it is reported again, from that sha, which Queue takes as the same landing. A report the queue doesn't take
 // holds the order, so the pass says so.
 func Land(queue Queue, hands Hands, log func(string)) Pass {
 	pass := Pass{}
+	if swept, err := hands.Sweep(); err != nil {
+		log(fmt.Sprintf("sweeping the landing refs a killed pass left: %v", err))
+	} else if swept > 0 {
+		log(fmt.Sprintf("swept %d landing refs a killed pass left", swept))
+	}
 	status, answer := call(queue, "GET", "/landings", nil)
 	var listed struct {
 		Landings []Order `json:"landings"`

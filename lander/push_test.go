@@ -23,7 +23,9 @@ import (
 //	the lease dropped (a branch deleted mid-pass is created again): TestABranchDeletedMidPassIsNeverCreatedAgain
 //	a lease refusal on a branch now gone parking the change: TestABranchDeletedMidPassIsNeverCreatedAgain
 //	"stale info" not read as the branch moving: TestABranchMovedMidPassParksAndKeepsItsTip, TestRefusalsAreReadByWhatGitAndGitHubSaid
-//	the branch not read back after the push: TestAPushThatDidntStickIsHeld
+//	the branch not read back after the push, or any read-back counted landed: TestAPushThatDidntStickIsHeld
+//	a read-back with another commit on top of the sha held: TestAPushWithACommitOnTopByTheReadBackLanded
+//	no sweep of the landing refs a killed pass left, or one that deletes nothing: TestAPassSweepsTheLandingRefsAKilledPassLeft
 //	the future not checked to be a commit: TestATagObjectAsTheFutureIsHeld
 //	a report the queue refused counted landed: TestALandingWhoseReportWasLostIsReportedAgain
 //	rule words matched against all of git's output, or the branch's name left in: TestRefusalsAreReadByWhatGitAndGitHubSaid

@@ -161,6 +161,51 @@ func TestAPushThatDidntStickIsHeld(t *testing.T) {
 	}
 }
 
+// A push that landed, with another commit on top by the time the branch is read back (here a hook adds it), has landed:
+// the branch contains the sha, so it is reported, never held for the next pass to park a change already on main.
+func TestAPushWithACommitOnTopByTheReadBackLanded(t *testing.T) {
+	made := newWorld(t)
+	tested := made.commit(t, "tested", made.main)
+	made.publish(t, tested, "a")
+	hook := "#!/bin/sh\nexport GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t\n" +
+		"while read old new ref; do top=$(git commit-tree \"$new^{tree}\" -p \"$new\" -m 'on top'); git update-ref \"$ref\" \"$top\"; echo \"$top\" > top; done\n"
+	os.WriteFile(filepath.Join(made.origin, "hooks", "post-receive"), []byte(hook), 0o755)
+	queue := &fakeQueue{landings: []Order{orderOf(change, tested, made.main)}}
+	if pass := Land(queue, made.hands("main"), made.log); pass != (Pass{Landed: 1}) {
+		t.Fatalf("pass %+v, %q", pass, made.logged)
+	}
+	top, _ := os.ReadFile(filepath.Join(made.origin, "top"))
+	if tip := made.tip(t, "main"); tip == tested || tip != strings.TrimSpace(string(top)) {
+		t.Fatalf("main is %s, not the commit on top %q", tip, top)
+	}
+	if want := []post{{"/landings/" + change, map[string]any{"main": tested, "from": made.main, "landed": tested}}}; !reflect.DeepEqual(queue.posts, want) {
+		t.Fatalf("posted %+v", queue.posts)
+	}
+}
+
+// Every refs/loom/land/ ref a pass left (systemd killed it before its deferred delete) is swept at the next pass's
+// start, and the clone's other refs stay.
+func TestAPassSweepsTheLandingRefsAKilledPassLeft(t *testing.T) {
+	made := newWorld(t)
+	tested := made.commit(t, "tested", made.main)
+	made.publish(t, tested, "a")
+	git(t, made.lander, "fetch", "-q", "origin", "refs/heads/a:refs/heads/a")
+	before := git(t, made.lander, "for-each-ref", "--format=%(refname)")
+	for _, ref := range []string{"refs/loom/land/" + tested, "refs/loom/land/" + made.main} {
+		git(t, made.lander, "update-ref", ref, tested)
+	}
+	queue := &fakeQueue{}
+	if pass := Land(queue, made.hands("main"), made.log); pass != (Pass{}) {
+		t.Fatalf("pass %+v, %q", pass, made.logged)
+	}
+	if refs := git(t, made.lander, "for-each-ref", "--format=%(refname)"); refs != before || !strings.Contains(refs, "refs/heads/a") {
+		t.Fatalf("the clone holds %q", refs)
+	}
+	if len(made.logged) != 1 || made.logged[0] != "swept 2 landing refs a killed pass left" {
+		t.Fatalf("logged %q", made.logged)
+	}
+}
+
 // A branch whose name holds a rule word ("denied") moving ahead of the sha is the branch moving: the change parks.
 func TestABranchNamedForARefusalStillParksWhenItMoved(t *testing.T) {
 	made := newWorld(t)
