@@ -222,6 +222,16 @@ class Tick(unittest.TestCase):
         gate.checkResult = (3, "", "held")
         queue_bridge.tick(pipeline, gate, memory())
         self.assertEqual((gate.checks[0][0], pipeline.posts()), ("--ruled-gate", []))
+        # A check that didn't run (git's lock race in the shared checkout) posts nothing and runs again; only
+        # push-main's refusal is the change's red.
+        pipeline, gate, held = FakePipeline([future], paths=["docs/a.md"]), FakeGate(), memory()
+        gate.checkResult = (1, "", "error: cannot lock ref 'refs/remotes/origin/x': is at 1 but expected 2")
+        queue_bridge.tick(pipeline, gate, held)
+        self.assertEqual((pipeline.posts(), held["ruled"]), ([], []))
+        gate.checkResult = (1, "", "refused: not test-only against main 0bf6186d: cmd/x/main.go")
+        queue_bridge.tick(pipeline, gate, held)
+        verdict = pipeline.posts()[0][1]["verdict"]
+        self.assertEqual((verdict["status"], verdict["cause"]), ("failed", "change"))
 
     def test_the_mac_lands_nothing_once_the_pusher_holds_main(self):
         queue_bridge.landsHere = False

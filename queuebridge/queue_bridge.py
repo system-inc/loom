@@ -318,10 +318,15 @@ def decide(pipeline, gate, memory):
             code, why = checked(gate, arguments, change)
             if code == 3:
                 continue
+            # Only push-main's own refusal is the change's. Anything else (a git lock race in the shared checkout, a
+            # fetch that failed) is the check not running, so it runs again next tick, never a red.
+            if code != 0 and not why.startswith("refused"):
+                log("push-main couldn't check %s (exit %d), trying again: %s" % (change, code, why[:300]))
+                continue
             if code != 0:
                 verdict.update(status="failed", cause="change", run="%s refused by push-main's checks: %s" % (lane[0], why[:300]))
             status, answer = pipeline.call("POST", "/verdicts", {"change": change, "verdict": verdict})
-            log("verdict %s passed under %s: %d %s" % (change, lane[1], status, answer))
+            log("verdict %s %s under %s: %d %s" % (change, verdict["status"], lane[1], status, answer))
             if status in (200, 409):
                 memory["ruled"].append(change)
             continue
