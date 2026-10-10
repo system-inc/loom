@@ -24,6 +24,11 @@ type Finished struct {
 	Outputs      []string
 	// Events are the attempt's test2json lines naming a test, in order, for the census; never part of the verdict.
 	Events []TestEvent
+	// TestLog names the attempt's uploaded test log; TestLogRead says WithTestLog read it, and NoTestFiles that it
+	// says the package has none.
+	TestLog     *TestLogRef
+	TestLogRead bool
+	NoTestFiles bool
 }
 
 // Runs reads a run's finished events for one unit; found is false when the unit never reported.
@@ -50,6 +55,10 @@ type Queue interface {
 type PlanUnit struct {
 	UnitKey string
 	Reused  string // the reused verdict's id; empty when the unit runs
+	// Named are the top-level tests the plan named for the unit (planner.RunNames of its select.run), each of which
+	// must reach a result in its test log; empty when the plan runs every test, or names them by a pattern the
+	// planner can't read back.
+	Named []string
 }
 
 // A Job is one future to judge. Its future is a prefix future whose newest change is Record's, so a red in it is
@@ -89,6 +98,8 @@ type Loop struct {
 	Now    func() time.Time
 	// Census, when set, holds every unit whose tests passed to the skip census (#esdkm67); nil skips the step.
 	Census *CensusConfig
+	// RequireTestLog holds every passed unit to a read test log with a test result in it (RuleZeroRun).
+	RequireTestLog bool
 }
 
 // CensusConfig is what the census step reads: the tools tree's rows, whether an awaited branch is on main, and the
@@ -101,6 +112,9 @@ type CensusConfig struct {
 
 // RuleCensus is the rule a unit's red names when its tests passed and its skips failed the census.
 const RuleCensus = Rule + " census"
+
+// RuleZeroRun is the rule a unit's red names when it passed on a test log with no test result in it.
+const RuleZeroRun = Rule + " zerorun"
 
 // JudgeFuture decides every planned unit of one future, posts the result to Queue, and returns what it posted.
 func (loop Loop) JudgeFuture(job Job) (FuturePost, error) {
@@ -202,7 +216,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 	evidence := evidenceOf(first)
 	verdict.Attempts = append(verdict.Attempts, first.Attempt)
 	verdict.Tests, verdict.Outputs = nonNil(first.Tests), nonNilStrings(first.Outputs)
-	events := first.Events
+	source := first // the attempt whose tests the verdict carries
 	budget := InfraRetries
 	var decision Decision
 	for {
@@ -227,7 +241,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 				}
 				verdict.Attempts = append(verdict.Attempts, again.Attempt)
 				verdict.Tests, verdict.Outputs = nonNil(again.Tests), nonNilStrings(again.Outputs)
-				events = again.Events
+				source = again
 				evidence = evidenceOf(again)
 			} else {
 				// An alone rerun broke: run both again.
@@ -241,10 +255,21 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		}
 	}
 	verdict.Status, verdict.Cause, verdict.Infra = decision.Status, decision.Cause, decision.Infra
+	if loop.RequireTestLog && verdict.Status == Passed {
+		// The old path's zerorun, carried over (Loom, Oct 10 01:12Z): a passed unit is never green on a test log it
+		// doesn't have, or on one that ran no test. No log is void (the runner reported nothing to read); a log with no
+		// test result that doesn't say the package has no test files is red, since its tests never ran.
+		switch {
+		case !source.TestLogRead:
+			verdict.Status, verdict.Cause, verdict.Infra = Void, CauseInfra, InfraSilent
+		case len(source.Tests) == 0 && !source.NoTestFiles, len(unrun(unit.Named, source.Tests)) > 0:
+			verdict.Status, verdict.Cause, verdict.RuleId = Failed, CauseChange, RuleZeroRun
+		}
+	}
 	if loop.Census != nil && verdict.Status == Passed {
 		// A unit is a whole package, so a skip, the pass that covers it and its siblings all run in it: the unit's census
 		// is the batch's for its package. Its red is structural, the box's census step, so nothing is rerun for it.
-		census := Census(events, loop.Census.Rows, loop.Census.Landed, loop.Census.Platform)
+		census := Census(source.Events, loop.Census.Rows, loop.Census.Landed, loop.Census.Platform)
 		if census.Failed() {
 			verdict.Status, verdict.Cause, verdict.RuleId = Failed, CauseChange, RuleCensus
 			verdict.censusFailing = census.Failing
@@ -328,4 +353,21 @@ func (stub *StubQueue) PostVerdicts(future string, post FuturePost) error {
 	}
 	stub.Posts[future] = append(stub.Posts[future], post)
 	return nil
+}
+
+// unrun is the named top-level tests with no result in tests.
+func unrun(named []string, tests []TestOutcome) []string {
+	ran := map[string]bool{}
+	for _, outcome := range tests {
+		if outcome.Outcome == "pass" || outcome.Outcome == "fail" || outcome.Outcome == "skip" {
+			ran[outcome.Test] = true
+		}
+	}
+	missing := []string{}
+	for _, name := range named {
+		if !ran[name] {
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }

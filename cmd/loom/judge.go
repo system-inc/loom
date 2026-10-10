@@ -105,9 +105,12 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			result, err := coordinator.RerunAlone(runContext, config, unit)
 			return result.Events, err
 		},
+		Log: func(run, sha256 string) ([]byte, error) {
+			return coordinator.ReadRunBlob(runContext, *wire, secret, run, sha256)
+		},
 		Main:  judge.NoMainRecords{},
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
-		Loop:  judge.Loop{Now: time.Now},
+		Loop:  judge.Loop{Now: time.Now, RequireTestLog: true},
 	}
 	if *censusRows != "" {
 		census, err := censusConfig(strings.Split(*censusRows, ","), *censusGit)

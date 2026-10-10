@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/system-inc/loom/protocol"
@@ -45,6 +46,17 @@ func ReadRunEvents(readContext context.Context, wire string, secret []byte, run 
 			return events, nil
 		}
 	}
+}
+
+// ReadRunBlob is one blob a run's unit uploaded (an uploaded event's sha256), read with the run's coordinator token:
+// the judge reads each unit's test log, loom-out/test.jsonl.gz, this way, since the runner doesn't stream it.
+func ReadRunBlob(readContext context.Context, wire string, secret []byte, run string, sha256 string) ([]byte, error) {
+	token, err := protocol.MintToken(secret, protocol.TokenClaims{Run: run, Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Hour).Unix()})
+	if err != nil {
+		return nil, err
+	}
+	reader := &wireClient{url: wire, client: http.DefaultClient}
+	return reader.call(readContext, http.MethodGet, "/runs/"+run+"/blobs/"+sha256, token, nil)
 }
 
 // RerunAlone runs one unit on its own, uncached, at RerunPriority on every pool the config places on: Judge's

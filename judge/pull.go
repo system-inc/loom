@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -99,6 +100,7 @@ type Puller struct {
 	RunOf  func(tree string, attempt int) string                                // coordinator.FutureRun
 	Read   func(run string) ([]protocol.Event, error)                           // coordinator.ReadRunEvents, bound
 	Rerun  func(keyParts json.RawMessage, sha string) ([]protocol.Event, error) // planner.JobUnitFor, then coordinator.RerunAlone
+	Log    func(run, sha256 string) ([]byte, error)                             // coordinator.ReadRunBlob, bound: each attempt's test log
 	Main   MainRecords
 	Queue  Queue
 	Loop   Loop // its Now is used; its collaborators are set per future
@@ -166,6 +168,14 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	for _, unit := range future.Units {
 		parts[unit.UnitKey] = unit.KeyParts
 		planUnit := PlanUnit{UnitKey: unit.UnitKey}
+		var parts struct {
+			Select struct {
+				Run string `json:"run"`
+			} `json:"select"`
+		}
+		if json.Unmarshal(unit.KeyParts, &parts) == nil {
+			planUnit.Named, _ = planner.RunNames(parts.Select.Run)
+		}
 		if unit.Decision == "reuse" {
 			planUnit.Reused = "reused"
 			if unit.Reused != nil && *unit.Reused != "" {
@@ -175,10 +185,10 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 		plan = append(plan, planUnit)
 	}
 	loop := puller.Loop
-	loop.Runs = EventRuns{Read: func(string) ([]protocol.Event, error) { return events, nil }}
+	loop.Runs = EventRuns{Read: func(string) ([]protocol.Event, error) { return events, nil }, Log: puller.Log}
 	loop.Fabric = EventFabric{Rerun: func(unitKey, tree string) ([]protocol.Event, error) {
 		return puller.Rerun(parts[unitKey], tree)
-	}}
+	}, Log: puller.Log}
 	loop.Main, loop.Queue = puller.Main, puller.Queue
 	record := ChangeRecord{Change: future.Change.Change, Sha: future.Change.Sha, Base: future.Change.Base, Owner: future.Change.Owner}
 	return loop, Job{Record: record, Change: record.Change, Future: future.Future, Base: future.Base, Run: run, Plan: plan}
