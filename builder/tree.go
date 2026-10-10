@@ -27,17 +27,45 @@ import (
 // every test package's binary (go test -c, with the unit's env and flags), the products its tests use (built by its
 // product tests into the tree's own buildcache), and the tree's source (tests read testdata), all in the action store.
 //
-// A tree key T names the build: sha256 of "loom-tree-v1", the tree hash, the Go version and the gate env. Its index is
+// A tree key T names the build: sha256 of "loom-tree-v2", the tree hash, the Go version, the platform the binaries were
+// built for (GOOS/GOARCH: a Linux binary is no use to a Mac runner) and the gate env. Its index is
 // trees/<T>.json in the store (store.go): each package's test binary, gzipped, as a blob; the buildcache products its
 // tests read, each its own archive under refs/action/<buildcache key>, so a product no tree changed is built and goes
 // up once and later trees fetch it (held.go); and
 // the tree's source archive, one blob every package shares. A runner reads the index, then only its own package's
 // binary, products and the source, each by sha256.
 
-// TreeKey is the key of one tree's build.
-func TreeKey(treeHash, goVersion string, environment []string) string {
-	sum := sha256.Sum256([]byte("loom-tree-v1\n" + treeHash + "\n" + goVersion + "\n" + strings.Join(environment, "\n")))
+// TreeKey is the key of one tree's build for the platform goos/goarch.
+func TreeKey(treeHash, goVersion, goos, goarch string, environment []string) string {
+	sum := sha256.Sum256([]byte("loom-tree-v2\n" + treeHash + "\n" + goVersion + "\n" + goos + "/" + goarch + "\n" + strings.Join(environment, "\n")))
 	return hex.EncodeToString(sum[:])
+}
+
+// A package's build failure is the change's (ChangeFailure: go test -c exited normally with its diagnostics, a compile
+// or vet error, which go test reports as the package's red) or Workshop's (WorkshopFailure: anything else, a kill, a
+// signal, a full disk, memory, the network). A runner reports the change's as the package's red, with its output, and
+// Workshop's as Loom's, broken. An index that names neither for a failed package is read as Workshop's.
+const (
+	ChangeFailure   = "change"
+	WorkshopFailure = "workshop"
+)
+
+// machineFailures are what go's output says when the machine, not the code, failed a build.
+var machineFailures = []string{"no space left on device", "signal: killed", "signal: terminated", "out of memory", "cannot allocate memory",
+	"resource temporarily unavailable", "too many open files", "dial tcp", "i/o timeout", "TLS handshake", "connection reset"}
+
+// BuildFailure says whose a failed go test -c is, from its error and output.
+func BuildFailure(err error, output []byte) string {
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || !exit.Exited() || exit.ExitCode() != 1 || len(bytes.TrimSpace(output)) == 0 {
+		return WorkshopFailure
+	}
+	for _, failure := range machineFailures {
+		if bytes.Contains(output, []byte(failure)) {
+			return WorkshopFailure
+		}
+	}
+	return ChangeFailure
 }
 
 // A TreePackage is one test package of a tree and what its build made.
@@ -49,6 +77,8 @@ type TreePackage struct {
 	Products  []string `json:"products"`         // buildcache keys its tests read
 	Seconds   float64  `json:"seconds"`
 	Error     string   `json:"error,omitempty"`
+	// Failure says whose Error is: ChangeFailure or WorkshopFailure (empty: Workshop's).
+	Failure string `json:"failure,omitempty"`
 }
 
 // TestPackages lists every package of the tree with tests, for this platform, compiling nothing.
@@ -281,7 +311,7 @@ func (build TreeBuild) environment(extra ...string) []string {
 func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 	results := make([]TreePackage, len(packages))
 	refuse := func(index int, err error) {
-		results[index] = TreePackage{Package: packages[index].Package, Directory: packages[index].Directory, Products: []string{}, Error: "not started: " + err.Error()}
+		results[index] = TreePackage{Package: packages[index].Package, Directory: packages[index].Directory, Products: []string{}, Error: "not started: " + err.Error(), Failure: WorkshopFailure}
 	}
 	admitted(len(packages), build.jobs(), build.gauge(), build.busy(), build.disk(), func(index int) {
 		test := packages[index]
@@ -292,13 +322,15 @@ func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 		command.Dir = build.Tree
 		command.Env = build.shared()
 		if output, err := command.CombinedOutput(); err != nil {
+			// The change's diagnostics are what its owner reads, so they keep more than a machine's failure.
 			tail := output
-			if len(tail) > 2000 {
-				tail = tail[len(tail)-2000:]
+			if len(tail) > 16000 {
+				tail = tail[len(tail)-16000:]
 			}
 			result.Error = fmt.Sprintf("go test -c: %v\n%s", err, tail)
+			result.Failure = BuildFailure(err, output)
 		} else if info, err := os.Stat(binary); err != nil {
-			result.Error = err.Error()
+			result.Error, result.Failure = err.Error(), WorkshopFailure
 		} else {
 			result.Bytes = info.Size()
 		}
@@ -357,9 +389,12 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 // A TreeIndex is trees/<treeKey>.json, a tree's build: the source archive's blob, each product's archive by its key,
 // and each package with its binary's blob and the products its tests read.
 type TreeIndex struct {
-	Tree     string                 `json:"tree"`
-	Future   string                 `json:"future"`
-	Go       string                 `json:"go"`
+	Tree   string `json:"tree"`
+	Future string `json:"future"`
+	Go     string `json:"go"`
+	// Goos and Goarch are the platform the binaries were built for, go env GOOS and GOARCH on Workshop.
+	Goos     string                 `json:"goos"`
+	Goarch   string                 `json:"goarch"`
 	Source   string                 `json:"source"`
 	Seconds  float64                `json:"seconds"`
 	Products map[string]string      `json:"products"`
@@ -537,7 +572,7 @@ func each(count, jobs int, work func(index int) error) error {
 // in the index and nothing more. It fills in treeIndex's blobs as it goes, and reports whether it wrote the index
 // (writeIndex keeps one with fewer failed packages).
 func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte, held map[string]string) (string, bool, error) {
-	treeKey := TreeKey(treeIndex.Tree, treeIndex.Go, GateEnvironment())
+	treeKey := TreeKey(treeIndex.Tree, treeIndex.Go, treeIndex.Goos, treeIndex.Goarch, GateEnvironment())
 	var err error
 	if treeIndex.Source, err = store.PutBlob(source); err != nil {
 		return "", false, fmt.Errorf("the source archive: %w", err)
@@ -598,6 +633,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 		for _, product := range built.Products {
 			if conflict, broke := conflicted[product]; broke {
 				built.Error += conflict.Error() + "\n"
+				built.Failure = WorkshopFailure
 			}
 		}
 		if built.Error == "" {

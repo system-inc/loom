@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -73,6 +74,12 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	index, err := run.treeIndex(runContext, job.Tree)
 	if err != nil {
 		run.fail(protocol.PhaseFetch, fmt.Errorf("%w: Loom's, never the change's", err))
+		return protocol.StatusBroken
+	}
+	// Binaries built for another platform can't run here: the placement's mistake, refused before anything is fetched.
+	if index.Goos != runtime.GOOS || index.Goarch != runtime.GOARCH {
+		run.fail(protocol.PhaseStart, fmt.Errorf("refused as unfit: the tree's binaries are built for %s/%s, and this runner is %s/%s: Loom's, never the change's",
+			index.Goos, index.Goarch, runtime.GOOS, runtime.GOARCH))
 		return protocol.StatusBroken
 	}
 	packages, needed, err := prebuiltPackages(job, index)
@@ -199,7 +206,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 }
 
 // treeIndex reads trees/<treeKey>.json from the store, as builder.ParseTree checks it, and holds it to its key: the
-// index's own tree, Go release and the gate's environment must hash to the key the job named.
+// index's own tree, Go release, platform and the gate's environment must hash to the key the job named.
 func (run *unitRun) treeIndex(runContext context.Context, treeKey string) (builder.TreeIndex, error) {
 	started := time.Now()
 	name := "trees/" + treeKey + ".json"
@@ -227,8 +234,8 @@ func (run *unitRun) treeIndex(runContext context.Context, treeKey string) (build
 	if err != nil {
 		return builder.TreeIndex{}, err
 	}
-	if key := builder.TreeKey(index.Tree, index.Go, builder.GateEnvironment()); key != treeKey {
-		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s describes tree %s on %s, whose key is %s: the store is poisoned", name, index.Tree, index.Go, key)
+	if key := builder.TreeKey(index.Tree, index.Go, index.Goos, index.Goarch, builder.GateEnvironment()); key != treeKey {
+		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s describes tree %s on %s for %s/%s, whose key is %s: the store is poisoned", name, index.Tree, index.Go, index.Goos, index.Goarch, key)
 	}
 	return index, nil
 }

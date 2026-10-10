@@ -87,7 +87,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	}
 	fake, store := serve(t)
 	treeKey, written, err := PublishTree(store, &index, build.Out, build.Cache, source, nil)
-	if err != nil || !written || treeKey != TreeKey(index.Tree, index.Go, GateEnvironment()) {
+	if err != nil || !written || treeKey != TreeKey(index.Tree, index.Go, index.Goos, index.Goarch, GateEnvironment()) {
 		t.Fatal(treeKey, err)
 	}
 	// The layout: the tree's index, one ref (the product), and four blobs (the source, the product, two binaries).
@@ -250,6 +250,43 @@ func TestARunnerRefusesATreeThatDoesntCheck(t *testing.T) {
 
 // Warm compiles every package in one go process and fails, naming the package, when one doesn't compile; a
 // compile limit of one still finishes.
+// A package whose test code doesn't compile, or doesn't vet, is the change's red; a build the machine failed (a kill,
+// a full disk) is Workshop's. The tree's key names the platform its binaries run on.
+// Mutants: every failure the change's; the key without the platform.
+func TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy(t *testing.T) {
+	tree := gitTree(t, map[string]string{
+		"go.mod":             "module example.com/failing\n\ngo 1.22\n",
+		"broken/b_test.go":   "package broken\n\nimport \"testing\"\n\nfunc TestBroken(t *testing.T) { undefinedThing() }\n",
+		"unvetted/u_test.go": "package unvetted\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n)\n\nfunc TestU(t *testing.T) { fmt.Printf(\"%d\\n\", \"s\") }\n",
+	})
+	build := TreeBuild{Tree: tree, Cache: t.TempDir(), Out: t.TempDir(), Environment: GateEnvironment(), Jobs: 2, Compile: 2}
+	for _, result := range build.Binaries([]planner.ProductTest{{Package: "example.com/failing/broken", Directory: "broken"}, {Package: "example.com/failing/unvetted", Directory: "unvetted"}}) {
+		if result.Failure != ChangeFailure || !strings.Contains(result.Error, "_test.go:") {
+			t.Errorf("%s: %q, %q", result.Package, result.Failure, result.Error)
+		}
+	}
+	shell := func(script string) ([]byte, error) { return exec.Command("sh", "-c", script).CombinedOutput() }
+	for name, test := range map[string]struct {
+		script string
+		want   string
+	}{
+		"a compile error":   {"echo 'a.go:1: undefined: x'; exit 1", ChangeFailure},
+		"a full disk":       {"echo 'write /tmp/go-build1/x: no space left on device'; exit 1", WorkshopFailure},
+		"a killed compiler": {"echo 'compile: signal: killed'; exit 1", WorkshopFailure},
+		"a killed go":       {"kill -9 $$", WorkshopFailure},
+		"no diagnostics":    {"exit 1", WorkshopFailure},
+		"another exit":      {"echo usage; exit 2", WorkshopFailure},
+	} {
+		output, err := shell(test.script)
+		if got := BuildFailure(err, output); got != test.want {
+			t.Errorf("%s: %s, want %s", name, got, test.want)
+		}
+	}
+	if TreeKey("t", "go1.27.1", "linux", "amd64", nil) == TreeKey("t", "go1.27.1", "darwin", "arm64", nil) {
+		t.Error("two platforms' builds share a key")
+	}
+}
+
 func TestWarmCompilesEveryPackageOnceAndNamesOneThatDoesNotCompile(t *testing.T) {
 	tree := gitTree(t, map[string]string{
 		"go.mod":         "module example.com/warm\n\ngo 1.22\n",

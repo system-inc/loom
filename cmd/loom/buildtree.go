@@ -96,6 +96,12 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	// The platform the binaries are built for, which the tree's key names: a runner on another can't run them.
+	platform, err := exec.Command("go", "env", "GOOS", "GOARCH").Output()
+	if err != nil {
+		return fail(err)
+	}
+	goos, goarch, _ := strings.Cut(strings.TrimSpace(string(platform)), "\n")
 	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: builder.GateEnvironment(),
 		Jobs: *jobs, Compile: *compile, Watched: watched}
 	for _, path := range []string{build.Cache, build.Out, filepath.Join(directory, "logs")} {
@@ -145,14 +151,16 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	treeIndex := builder.TreeIndex{Tree: treeHash, Future: *future, Go: strings.TrimSpace(string(goVersion)), Packages: map[string]builder.TreePackage{}}
+	treeIndex := builder.TreeIndex{Tree: treeHash, Future: *future, Go: strings.TrimSpace(string(goVersion)), Goos: strings.TrimSpace(goos),
+		Goarch: strings.TrimSpace(goarch), Packages: map[string]builder.TreePackage{}}
 	for _, result := range built {
 		result.Products = products[result.Package]
 		if result.Products == nil {
 			result.Products = []string{}
 		}
 		if failure, broke := productFailures[result.Package]; broke && result.Error == "" {
-			result.Error = "product tests: " + failure
+			// A product test that failed on Workshop is Workshop's to look at until its failure is classed too.
+			result.Error, result.Failure = "product tests: "+failure, builder.WorkshopFailure
 		}
 		treeIndex.Packages[result.Package] = result
 	}

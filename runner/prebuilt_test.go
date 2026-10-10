@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -171,12 +172,17 @@ func newPrebuiltTree(t *testing.T, store *prebuiltStore) *prebuiltTree {
 		{name: fixtureProductKey + ".inputs", kind: tar.TypeReg, content: "{}\n"},
 		{name: fixtureProductKey + "/tool", kind: tar.TypeReg, content: "the product\n", mode: 0o755},
 	}, true))
-	tree.index = builder.TreeIndex{Tree: strings.Repeat("7", 40), Go: "go1.27.1", Source: tree.source,
+	tree.index = builder.TreeIndex{Tree: strings.Repeat("7", 40), Go: "go1.27.1", Goos: runtime.GOOS, Goarch: runtime.GOARCH, Source: tree.source,
 		Products: map[string]string{fixtureProductKey: product},
 		Packages: map[string]builder.TreePackage{lowerPackage: {Package: lowerPackage, Directory: "internal/lower", Binary: tree.binary, Products: []string{fixtureProductKey}}}}
-	tree.key = builder.TreeKey(tree.index.Tree, tree.index.Go, builder.GateEnvironment())
-	tree.publish(t)
+	tree.rekey(t)
 	return tree
+}
+
+// rekey publishes the index under the key its own tree, Go and platform name.
+func (tree *prebuiltTree) rekey(t *testing.T) {
+	tree.key = builder.TreeKey(tree.index.Tree, tree.index.Go, tree.index.Goos, tree.index.Goarch, builder.GateEnvironment())
+	tree.publish(t)
 }
 
 // publish writes the tree's index as it stands.
@@ -771,4 +777,19 @@ func TestSourcesAreBoundedAndAHeldOneStays(t *testing.T) {
 	}
 	again.release()
 	held[0].release()
+}
+
+// A tree built for another platform is refused as unfit before anything is fetched: its binaries can't run here.
+// Mutant: the platform check dropped.
+func TestATreeForAnotherPlatformIsRefusedAsUnfit(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.tree.index.Goos = "plan9"
+	fixture.tree.rekey(t)
+	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "built for plan9/"+runtime.GOARCH) {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+	if gets := fixture.store.blobGets(); gets != 0 {
+		t.Fatalf("fetched %d blobs for another platform", gets)
+	}
 }
