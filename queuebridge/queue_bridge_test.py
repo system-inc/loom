@@ -87,7 +87,7 @@ class Tick(unittest.TestCase):
         self.assertEqual(pipeline.posts(), [])
 
     def test_a_record_of_the_tree_is_its_verdict_posted_once(self):
-        for status, verdict, cause in (("green", "passed", None), ("red", "failed", "change"), ("void", "void", "infra")):
+        for status, verdict, cause in (("green", "passed", None), ("red", "void", "flake"), ("void", "void", "infra")):
             pipeline, held = FakePipeline([future]), memory()
             gate = FakeGate({"ref": "gate-logs/r/fast", "status": status, "gated": tree})
             queue_bridge.tick(pipeline, gate, held)
@@ -99,6 +99,15 @@ class Tick(unittest.TestCase):
         pipeline, gate = FakePipeline([dict(future, parity=True)]), FakeGate({"ref": "gate-logs/r/fast", "status": "green", "gated": tree})
         queue_bridge.tick(pipeline, gate, memory())
         self.assertEqual((gate.queued, pipeline.posts()), ([], []))
+
+    def test_a_first_red_is_served_again_and_only_a_second_red_is_the_changes(self):
+        pipeline, held = FakePipeline([future]), memory()
+        gate = FakeGate({"ref": "gate-logs/r1/fast", "status": "red", "gated": tree})
+        queue_bridge.tick(pipeline, gate, held)
+        gate.found = {"ref": "gate-logs/r2/fast", "status": "red", "gated": tree}
+        queue_bridge.tick(pipeline, gate, held)
+        self.assertEqual(gate.requeued, [tree])
+        self.assertEqual([(body["verdict"]["status"], body["verdict"]["cause"]) for path, body in pipeline.posts()], [("void", "flake"), ("failed", "change")])
 
     def test_a_void_is_served_once_more_and_only_once(self):
         pipeline, held = FakePipeline([future]), memory()

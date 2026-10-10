@@ -7,7 +7,8 @@ take over. Each tick, from Kirk's Mac beside the gate lane:
 1. Every unplanned future loom-pipeline lists (slice 1: one change, tree = its sha) goes through today's fast gate
    exactly as a cut does: a cloud/land-queue-<tree8> branch at the tree, which fast-gate-watch gates like any
    cloud/land-* tip. Its newest finished record (gate-logs/<tree12>/<stamp>/fast) is the verdict input: green is
-   passed, red is failed with cause change (the judge's stub: any red is the change's), void is void. Main moves often,
+   passed, void is void, and red follows the contract's judge stub, "any second failure is the change": a first red
+   is posted void and served again, and only a red after that is failed with cause change. Main moves often,
    so the gate usually tests the change merged onto a newer main (a gate merge, second parent the change's sha): that
    merge becomes the change's future, posted with its first parent as gateMerge.base, and it is what lands. A record
    of any other tree is void for this future. A void is served once more (requeue.sh, the old path's one requeue),
@@ -136,15 +137,16 @@ class Gate:
         return subprocess.run(["git", "-C", repository, "merge-base", "--is-ancestor", tree, main]).returncode == 0
 
 
-def verdictOf(record, tree, gate):
-    """The body today's record gives the change at tree: its whole verdict, and gateMerge when it gated a merge of tree."""
+def verdictOf(record, tree, gate, served=False):
+    """The body today's record gives the change at tree: its whole verdict, and gateMerge when it gated a merge of tree.
+    served says the tree was already served again once, so a red now is the change's."""
     gated, merge = record["gated"], None
     if gated != tree:
         parents = gate.parents(gated)
         if len(parents) != 2 or parents[1] != tree:
             return {"verdict": {"future": tree, "run": record["ref"], "status": "void", "cause": "infra", "rule": rule}}
         merge = {"base": parents[0]}
-    status, cause = {"green": ("passed", None), "red": ("failed", "change"), "void": ("void", "infra")}[record["status"]]
+    status, cause = {"green": ("passed", None), "red": ("failed", "change") if served else ("void", "flake"), "void": ("void", "infra")}[record["status"]]
     body = {"verdict": {"future": gated, "run": record["ref"], "status": status, "cause": cause, "rule": rule}}
     if merge is not None:
         body["gateMerge"] = merge
@@ -179,7 +181,7 @@ def tick(pipeline, gate, memory):
         key = "%s %s" % (change, record["ref"])
         if key in memory["posted"]:
             continue
-        body = dict(verdictOf(record, tree, gate), change=change)
+        body = dict(verdictOf(record, tree, gate, served=tree in memory["requeued"]), change=change)
         status, answer = pipeline.call("POST", "/verdicts", body)
         log("verdict %s %s on %s: %d %s" % (change, body["verdict"]["status"], record["ref"], status, answer))
         if status in (200, 409):
