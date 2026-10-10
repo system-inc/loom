@@ -2,7 +2,10 @@ package planner
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // A Verdict is the part of contract section 3's verdict record selection reads.
@@ -91,4 +94,48 @@ func Sha256Hex(value string) bool {
 		}
 	}
 	return true
+}
+
+// NoReuseFile lists unit keys whose passed verdicts may not be reused, one per line as "<unitKey> <why>", with #
+// comments: a pass that ran on a warm shared cache is evidence, never a verdict to reuse (Release, Oct 10 02:43Z). A
+// missing file lists none. ~/.loom/no-reuse unless a command names another (--no-reuse).
+var NoReuseFile = func() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".loom", "no-reuse")
+}()
+
+// LoadNoReuse reads a no-reuse file into each key's why.
+func LoadNoReuse(path string) (map[string]string, error) {
+	content, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("the no-reuse file: %w", err)
+	}
+	noReuse := map[string]string{}
+	for number, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, why, _ := strings.Cut(line, " ")
+		why = strings.TrimSpace(why)
+		if !Sha256Hex(key) || why == "" {
+			return nil, fmt.Errorf("%s:%d: want <unitKey> <why>, got %q", path, number+1, line)
+		}
+		noReuse[key] = why
+	}
+	return noReuse, nil
+}
+
+// Unreused turns every reuse of a listed key back into a run, naming why, so a stale pass can't reach a plan.
+func Unreused(choices []Choice, noReuse map[string]string) []Choice {
+	for index, choice := range choices {
+		if why, listed := noReuse[choice.UnitKey]; listed && choice.Action == "reuse" {
+			choices[index].Action, choices[index].Reused = "run", ""
+			choices[index].Reason = "its passed verdict isn't reusable: " + why
+		}
+	}
+	return choices
 }

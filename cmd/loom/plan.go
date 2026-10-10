@@ -32,6 +32,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	only := flags.String("future", "", "plan only this future (its tree sha) and leave every other unplanned")
 	gateInputsFile := flags.String("gate-inputs-file", "", "the file holding the gate inputs' manifest sha256 a parity run's box record ran with")
 	poolsFile := flags.String("pools", planner.PoolsFile, "the pool table, for declared needs' plan-time check")
+	noReuseFile := flags.String("no-reuse", planner.NoReuseFile, "unit keys whose passed verdicts may not be reused, one per line with why")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -50,6 +51,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	planner.PoolsFile = *poolsFile
+	planner.NoReuseFile = *noReuseFile
 	gateInputs := ""
 	if *gateInputsFile != "" {
 		content, err := os.ReadFile(*gateInputsFile)

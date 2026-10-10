@@ -1,6 +1,8 @@
 package planner
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -63,5 +65,58 @@ func TestChooseRefusesAMalformedPlan(t *testing.T) {
 	}
 	if _, err := Choose([]PlannedUnit{{"twice", keyOf("a")}, {"twice", keyOf("b")}}, MemoryIndex{}, false); err == nil {
 		t.Error("a unit planned twice was accepted")
+	}
+}
+
+// Mutant (Release, Oct 10 02:43Z): a key whose pass ran on a warm shared cache has a passed verdict, so Choose reuses
+// it; listed in the no-reuse file, the plan runs it and names why, while an unlisted passed key still reuses.
+func TestUnreusedRunsAListedPassedKey(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "no-reuse")
+	content := "# warm per-worker cache\n" + keyOf("a") + " ran on cloud-box-2's warm cache\n\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	noReuse, err := LoadNoReuse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := MemoryIndex{
+		keyOf("a"): {UnitKey: keyOf("a"), Status: "passed", Run: "run-warm"},
+		keyOf("b"): {UnitKey: keyOf("b"), Status: "passed", Run: "run-cold"},
+	}
+	choices, err := Choose([]PlannedUnit{{"warm", keyOf("a")}, {"cold", keyOf("b")}}, index, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choices[1].Name != "warm" || choices[1].Action != "reuse" {
+		t.Fatalf("the mutant isn't live: Choose alone should reuse the warm pass, got %+v", choices[1])
+	}
+	byName := map[string]Choice{}
+	for _, choice := range Unreused(choices, noReuse) {
+		byName[choice.Name] = choice
+	}
+	if warm := byName["warm"]; warm.Action != "run" || warm.Reused != "" || !strings.Contains(warm.Reason, "cloud-box-2") {
+		t.Errorf("a listed key reused a warm pass: %+v", warm)
+	}
+	if cold := byName["cold"]; cold.Action != "reuse" || cold.Reused != "run-cold" {
+		t.Errorf("an unlisted passed key stopped reusing: %+v", cold)
+	}
+}
+
+func TestLoadNoReuse(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	if noReuse, err := LoadNoReuse(filepath.Join(directory, "missing")); err != nil || len(noReuse) != 0 {
+		t.Errorf("a missing file lists no keys, got %v, %v", noReuse, err)
+	}
+	for name, line := range map[string]string{"no why": keyOf("a"), "short key": "abc why", "upper": strings.Repeat("A", 64) + " why"} {
+		path := filepath.Join(directory, strings.ReplaceAll(name, " ", "-"))
+		if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadNoReuse(path); err == nil {
+			t.Errorf("%s: %q was accepted", name, line)
+		}
 	}
 }
