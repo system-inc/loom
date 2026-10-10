@@ -108,6 +108,17 @@ func TestTheServePromptKeepsTheTokenOffTheCommandLine(t *testing.T) {
 	}
 }
 
+// A pool's runner is a release's loom-runner, so an instance fetches it from the release store by its sha256 and checks
+// it before running it; nothing publishes a runner anywhere else (docs/serving.md).
+func TestTheServePromptRunsARelease(t *testing.T) {
+	runner := strings.Repeat("a", 64)
+	prompt := servePrompt("https://wire", "codex-strict", "secret.token", runner, "55m", "", true)
+	if !strings.Contains(prompt, "curl -fsS -o \"$runner.partial\" https://artifacts.loom.system.inc/releases/blobs/"+runner+"; ") ||
+		!strings.Contains(prompt, "echo \""+runner+"  $runner.partial\" | sha256sum -c --quiet") {
+		t.Fatalf("the prompt doesn't fetch the release's runner by its hash:\n%s", prompt)
+	}
+}
+
 func TestAStrictServePromptServesStrictAndRunsNoBeforeScript(t *testing.T) {
 	prompt := servePrompt("https://wire", "codex-strict", "secret.token", strings.Repeat("a", 64), "55m", "", true)
 	if !strings.Contains(prompt, "serve --strict --pool https://wire/pools/codex-strict --token-file /tmp/loom-pool-token") {

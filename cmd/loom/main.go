@@ -53,7 +53,6 @@ const usage = `usage:
   loom board [--days <n>] [--wire <url>]
   loom pool status [--wire <url>] <name>
   loom pool token <pool> [--hours N]
-  loom pool publish-runner
   loom pool prompt <pool> --runner <sha256> [--until 55m]
   loom gate-lines [--once] [--interval <duration>] [--wire <url>]
   loom owner-bridge [--once] [--interval <duration>] [--pipeline <url>]

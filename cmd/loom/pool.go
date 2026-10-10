@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -157,7 +155,7 @@ type poolStatus struct {
 
 // pool handles `loom pool status <name>`, read with a board token, which watches and changes nothing.
 func pool(arguments []string, stdout io.Writer, stderr io.Writer) int {
-	if len(arguments) > 0 && (arguments[0] == "token" || arguments[0] == "publish-runner" || arguments[0] == "prompt") {
+	if len(arguments) > 0 && (arguments[0] == "token" || arguments[0] == "prompt") {
 		return poolTools(arguments, stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "cancel" {
@@ -303,19 +301,20 @@ func cancelPoolRun(client *http.Client, wire string, secret []byte, pool string,
 // poolTools are what starting a pool takes:
 //
 //	loom pool token <pool> [--hours 24]            a pool token for its instances
-//	loom pool publish-runner                       the linux runner, built at this checkout's version, in the public store
 //	loom pool prompt <pool> --runner <sha256> [--until 55m] [--before <sha256> | --strict]
 //	                                               the turn brief that starts one instance's serve
+//
+// A pool's runner is a release's: the loom-runner linux/amd64 that Workshop's publish.sh built with the pinned Go and
+// every box's updater installs (docs/serving.md), fetched by a Codex instance from the same release store by its sha256.
 func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pool "+arguments[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin")
 	hours := flags.Int("hours", 24, "how long a pool token lasts")
-	runnerHash := flags.String("runner", "", "the runner binary's sha256 in the public store (from publish-runner)")
+	runnerHash := flags.String("runner", "", "the runner binary's sha256: a release's loom-runner linux/amd64 line in releases/current.txt")
 	until := flags.String("until", "55m", "how long one serve turn runs before it exits for the next turn")
 	before := flags.String("before", "", "a script's sha256 in the public store that readies the instance before serve asks for a unit")
 	strict := flags.Bool("strict", false, "the instance serves with --strict: only structured test jobs, never a before script")
-	source := flags.String("source", defaultSource(), "this repository's checkout")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -338,38 +337,6 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return 3
 		}
 		fmt.Fprintln(stdout, token)
-	case "publish-runner":
-		version, err := runnerVersion(*source)
-		if err != nil {
-			fmt.Fprintf(stderr, "loom: %v\n", err)
-			return 3
-		}
-		binary, err := buildRunner(*source, version, "linux/amd64", filepath.Join(home, ".loom"))
-		if err != nil {
-			fmt.Fprintf(stderr, "loom: %v\n", err)
-			return 3
-		}
-		content, err := os.ReadFile(binary)
-		if err != nil {
-			fmt.Fprintf(stderr, "loom: %v\n", err)
-			return 3
-		}
-		sum := sha256.Sum256(content)
-		hash := hex.EncodeToString(sum[:])
-		token, _ := protocol.MintToken(secret, protocol.TokenClaims{Run: "publish-runner", Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(time.Hour).Unix()})
-		request, _ := http.NewRequest(http.MethodPut, strings.TrimSuffix(*wire, "/")+"/public/blobs/"+hash, bytes.NewReader(content))
-		request.Header.Set("Authorization", "Bearer "+token)
-		response, err := (&http.Client{Timeout: 10 * time.Minute}).Do(request)
-		if err != nil {
-			fmt.Fprintf(stderr, "loom: %v\n", err)
-			return 3
-		}
-		response.Body.Close()
-		if response.StatusCode/100 != 2 {
-			fmt.Fprintf(stderr, "loom: the public store answered %s\n", response.Status)
-			return 3
-		}
-		fmt.Fprintf(stdout, "runner %s (%d bytes)\n%s\nhttps://artifacts.loom.system.inc/blobs/%s\n", version, len(content), hash, hash)
 	case "prompt":
 		if flags.NArg() != 1 || !protocol.Sha256Pattern.MatchString(*runnerHash) {
 			fmt.Fprint(stderr, "loom: prompt needs a pool name and --runner <sha256>\n")
@@ -393,6 +360,9 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	return 0
 }
+
+// releaseBlobs is where every release's binaries are, by sha256 (docs/updater.md): a pool's runner is fetched from here.
+const releaseBlobs = "https://artifacts.loom.system.inc/releases/blobs/"
 
 // servePrompt is the whole of one instance's turn: fetch the runner by hash, check it, serve until the deadline
 // with every unit's output in a file, and show only serve's one summary line. A before script, fetched and checked
@@ -424,7 +394,7 @@ func servePrompt(wire string, pool string, token string, runnerHash string, unti
 		"Then reply with only its last line of output, nothing else.\n\n```bash\n" +
 		"set -e\nmkdir -p /tmp/loom-units\n" + readying +
 		"runner=/tmp/loom-runner-" + runnerHash[:12] + "\n" +
-		"if [ ! -x \"$runner\" ]; then curl -fsS -o \"$runner.partial\" https://artifacts.loom.system.inc/blobs/" + runnerHash + "; " +
+		"if [ ! -x \"$runner\" ]; then curl -fsS -o \"$runner.partial\" " + releaseBlobs + runnerHash + "; " +
 		"echo \"" + runnerHash + "  $runner.partial\" | sha256sum -c --quiet; chmod 755 \"$runner.partial\"; mv \"$runner.partial\" \"$runner\"; fi\n" +
 		"(umask 077 && printf '%s\\n' '" + token + "' > /tmp/loom-pool-token)\n" +
 		"\"$runner\" serve" + strictFlag + " --pool " + strings.TrimSuffix(wire, "/") + "/pools/" + pool + " --token-file /tmp/loom-pool-token" +
