@@ -198,27 +198,49 @@ func mustObject(t *testing.T, fake *r2test.Fake, key string) []byte {
 
 // The server refuses a held archive that doesn't check, and says so, so the build fails rather than quietly building.
 func TestHeldProductsRefusesAPoisonedArchive(t *testing.T) {
-	fake, store := serve(t)
-	archive := tarGzip(t, entry{name: strings.Repeat("6", 64) + "/tool", body: "another product's tool"})
-	fake.Set("blobs/"+digest(archive), archive, time.Now())
-	fake.Set("refs/action/"+sharedProduct, []byte(digest(archive)), time.Now())
+	honest := tarGzip(t, entry{name: sharedProduct + "/tool", body: "the tool"})
+	other := tarGzip(t, entry{name: strings.Repeat("6", 64) + "/tool", body: "another product's tool"})
+	for name, plant := range map[string]func(fake *r2test.Fake){
+		"another product's files": func(fake *r2test.Fake) {
+			fake.Set("blobs/"+digest(other), other, time.Now())
+			fake.Set("refs/action/"+sharedProduct, []byte(digest(other)), time.Now())
+		},
+		"the same product, other bytes than its hash": func(fake *r2test.Fake) {
+			fake.Set("blobs/"+digest(honest), tarGzip(t, entry{name: sharedProduct + "/tool", body: "a tool someone swapped in"}), time.Now())
+			fake.Set("refs/action/"+sharedProduct, []byte(digest(honest)), time.Now())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake, store := serve(t)
+			plant(fake)
+			held, err := ServeHeldProducts(store, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer held.Close()
+			response, err := store.client().Get(held.Address + "/refs/build/" + sharedProduct)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode == 200 || held.Err() == nil || !strings.Contains(held.Err().Error(), "poisoned") || len(held.Held()) != 0 {
+				t.Fatalf("a poisoned archive: %s, %v", response.Status, held.Err())
+			}
+		})
+	}
+	// A key the store doesn't hold is a miss, and no failure.
+	_, store := serve(t)
 	held, err := ServeHeldProducts(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer held.Close()
-	response, err := store.client().Get(held.Address + "/refs/build/" + sharedProduct)
+	response, err := store.client().Get(held.Address + "/refs/build/" + strings.Repeat("7", 64))
 	if err != nil {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if response.StatusCode == 200 || held.Err() == nil || !strings.Contains(held.Err().Error(), "poisoned") || len(held.Held()) != 0 {
-		t.Fatalf("a poisoned archive: %s, %v", response.Status, held.Err())
-	}
-	// A key the store doesn't hold is a miss, and no failure.
-	response, _ = store.client().Get(held.Address + "/refs/build/" + strings.Repeat("7", 64))
-	response.Body.Close()
-	if response.StatusCode != 404 {
-		t.Fatalf("an unheld key: %s", response.Status)
+	if response.StatusCode != 404 || held.Err() != nil {
+		t.Fatalf("an unheld key: %s %v", response.Status, held.Err())
 	}
 }
