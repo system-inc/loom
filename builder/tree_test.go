@@ -255,13 +255,25 @@ func TestARunnerRefusesATreeThatDoesntCheck(t *testing.T) {
 // Mutants: every failure the change's; the key without the platform.
 func TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy(t *testing.T) {
 	tree := gitTree(t, map[string]string{
-		"go.mod":             "module example.com/failing\n\ngo 1.22\n",
-		"broken/b_test.go":   "package broken\n\nimport \"testing\"\n\nfunc TestBroken(t *testing.T) { undefinedThing() }\n",
-		"unvetted/u_test.go": "package unvetted\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n)\n\nfunc TestU(t *testing.T) { fmt.Printf(\"%d\\n\", \"s\") }\n",
+		"go.mod":                "module example.com/failing\n\ngo 1.22\n",
+		"broken/b_test.go":      "package broken\n\nimport \"testing\"\n\nfunc TestBroken(t *testing.T) { undefinedThing() }\n",
+		"unvetted/u_test.go":    "package unvetted\n\nimport (\n\t\"fmt\"\n\t\"testing\"\n)\n\nfunc TestU(t *testing.T) { fmt.Printf(\"%d\\n\", \"s\") }\n",
+		"missing/m_test.go":     "package missing\n\nimport _ \"example.com/failing/nowhere\"\n",
+		"cycle/a/a.go":          "package a\n\nimport _ \"example.com/failing/cycle/b\"\n",
+		"cycle/a/a_test.go":     "package a\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n",
+		"cycle/b/b.go":          "package b\n\nimport _ \"example.com/failing/cycle/a\"\n",
+		"nogo/readme.txt":       "no Go here\n",
+		"constrained/c_test.go": "//go:build never\n\npackage constrained\n\nimport \"testing\"\n\nfunc TestC(t *testing.T) {}\n",
 	})
+	// Each as real go 1.27 says it: a compile error, a vet error, a missing import, an import cycle, a package with no
+	// Go files, and one whose build constraints exclude every file.
 	build := TreeBuild{Tree: tree, Cache: t.TempDir(), Out: t.TempDir(), Environment: GateEnvironment(), Jobs: 2, Compile: 2}
-	for _, result := range build.Binaries([]planner.ProductTest{{Package: "example.com/failing/broken", Directory: "broken"}, {Package: "example.com/failing/unvetted", Directory: "unvetted"}}) {
-		if result.Failure != ChangeFailure || !strings.Contains(result.Error, "_test.go:") {
+	failing := []planner.ProductTest{}
+	for _, directory := range []string{"broken", "unvetted", "missing", "cycle/a", "nogo", "constrained"} {
+		failing = append(failing, planner.ProductTest{Package: "example.com/failing/" + directory, Directory: directory})
+	}
+	for _, result := range build.Binaries(failing) {
+		if result.Failure != ChangeFailure || result.Error == "" {
 			t.Errorf("%s: %q, %q", result.Package, result.Failure, result.Error)
 		}
 	}
@@ -273,6 +285,10 @@ func TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy(t *testing.T) {
 		"a compile error":                        {"printf '# example.com/p [example.com/p.test]\\n./a_test.go:3:2: undefined: x\\n'; exit 1", ChangeFailure},
 		"a type error quoting a network failure": {`printf '# example.com/p\n./a.go:3:9: cannot use "connection reset" (untyped string constant) as int value\n\thave string\n'; exit 1`, ChangeFailure},
 		"a proxy's 502":                          {"printf 'go: example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 502 Bad Gateway\\n'; exit 1", WorkshopFailure},
+		"a proxy's 502 under a header":           {"printf '# example.com/a\\ngo: example.com/dep@v1.0.0: reading https://proxy.golang.org/example.com/dep/@v/v1.0.0.zip: 502 Bad Gateway\\n'; exit 1", WorkshopFailure},
+		"a killed clang twice":                   {"printf '# example.com/a\\nclang: error: unable to execute command: Killed\\nclang: error: clang frontend command failed due to signal (use -v to see invocation)\\n'; exit 1", WorkshopFailure},
+		"a killed compile after setup":           {"printf '# example.com/p\\ncompile: signal: killed\\nFAIL\\texample.com/p [build failed]\\nFAIL\\n'; exit 1", WorkshopFailure},
+		"go's ending alone":                      {"printf 'FAIL\\texample.com/p [setup failed]\\nFAIL\\n'; exit 1", WorkshopFailure},
 		"a killed clang":                         {"printf '# example.com/p\\nclang: error: unable to execute command: Killed\\n'; exit 1", WorkshopFailure},
 		"a diagnostic beside a killed compiler":  {"printf '# example.com/p\\n./a.go:1:1: x\\ncompile: signal: killed\\n'; exit 1", WorkshopFailure},
 		"a full disk":                            {"echo 'write /tmp/go-build1/x: no space left on device'; exit 1", WorkshopFailure},

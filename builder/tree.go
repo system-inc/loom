@@ -51,9 +51,16 @@ const (
 	WorkshopFailure = "workshop"
 )
 
-// diagnosticLine is a line of a compile or vet failure as go prints it: a package's header (# <package>), a
-// file:line:col: message diagnostic, or a diagnostic's tab-indented continuation (a type error's have and want).
-var diagnosticLine = regexp.MustCompile(`^(# \S.*|\S+:[0-9]+:[0-9]+: \S.*|\t.*)$`)
+// diagnosticLine is a line of a compile, vet or package-loading failure as go 1.27's go test -c prints it (captured
+// from real go in TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy): a package's header (# <package>); a file:line:col:
+// message diagnostic (a compile or vet error, a missing import); an import cycle's "package <path>" and its
+// tab-indented "imports" chain, or any diagnostic's tab-indented continuation; "package <path>: build constraints
+// exclude all Go files in <dir>"; "no Go files in <dir>"; and go's own ending, "FAIL\t<package> [setup failed]" and a
+// bare "FAIL".
+var diagnosticLine = regexp.MustCompile(`^(# \S.*|\S+:[0-9]+:[0-9]+: \S.*|\t.*|package \S+|package \S+: build constraints exclude all Go files in \S.*|no Go files in \S.*|FAIL\t\S+ \[setup failed\]|FAIL)$`)
+
+// goEnding is a line go adds after a failure's diagnostics, which says nothing of its own.
+var goEnding = regexp.MustCompile(`^(# \S.*|\t.*|FAIL\t\S+ \[setup failed\]|FAIL)$`)
 
 // BuildFailure says whose a failed go test -c is, from its error and output: the change's only when go exited 1 and
 // said nothing but package headers and diagnostics, whatever their words; anything else (a proxy's 502, a killed
@@ -68,7 +75,7 @@ func BuildFailure(err error, output []byte) string {
 		if !diagnosticLine.MatchString(line) {
 			return WorkshopFailure
 		}
-		if !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "\t") {
+		if !goEnding.MatchString(line) {
 			diagnostics++
 		}
 	}
