@@ -171,6 +171,8 @@ describe('events', function () {
             { ...event(run, 'a', 0, 'started'), surprise: true },
             event(run, 'a', 0, 'nonsense'),
             event(run, 'a', -1, 'started'),
+            event(run, 'a', 0, 'started', { runnerSha256: inputA.toUpperCase() }),
+            event(run, 'a', 0, 'started', { runnerSha256: 'v0-dev' }),
             { ...event(run, 'a', 0, 'started'), time: '2026-10-08 12:00:00' },
             { ...event(run, 'a', 0, 'started'), time: '2026-10-08T12:00:00+02:00' },
             event(run, 'a', 0, 'output', { text: 'no stream' }),
@@ -191,6 +193,14 @@ describe('events', function () {
             const response = await postEvents(run, runner, [line]);
             expect(response.status, JSON.stringify(line)).toBe(400);
         }
+    });
+
+    it("takes a started event naming the runner binary's sha256, as the judge's runner check reads it", async function () {
+        const run = freshRun();
+        const runner = await token(run, 'runner');
+        const started = event(run, 'a', 0, 'started', { machine: 'test-box', runnerVersion: 'v0-dev', runnerSha256: inputA });
+        const response = await postEvents(run, runner, [started]);
+        expect(response.status, await response.clone().text()).toBe(200);
     });
 
     it('takes a cached unit: cached, then finished passed', async function () {

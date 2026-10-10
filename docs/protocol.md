@@ -60,7 +60,7 @@ One JSON object per line. Every event carries `run`, `unit`, `sequence` (from 0,
 
 | `type` | Fields |
 |---|---|
-| `started` | `machine`, `runnerVersion`, `cpus`, `memoryMegabytes`, `inputs` (path to sha256) |
+| `started` | `machine`, `runnerVersion`, `runnerSha256` (the runner binary's sha256), `cpus`, `memoryMegabytes`, `inputs` (path to sha256) |
 | `output` | `stream` (`stdout` or `stderr`), `text` (one line, newline removed; invalid UTF-8 replaced and `replaced: true`) |
 | `exit` | `code`, `signal` (if killed), `timedOut`, `wallSeconds`, `userSeconds`, `systemSeconds` |
 | `uploaded` | `path`, `sha256`, `bytes` |

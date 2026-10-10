@@ -87,6 +87,8 @@ const typeFields: Record<string, Record<string, { check: FieldCheck; required: b
     started: {
         machine: { check: isString, required: false },
         runnerVersion: { check: isString, required: false },
+        // The runner binary's own sha256, which a unit key's runner part names; the judge voids an attempt on another.
+        runnerSha256: { check: isSha256, required: false },
         cpus: { check: isCount, required: false },
         memoryMegabytes: { check: isCount, required: false },
         inputs: { check: isInputHashes, required: false },
