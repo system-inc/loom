@@ -4,6 +4,7 @@
 package runner
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -63,6 +64,9 @@ type Options struct {
 	// preparation clears earlier units' leavings. Empty means /tmp for an exclusive runner, whose instance is the
 	// runner's alone, and loom-test-root under WorkspaceParent otherwise.
 	Root string
+	// Machine is the name every started event gives this machine. Empty means the host's name; a serving runner gives
+	// its worker's name, so the board ties a unit to the worker the pool shows.
+	Machine string
 	// Tree is where a test job's checkout is kept across units. Empty means adamic under Root.
 	Tree string
 	// Store is the action store's public domain, where a prebuilt test job's tree index and blobs are read: the
@@ -195,15 +199,6 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 	return Result{Status: status, Workspace: run.workspace}
 }
 
-// refuse finishes a unit this runner can't run at all, broken, with the error that says why: started (this runner's
-// own), the error and finished, posted where the unit says as any unit's are, so the coordinator reads it Loom's.
-func refuse(unit protocol.Unit, options Options, phase string, err error) Result {
-	run := begin(unit, options)
-	run.fail(phase, err)
-	run.finish(protocol.StatusBroken)
-	return Result{Status: protocol.StatusBroken}
-}
-
 // begin readies a unit's run, its wire posting if the unit names one, and emits its started event.
 func begin(unit protocol.Unit, options Options) *unitRun {
 	options = options.withDefaults()
@@ -224,7 +219,7 @@ func begin(unit protocol.Unit, options Options) *unitRun {
 	}
 	run.emitter.emit(protocol.Event{
 		Type:             "started",
-		Machine:          machine.name,
+		Machine:          cmp.Or(options.Machine, machine.name),
 		RunnerVersion:    Version,
 		RunnerSha256:     selfSha256(),
 		Cpus:             machine.cpus,

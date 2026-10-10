@@ -1,7 +1,7 @@
 // Command loom-runner runs one Loom unit on this machine and streams its events to stdout, one JSON line
 // each. It exits 0 when the unit passed, 1 when it failed and 2 when it is broken or couldn't be read.
 //
-//	loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] <unit.json | https URL | ->
+//	loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] <unit.json | https URL | ->
 //	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
 //	loom-runner install-serve
 //	loom-runner version
@@ -36,7 +36,7 @@ import (
 )
 
 const usage = `usage:
-  loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] <unit.json | https URL | ->
+  loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] <unit.json | https URL | ->
   loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
   loom-runner install-serve
   loom-runner version
@@ -74,6 +74,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	exclusive := flags.Bool("exclusive", false, "this machine is the runner's alone")
 	root := flags.String("root", "", "where a test job keeps its caches between units")
 	tree := flags.String("tree", "", "where a test job's checkout is kept across units")
+	machine := flags.String("machine", "", "the name started events give this machine (default the host's)")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return 2
 	}
@@ -99,6 +100,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Exclusive:       *exclusive,
 		Root:            *root,
 		Tree:            *tree,
+		Machine:         *machine,
 	})
 	if *keep && result.Workspace != "" {
 		fmt.Fprintf(stderr, "loom-runner: workspace kept at %s\n", result.Workspace)

@@ -50,6 +50,9 @@ type ServeOptions struct {
 	// Drain, once it delivers or closes, ends serving as the deadline does: nothing more is asked for, and the unit in
 	// hand runs to its finish. A box's loom-serve unit drains on SIGHUP, so a release restarts serve and breaks nothing.
 	Drain <-chan struct{}
+	// checkRunner says whether a fetched binary is a loom-runner for this platform; nil means its build information
+	// (runners.go). Tests running a stand-in pass one that takes it.
+	checkRunner func(path string) error
 	// freeMegabytes reads a path's free room; nil means the file system's. Tests plant a full disk through it.
 	freeMegabytes func(path string) (int64, error)
 	// trim clears what earlier units left on a strict runner's root, and an exclusive one's HOME (prepare.sh trim-only);
@@ -90,6 +93,10 @@ var errPoolRefused = errors.New("the pool refused")
 func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, error) {
 	started := time.Now()
 	unitOptions := options.Unit.withDefaults()
+	if unitOptions.Machine == "" {
+		// Its started events name the worker the pool shows, so the board ties the unit to it.
+		unitOptions.Machine = options.Worker
+	}
 	if options.Margin == 0 {
 		options.Margin = time.Minute
 	}
@@ -135,7 +142,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	}()
 	summary := ServeSummary{}
 	failures := 0
-	runners := runnerCache{directory: filepath.Join(unitOptions.testRoot(), runnerDirectoryName), releases: options.Releases, client: unitOptions.Client}
+	runners := runnerCache{directory: filepath.Join(unitOptions.testRoot(), runnerDirectoryName), releases: options.Releases, client: unitOptions.Client, check: options.checkRunner}
 	// unhad counts the units in a row whose runner couldn't be had: past two, serve waits a little before it asks again,
 	// so a store that is down doesn't void a whole queue in seconds. Any unit whose runner was had starts it over.
 	unhad := 0

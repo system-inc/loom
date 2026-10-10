@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -81,9 +83,14 @@ func (store *releaseStore) put(content []byte) string {
 
 func (store *releaseStore) url() string { return store.server.URL + "/releases/blobs/" }
 
-// standIn is a runner that records how it was run and the unit it was given, and exits with code.
-func standIn(directory string, code int) []byte {
-	return []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + directory + "/arguments'\ncat > '" + directory + "/unit.json'\nexit " + strconv.Itoa(code) + "\n")
+// standIn is a runner that records how it was run and the unit it was given, says it started (unless starts is false,
+// as a release from before the hand-off, which refuses serve's flags, never does), and exits with code.
+func standIn(directory string, starts bool, code int) []byte {
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + directory + "/arguments'\ncat > '" + directory + "/unit.json'\n"
+	if starts {
+		script += "echo '{\"type\":\"started\"}'\n"
+	}
+	return []byte(script + "exit " + strconv.Itoa(code) + "\n")
 }
 
 // poolJob is a pool unit carrying a test job that names runner.
@@ -96,29 +103,42 @@ func (pool *testPool) job(id string, runner string) protocol.Unit {
 	return unit
 }
 
+// takeAnyRunner stands in for the check that a fetched blob is a loom-runner for this platform, for a stand-in script.
+func takeAnyRunner(string) error { return nil }
+
 // The box's own runner only serves: a unit naming another runner runs on that one, fetched once from the release store
 // by its sha256, kept read-only under the root, and run with this runner's settings and the unit on its stdin. Its exit
-// is the unit's status, and the unit's events are that runner's, never this one's. So a release a box installs moves
-// no pin: the units keep running on the runner their keys name.
+// is the unit's status. So a release a box installs moves no pin: the units keep running on the runner their keys name.
+// Before it fetches, serve starts the unit itself, naming the worker as the machine, and the runner continues the
+// stream from the sequence after serve's.
 func TestServeRunsAUnitOnTheRunnerItNames(t *testing.T) {
 	directory := t.TempDir()
 	store := newReleaseStore(t)
-	named := store.put(standIn(directory, 1))
+	named := store.put(standIn(directory, true, 1))
 	pool := newTestPool(t)
 	pool.queue = []protocol.Unit{pool.job("first", named), pool.job("second", named)}
 	options := pool.serveOptions(t, time.Now().Add(time.Second+1500*time.Millisecond), time.Second, io.Discard)
-	options.Unit.Strict, options.Unit.Root, options.Releases = true, filepath.Join(directory, "root"), store.url()
+	options.Unit.Strict, options.Unit.Root, options.Releases, options.checkRunner = true, filepath.Join(directory, "root"), store.url(), takeAnyRunner
 	summary, err := Serve(context.Background(), options)
 	if err != nil || summary.Units != 2 || summary.Failed != 2 {
 		t.Fatalf("summary %+v, err %v", summary, err)
 	}
 	arguments, _ := os.ReadFile(filepath.Join(directory, "arguments"))
-	want := strings.Join([]string{"run", "--workspace", options.Unit.WorkspaceParent, "--strict", "--root", options.Unit.Root, "-"}, "\n") + "\n"
+	want := strings.Join([]string{"run", "--workspace", options.Unit.WorkspaceParent, "--strict", "--root", options.Unit.Root, "--machine", "codex-1", "-"}, "\n") + "\n"
 	if string(arguments) != want {
 		t.Fatalf("the named runner was run with %q, not %q", arguments, want)
 	}
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	events := pool.events["second"]
+	if len(events) != 2 || events[0].Type != "started" || events[0].Machine != "codex-1" || events[0].RunnerSha256 != selfSha256() ||
+		!strings.Contains(events[1].Text, "the unit's key names runner "+named[:12]+"; fetching it") {
+		t.Fatalf("serve's own events for the unit: %+v", events)
+	}
 	var given protocol.Unit
-	if content, _ := os.ReadFile(filepath.Join(directory, "unit.json")); protocol.Decode(bytes.NewReader(content), &given) != nil || !reflect.DeepEqual(given, pool.job("second", named)) {
+	expected := pool.job("second", named)
+	expected.SequenceStart = 2
+	if content, _ := os.ReadFile(filepath.Join(directory, "unit.json")); protocol.Decode(bytes.NewReader(content), &given) != nil || !reflect.DeepEqual(given, expected) {
 		t.Fatalf("the named runner was given %+v", given)
 	}
 	kept, err := os.Stat(filepath.Join(options.Unit.Root, runnerDirectoryName, named))
@@ -127,10 +147,149 @@ func TestServeRunsAUnitOnTheRunnerItNames(t *testing.T) {
 	}
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
+	if store.gets != 1 {
+		t.Fatalf("%d fetches of the runner", store.gets)
+	}
+}
+
+// A runner of a release from before the hand-off refuses serve's flags and exits 2 having posted nothing. That is the
+// unit's void, named by serve on the stream it started (never an ordinary broken unit that, posting nothing, the
+// coordinator would queue again every two minutes forever), and it counts toward the backoff: five in a row take four.
+func TestARunnerThatNeverStartsTheUnitIsItsVoidNamed(t *testing.T) {
+	store := newReleaseStore(t)
+	silent := store.put(standIn(t.TempDir(), false, 2))
+	pool := newTestPool(t)
+	for _, id := range []string{"1", "2", "3", "4", "5"} {
+		pool.queue = append(pool.queue, pool.job(id, silent))
+	}
+	options := pool.serveOptions(t, time.Now().Add(time.Second+2*time.Second), time.Second, io.Discard)
+	options.Unit.Root, options.Releases, options.checkRunner = t.TempDir(), store.url(), takeAnyRunner
+	summary, err := Serve(context.Background(), options)
+	if err != nil || summary.Units != 4 || summary.Broken != 4 {
+		t.Fatalf("summary %+v, err %v", summary, err)
+	}
 	pool.mutex.Lock()
 	defer pool.mutex.Unlock()
-	if store.gets != 1 || len(pool.events["first"]) != 0 {
-		t.Fatalf("%d fetches of the runner; this runner posted %d events of its own", store.gets, len(pool.events["first"]))
+	events := pool.events["1"]
+	if len(events) == 0 || events[len(events)-1].Status != protocol.StatusBroken ||
+		!strings.Contains(errorPhases(events), "start: the runner "+silent[:12]+" the unit's key names exited 2 without starting the unit") {
+		t.Fatalf("the void's stream: %+v", events)
+	}
+}
+
+// Serve holds a unit it is fetching a runner for: a slow store gets a line on the unit's stream every heartbeat, so the
+// coordinator never takes it for a worker gone, and the fetch is bounded by a quarter of the unit's time, so a store
+// that never answers is the unit's void in that time, never its deadline.
+func TestServeHoldsTheUnitWhileItFetchesAndBoundsTheFetch(t *testing.T) {
+	directory := t.TempDir()
+	content := standIn(directory, true, 0)
+	sum := sha256.Sum256(content)
+	named := hex.EncodeToString(sum[:])
+	delay := 600 * time.Millisecond
+	store := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		select {
+		case <-time.After(delay):
+		case <-request.Context().Done():
+			return
+		}
+		writer.Write(content)
+	}))
+	defer store.Close()
+	pool := newTestPool(t)
+	pool.queue = []protocol.Unit{pool.job("slow", named)}
+	options := pool.serveOptions(t, time.Now().Add(time.Second+1500*time.Millisecond), time.Second, io.Discard)
+	options.Unit.Root, options.Releases, options.checkRunner = t.TempDir(), store.URL+"/", takeAnyRunner
+	options.Unit.Heartbeat = 100 * time.Millisecond
+	if summary, err := Serve(context.Background(), options); err != nil || summary.Passed != 1 {
+		t.Fatalf("a slow store: summary %+v, err %v", summary, err)
+	}
+	pool.mutex.Lock()
+	if lines := outputLines(pool.events["slow"], "runner"); !strings.Contains(strings.Join(lines, "\n"), "still fetching runner "+named[:12]) {
+		t.Fatalf("no heartbeat while fetching: %q", lines)
+	}
+	pool.mutex.Unlock()
+	// A unit of two seconds may wait half a second for its runner; this store answers after five.
+	delay = 5 * time.Second
+	pool = newTestPool(t)
+	unit := pool.job("stalled", named)
+	unit.TimeoutSeconds = 2
+	pool.queue = []protocol.Unit{unit}
+	options = pool.serveOptions(t, time.Now().Add(time.Second+1500*time.Millisecond), time.Second, io.Discard)
+	options.Unit.Root, options.Releases, options.checkRunner = t.TempDir(), store.URL+"/", takeAnyRunner
+	started := time.Now()
+	if summary, err := Serve(context.Background(), options); err != nil || summary.Broken != 1 || time.Since(started) > 4*time.Second {
+		t.Fatalf("a stalled store: summary %+v, err %v after %v", summary, err, time.Since(started))
+	}
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	if !strings.Contains(errorPhases(pool.events["stalled"]), "can't be had within 500ms") {
+		t.Fatalf("the stalled fetch's void: %q", errorPhases(pool.events["stalled"]))
+	}
+}
+
+// Every unit serve runs itself names the worker the pool shows as its machine, so the board ties the two.
+func TestServesStartedEventsNameItsWorker(t *testing.T) {
+	pool := newTestPool(t)
+	pool.queue = []protocol.Unit{pool.unit("here", "true")}
+	options := pool.serveOptions(t, time.Now().Add(time.Second+500*time.Millisecond), time.Second, io.Discard)
+	if summary, err := Serve(context.Background(), options); err != nil || summary.Passed != 1 {
+		t.Fatalf("summary %+v, err %v", summary, err)
+	}
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	if events := pool.events["here"]; len(events) == 0 || events[0].Machine != "codex-1" {
+		t.Fatalf("started names the machine %+v, not the worker codex-1", events)
+	}
+}
+
+// Only a loom-runner built for this machine's platform is run: the release store holds every release's `loom` and
+// both platforms' builds too, and a unit naming one of those is refused before anything runs it.
+func TestOnlyALoomRunnerForThisPlatformIsRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds loom-runner twice")
+	}
+	build := func(goos, goarch string) string {
+		binary := filepath.Join(t.TempDir(), "loom-runner")
+		command := exec.Command("go", "build", "-o", binary, loomRunnerPath)
+		command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS="+goos, "GOARCH="+goarch)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("building loom-runner for %s/%s: %v %s", goos, goarch, err, output)
+		}
+		return binary
+	}
+	if err := checkRunnerBinary(build(runtime.GOOS, runtime.GOARCH)); err != nil {
+		t.Fatalf("this platform's loom-runner refused: %v", err)
+	}
+	other := "linux"
+	if runtime.GOOS == "linux" {
+		other = "darwin"
+	}
+	if err := checkRunnerBinary(build(other, "amd64")); err == nil || !strings.Contains(err.Error(), "built for "+other+"/amd64") {
+		t.Fatalf("another platform's loom-runner: %v", err)
+	}
+	test, _ := os.Executable()
+	if err := checkRunnerBinary(test); err == nil || !strings.Contains(err.Error(), "not loom-runner") {
+		t.Fatalf("another Go program: %v", err)
+	}
+	script := filepath.Join(t.TempDir(), "runner")
+	os.WriteFile(script, standIn(t.TempDir(), true, 0), 0o755)
+	if err := checkRunnerBinary(script); err == nil || !strings.Contains(err.Error(), "isn't a Go binary") {
+		t.Fatalf("a script: %v", err)
+	}
+	// Served, a blob that isn't a runner here is the unit's void, named.
+	store := newReleaseStore(t)
+	named := store.put([]byte("#!/bin/sh\nexit 0\n"))
+	pool := newTestPool(t)
+	pool.queue = []protocol.Unit{pool.job("script", named)}
+	options := pool.serveOptions(t, time.Now().Add(time.Second+500*time.Millisecond), time.Second, io.Discard)
+	options.Unit.Root, options.Releases = t.TempDir(), store.url()
+	if summary, err := Serve(context.Background(), options); err != nil || summary.Broken != 1 {
+		t.Fatalf("summary %+v, err %v", summary, err)
+	}
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	if !strings.Contains(errorPhases(pool.events["script"]), "fetch: the blob "+named[:12]+" the unit's key names isn't a runner to run here: it isn't a Go binary") {
+		t.Fatalf("the script's void: %q", errorPhases(pool.events["script"]))
 	}
 }
 
@@ -152,7 +311,7 @@ func TestARunnerThatCantBeHadIsTheUnitsVoidNamed(t *testing.T) {
 	events := pool.events["first"]
 	pool.mutex.Unlock()
 	if len(events) < 3 || events[0].Type != "started" || events[0].RunnerSha256 != selfSha256() || events[len(events)-1].Status != protocol.StatusBroken ||
-		!strings.Contains(errorPhases(events), "fetch: the runner cccccccccccc the unit's key names can't be had: ") || !strings.Contains(errorPhases(events), "its bytes hash to ") {
+		!strings.Contains(errorPhases(events), "fetch: the runner cccccccccccc the unit's key names can't be had within ") || !strings.Contains(errorPhases(events), "its bytes hash to ") {
 		t.Fatalf("the void's stream: %+v", events)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(options.Unit.Root, runnerDirectoryName)); len(entries) != 0 {

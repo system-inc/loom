@@ -18,9 +18,10 @@ import (
 	"github.com/system-inc/loom/protocol"
 )
 
-// The whole hand-off with real binaries: this serve takes a unit whose job names another loom-runner, fetches that one
-// from the release store by its sha256, and runs it with serve's own settings. The unit's events on the wire are that
-// runner's (its sha256 in started), and it applies serve's --strict, refusing a test job that brings an environment,
+// The whole hand-off with real binaries: this serve takes a unit whose job names another loom-runner, starts it, fetches
+// that runner from the release store by its sha256, checks it is a loom-runner for this platform, and runs it with
+// serve's own settings. The runner continues the unit's stream (its sha256 and serve's worker in its started), and it
+// applies serve's --strict, refusing a test job that brings an environment,
 // so the unit is broken there, never run here.
 func TestServeHandsAUnitToTheRunnerItNames(t *testing.T) {
 	if testing.Short() {
@@ -77,12 +78,17 @@ func TestServeHandsAUnitToTheRunnerItNames(t *testing.T) {
 	}
 	mutex.Lock()
 	defer mutex.Unlock()
+	// Serve's own started holds the unit while it fetches; the named runner's started, last, is the one the judge reads.
 	var messages []string
+	var started []protocol.Event
 	for _, event := range events {
 		messages = append(messages, event.Message)
+		if event.Type == "started" {
+			started = append(started, event)
+		}
 	}
-	if len(events) == 0 || events[0].Type != "started" || events[0].RunnerSha256 != named || events[len(events)-1].Status != protocol.StatusBroken ||
-		!strings.Contains(strings.Join(messages, "\n"), "refused: a test job's environment is the runner's to make") {
+	if len(started) != 2 || started[0].Sequence != 0 || started[1].RunnerSha256 != named || started[0].Machine != "box-1" || started[1].Machine != "box-1" ||
+		events[len(events)-1].Status != protocol.StatusBroken || !strings.Contains(strings.Join(messages, "\n"), "refused: a test job's environment is the runner's to make") {
 		t.Fatalf("the wire got %+v", events)
 	}
 }

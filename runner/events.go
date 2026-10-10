@@ -29,6 +29,13 @@ type emitter struct {
 	lastEmit   time.Time // when the last event left, so a silent unit can be told from a lost runner
 }
 
+// next is the sequence the next event takes.
+func (emitter *emitter) next() int {
+	emitter.mutex.Lock()
+	defer emitter.mutex.Unlock()
+	return emitter.sequence
+}
+
 // silentFor is how long since the last event left.
 func (emitter *emitter) silentFor() time.Duration {
 	emitter.mutex.Lock()

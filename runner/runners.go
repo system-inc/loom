@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"debug/buildinfo"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -42,11 +44,45 @@ type runnerCache struct {
 	directory string
 	releases  string
 	client    *http.Client
+	// check says whether a binary is a loom-runner for this platform; nil means checkRunnerBinary.
+	check func(path string) error
+}
+
+// runnerFetchBound bounds a runner's fetch, and a quarter of the unit's own time bounds it further, so a slow store
+// never spends the unit's deadline.
+const runnerFetchBound = 5 * time.Minute
+
+// loomRunnerPath is the main package every loom-runner is built from.
+const loomRunnerPath = "github.com/system-inc/loom/runner/cmd/loom-runner"
+
+// checkRunnerBinary refuses a binary that isn't a loom-runner built for this platform, by the build information Go
+// writes into every binary: the release store holds every release's `loom` too, and both platforms' builds, and a
+// unit naming one of those must never be run here as a runner.
+func checkRunnerBinary(path string) error {
+	information, err := buildinfo.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("it isn't a Go binary: %w", err)
+	}
+	if information.Path != loomRunnerPath {
+		return fmt.Errorf("it is %s, not loom-runner", information.Path)
+	}
+	settings := map[string]string{}
+	for _, setting := range information.Settings {
+		settings[setting.Key] = setting.Value
+	}
+	if settings["GOOS"] != runtime.GOOS || settings["GOARCH"] != runtime.GOARCH {
+		return fmt.Errorf("it is built for %s/%s, and this machine is %s/%s", settings["GOOS"], settings["GOARCH"], runtime.GOOS, runtime.GOARCH)
+	}
+	return nil
 }
 
 // run runs a unit on the runner it names: this one when it names none or this one, else that runner, as a process of
-// its own. had is false when the unit names a runner that couldn't be had (not in the store, not whole, or unable to
-// start here); the unit is then refused here, broken and named, the coordinator's to place again.
+// its own. Before fetching that runner it starts the unit itself (started, naming this machine, then a line saying what
+// it fetches, and one every heartbeat while it does), so the coordinator holds the unit as taken instead of queuing it
+// again, and the runner continues the unit's stream from there. had is false when the unit names a runner that couldn't
+// be had (not in the store, not whole, not a loom-runner for this platform, or never starting the unit, as a release
+// from before this hand-off doesn't); the unit is then finished here, broken and named, the coordinator's to place
+// again, and serve counts it toward its backoff.
 func (cache runnerCache) run(runContext context.Context, unit protocol.Unit, options Options) (Result, bool) {
 	named := ""
 	if unit.Test != nil {
@@ -55,25 +91,94 @@ func (cache runnerCache) run(runContext context.Context, unit protocol.Unit, opt
 	if named == "" || named == selfSha256() {
 		return Run(runContext, unit, options), true
 	}
-	binary, err := cache.path(runContext, named)
-	if err != nil {
-		return refuse(unit, options, protocol.PhaseFetch, fmt.Errorf("the runner %.12s the unit's key names can't be had: %w: Loom's, never the change's", named, err)), false
+	run := begin(unit, options)
+	broken := func(phase string, err error) (Result, bool) {
+		run.fail(phase, err)
+		run.finish(protocol.StatusBroken)
+		return Result{Status: protocol.StatusBroken}, false
 	}
-	result, err := runOn(runContext, binary, unit, options)
+	run.say(fmt.Sprintf("the unit's key names runner %.12s; fetching it from the release store", named))
+	bound := runnerFetchBound
+	if quarter := time.Duration(unit.TimeoutSeconds) * time.Second / 4; quarter > 0 && quarter < bound {
+		bound = quarter
+	}
+	fetchContext, cancel := context.WithTimeout(runContext, bound)
+	beating := make(chan struct{})
+	go func() {
+		started := time.Now()
+		ticker := time.NewTicker(run.options.Heartbeat / 4)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-beating:
+				return
+			case <-ticker.C:
+				if run.emitter.silentFor() >= run.options.Heartbeat {
+					run.say(fmt.Sprintf("still fetching runner %.12s after %.0f s", named, time.Since(started).Seconds()))
+				}
+			}
+		}
+	}()
+	binary, err := cache.path(fetchContext, named)
+	close(beating)
+	cancel()
 	if err != nil {
-		return refuse(unit, options, protocol.PhaseStart, fmt.Errorf("the runner %.12s the unit's key names can't run here: %w: Loom's, never the change's", named, err)), false
+		return broken(protocol.PhaseFetch, fmt.Errorf("the runner %.12s the unit's key names can't be had within %v: %w: Loom's, never the change's", named, bound, err))
+	}
+	check := cache.check
+	if check == nil {
+		check = checkRunnerBinary
+	}
+	if err := check(binary); err != nil {
+		return broken(protocol.PhaseFetch, fmt.Errorf("the blob %.12s the unit's key names isn't a runner to run here: %v: Loom's, never the change's", named, err))
+	}
+	// What this runner said lands before the named runner continues the stream from the next sequence.
+	if wire := run.emitter.wire; wire != nil {
+		wire.Drain(time.Now().Add(run.options.WireDrainTimeout))
+	}
+	unit.SequenceStart = run.emitter.next()
+	result, started, err := runOn(runContext, binary, unit, options)
+	switch {
+	case err != nil:
+		return broken(protocol.PhaseStart, fmt.Errorf("the runner %.12s the unit's key names can't run here: %w: Loom's, never the change's", named, err))
+	case !started:
+		return broken(protocol.PhaseStart, fmt.Errorf("the runner %.12s the unit's key names exited %s without starting the unit (a release from before serve's hand-off takes none of its settings): Loom's, never the change's", named, result.Status))
 	}
 	return result, true
 }
 
+// startWatcher passes a runner's event lines through and notes whether one was its unit's started event.
+type startWatcher struct {
+	writer  io.Writer
+	partial []byte
+	started bool
+}
+
+func (watcher *startWatcher) Write(content []byte) (int, error) {
+	watcher.partial = append(watcher.partial, content...)
+	for {
+		end := bytes.IndexByte(watcher.partial, '\n')
+		if end < 0 {
+			break
+		}
+		var event protocol.Event
+		if json.Unmarshal(watcher.partial[:end], &event) == nil && event.Type == "started" {
+			watcher.started = true
+		}
+		watcher.partial = watcher.partial[end+1:]
+	}
+	return watcher.writer.Write(content)
+}
+
 // runOn runs the unit on another runner binary, `run` with this runner's own settings and the unit on its stdin, the
 // way serve would run it: its events go to options.Events and to the wire the unit names, posted by that runner. Its
-// exit says the status. A stopped serve stops it with SIGTERM, which breaks the unit there as here.
-func runOn(runContext context.Context, binary string, unit protocol.Unit, options Options) (Result, error) {
+// exit says the status, and started whether it began the unit at all. A stopped serve stops it with SIGTERM, which
+// breaks the unit there as here.
+func runOn(runContext context.Context, binary string, unit protocol.Unit, options Options) (Result, bool, error) {
 	options = options.withDefaults()
 	encoded, err := json.Marshal(unit)
 	if err != nil {
-		return Result{}, err
+		return Result{}, false, err
 	}
 	arguments := []string{"run", "--workspace", options.WorkspaceParent}
 	if options.Strict {
@@ -91,24 +196,29 @@ func runOn(runContext context.Context, binary string, unit protocol.Unit, option
 	if options.Tree != "" {
 		arguments = append(arguments, "--tree", options.Tree)
 	}
+	if options.Machine != "" {
+		arguments = append(arguments, "--machine", options.Machine)
+	}
 	command := exec.CommandContext(runContext, binary, append(arguments, "-")...)
 	command.Stdin = bytes.NewReader(encoded)
-	command.Stdout, command.Stderr = options.Events, options.Diagnostics
+	watcher := &startWatcher{writer: options.Events}
+	command.Stdout, command.Stderr = watcher, options.Diagnostics
 	command.Cancel = func() error { return command.Process.Signal(syscall.SIGTERM) }
 	// Time for it to break the unit and post that: its kill grace and its wire's drain.
 	command.WaitDelay = options.KillGrace + options.WireDrainTimeout + 30*time.Second
 	err = command.Run()
 	var exit *exec.ExitError
 	if err != nil && !errors.As(err, &exit) {
-		return Result{}, err
+		return Result{}, false, err
 	}
-	switch command.ProcessState.ExitCode() {
+	switch code := command.ProcessState.ExitCode(); code {
 	case 0:
-		return Result{Status: protocol.StatusPassed}, nil
+		return Result{Status: protocol.StatusPassed}, watcher.started, nil
 	case 1:
-		return Result{Status: protocol.StatusFailed}, nil
+		return Result{Status: protocol.StatusFailed}, watcher.started, nil
+	default:
+		return Result{Status: fmt.Sprintf("%d", code)}, watcher.started, nil
 	}
-	return Result{Status: protocol.StatusBroken}, nil
 }
 
 // path is the runner with this sha256, ready to run: kept here and checked again, or fetched from the release store,
@@ -132,10 +242,8 @@ func (cache runnerCache) path(fetchContext context.Context, sum string) (string,
 	if err := os.MkdirAll(cache.directory, 0o755); err != nil {
 		return "", err
 	}
-	requestContext, cancel := context.WithTimeout(fetchContext, 10*time.Minute)
-	defer cancel()
 	url := strings.TrimSuffix(cache.releases, "/") + "/" + sum
-	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, url, nil)
+	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
 	}

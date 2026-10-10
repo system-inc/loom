@@ -3,7 +3,6 @@ package coordinator
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
 	"runtime"
 	"slices"
@@ -84,20 +83,20 @@ func TestThreeUnitsOnPoolSlotsAreGreenAndTheWireHoldsTheRecord(t *testing.T) {
 	if len(held) != len(result.Events) {
 		t.Fatalf("the wire holds %d events, the record %d", len(held), len(result.Events))
 	}
-	hostname, _ := os.Hostname()
 	for _, id := range []string{"a", "b", "c"} {
 		onWire, inRecord := unitEventsOf(held, id), unitEventsOf(result.Events, id)
 		if !reflect.DeepEqual(onWire, inRecord) {
 			t.Fatalf("%s: the wire has %+v, the record %+v", id, onWire, inRecord)
 		}
-		// The worker says where it ran; the pool is only where the coordinator placed it.
+		// The worker says where it ran, by the name the pool shows it under; the pool is only where the coordinator
+		// placed it.
 		said := ""
 		for _, event := range inRecord {
 			if event.Type == "output" {
 				said += event.Text
 			}
 		}
-		if inRecord[0].Type != "started" || inRecord[0].Machine != hostname || said != id {
+		if inRecord[0].Type != "started" || !strings.HasPrefix(inRecord[0].Machine, "worker-") || said != id {
 			t.Fatalf("%s: %+v", id, inRecord)
 		}
 	}
@@ -264,8 +263,7 @@ func TestAPoolUnitWhoseWorkerGoesSilentIsPlacedAgainAndContinuesItsStream(t *tes
 			machines = append(machines, event.Machine)
 		}
 	}
-	hostname, _ := os.Hostname()
-	if !reflect.DeepEqual(machines, []string{"ghost", hostname}) {
+	if len(machines) != 2 || machines[0] != "ghost" || !strings.HasPrefix(machines[1], "worker-") {
 		t.Fatalf("started on %v", machines)
 	}
 	onWire := unitEventsOf(wire.events(result.Run), "orphaned")
