@@ -10,7 +10,7 @@ import (
 
 // prepare.sh pin-urls holds every submodule url at every depth to pinUrl's rule (queuebridge's PinUrl, the same rule):
 // a checkout whose nested submodule names a house address is refused by name, though the top level is on GitHub.
-// Mutant: pinUrls reading only the top level's .gitmodules makes this fail.
+// Mutants: pinUrls reading only the top level's .gitmodules, or splitting the submodule paths on spaces, make this fail.
 func TestPrepareChecksEverySubmoduleUrlAtEveryDepth(t *testing.T) {
 	// The real path, as git names it (macOS's /tmp is /private/tmp).
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -43,14 +43,15 @@ func TestPrepareChecksEverySubmoduleUrlAtEveryDepth(t *testing.T) {
 	git(cohere, "submodule", "add", "-q", typeScript, "TypeScript")
 	git(cohere, "config", "-f", ".gitmodules", "submodule.TypeScript.url", "http://10.101.1.1/TypeScript.git")
 	git(cohere, "commit", "-q", "-am", "pins TypeScript")
+	// cohere sits at a path with a space, so a check that splits paths on spaces never reads its .gitmodules.
 	tree := repository("adamic", nil)
-	git(tree, "submodule", "add", "-q", cohere, "cohere")
+	git(tree, "submodule", "add", "-q", cohere, "co here")
 	// cohere's TypeScript is checked out from the local repository; its .gitmodules still names the house address.
-	nested := filepath.Join(tree, "cohere")
+	nested := filepath.Join(tree, "co here")
 	git(nested, "submodule", "init")
 	git(nested, "config", "submodule.TypeScript.url", typeScript)
 	git(nested, "submodule", "update", "-q")
-	git(tree, "config", "-f", ".gitmodules", "submodule.cohere.url", "git@github.com:system-inc/cohere.git")
+	git(tree, "config", "-f", ".gitmodules", "submodule.co here.url", "git@github.com:system-inc/cohere.git")
 	git(tree, "commit", "-q", "-am", "pins cohere")
 	check := func() (int, string) {
 		command := exec.Command("bash", "prepare.sh", "pin-urls", tree)
@@ -58,7 +59,7 @@ func TestPrepareChecksEverySubmoduleUrlAtEveryDepth(t *testing.T) {
 		output, _ := command.CombinedOutput()
 		return command.ProcessState.ExitCode(), string(output)
 	}
-	if code, output := check(); code != 3 || !strings.Contains(output, "refused: submodule http://10.101.1.1/TypeScript.git in "+filepath.Join(tree, "cohere")) {
+	if code, output := check(); code != 3 || !strings.Contains(output, "refused: submodule http://10.101.1.1/TypeScript.git in "+nested) {
 		t.Fatalf("a house address two levels down: exit %d, %s", code, output)
 	}
 	git(nested, "config", "-f", ".gitmodules", "submodule.TypeScript.url", "https://github.com/system-inc/TypeScript.git")

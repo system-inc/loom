@@ -172,10 +172,11 @@ func TestAnOriginThatIsntHttpsIsRefusedBeforeAnyFetch(t *testing.T) {
 	made := newWorld(t)
 	before := gitIn(t, made.work, "rev-parse", "origin/main")
 	made.pushFromAnotherTree(t)
-	for _, origin := range []string{"git@github.com:system-inc/adamic.git", "git@github-lander:system-inc/adamic.git", "ssh://git@github.com/system-inc/adamic.git", "http://10.101.1.1/adamic.git"} {
+	for _, origin := range []string{"git@github.com:system-inc/adamic.git", "git@github-lander:system-inc/adamic.git", "ssh://git@github.com/system-inc/adamic.git", "http://10.101.1.1/adamic.git",
+		"https://kirk:key@github.com/system-inc/adamic.git", "https://x-access-token@github.com/system-inc/adamic.git", "https://10.101.1.1/adamic.git", "https://gitlab.com/system-inc/adamic.git"} {
 		gitIn(t, made.work, "remote", "set-url", "origin", origin)
 		var gitError *GitError
-		if facts, err := made.clone.Facts(made.base, made.base); !errors.As(err, &gitError) || !strings.Contains(err.Error(), "isn't https") {
+		if facts, err := made.clone.Facts(made.base, made.base); !errors.As(err, &gitError) || !strings.Contains(err.Error(), "isn't a github.com repository over https with no key in it") {
 			t.Errorf("%s: facts %v, %v", origin, facts, err)
 		}
 	}

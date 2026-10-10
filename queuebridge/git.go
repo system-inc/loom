@@ -27,9 +27,10 @@ func (err *GitError) Error() string {
 
 // Clone is git's facts through this machine's clone of adamic, whose origin is the public
 // https://github.com/system-inc/adamic.git: the bridge is keyless (only the pusher holds a key), by construction rather
-// than by the machine's settings. Facts refuses an origin that isn't https (a local path, as the tests' is, is no key
-// either), and every git runs in keyless() with credential.helper emptied. A bare clone does, since main is fetched by
-// an explicit refspec into refs/remotes/origin/main.
+// than by the machine's settings or the clone's own configuration. Facts refuses an origin that breaks PinUrl's rule
+// (another host, a user or password in the url; a local path, as the tests' is, is no key either), and every git runs
+// in keyless() with keylessSettings on its command line. A bare clone does, since main is fetched by an explicit refspec
+// into refs/remotes/origin/main.
 type Clone struct {
 	Repository string
 	// mirror is where a pin's github.com url is fetched from, for the tests' stand-in GitHub; nil fetches the url.
@@ -49,9 +50,14 @@ func keyless() []string {
 	return environment
 }
 
-// gitArguments are git's arguments for a command in repository, with any credential helper emptied first.
+// keylessSettings are set on every git's command line, over anything a repository's own configuration says, since no
+// environment drops that: no credential helper, no extra header (an Authorization one is a key), and the server's
+// certificate verified.
+var keylessSettings = []string{"-c", "credential.helper=", "-c", "http.extraHeader=", "-c", "http.sslVerify=true"}
+
+// gitArguments are git's arguments for a command in repository, after keylessSettings.
 func gitArguments(repository string, arguments ...string) []string {
-	return append([]string{"-c", "credential.helper=", "-C", repository}, arguments...)
+	return append(append(append([]string{}, keylessSettings...), "-C", repository), arguments...)
 }
 
 // run runs a command with a time limit, in environment when it isn't nil (the whole environment, nothing of the
@@ -251,8 +257,10 @@ func (clone Clone) Facts(sha, base string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(origin, "https://") && !filepath.IsAbs(origin) {
-		return nil, &GitError{fmt.Sprintf("the clone's origin %q isn't https: the bridge reads the public repository with no key", origin)}
+	// The origin holds to the pins' rule (PinUrl): github.com over https, as owner/name, nothing in the url that is a key.
+	// A local path, as the tests' clones have, needs no key either.
+	if address, refused := PinUrl(origin); (refused != "" || address != origin) && !filepath.IsAbs(origin) {
+		return nil, &GitError{fmt.Sprintf("the clone's origin %q isn't a github.com repository over https with no key in it: the bridge reads the public repository keyless", origin)}
 	}
 	// main's head, asked of origin: a witness is of main's tip only when this is its sha (#6gj7n9p).
 	head, err := clone.mainHead()

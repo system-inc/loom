@@ -108,7 +108,7 @@ func (clone Clone) fetchPin(scratch, address, sha string) (string, string, error
 	for _, arguments := range [][]string{{"init", "-q", "--bare", store}, {"-C", store, "config", "core.repositoryformatversion", "1"},
 		{"-C", store, "config", "extensions.partialClone", "origin"}, {"-C", store, "remote", "add", "origin", from},
 		{"-C", store, "config", "remote.origin.promisor", "true"}, {"-C", store, "config", "remote.origin.partialclonefilter", "blob:none"}} {
-		if _, stderr, code, err := run(time.Minute, "", keyless(), nil, "git", append([]string{"-c", "credential.helper="}, arguments...)...); err != nil || code != 0 {
+		if _, stderr, code, err := run(time.Minute, "", keyless(), nil, "git", append(append([]string{}, keylessSettings...), arguments...)...); err != nil || code != 0 {
 			return "", "", &GitError{fmt.Sprintf("making a scratch store: git %s: %v %s", arguments[0], err, first(strings.TrimSpace(stderr), 300))}
 		}
 	}

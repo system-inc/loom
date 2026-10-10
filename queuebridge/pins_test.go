@@ -34,6 +34,11 @@ type server struct {
 }
 
 func newServer(t *testing.T) *server {
+	return newServerOver(t, false)
+}
+
+// newServerOver is a server over TLS when secure, with a certificate no client trusts unless told not to verify it.
+func newServerOver(t *testing.T, secure bool) *server {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("no git")
@@ -41,7 +46,7 @@ func newServer(t *testing.T) *server {
 	made := &server{root: t.TempDir()}
 	backend := &cgi.Handler{Path: gitPath, Args: []string{"http-backend"}, Env: []string{"GIT_PROJECT_ROOT=" + made.root, "GIT_HTTP_EXPORT_ALL=1"},
 		InheritEnv: []string{"PATH"}}
-	listener := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if made.status != 0 {
 			http.Error(writer, "GitHub is having a moment", made.status)
 			return
@@ -53,7 +58,13 @@ func newServer(t *testing.T) *server {
 			return
 		}
 		backend.ServeHTTP(writer, request)
-	}))
+	})
+	listener := httptest.NewUnstartedServer(handler)
+	if secure {
+		listener.StartTLS()
+	} else {
+		listener.Start()
+	}
 	t.Cleanup(listener.Close)
 	made.url = listener.URL
 	return made
@@ -260,11 +271,31 @@ func TestAPinBehindAKeyIsUnfetchableEvenWhenThisMachineHoldsOne(t *testing.T) {
 	if err != nil || len(pins) != 1 || pins[0].Fetchable || pins[0].Reason != github("private")+" isn't a public repository: a fetch with no key can't read it" {
 		t.Fatalf("pins %+v, %v", pins, err)
 	}
-	// A credential helper in the clone's own configuration, which no environment drops, is never asked either: every git
-	// the bridge runs empties credential.helper first.
-	gitIn(t, clone.Repository, "config", "credential.helper", helper)
-	if _, err := clone.git([]string{"fetch", "-q", served.url + "/private.git", private}); err == nil {
-		t.Fatal("the clone's own credential helper fetched the private repository")
+	// The clone's own configuration, which no environment drops, holds no key either: a credential helper there is never
+	// asked, and an Authorization header there is never sent, since every git the bridge runs empties both first. Each
+	// alone, so neither setting covers for the other.
+	for name, setting := range map[string][2]string{"a credential helper": {"credential.helper", helper}, "an extra header": {"http.extraHeader", "Authorization: Basic a2lyazprZXk="}} {
+		gitIn(t, clone.Repository, "config", setting[0], setting[1])
+		if _, err := clone.git([]string{"fetch", "-q", served.url + "/private.git", private}); err == nil {
+			t.Errorf("%s in the clone's own configuration fetched the private repository", name)
+		}
+		gitIn(t, clone.Repository, "config", "--unset", setting[0])
+	}
+}
+
+// A server whose certificate nothing trusts (a stand-in for a man in the middle) is never read, even when the clone's
+// own configuration says not to verify it. Mutant: http.sslVerify not forced on.
+func TestTheClonesOwnConfigurationNeverTurnsOffCertificateChecks(t *testing.T) {
+	served := newServerOver(t, true)
+	public := commitIn(t, map[string]string{"a.go": "package cohere\n"}, nil, served.repository(t, "cohere"))
+	clone := newWorld(t).clone
+	gitIn(t, clone.Repository, "config", "http.sslVerify", "false")
+	// Told not to verify, git reads it: the stand-in serves.
+	holder := t.TempDir()
+	gitIn(t, holder, "init", "-q", "--bare")
+	gitIn(t, holder, "-c", "http.sslVerify=false", "fetch", "-q", served.url+"/cohere.git", public)
+	if _, err := clone.git([]string{"fetch", "-q", served.url + "/cohere.git", public}); err == nil {
+		t.Fatal("the clone's http.sslVerify=false fetched from a server whose certificate nothing trusts")
 	}
 }
 

@@ -49,12 +49,15 @@ pinUrl() {
 }
 # pinUrls <tree>: every submodule url at every depth under <tree> follows pinUrl, or the first that doesn't is named.
 pinUrls() {
-	local directory key url why
-	for directory in "$1" $(git -C "$1" submodule foreach --quiet --recursive 'echo "${toplevel}/${sm_path}"' 2> /dev/null); do
-		while read -r key url; do
+	local directory entry url why
+	# One directory a line, read whole, so a submodule path with a space is one directory, never two; and each url read
+	# from git's NUL-separated "key, newline, value" entries, so a submodule name with a space never shifts it.
+	while IFS= read -r directory; do
+		while IFS= read -r -d '' entry; do
+			url=${entry#*$'\n'}
 			why=$(pinUrl "${url}") || { say "refused: submodule ${url} in ${directory}: ${why}"; return 3; }
-		done < <(git -C "${directory}" config -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
-	done
+		done < <(git -C "${directory}" config -z -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
+	done < <(printf '%s\n' "$1"; git -C "$1" submodule foreach --quiet --recursive 'printf "%s\n" "${toplevel}/${sm_path}"' 2> /dev/null)
 	return 0
 }
 if [ "${1:-}" = pin-url ]; then
