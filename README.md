@@ -96,7 +96,8 @@ Workshop built and builds nothing (`runner/prebuilt.go`, #pcn6prz). In place of 
    exactly the tree's release, or the unit is unfit), `GOFLAGS=-mod=readonly`, `GOENV=off`, `GOSUMDB=off`, and
    `GOPROXY=file://` the tree's module cache, which Workshop publishes with the tree (`go mod download all`, 63 MB for
    adamic) and the runner fetches and unpacks once like a source, into a `GOMODCACHE` per tree that the blob cache's
-   bound counts, filled before the tests; a module it lacks breaks the unit, named. Everything else is refused, and a
+   bound counts, filled before the tests; a module it lacks breaks the unit, named. A tree with a `go.work` gets a
+   copy of it outside the source (`GOWORK`, its paths made absolute), so go writes no `go.work.sum` into the tree. Everything else is refused, and a
    red whose test was refused is broken, naming the command. With no go, a unit whose tests asked one is unfit.
 
 These binaries are Workshop's builds from Loom's store, not compiled on the instance from the public repository at the

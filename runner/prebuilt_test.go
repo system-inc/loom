@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -109,8 +110,9 @@ func buildFixture(t *testing.T) error {
 		removeDirectory(directory)
 	}()
 	proxy, tree := filepath.Join(directory, "proxy"), filepath.Join(directory, "tree")
-	goSum := moduletest.Proxy(t, proxy)
-	fixtureBinary.files = map[string]string{"go.sum": goSum, "internal/uses/uses.go": "package uses\n\nimport _ \"" + moduletest.Import + "\"\n"}
+	moduletest.Proxy(t, proxy)
+	// A workspace, as adamic's is, whose module's go.sum lacks the module's lines: go learns them into go.work.sum.
+	fixtureBinary.files = map[string]string{"go.work": "go 1.27\n\nuse .\n", "internal/uses/uses.go": "package uses\n\nimport _ \"" + moduletest.Import + "\"\n"}
 	for _, name := range []string{"go.mod", "internal/lower/lower_test.go", "internal/lower/testdata/fixture.txt"} {
 		content, err := os.ReadFile(filepath.Join("testdata", "prebuilt", filepath.FromSlash(name)))
 		if err != nil {
@@ -128,14 +130,14 @@ func buildFixture(t *testing.T) error {
 	binary := filepath.Join(directory, "lower.test")
 	command := exec.Command("go", "test", "-c", "-o", binary, "./internal/lower")
 	command.Dir = tree
-	command.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=-mod=readonly -modcacherw", "GOPROXY=file://"+proxy, "GOSUMDB=off", "GOMODCACHE="+filepath.Join(directory, "modcache"))
+	command.Env = append(os.Environ(), "GOFLAGS=-mod=readonly -modcacherw", "GOPROXY=file://"+proxy, "GOSUMDB=off", "GOMODCACHE="+filepath.Join(directory, "modcache"))
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("go test -c: %v: %s", err, output)
 	}
 	if fixtureBinary.content, err = os.ReadFile(binary); err != nil {
 		return err
 	}
-	if fixtureBinary.modules, err = builder.ModuleCacheArchive(tree, []string{"GOWORK=off", "GOPROXY=file://" + proxy, "GOSUMDB=off"}); err != nil {
+	if fixtureBinary.modules, err = builder.ModuleCacheArchive(tree, []string{"GOPROXY=file://" + proxy, "GOSUMDB=off"}); err != nil {
 		return err
 	}
 	version, err := exec.Command("go", "env", "GOVERSION", "GOROOT").Output()
@@ -1199,6 +1201,18 @@ func TestATestsModulesComeFromTheTreesModuleCache(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(fixture.directory, "home", "go")); err == nil {
 		t.Error("go wrote HOME's module cache")
 	}
+	// The tree's source, shared by every unit of the tree, is as Workshop archived it: go wrote no go.work.sum there.
+	source := filepath.Join(fixture.directory, "root", sourceDirectoryName, fixture.tree.source)
+	filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || entry.Name() == sourceMarker {
+			return err
+		}
+		name, _ := filepath.Rel(source, path)
+		if content, err := os.ReadFile(path); err != nil || string(content) != fixtureBinary.files[filepath.ToSlash(name)] {
+			t.Errorf("the source's %s isn't as archived: %q", name, content)
+		}
+		return nil
+	})
 }
 
 // A module the tree's module cache lacks breaks the unit, named, before any test runs.
@@ -1315,5 +1329,28 @@ func TestAWaitToMakeAPartialIsBounded(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a wait for the sweep lock outlived the unit's time")
+	}
+}
+
+// The copy of a tree's go.work names the tree's directories absolutely, so go finds them from outside the tree, and
+// carries its go.work.sum.
+func TestAWorkspaceCopyNamesTheTreesDirectories(t *testing.T) {
+	prebuiltBinary(t)
+	source, directory := t.TempDir(), t.TempDir()
+	os.WriteFile(filepath.Join(source, "go.work"), []byte("go 1.27\n\nuse (\n\t.\n\t./sub\n)\n\nreplace example.com/x v1.0.0 => ./x\n\nreplace example.com/y => example.com/z v1.2.0\n"), 0o644)
+	os.WriteFile(filepath.Join(source, "go.work.sum"), []byte("sums\n"), 0o644)
+	copied, err := workspaceCopy(context.Background(), fixtureBinary.goBinary, append(os.Environ(), "GOTOOLCHAIN=local"), source, directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, _ := os.ReadFile(copied)
+	for _, want := range []string{"use " + strconv.Quote(source), "use " + strconv.Quote(filepath.Join(source, "sub")),
+		"replace example.com/x v1.0.0 => " + strconv.Quote(filepath.Join(source, "x")), "replace example.com/y => example.com/z v1.2.0"} {
+		if !strings.Contains(string(content), want+"\n") {
+			t.Errorf("the copy lacks %q:\n%s", want, content)
+		}
+	}
+	if sums, err := os.ReadFile(filepath.Join(directory, "go.work.sum")); err != nil || string(sums) != "sums\n" {
+		t.Errorf("go.work.sum: %q %v", sums, err)
 	}
 }

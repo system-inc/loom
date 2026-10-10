@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -410,6 +412,77 @@ func delegatedEnvironment(proxy, moduleCache string) []string {
 	return []string{"GOTOOLCHAIN=local", "GOENV=off", "GOFLAGS=-mod=readonly", "GOPROXY=" + proxy, "GOSUMDB=off", "GOMODCACHE=" + moduleCache}
 }
 
+// workspaceCopy writes the tree's go.work, its paths made absolute, and its go.work.sum when it has one, into
+// directory, for the tests' go queries, and returns the copy's path: in workspace mode go writes the checksums it
+// learns into go.work.sum beside go.work, and the tree's source is every unit's, so no go query may write there. ""
+// when the tree's source has no go.work at its top.
+func workspaceCopy(copyContext context.Context, real string, environment []string, source, directory string) (string, error) {
+	original := filepath.Join(source, "go.work")
+	if _, err := os.Stat(original); errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	command := exec.CommandContext(copyContext, real, "work", "edit", "-json", original)
+	command.Env, command.Dir = environment, source
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("go work edit -json: %w", err)
+	}
+	var work struct {
+		Go        string
+		Toolchain string
+		Godebug   []struct{ Key, Value string }
+		Use       []struct{ DiskPath string }
+		Replace   []struct {
+			Old, New struct{ Path, Version string }
+		}
+	}
+	if err = json.Unmarshal(output, &work); err != nil {
+		return "", err
+	}
+	local := func(path string) string {
+		if filepath.IsAbs(path) {
+			return path
+		}
+		return filepath.Join(source, filepath.FromSlash(path))
+	}
+	var text strings.Builder
+	fmt.Fprintf(&text, "go %s\n", work.Go)
+	if work.Toolchain != "" {
+		fmt.Fprintf(&text, "toolchain %s\n", work.Toolchain)
+	}
+	for _, setting := range work.Godebug {
+		fmt.Fprintf(&text, "godebug %s=%s\n", setting.Key, setting.Value)
+	}
+	for _, use := range work.Use {
+		fmt.Fprintf(&text, "use %s\n", strconv.Quote(local(use.DiskPath)))
+	}
+	for _, replace := range work.Replace {
+		old := replace.Old.Path
+		if replace.Old.Version != "" {
+			old += " " + replace.Old.Version
+		}
+		target := replace.New.Path + " " + replace.New.Version
+		if replace.New.Version == "" {
+			// A version-less replacement is a directory.
+			target = strconv.Quote(local(replace.New.Path))
+		}
+		fmt.Fprintf(&text, "replace %s => %s\n", old, target)
+	}
+	if err = os.MkdirAll(directory, 0o755); err != nil {
+		return "", err
+	}
+	copied := filepath.Join(directory, "go.work")
+	if err = os.WriteFile(copied, []byte(text.String()), 0o644); err != nil {
+		return "", err
+	}
+	if sums, err := os.ReadFile(filepath.Join(source, "go.work.sum")); err == nil {
+		if err = os.WriteFile(filepath.Join(directory, "go.work.sum"), sums, 0o644); err != nil {
+			return "", err
+		}
+	}
+	return copied, nil
+}
+
 // A goStandIn is the go a prebuilt unit's tests find first on PATH, and the files it writes what they asked of it in:
 // each build it refused, each read-only query the runner's go answered (with its exit), each one no go here could.
 type goStandIn struct {
@@ -486,6 +559,13 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 			return goStandIn{}, fmt.Errorf("refused as unfit: the runner's go at %s is %q under GOTOOLCHAIN=local (%v), and the tree was built with %s: Loom's, never the change's",
 				real, says, err, release[0])
 		}
+		work, err := workspaceCopy(checkContext, real, append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), directory, filepath.Join(run.directory, "workspace-go"))
+		if err != nil {
+			return goStandIn{}, fmt.Errorf("copying the tree's go.work: %w (Loom's, never the change's)", err)
+		}
+		if work != "" {
+			delegated = append(delegated, "GOWORK="+work)
+		}
 		if index.Modules != "" {
 			started := time.Now()
 			if output, err := goCommand("mod", "download", "all"); err != nil {
@@ -505,6 +585,11 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 	exports := ""
 	for _, variable := range delegated {
 		name, value, _ := strings.Cut(variable, "=")
+		if name == "GOWORK" {
+			// A test that chose its own workspace (GOWORK=off, say) keeps it.
+			exports += "if [ -z \"$GOWORK\" ]; then GOWORK=" + shellQuote(value) + "; export GOWORK; fi\n"
+			continue
+		}
 		exports += name + "=" + shellQuote(value) + "\nexport " + name + "\n"
 	}
 	script := strings.NewReplacer("REFUSED", shellQuote(standIn.refused), "UNANSWERED", shellQuote(standIn.unanswered),
