@@ -27,3 +27,21 @@ func TestProbeToolsReadsThePinnedRunnerFromItsFile(t *testing.T) {
 		t.Error("a missing pin file left the runner empty instead of refusing")
 	}
 }
+
+// The Go release a gofmt key holds is the one go resolves inside the tree under GOTOOLCHAIN=auto, as adamic's setup
+// leaves it: asked in the tree, with auto outranking the planner's own GOTOOLCHAIN. A go that can't say fails the plan.
+// Mutants: go asked outside the tree, or under the planner's GOTOOLCHAIN.
+func TestTreeGoVersionIsAskedInTheTree(t *testing.T) {
+	bin, tree := t.TempDir(), filepath.Join(t.TempDir(), "tree-x")
+	os.MkdirAll(tree, 0o755)
+	os.WriteFile(filepath.Join(bin, "go"), []byte("#!/bin/bash\n[ \"$*\" = \"env GOVERSION\" ] || exit 2\necho \"go1.99.9-$(basename \"$(/bin/pwd -P)\")-${GOTOOLCHAIN}\"\n"), 0o755)
+	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	t.Setenv("GOTOOLCHAIN", "local")
+	if version, err := TreeGoVersion(tree); err != nil || version != "go1.99.9-tree-x-auto" {
+		t.Fatalf("the tree's Go release is %q (%v), want go1.99.9-tree-x-auto", version, err)
+	}
+	os.WriteFile(filepath.Join(bin, "go"), []byte("#!/bin/bash\necho 'go: no toolchain' >&2\nexit 1\n"), 0o755)
+	if _, err := TreeGoVersion(tree); err == nil || !strings.Contains(err.Error(), "no toolchain") {
+		t.Fatalf("a go that can't say its release gave %v", err)
+	}
+}

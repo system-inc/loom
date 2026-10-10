@@ -254,11 +254,17 @@ func TestAChangeKeysGateInputsEverywhereAndItsPathsOnlyOnGateSampleReaders(t *te
 }
 
 // A future's phase units are run.py's own list at the gate tools (but census, the judge's step) plus gofmt, each kind phase, run, keyed on the
-// tree's object and the tools commit, with gofmt alone carrying the change's paths. Another tree moves every phase key.
+// tree's object and the tools commit, with gofmt alone carrying the change's paths and keyed on the Go release the tree
+// resolves (TreeGoVersion), not the planner's. Another tree moves every phase key. Mutant: gofmt keyed on the
+// planner's Go.
 func TestPhaseUnitsAreRunPysListPlusGofmtKeyedOnTheWholeTree(t *testing.T) {
 	t.Parallel()
 	tree, gateTools := planFixture(t)
-	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
+	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.0"}
+	treeGo, err := TreeGoVersion(tree)
+	if err != nil || treeGo == tools.Go {
+		t.Fatalf("the tree's Go release is %q (%v)", treeGo, err)
+	}
 	inputs := ParityInputs{GateInputs: strings.Repeat("4", 64), ChangedPaths: []string{"a/a.go"}}
 	phases, err := PhaseUnits(tree, gateTools, strings.Repeat("b", 40), strings.Repeat("c", 40), tools, inputs)
 	if err != nil {
@@ -277,6 +283,9 @@ func TestPhaseUnitsAreRunPysListPlusGofmtKeyedOnTheWholeTree(t *testing.T) {
 			t.Errorf("%s keys runner %s and gate tools %q, want the phase pool's %s and %s", phase.Name, short(phase.KeyParts.Tools.Runner), phase.KeyParts.GateTools, short(PhasePoolRunner), short(toolsCommit))
 		}
 		gofmt := phase.Name == "phase:gofmt"
+		if want := map[bool]string{true: treeGo, false: tools.Go}[gofmt]; phase.KeyParts.Tools.Go != want {
+			t.Errorf("%s keys Go %s, want %s", phase.Name, phase.KeyParts.Tools.Go, want)
+		}
 		if phase.KeyParts.Kind != "phase" || phase.Decision != "run" || phase.KeyParts.GateInputs != inputs.GateInputs || (phase.KeyParts.Env["ADAMIC_GATE_CHANGED"] != "") != gofmt {
 			t.Errorf("%s: %+v, decision %s", phase.Name, phase.KeyParts, phase.Decision)
 		}

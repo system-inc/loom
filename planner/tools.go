@@ -26,6 +26,24 @@ func ProbeTools(runnerShaFile string) (Tools, error) {
 	return tools, nil
 }
 
+// TreeGoVersion is the Go release go resolves inside the tree: go env GOVERSION run there under GOTOOLCHAIN=auto, as
+// adamic's setup leaves it, so the tree's go.mod go and toolchain lines decide, not the planner's own Go alone. The
+// gofmt phase is keyed on it, and the runner resolves exactly that release (GOTOOLCHAIN=<it>) for the gofmt it runs.
+func TreeGoVersion(tree string) (string, error) {
+	command := exec.Command("go", "env", "GOVERSION")
+	command.Dir = tree
+	// The last GOTOOLCHAIN in an environment is the one go gets, so a planner's own GOTOOLCHAIN=local can't win.
+	command.Env = append(os.Environ(), "GOTOOLCHAIN=auto")
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	output, err := command.Output()
+	version := strings.TrimSpace(string(output))
+	if err != nil || version == "" {
+		return "", fmt.Errorf("go env GOVERSION in %s: %v: %s", tree, err, strings.TrimSpace(stderr.String()))
+	}
+	return version, nil
+}
+
 func firstLine(name string, arguments ...string) string {
 	output, err := exec.Command(name, arguments...).Output()
 	if err != nil {

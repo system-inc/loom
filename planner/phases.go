@@ -61,6 +61,11 @@ func PhaseUnits(tree, gateTools, base, sha string, tools Tools, inputs ParityInp
 	if tools.Runner, err = PhaseRunner(pools); err != nil {
 		return nil, err
 	}
+	// gofmt is keyed on the Go release the tree resolves, which the runner resolves too, never the planner's own.
+	gofmtTools := tools
+	if gofmtTools.Go, err = TreeGoVersion(tree); err != nil {
+		return nil, err
+	}
 	closure, reads := phaseHash("loom-phase-tree", treeObject), phaseHash("loom-phase-tools", toolsCommit)
 	environment := map[string]string{}
 	for name, value := range GateEnvironment {
@@ -85,14 +90,16 @@ func PhaseUnits(tree, gateTools, base, sha string, tools Tools, inputs ParityInp
 	results := []PlannedResult{}
 	for _, line := range append(lines, protocol.GofmtPhase) {
 		env, err := KeyEnv(environment)
+		lineTools := tools
 		if line == protocol.GofmtPhase {
 			env, err = KeyEnv(gofmtEnvironment)
+			lineTools = gofmtTools
 		}
 		if err != nil {
 			return nil, err
 		}
 		parts := KeyParts{Kind: "phase", Package: module, Select: Select{Run: line}, Closure: closure, Reads: reads,
-			Products: []string{}, Tools: tools, Env: env, GateInputs: inputs.GateInputs, GateTools: toolsCommit}
+			Products: []string{}, Tools: lineTools, Env: env, GateInputs: inputs.GateInputs, GateTools: toolsCommit}
 		key, err := UnitKey(parts)
 		if err != nil {
 			return nil, err

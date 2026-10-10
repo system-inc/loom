@@ -28,7 +28,8 @@ import (
 //	a phase job run without --phase-jobs: TestAPhaseJobRunsRunPyFromTheGateToolsAtItsCommit
 //	gofmt over the whole tree, its listed files ignored, a deleted path handed to it, a linked or escaping path
 //	skipped, the stage3/upstream/ skip dropped, or only the first batch run: TestTheGofmtPhaseChecksOnlyTheChangesGoFiles
-//	gofmt found on PATH, or of any Go release: TestTheGofmtPhaseChecksOnlyTheChangesGoFiles, TestTheGofmtPhaseRunsOnlyTheKeysGofmt
+//	gofmt found on PATH, of any Go release, or resolved without GOTOOLCHAIN set to the key's: TestTheGofmtPhaseChecksOnlyTheChangesGoFiles,
+//	TestTheGofmtPhaseRunsOnlyTheKeysGofmt
 
 const testSha = "0123456789abcdef0123456789abcdef01234567"
 
@@ -560,8 +561,9 @@ func gofmtToolchain(t *testing.T) (string, string) {
 	return lines[0], lines[1]
 }
 
-// The gofmt phase runs only a gofmt the key's Go release built, beside the go the tree runs: a gofmt of another
-// release, or none there, breaks the unit (the instance's, never the change's) and runs nothing.
+// The gofmt phase runs only the gofmt of the Go release its key names: go resolves it in the tree under GOTOOLCHAIN set
+// to that release. A release that can't be had (here, offline: GOPROXY=off), a gofmt another release built, or none
+// beside the go breaks the unit (the instance's, never the change's), names why, and runs nothing.
 func TestTheGofmtPhaseRunsOnlyTheKeysGofmt(t *testing.T) {
 	fixture := newStrictFixture(t, 0)
 	goroot, version := gofmtToolchain(t)
@@ -569,25 +571,42 @@ func TestTheGofmtPhaseRunsOnlyTheKeysGofmt(t *testing.T) {
 	os.WriteFile(filepath.Join(fixture.tree, "unformatted.go"), []byte("package a\nconst  B=2\n"), 0o644)
 	options := fixture.options(t)
 	options.PhaseJobs = true
+	onPath := func(path string) {
+		prepareScript = []byte("#!/bin/bash\nprintf 'PATH=%s\\0HOME=%s\\0GOPROXY=off\\0GOTOOLCHAIN=auto\\0' \"" + path + ":/usr/bin:/bin\" \"${HOME}\" > \"$5\"\n")
+	}
+	stubGo := func(name, script string) string {
+		directory := filepath.Join(fixture.directory, name)
+		os.MkdirAll(directory, 0o755)
+		os.WriteFile(filepath.Join(directory, "go"), []byte("#!/bin/bash\n"+script), 0o755)
+		return directory
+	}
 	job := protocol.TestJob{Repository: protocol.AdamicRepository, Sha: testSha, Base: strings.Repeat("b", 40), Phase: protocol.GofmtPhase,
-		Tools: strings.Repeat("e", 40), ChangedPaths: []string{"unformatted.go"}, Go: "go1.0"}
-	prepareScript = []byte("#!/bin/bash\nprintf 'PATH=%s\\0HOME=%s\\0' \"" + filepath.Join(goroot, "bin") + ":/usr/bin:/bin\" \"${HOME}\" > \"$5\"\n")
-	result, events, _ := runUnit(t, testJobUnit(job), options)
-	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "the unit's key names \"go1.0\"") || len(eventsOfType(events, "exit")) != 0 {
-		t.Fatalf("a gofmt of %s under a key naming go1.0: %s; errors %q", version, result.Status, errorPhases(events))
+		Tools: strings.Repeat("e", 40), ChangedPaths: []string{"unformatted.go"}, Go: "go1.27.99"}
+	broken := func(why string) {
+		t.Helper()
+		result, events, _ := runUnit(t, testJobUnit(job), options)
+		if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), why) || len(eventsOfType(events, "exit")) != 0 {
+			t.Fatalf("gofmt keyed on %s: %s, want broken saying %q; errors %q", job.Go, result.Status, why, errorPhases(events))
+		}
+	}
+	onPath(filepath.Join(goroot, "bin"))
+	broken("the key's Go release go1.27.99 can't be had here")
+	// A go that resolves the key's release (it says which GOTOOLCHAIN it was asked for) to a gofmt another one built.
+	other := filepath.Join(fixture.directory, "other-goroot")
+	os.MkdirAll(filepath.Join(other, "bin"), 0o755)
+	os.WriteFile(filepath.Join(other, "bin", "gofmt"), []byte("#!/bin/bash\n"), 0o755)
+	asked := filepath.Join(fixture.directory, "asked")
+	onPath(stubGo("other-go", "echo \"${GOTOOLCHAIN}\" > \""+asked+"\"\ncase $1 in env) echo \""+other+"\" ;; version) echo \"$2: go1.26.0\" ;; esac\n"))
+	job.Go = version
+	broken("was built by \"go1.26.0\", and the unit's key names \"" + version + "\"")
+	if content, _ := os.ReadFile(asked); strings.TrimSpace(string(content)) != version {
+		t.Errorf("go was asked for GOTOOLCHAIN %q, want the key's %s", strings.TrimSpace(string(content)), version)
 	}
 	// A go whose GOROOT holds no gofmt.
 	empty := filepath.Join(fixture.directory, "empty-goroot")
-	stub := filepath.Join(fixture.directory, "stub-go")
 	os.MkdirAll(empty, 0o755)
-	os.MkdirAll(stub, 0o755)
-	os.WriteFile(filepath.Join(stub, "go"), []byte("#!/bin/bash\necho \""+empty+"\"\n"), 0o755)
-	prepareScript = []byte("#!/bin/bash\nprintf 'PATH=%s\\0HOME=%s\\0' \"" + stub + ":/usr/bin:/bin\" \"${HOME}\" > \"$5\"\n")
-	job.Go = version
-	result, events, _ = runUnit(t, testJobUnit(job), options)
-	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "no gofmt at "+filepath.Join(empty, "bin", "gofmt")) {
-		t.Fatalf("no gofmt beside the go: %s; errors %q", result.Status, errorPhases(events))
-	}
+	onPath(stubGo("empty-go", "echo \""+empty+"\"\n"))
+	broken("no gofmt at " + filepath.Join(empty, "bin", "gofmt"))
 }
 
 // A package that compiles and tests in silence past the heartbeat still has the runner saying the unit is running,

@@ -301,6 +301,7 @@ func gofmtPaths(tree string, changed []string) (paths []string, problems []strin
 		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
 			// The change deleted it.
 		case err != nil:
+			// A deleted path behind a link out of the tree fails too: failing closed there is right.
 			problems = append(problems, fmt.Sprintf("%s can't be read inside the tree: %v", path, err))
 		case info.Mode()&fs.ModeSymlink != 0:
 			problems = append(problems, path+" is a symbolic link, not a Go file")
@@ -332,15 +333,22 @@ func gofmtBatches(paths []string) [][]string {
 	return batches
 }
 
-// gofmtTool is the gofmt the phase runs: bin/gofmt under the GOROOT of the go the unit's environment runs in the tree.
-// adamic's setup leaves GOTOOLCHAIN=auto, under which go switches to the go.mod toolchain and a gofmt found on PATH
-// does not, so PATH's gofmt could be any release. It is taken only when go version says the Go release the unit's key
-// names (the job's Go) built it.
+// gofmtTool is the gofmt the phase runs: bin/gofmt under the GOROOT of the go the unit's environment runs in the tree
+// with GOTOOLCHAIN set to the Go release the unit's key names (the job's Go), so go resolves exactly that release,
+// fetching it if the instance's go is another. A gofmt found on PATH is never switched, so it could be any release.
+// It is taken only when go version says that release built it. A release that can't be had here (no download allowed,
+// offline) is the instance's, named.
 func (run *unitRun) gofmtTool(gofmtContext context.Context, environment []string, tree string, want string) (string, error) {
+	release := strings.Fields(want)
+	if len(release) == 0 {
+		return "", fmt.Errorf("the unit's key names no Go release")
+	}
+	// The last GOTOOLCHAIN in an environment is the one a command gets, so this one outranks adamic's auto.
+	environment = append(slices.Clone(environment), "GOTOOLCHAIN="+release[0])
 	var output, stderr bytes.Buffer
 	state, err := run.goCommand(gofmtContext, []string{"go", "env", "GOROOT"}, environment, tree, &output, &stderr)
 	if err != nil || !state.Success() {
-		return "", fmt.Errorf("go env GOROOT failed (%v): %s", err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("the key's Go release %s can't be had here: go env GOROOT under GOTOOLCHAIN=%s failed (%v): %s", release[0], release[0], err, strings.TrimSpace(stderr.String()))
 	}
 	goroot := strings.TrimSpace(output.String())
 	if !filepath.IsAbs(goroot) {
@@ -348,7 +356,7 @@ func (run *unitRun) gofmtTool(gofmtContext context.Context, environment []string
 	}
 	gofmt := filepath.Join(goroot, "bin", "gofmt")
 	if info, err := os.Stat(gofmt); err != nil || !info.Mode().IsRegular() {
-		return "", fmt.Errorf("no gofmt at %s, beside the go the tree runs", gofmt)
+		return "", fmt.Errorf("no gofmt at %s, beside the go of the key's release %s", gofmt, release[0])
 	}
 	output.Reset()
 	stderr.Reset()
@@ -357,7 +365,7 @@ func (run *unitRun) gofmtTool(gofmtContext context.Context, environment []string
 		return "", fmt.Errorf("go version %s failed (%v): %s", gofmt, err, strings.TrimSpace(stderr.String()))
 	}
 	_, built, _ := strings.Cut(strings.TrimSpace(output.String()), ": ")
-	if fields := strings.Fields(built); len(fields) == 0 || len(strings.Fields(want)) == 0 || fields[0] != strings.Fields(want)[0] {
+	if fields := strings.Fields(built); len(fields) == 0 || fields[0] != release[0] {
 		return "", fmt.Errorf("%s was built by %q, and the unit's key names %q", gofmt, built, want)
 	}
 	return gofmt, nil
