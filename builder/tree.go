@@ -2,6 +2,7 @@ package builder
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -148,6 +149,8 @@ type TreeBuild struct {
 	// watches nothing. Free reads a filesystem (nil means Free).
 	Watched map[string]Watch
 	Free    func(path string) (uint64, error)
+	// Phases, when set, takes Warm's two steps' seconds (WarmTests, WarmMains).
+	Phases *TreePhases
 }
 
 func (build TreeBuild) busy() float64 {
@@ -247,12 +250,19 @@ func (build TreeBuild) mainPackages() ([]string, error) {
 // Warm compiles every package's tests once, in one go process, compile at a time, running none: each dependency
 // compiles once for the whole tree, and the products and binaries after it start from a warm build cache instead
 // of each compiling the tree's dependencies again at once. Then it compiles every main package with
-// ProductBuildFlags, as a product's go build will, so a product test's own build compiles nothing either.
+// ProductBuildFlags, as a product's go build will, so a product test's own build compiles nothing either. Each step's
+// seconds go to Phases, when set.
 func (build TreeBuild) Warm(packages []planner.ProductTest) error {
-	if err := build.warmTests(packages); err != nil {
+	phases, started := cmp.Or(build.Phases, &TreePhases{}), time.Now()
+	err := build.warmTests(packages)
+	phases.WarmTests = time.Since(started).Seconds()
+	if err != nil {
 		return err
 	}
-	return build.warmProducts()
+	started = time.Now()
+	err = build.warmProducts()
+	phases.WarmMains = time.Since(started).Seconds()
+	return err
 }
 
 // warmProducts compiles every main package with ProductBuildFlags, compile at a time, linking nothing.
@@ -606,6 +616,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 	if err := CheckChunks(source.Chunks); err != nil {
 		return "", false, fmt.Errorf("the source: %w", err)
 	}
+	phases, lap := cmp.Or(store.Phases, &TreePhases{}), time.Now()
 	var sent, sentBytes atomic.Int64
 	err := each(len(source.Chunks), publishJobs, func(index int) error {
 		chunk := source.Chunks[index]
@@ -623,6 +634,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 		return "", false, err
 	}
 	source.Sent, source.SentBytes = int(sent.Load()), sentBytes.Load()
+	phases.UploadChunks, lap = time.Since(lap).Seconds(), time.Now()
 	treeIndex.Format, treeIndex.Source = TreeIndexFormat, source.Chunks
 	names := make([]string, 0, len(treeIndex.Packages))
 	read := map[string]bool{}
@@ -661,6 +673,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 	if err != nil {
 		return "", false, err
 	}
+	phases.UploadProducts, lap = time.Since(lap).Seconds(), time.Now()
 	treeIndex.Products = map[string]string{}
 	conflicted := map[string]error{}
 	for index, product := range products {
@@ -705,7 +718,9 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 	for index, name := range names {
 		treeIndex.Packages[name] = packages[index]
 	}
+	phases.UploadBinaries, lap = time.Since(lap).Seconds(), time.Now()
 	written, err := store.writeIndex(treeKey, treeIndex)
+	phases.UploadIndex = time.Since(lap).Seconds()
 	if err != nil {
 		return "", false, fmt.Errorf("the tree's index: %w", err)
 	}

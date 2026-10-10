@@ -11,12 +11,12 @@
 ── tree builder · building ab12ab12ab12 ────────────────────────────────────────
  phase       products 4m12s · future 9f8e9f8e9f8e · 312 packages, 52 product te…
  products    40 hit in the store
+ phases      readying 1.4s · npm install 0.0s · listing 3.8s · warm tests 1m14s
+             warm mains 21s
  ✓ built       cd34cd34cd34 future 123412341234   6m02s  15:55:05
- ✕ failed      ef56ef56ef56 future 567856785678   1m35s  15:33:05  package stag…
 ── pools ───────────────────────────────────────────────────────────────────────
  box-strict 7 queued · 3 workers
    cloud-1a2b3c            16 cpus · asked 2m00s ago · took u-0042-lower
-   server-77e01d           32 cpus · asked 41s ago · took u-0043-lower
  box-phase 0 queued · 1 workers
  codex https://runs.loom.system.inc/pools/codex answered 503 Service Unavailable
 ── queue · seq 18422 ───────────────────────────────────────────────────────────

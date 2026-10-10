@@ -33,6 +33,7 @@ const (
 	MaximumBytes   = 64 << 10
 	RecentKept     = 12
 	FetchesKept    = 16
+	PhasesKept     = 24
 	MaximumText    = 160
 	MinimumSpacing = time.Second
 )
@@ -145,6 +146,16 @@ type Tree struct {
 	Products     int       `json:"products,omitempty"`
 	ProductsHit  int       `json:"productsHit,omitempty"`
 	Failed       int       `json:"failed,omitempty"`
+	// Phases are the build's phases so far, each as it ended, in order (build-tree's TreePhases, by name).
+	Phases []Phase `json:"phases,omitempty"`
+}
+
+// A Phase is one ended phase of a tree build: its name, its seconds, and for a phase that counts things (the products
+// fetched or built), how many.
+type Phase struct {
+	Name    string  `json:"name"`
+	Seconds float64 `json:"seconds"`
+	Count   int     `json:"count,omitempty"`
 }
 
 // Fetched is the bytes the unit had from the store, not the cache.
@@ -217,6 +228,15 @@ func bounded(status Status) Status {
 	if status.Tree != nil {
 		tree := *status.Tree
 		tree.Key, tree.Future, tree.Phase = cut(tree.Key), cut(tree.Future), cut(tree.Phase)
+		phases := tree.Phases
+		if len(phases) > PhasesKept {
+			phases = phases[:PhasesKept]
+		}
+		tree.Phases = make([]Phase, len(phases))
+		for index, phase := range phases {
+			phase.Name = cut(phase.Name)
+			tree.Phases[index] = phase
+		}
 		status.Tree = &tree
 	}
 	return status
@@ -392,6 +412,7 @@ func copyStatus(status Status) Status {
 	}
 	if status.Tree != nil {
 		tree := *status.Tree
+		tree.Phases = append([]Phase(nil), tree.Phases...)
 		status.Tree = &tree
 	}
 	status.Recent = append([]Recent(nil), status.Recent...)

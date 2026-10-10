@@ -21,6 +21,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/jsonlines"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
@@ -68,6 +69,9 @@ type Record struct {
 	Retry string `json:"retry,omitempty"`
 	// Transient marks a failure that passes (ErrTransient): retried soon, never standing.
 	Transient bool `json:"transient,omitempty"`
+	// Phases are the build's seconds by phase, its checkout's and build-tree's own, so a tree's phases outlive its
+	// build (#s0cqqhk); none on a start, or when the build said none.
+	Phases *builder.TreePhases `json:"phases,omitempty"`
 }
 
 // at is when the record was written; an unreadable time is the zero time, as old as can be.
@@ -318,9 +322,10 @@ type Builder struct {
 	// and the clone's): nothing is checked out or built until it has room.
 	Floor func() error
 	// Build checks the future's commit out keyless in the builder's clone and runs `loom build-tree` on it with the
-	// plan's tree key, which refuses a tree keying otherwise. Its error is why the build ended badly; whether the tree
-	// was built is read from the store after it, never from its exit.
-	Build  func(want Want) error
+	// plan's tree key, which refuses a tree keying otherwise, and returns the build's phases, nil when it has none. Its
+	// error is why the build ended badly; whether the tree was built is read from the store after it, never from its
+	// exit.
+	Build  func(want Want) (*builder.TreePhases, error)
 	Ledger *Ledger
 	// Keep is how long a record is kept; zero keeps every one.
 	Keep        time.Duration
@@ -409,9 +414,9 @@ func (builder *Builder) build(want Want) error {
 	}
 	fmt.Fprintf(builder.Log, "tree %s of %s: building\n", want.Tree, want.Future)
 	started := builder.Now()
-	buildErr := builder.Build(want)
+	phases, buildErr := builder.Build(want)
 	indexed, indexErr := builder.Indexed(want.Tree)
-	record.At, record.Seconds = builder.Now().UTC().Format(time.RFC3339), builder.Now().Sub(started).Seconds()
+	record.At, record.Seconds, record.Phases = builder.Now().UTC().Format(time.RFC3339), builder.Now().Sub(started).Seconds(), phases
 	switch {
 	case errors.Is(buildErr, ErrStopped) && !(indexErr == nil && indexed):
 		// A stop is the builder's, never the tree's: nothing stands failed, and the next builder builds it again.
