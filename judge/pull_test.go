@@ -303,8 +303,7 @@ func TestThePullerReadsAUnitsKindAndRunnerFromItsKey(t *testing.T) {
 }
 
 func TestARerunsNeedIsTheListingsElseUnitNeeds(t *testing.T) {
-	needs := planner.UnitNeeds{Tiers: []planner.NeedTier{{Name: "codex-strict", MemoryMegabytes: 16384, Cpus: 4}, {Name: "box-strict", MemoryMegabytes: 65536, Cpus: 8}},
-		Units: []planner.UnitNeed{{Package: "stage1/cohere/typeaware", MemoryMegabytes: 32768, Cpus: 4, Record: "r"}}}
+	needs := planner.UnitNeeds{Units: []planner.UnitNeed{{Package: "stage1/cohere/typeaware", MemoryMegabytes: 32768, Cpus: 4, Record: "r"}}}
 	typeaware := json.RawMessage(`{"package":"github.com/system-inc/adamic/stage1/cohere/typeaware","select":{"run":""}}`)
 	if need, err := NeedOf(protocol.Resources{}, typeaware, needs); err != nil || need.MemoryMegabytes != 32768 {
 		t.Fatalf("need %+v (%v), want unit-needs' 32768 MB for a plan that carried none", need, err)
@@ -315,9 +314,10 @@ func TestARerunsNeedIsTheListingsElseUnitNeeds(t *testing.T) {
 	if need, err := NeedOf(protocol.Resources{}, json.RawMessage(`{"package":"github.com/system-inc/adamic/internal/oracle"}`), needs); err != nil || need != (protocol.Resources{}) {
 		t.Fatalf("need %+v (%v), want none declared", need, err)
 	}
+	// A need no pool holds is still the unit's need; refusing it is placement's (the next test), as void.
 	needs.Units[0].MemoryMegabytes = 131072
-	if _, err := NeedOf(protocol.Resources{}, typeaware, needs); err == nil {
-		t.Fatal("a need no tier meets was placed")
+	if need, err := NeedOf(protocol.Resources{}, typeaware, needs); err != nil || need.MemoryMegabytes != 131072 {
+		t.Fatalf("need %+v (%v), want the declared 131072 MB for placement to refuse", need, err)
 	}
 }
 

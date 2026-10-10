@@ -10,19 +10,48 @@ import (
 )
 
 // UnitNeeds is the gate tools' cloud/fast-gate/unit-needs.json (Loom, Oct 10 01:10Z): what a unit needs from the
-// machine it's placed on, measured, and the live tiers a placer can put it on. A need is placement only, like
-// Requires, never part of the key: it doesn't change what a passing run proves.
+// machine it's placed on, measured. A need is placement only, like Requires, never part of the key: it doesn't
+// change what a passing run proves. What each pool has lives in Fabric's pool table (Pools), never here.
 type UnitNeeds struct {
 	Version int        `json:"version"`
-	Tiers   []NeedTier `json:"tiers"`
 	Units   []UnitNeed `json:"units"`
 }
 
-// A NeedTier is one live placement tier and the most a unit placed on it can use.
-type NeedTier struct {
+// A Pool is one pool of Fabric's table (workshop ~/.loom/pools.json, Oct 10 02:04Z), which the placer and the
+// judge's reruns read too: its name on the wire, its tier, the runner its workers serve, and each worker's memory
+// and cpus.
+type Pool struct {
 	Name            string `json:"name"`
+	Tier            string `json:"tier"`
+	Runner          string `json:"runner"`
 	MemoryMegabytes int    `json:"memoryMegabytes"`
 	Cpus            int    `json:"cpus"`
+}
+
+// PoolsFile is the pool table the planner reads, ~/.loom/pools.json unless a command names another (--pools).
+var PoolsFile = func() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".loom", "pools.json")
+}()
+
+// LoadPools reads a pool table and checks every pool names its tier and runner and has room.
+func LoadPools(path string) ([]Pool, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("the pool table: %w", err)
+	}
+	var table struct {
+		Pools []Pool `json:"pools"`
+	}
+	if err := json.Unmarshal(content, &table); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	for _, pool := range table.Pools {
+		if pool.Name == "" || pool.Tier == "" || !Sha256Hex(pool.Runner) || pool.MemoryMegabytes <= 0 || pool.Cpus <= 0 {
+			return nil, fmt.Errorf("%s: pool %+v needs a name, a tier, its runner's sha256 and positive memoryMegabytes and cpus", path, pool)
+		}
+	}
+	return table.Pools, nil
 }
 
 // A UnitNeed is one package's measured need, with the record that measured it. Run, when set, narrows it to the unit
@@ -36,7 +65,7 @@ type UnitNeed struct {
 }
 
 // LoadUnitNeeds reads the gate tools' unit-needs.json and checks it: every need positive and measured by a named
-// record, and at least one tier when any unit declares a need. Tools without the file declare no needs.
+// record. Tools without the file declare no needs.
 func LoadUnitNeeds(gateTools string) (UnitNeeds, error) {
 	content, err := os.ReadFile(filepath.Join(gateTools, "cloud/fast-gate/unit-needs.json"))
 	if os.IsNotExist(err) {
@@ -49,26 +78,33 @@ func LoadUnitNeeds(gateTools string) (UnitNeeds, error) {
 	if err := json.Unmarshal(content, &needs); err != nil {
 		return UnitNeeds{}, fmt.Errorf("unit-needs.json: %w", err)
 	}
-	for _, tier := range needs.Tiers {
-		if tier.Name == "" || tier.MemoryMegabytes <= 0 || tier.Cpus <= 0 {
-			return UnitNeeds{}, fmt.Errorf("unit-needs.json: tier %+v needs a name and positive memoryMegabytes and cpus", tier)
-		}
-	}
 	for _, need := range needs.Units {
 		// Queue takes a unit's resources only as both keys, each a positive whole number (18e6bb6).
 		if need.Package == "" || need.Record == "" || need.MemoryMegabytes <= 0 || need.Cpus <= 0 {
 			return UnitNeeds{}, fmt.Errorf("unit-needs.json: unit %+v needs a package, positive memoryMegabytes and cpus, and the record that measured them", need)
 		}
 	}
-	if len(needs.Units) > 0 && len(needs.Tiers) == 0 {
-		return UnitNeeds{}, fmt.Errorf("unit-needs.json declares needs but no tiers to meet them")
-	}
 	return needs, nil
 }
 
-// For is a unit's resources (nil: no declared need), refused when no live tier can meet it, so the unit is never
-// planned to wait unplaced.
-func (needs UnitNeeds) For(directory, run string) (*protocol.Resources, error) {
+// For is a unit's resources (nil: no declared need), refused when no pool serving the unit's runner can hold it, so
+// the unit is never planned to wait unplaced. An empty runner (a product's key) may go to any pool.
+func (needs UnitNeeds) For(directory, run string, pools []Pool, runner string) (*protocol.Resources, error) {
+	resources := needs.Need(directory, run)
+	if resources == nil {
+		return nil, nil
+	}
+	for _, pool := range pools {
+		if (runner == "" || pool.Runner == runner) && pool.MemoryMegabytes >= resources.MemoryMegabytes && pool.Cpus >= resources.Cpus {
+			return resources, nil
+		}
+	}
+	return nil, fmt.Errorf("%s needs %d MB and %d cpus, which no pool serving runner %s holds", directory, resources.MemoryMegabytes, resources.Cpus, short(runner))
+}
+
+// Need is a unit's declared need (nil: none), the largest of the entries for its directory and run pattern, with no
+// check of what any pool has: the judge's reruns place it against the pool table themselves.
+func (needs UnitNeeds) Need(directory, run string) *protocol.Resources {
 	var resources *protocol.Resources
 	for _, need := range needs.Units {
 		if need.Package != directory || need.Run != "" && need.Run != run {
@@ -80,13 +116,5 @@ func (needs UnitNeeds) For(directory, run string) (*protocol.Resources, error) {
 		resources.MemoryMegabytes = max(resources.MemoryMegabytes, need.MemoryMegabytes)
 		resources.Cpus = max(resources.Cpus, need.Cpus)
 	}
-	if resources == nil {
-		return nil, nil
-	}
-	for _, tier := range needs.Tiers {
-		if tier.MemoryMegabytes >= resources.MemoryMegabytes && tier.Cpus >= resources.Cpus {
-			return resources, nil
-		}
-	}
-	return nil, fmt.Errorf("%s needs %d MB and %d cpus, which no live tier meets", directory, resources.MemoryMegabytes, resources.Cpus)
+	return resources
 }

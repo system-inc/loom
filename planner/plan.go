@@ -226,6 +226,12 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	if err != nil {
 		return nil, err
 	}
+	var pools []Pool
+	if len(needs.Units) > 0 {
+		if pools, err = LoadPools(PoolsFile); err != nil {
+			return nil, err
+		}
+	}
 	resources := map[string]*protocol.Resources{}
 	environment := GateEnvironment
 	if selection != nil && selection.inputs != nil {
@@ -304,7 +310,7 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 		if err != nil {
 			return nil, err
 		}
-		if resources[listed.ImportPath], err = needs.For(directory, unit.Run); err != nil {
+		if resources[listed.ImportPath], err = needs.For(directory, unit.Run, pools, tools.Runner); err != nil {
 			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
 		}
 		planned = append(planned, PlannedUnit{Name: listed.ImportPath, UnitKey: key})

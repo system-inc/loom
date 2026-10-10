@@ -372,7 +372,7 @@ const adamicModule = "github.com/system-inc/adamic/"
 
 // NeedOf is a unit's declared need for a rerun, read the way the placer reads it (Planner, Oct 10 02:02Z): the
 // listing's resources when the plan carried them, else the gate tools' unit-needs.json by the unit's directory and run
-// pattern (planner.UnitNeeds.For). A need no live tier meets is an error, so the rerun is never placed to wait.
+// pattern (planner.UnitNeeds.Need). A need no pool holds is the rerun's placement's to refuse, as void.
 func NeedOf(listed protocol.Resources, keyParts json.RawMessage, needs planner.UnitNeeds) (protocol.Resources, error) {
 	if listed.MemoryMegabytes > 0 || listed.Cpus > 0 {
 		return listed, nil
@@ -386,9 +386,9 @@ func NeedOf(listed protocol.Resources, keyParts json.RawMessage, needs planner.U
 	if err := json.Unmarshal(keyParts, &parts); err != nil {
 		return protocol.Resources{}, fmt.Errorf("a unit's keyParts: %w", err)
 	}
-	need, err := needs.For(strings.TrimPrefix(parts.Package, adamicModule), parts.Select.Run)
-	if err != nil || need == nil {
-		return protocol.Resources{}, err
+	need := needs.Need(strings.TrimPrefix(parts.Package, adamicModule), parts.Select.Run)
+	if need == nil {
+		return protocol.Resources{}, nil
 	}
 	return *need, nil
 }
