@@ -36,7 +36,8 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 		}
 		switch {
 		case request.Method == "GET" && request.URL.Path == "/futures" && request.URL.Query().Get("state") == "unplanned":
-			json.NewEncoder(writer).Encode(map[string][]Future{"futures": {{Future: "fut-1", Tree: "tree-sha"}, {Future: "fut-2", Tree: "tree-sha", Uncached: true}}})
+			json.NewEncoder(writer).Encode(map[string][]Future{"futures": {{Future: "fut-1", Tree: "tree-sha"}, {Future: "fut-2", Tree: "tree-sha", Uncached: true},
+				{Future: "fut-3", Tree: "tree-sha", Parity: true, Select: &ParitySelect{Packages: []string{"example.com/plan/a"}}}}})
 		case request.Method == "GET" && strings.HasPrefix(request.URL.Path, "/verdicts/"):
 			verdict, found := passed[strings.TrimPrefix(request.URL.Path, "/verdicts/")]
 			if !found {
@@ -79,8 +80,8 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	}
 	delete(posted, "fut-2")
 	count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "")
-	if err != nil || count != 2 {
-		t.Fatalf("planned %d futures (%v), want 2", count, err)
+	if err != nil || count != 3 {
+		t.Fatalf("planned %d futures (%v), want 3", count, err)
 	}
 	decisions := func(future string) map[string]string {
 		result := map[string]string{}
@@ -97,5 +98,8 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	}
 	if got := decisions("fut-2"); got["example.com/plan/a"] != "run" || got["example.com/plan/b"] != "run" {
 		t.Errorf("fut-2 is uncached and reuses nothing: %v", got)
+	}
+	if got := decisions("fut-3"); len(got) != 1 || got["example.com/plan/a"] != "run" {
+		t.Errorf("fut-3 is a parity run of a alone, run though a's key passed: %v", got)
 	}
 }

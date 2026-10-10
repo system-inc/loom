@@ -66,7 +66,7 @@ func reselectFailures(t *testing.T, keyFor keyFunction) []string {
 	tree, gateTools := reselectFixture(t)
 	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
 	plan := func(index VerdictIndex) []PlannedResult {
-		results, err := planTree(tree, gateTools, tools, index, false, keyFor)
+		results, err := planTree(tree, gateTools, tools, index, false, keyFor, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

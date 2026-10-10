@@ -20,6 +20,16 @@ type Future struct {
 	Base     string   `json:"base"`
 	Changes  []string `json:"changes"`
 	Uncached bool     `json:"uncached"` // the witness and main's landing reuse nothing
+	// Parity marks a parity run against today's gate; its Select is the box record's selection, which the plan holds
+	// exactly, every unit run (Queue, 02ea607).
+	Parity bool          `json:"parity"`
+	Select *ParitySelect `json:"select,omitempty"`
+}
+
+// A ParitySelect is a parity run's selection: the packages it runs and, for a package run.py split, its test names.
+type ParitySelect struct {
+	Packages []string            `json:"packages"`
+	Tests    map[string][]string `json:"tests,omitempty"`
 }
 
 // A QueueClient talks to loom-pipeline's planning routes with the coordinator token.
@@ -161,7 +171,13 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 			failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
 			continue
 		}
-		results, err := PlanTree(tree, gateTools, tools, index, future.Uncached)
+		var results []PlannedResult
+		if future.Select != nil {
+			// A parity plan reruns the box record's selection as it was, so nothing is reused.
+			results, err = PlanSelected(tree, gateTools, tools, *future.Select)
+		} else {
+			results, err = PlanTree(tree, gateTools, tools, index, future.Uncached || future.Parity)
+		}
 		cleanup()
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))

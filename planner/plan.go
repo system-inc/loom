@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -29,16 +30,55 @@ type PlannedResult struct {
 // decided by Choose against the verdict index. A package the change didn't reach keeps its key and so its verdict;
 // selection is the key, so no unit is left out to make the plan smaller.
 func PlanTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool) ([]PlannedResult, error) {
-	return planTree(tree, gateTools, tools, index, uncached, KeyFor)
+	return planTree(tree, gateTools, tools, index, uncached, KeyFor, nil)
+}
+
+// PlanSelected plans a parity run: exactly the selection's packages, every unit run and none reused, and for a package
+// whose tests the selection names, a unit that runs exactly those tests (its run pattern ^(A|B)$).
+func PlanSelected(tree, gateTools string, tools Tools, selection ParitySelect) ([]PlannedResult, error) {
+	return planTree(tree, gateTools, tools, MemoryIndex{}, true, KeyFor, &selection)
+}
+
+// exactRun is the run pattern that selects exactly the named top-level tests. A subtest's name can't be one, since go
+// test splits a -run pattern at its slashes.
+func exactRun(tests []string) (string, error) {
+	quoted := []string{}
+	for _, test := range tests {
+		if strings.Contains(test, "/") {
+			return "", fmt.Errorf("test %q is a subtest; a parity selection names top-level tests", test)
+		}
+		quoted = append(quoted, regexp.QuoteMeta(test))
+	}
+	sort.Strings(quoted)
+	return "^(" + strings.Join(quoted, "|") + ")$", nil
 }
 
 // A keyFunction makes a unit's key parts. PlanTree's is KeyFor; the selector's mutants are weaker ones.
 type keyFunction func(tree, gateTools string, unit Unit, tools Tools, compilerPackages []string) (KeyParts, error)
 
-func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool, keyFor keyFunction) ([]PlannedResult, error) {
+func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool, keyFor keyFunction, selection *ParitySelect) ([]PlannedResult, error) {
 	module, packages, err := testedPackages(tree)
 	if err != nil {
 		return nil, err
+	}
+	if selection != nil {
+		tested := map[string]listedPackage{}
+		for _, listed := range packages {
+			tested[listed.ImportPath] = listed
+		}
+		packages = packages[:0]
+		for _, importPath := range selection.Packages {
+			listed, found := tested[importPath]
+			if !found {
+				return nil, fmt.Errorf("selected package %s has no tests on this tree", importPath)
+			}
+			packages = append(packages, listed)
+		}
+		for importPath := range selection.Tests {
+			if _, found := tested[importPath]; !found {
+				return nil, fmt.Errorf("the selection names tests of %s, which isn't a tested package", importPath)
+			}
+		}
 	}
 	declared, err := compilerDeclarations(tree)
 	if err != nil {
@@ -59,6 +99,11 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 		}
 		unit := Unit{Kind: "test", Package: listed.ImportPath, Directory: directory, Environment: GateEnvironment,
 			Products: UnitProducts(productKeys, listed.ImportPath, compilers)}
+		if selection != nil && len(selection.Tests[listed.ImportPath]) > 0 {
+			if unit.Run, err = exactRun(selection.Tests[listed.ImportPath]); err != nil {
+				return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
+			}
+		}
 		keyParts, err := keyFor(tree, gateTools, unit, tools, compilers)
 		if err != nil {
 			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
