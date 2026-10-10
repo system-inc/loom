@@ -41,10 +41,14 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if *packages != "" {
 		selected = strings.Split(*packages, ",")
 	}
-	actions, err := builder.ListActions(*tree, selected)
+	tests, err := planner.ListProductTests(*tree, selected)
 	if err != nil {
 		fmt.Fprintln(stderr, "build-actions:", err)
 		return 1
+	}
+	actions := make([]builder.Action, len(tests))
+	for index, test := range tests {
+		actions[index] = builder.Action(test)
 	}
 	declared, err := planner.CompilerDeclarations(*tree)
 	if err != nil {
@@ -55,10 +59,6 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "build-actions: tools:", err)
 		return 1
-	}
-	tests := make([]planner.ProductTest, len(actions))
-	for index, action := range actions {
-		tests[index] = planner.ProductTest(action)
 	}
 	keys, err := planner.ProductKeys(*tree, *gateTools, tools, tests, declared)
 	if err != nil {

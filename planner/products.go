@@ -1,7 +1,14 @@
 package planner
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -11,6 +18,75 @@ type ProductTest struct {
 	Package   string // import path
 	Directory string // the package's directory in the tree, repo-relative
 	Test      string // TestProduct_X
+}
+
+// productTestPattern finds a product test's declaration in a test file: adamic names every product test
+// TestProduct_<name>, and run.py's first wave selects them the same way.
+var productTestPattern = regexp.MustCompile(`(?m)^func (TestProduct_[A-Za-z0-9_]+)\(`)
+
+// ListProductTests lists every product test on a tree, from go list's test files for this platform (so a file another
+// platform's build tags leave out is left out here too), without compiling anything. Packages, when given, keeps only
+// those import paths.
+func ListProductTests(tree string, packages []string) ([]ProductTest, error) {
+	// The tree's own module, from its go.mod: in a workspace, go list -m names every module the workspace uses.
+	goMod, err := os.ReadFile(filepath.Join(tree, "go.mod"))
+	if err != nil {
+		return nil, err
+	}
+	module := ""
+	for _, line := range strings.Split(string(goMod), "\n") {
+		if name, found := strings.CutPrefix(strings.TrimSpace(line), "module "); found {
+			module = strings.Trim(strings.TrimSpace(name), `"`)
+			break
+		}
+	}
+	if module == "" {
+		return nil, fmt.Errorf("%s/go.mod names no module", tree)
+	}
+	command := exec.Command("go", "list", "-json", "./...")
+	command.Dir = tree
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list ./...: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	wanted := map[string]bool{}
+	for _, importPath := range packages {
+		wanted[importPath] = true
+	}
+	tests := []ProductTest{}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	for decoder.More() {
+		var listed listedPackage
+		if err := decoder.Decode(&listed); err != nil {
+			return nil, err
+		}
+		if len(wanted) > 0 && !wanted[listed.ImportPath] {
+			continue
+		}
+		directory := strings.TrimPrefix(strings.TrimPrefix(listed.ImportPath, module), "/")
+		seen := map[string]bool{}
+		for _, file := range append(append([]string{}, listed.TestGoFiles...), listed.XTestGoFiles...) {
+			content, err := os.ReadFile(filepath.Join(listed.Dir, file))
+			if err != nil {
+				return nil, err
+			}
+			for _, match := range productTestPattern.FindAllStringSubmatch(string(content), -1) {
+				if !seen[match[1]] {
+					seen[match[1]] = true
+					tests = append(tests, ProductTest{Package: listed.ImportPath, Directory: directory, Test: match[1]})
+				}
+			}
+		}
+	}
+	sort.Slice(tests, func(left, right int) bool {
+		if tests[left].Package != tests[right].Package {
+			return tests[left].Package < tests[right].Package
+		}
+		return tests[left].Test < tests[right].Test
+	})
+	return tests, nil
 }
 
 // CompilerDeclarations is the tree's cloud/fast-gate/compiler-dependencies.json, package directory to the compiler
