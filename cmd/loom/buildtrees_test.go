@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -204,5 +205,26 @@ func TestThePlannerAndTheTreeBuilderShareOneEnvironment(t *testing.T) {
 	planner, builder := environment("../../planner/systemd/loom-plan.service"), environment("../../treebuilder/systemd/loom-build-trees.service")
 	if planner != builder || !strings.Contains(planner, "Environment=GOTOOLCHAIN=local") || !strings.Contains(planner, "adamic-tools/env.sh") {
 		t.Fatalf("the planner starts under\n%s\nand the tree builder under\n%s", planner, builder)
+	}
+}
+
+// A checkout that fails (GitHub's 5xx, the network) is a transient failure, retried soon, and one the builder's own stop
+// cut short is a stop: neither is the tree's failure. Mutant: a checkout's failure the tree's.
+func TestACheckoutHiccupIsTransient(t *testing.T) {
+	settings, err := parseBuildTreesFlags([]string{"--queue", "https://queue", "--token-file", "token", "--logs", t.TempDir()}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing := func(string) (string, func(), error) {
+		return "", nil, errors.New("git fetch --quiet origin: The requested URL returned error: 502")
+	}
+	want := treebuilder.Want{Tree: strings.Repeat("b", 64), Future: strings.Repeat("2", 40), Go: "go1.27.1"}
+	if err := buildWant(context.Background(), failing, "/bin/true", settings, want); !errors.Is(err, treebuilder.ErrTransient) || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("a checkout's 502: %v", err)
+	}
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	if err := buildWant(stopped, failing, "/bin/true", settings, want); !errors.Is(err, treebuilder.ErrStopped) {
+		t.Fatalf("a checkout the stop cut short: %v", err)
 	}
 }

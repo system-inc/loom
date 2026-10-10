@@ -6,7 +6,8 @@
 //
 // Every build is in the ledger before it starts and when it ends, so the placer can act on it: built (the index is
 // up; a package that didn't compile for the change's reasons is the change's red through the index, one that failed for
-// Workshop's is broken), failed (no index: Workshop's, void, named, and built again after RetryAfter), refused (the
+// Workshop's is broken), failed (no index: Workshop's, void, named, and built again after a backoff, or never once it
+// has failed MaxFailures times; a checkout that hiccuped is transient, retried soon and never voided), refused (the
 // disk is under its floor: nothing is checked out or built until it isn't), or interrupted (the builder stopped
 // mid-build, a crash, and builds it again), or stopped (the builder was told to stop, a restart or a deploy, and the
 // next one builds it again).
@@ -17,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"github.com/system-inc/loom/jsonlines"
@@ -38,9 +40,20 @@ const (
 // restart). The build isn't the tree's failure: it's recorded Stopped, and the next builder builds it again.
 var ErrStopped = errors.New("the builder was stopped mid-build")
 
-// RetryAfter is how long a tree whose build failed stands failed: the builder builds it again after it, and the placer
-// reads the failure as the tree's only while it's younger, holding a later attempt while the next build runs.
-const RetryAfter = 30 * time.Minute
+// ErrTransient is a build that failed before building anything for a reason that passes (review of tree-wiring,
+// finding 6): its checkout, against GitHub's 5xx or the network. It's retried after TransientRetry, doubling to
+// TransientCap, and never stands: the placer keeps holding, under its own bound.
+var ErrTransient = errors.New("a transient failure")
+
+// A tree's failures back off (review of tree-wiring, finding 5): the first stands RetryAfter, each later one twice the
+// last, and after MaxFailures (a crash mid-build counting as one) the builder gives the tree up, standing until its
+// records are compacted away, so one bad tree can't take the builder from the others.
+const (
+	RetryAfter     = 30 * time.Minute
+	MaxFailures    = 3
+	TransientRetry = time.Minute
+	TransientCap   = 10 * time.Minute
+)
 
 // A Record is one ledger line: what the builder did with one tree, by its key.
 type Record struct {
@@ -50,6 +63,10 @@ type Record struct {
 	Event   string  `json:"event"`
 	Cause   string  `json:"cause,omitempty"`
 	Seconds float64 `json:"seconds,omitempty"`
+	// Retry is when the builder builds a failed tree again (RFC 3339); a failure without one is given up.
+	Retry string `json:"retry,omitempty"`
+	// Transient marks a failure that passes (ErrTransient): retried soon, never standing.
+	Transient bool `json:"transient,omitempty"`
 }
 
 // at is when the record was written; an unreadable time is the zero time, as old as can be.
@@ -58,14 +75,35 @@ func (record Record) at() time.Time {
 	return at
 }
 
-// Standing says whether a failed record still stands at now: younger than RetryAfter, before the builder tries again.
+// Standing says whether a failed record stands at now, the tree's failure: not transient, and before the builder
+// tries it again, or given up.
 func (record Record) Standing(now time.Time) bool {
-	return record.Event == Failed && now.Sub(record.at()) < RetryAfter
+	return record.Event == Failed && !record.Transient && (record.Retry == "" || now.Before(record.retry()))
+}
+
+// due says whether the builder may build the tree at now, after this record: always, except after a failure before its
+// retry, or one given up.
+func (record Record) due(now time.Time) bool {
+	return record.Event != Failed || (record.Retry != "" && !now.Before(record.retry()))
+}
+
+func (record Record) retry() time.Time {
+	retry, _ := time.Parse(time.RFC3339, record.Retry)
+	return retry
 }
 
 // String is the record as a void's cause names it.
 func (record Record) String() string {
 	text := fmt.Sprintf("%s at %s", record.Event, record.At)
+	switch {
+	case record.Event != Failed:
+	case record.Transient:
+		text += ", transient, tried again at " + record.Retry
+	case record.Retry == "":
+		text += fmt.Sprintf(", given up after %d failures", MaxFailures)
+	default:
+		text += ", tried again at " + record.Retry
+	}
 	if record.Cause != "" {
 		text += ": " + record.Cause
 	}
@@ -94,7 +132,11 @@ func OpenLedger(path string, now time.Time) (*Ledger, error) {
 	for _, record := range records {
 		if newest := ledger.newest[record.Tree]; newest == record && record.Event == Started {
 			interrupted := Record{Tree: record.Tree, Future: record.Future, At: now.UTC().Format(time.RFC3339), Event: Interrupted,
-				Cause: "the builder stopped mid-build (a restart or a crash), and builds it again"}
+				Cause: "the builder stopped mid-build without being told to (a crash), and builds it again"}
+			// A tree that keeps taking the builder down with it is given up like one that keeps failing.
+			if ledger.failures(record.Tree)+1 >= MaxFailures {
+				interrupted.Event, interrupted.Cause = Failed, fmt.Sprintf("the builder died mid-build %d times building it", MaxFailures)
+			}
 			if err := ledger.Append(interrupted); err != nil {
 				file.Close()
 				return nil, err
@@ -107,6 +149,39 @@ func OpenLedger(path string, now time.Time) (*Ledger, error) {
 func (ledger *Ledger) hold(record Record) {
 	ledger.newest[record.Tree] = record
 	ledger.order = append(ledger.order, record)
+}
+
+// failures counts the tree's failures since it was last built: failed builds that weren't transient, and builds a
+// crash cut short.
+func (ledger *Ledger) failures(tree string) int {
+	count := 0
+	for index := len(ledger.order) - 1; index >= 0; index-- {
+		record := ledger.order[index]
+		switch {
+		case record.Tree != tree:
+		case record.Event == Built:
+			return count
+		case record.Event == Interrupted, record.Event == Failed && !record.Transient:
+			count++
+		}
+	}
+	return count
+}
+
+// transients counts the tree's transient failures since anything else but a start or a refusal.
+func (ledger *Ledger) transients(tree string) int {
+	count := 0
+	for index := len(ledger.order) - 1; index >= 0; index-- {
+		record := ledger.order[index]
+		switch {
+		case record.Tree != tree, record.Event == Started, record.Event == Refused:
+		case record.Event == Failed && record.Transient:
+			count++
+		default:
+			return count
+		}
+	}
+	return count
 }
 
 // Newest is the tree's newest record.
@@ -260,18 +335,30 @@ func (builder *Builder) BuildOnce() (bool, error) {
 	if err := builder.compact(); err != nil {
 		fmt.Fprintf(builder.Log, "compacting the ledger: %v\n", err)
 	}
+	// The trees due, fewest failures first, listing order among equals: a tree that keeps failing waits behind every
+	// other, and never takes more than its share of the builder.
+	type due struct {
+		want     Want
+		newest   Record
+		failures int
+	}
+	dues := []due{}
 	for _, want := range wants {
 		newest, found := builder.Ledger.Newest(want.Tree)
-		if found && newest.Standing(builder.Now()) {
+		if found && !newest.due(builder.Now()) {
 			continue
 		}
 		indexed, err := builder.Indexed(want.Tree)
 		if err != nil {
 			return false, fmt.Errorf("tree %s: %w", want.Tree, err)
 		}
-		if indexed {
-			continue
+		if !indexed {
+			dues = append(dues, due{want: want, newest: newest, failures: builder.Ledger.failures(want.Tree)})
 		}
+	}
+	sort.SliceStable(dues, func(left, right int) bool { return dues[left].failures < dues[right].failures })
+	for _, next := range dues {
+		want, newest := next.want, next.newest
 		// Under the floor nothing is checked out or built, this tree or any other, until the disk has room: refused
 		// once in the ledger, so the placer can say why a tree it waits on isn't coming.
 		if err := builder.Floor(); err != nil {
@@ -314,8 +401,29 @@ func (builder *Builder) build(want Want) error {
 	default:
 		record.Event, record.Cause = Failed, "build-tree ended well, and trees/"+want.Tree+".json isn't in the store"
 	}
+	if record.Event == Failed {
+		builder.backOff(&record, errors.Is(buildErr, ErrTransient) && indexErr == nil)
+	}
 	fmt.Fprintf(builder.Log, "tree %s of %s: %s\n", want.Tree, want.Future, record)
 	return builder.Ledger.Append(record)
+}
+
+// backOff sets a failed record's retry: a transient failure's after TransientRetry, doubling with each in a row to
+// TransientCap; any other's after RetryAfter, doubling with each failure since the tree was last built, and none,
+// given up, at the MaxFailures'th.
+func (builder *Builder) backOff(record *Record, transient bool) {
+	now := builder.Now()
+	if transient {
+		record.Transient = true
+		delay := TransientRetry << min(builder.Ledger.transients(record.Tree), 10)
+		record.Retry = now.Add(min(delay, TransientCap)).UTC().Format(time.RFC3339)
+		return
+	}
+	failures := builder.Ledger.failures(record.Tree) + 1
+	if failures >= MaxFailures {
+		return
+	}
+	record.Retry = now.Add(RetryAfter << (failures - 1)).UTC().Format(time.RFC3339)
 }
 
 // compact drops, at most hourly, the records over Keep old.

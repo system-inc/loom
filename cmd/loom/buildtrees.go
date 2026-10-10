@@ -127,15 +127,7 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Indexed: store.TreeIndexed,
 		Floor:   func() error { return builder.CheckFloor(watched, nil) },
 		Build: func(want treebuilder.Want) error {
-			tree, cleanup, err := checkout(want.Future)
-			if err != nil && runContext.Err() != nil {
-				return fmt.Errorf("%w: checking %s out: %v", treebuilder.ErrStopped, want.Future, err)
-			}
-			if err != nil {
-				return fmt.Errorf("checking %s out keyless: %w", want.Future, err)
-			}
-			defer cleanup()
-			return runBuildTree(runContext, binary, buildTreeArguments(settings, tree, want), filepath.Join(*settings.logs, want.Tree+".log"), *settings.bound)
+			return buildWant(runContext, checkout, binary, settings, want)
 		},
 		Ledger: ledger,
 		Keep:   *settings.keep,
@@ -170,6 +162,20 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// buildWant checks the wanted future out and runs build-tree on it. A checkout that fails is transient (GitHub's 5xx,
+// the network), retried soon and never the tree's failure; one the builder's stop cut short is a stop.
+func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want) error {
+	tree, cleanup, err := checkout(want.Future)
+	if err != nil && runContext.Err() != nil {
+		return fmt.Errorf("%w: checking %s out: %v", treebuilder.ErrStopped, want.Future, err)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: checking %s out keyless: %v", treebuilder.ErrTransient, want.Future, err)
+	}
+	defer cleanup()
+	return runBuildTree(runContext, binary, buildTreeArguments(settings, tree, want), filepath.Join(*settings.logs, want.Tree+".log"), *settings.bound)
 }
 
 // readyClone makes the builder's clone when it's missing, an empty repository whose origin is the public adamic

@@ -150,19 +150,35 @@ func TestAFailedTreeOrAPlanNamingNoOneTreeIsVoidedNamed(t *testing.T) {
 	source := listedFutures{{Future: tree, Base: base, Attempt: 1, Units: withTree(t, everyKind(t), treeKey)}}
 	h := newHarness(t, source, &MemoryLedger{})
 	state := newTrees(h)
-	failed := treebuilder.Record{Tree: treeKey, Event: treebuilder.Failed, At: h.now.Add(-time.Minute).Format(time.RFC3339), Cause: "checking it out keyless: 502"}
+	failed := treebuilder.Record{Tree: treeKey, Event: treebuilder.Failed, At: h.now.Add(-time.Minute).Format(time.RFC3339), Cause: "build-tree: exit status 1",
+		Retry: h.now.Add(treebuilder.RetryAfter - time.Minute).Format(time.RFC3339)}
 	state.newest[treeKey] = failed
 	h.placeOnce(t, 0)
-	if len(h.voids) != 1 || !strings.Contains(h.voids[0], "its tree "+treeKey+" wasn't built on Workshop") || !strings.Contains(h.voids[0], "502") {
+	if len(h.voids) != 1 || !strings.Contains(h.voids[0], "its tree "+treeKey+" wasn't built on Workshop") || !strings.Contains(h.voids[0], "exit status 1") {
 		t.Fatalf("voids %v", h.voids)
 	}
 	stale := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: withTree(t, everyKind(t), treeKey)}}, &MemoryLedger{})
 	staleState := newTrees(stale)
-	failed.At = stale.now.Add(-treebuilder.RetryAfter).Format(time.RFC3339)
+	failed.At, failed.Retry = stale.now.Add(-treebuilder.RetryAfter).Format(time.RFC3339), stale.now.Add(-time.Second).Format(time.RFC3339)
 	staleState.newest[treeKey] = failed
 	stale.placeOnce(t, 0)
 	if len(stale.voids) != 0 {
 		t.Fatalf("a failure the builder is retrying voided: %v", stale.voids)
+	}
+	// A transient failure (a checkout's 502) never stands: the attempt holds under its bound while it's retried.
+	transient := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: withTree(t, everyKind(t), treeKey)}}, &MemoryLedger{})
+	newTrees(transient).newest[treeKey] = treebuilder.Record{Tree: treeKey, Event: treebuilder.Failed, At: transient.now.Format(time.RFC3339), Transient: true,
+		Retry: transient.now.Add(time.Minute).Format(time.RFC3339), Cause: "checking it out keyless: 502"}
+	transient.placeOnce(t, 0)
+	if len(transient.voids) != 0 {
+		t.Fatalf("a transient failure voided: %v", transient.voids)
+	}
+	// A tree the builder gave up stands for good.
+	gaveUp := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: withTree(t, everyKind(t), treeKey)}}, &MemoryLedger{})
+	newTrees(gaveUp).newest[treeKey] = treebuilder.Record{Tree: treeKey, Event: treebuilder.Failed, At: gaveUp.now.Add(-24 * time.Hour).Format(time.RFC3339), Cause: "boom"}
+	gaveUp.placeOnce(t, 0)
+	if len(gaveUp.voids) != 1 || !strings.Contains(gaveUp.voids[0], "given up after 3 failures") {
+		t.Fatalf("a tree given up: %v", gaveUp.voids)
 	}
 
 	units := withTree(t, everyKind(t), treeKey)
@@ -189,7 +205,8 @@ func TestAnAttemptAfterATreeFailureIsVoidedNamedBeforeTheJudgesBackstop(t *testi
 	h := newHarness(t, source, ledger)
 	state := newTrees(h)
 	start := h.now
-	state.newest[treeKey] = treebuilder.Record{Tree: treeKey, Event: treebuilder.Failed, At: start.Format(time.RFC3339), Cause: "boom"}
+	state.newest[treeKey] = treebuilder.Record{Tree: treeKey, Event: treebuilder.Failed, At: start.Format(time.RFC3339), Cause: "boom",
+		Retry: start.Add(treebuilder.RetryAfter).Format(time.RFC3339)}
 	h.placeOnce(t, 0)
 	if len(h.voids) != 1 {
 		t.Fatalf("attempt 1: voids %v", h.voids)

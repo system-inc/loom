@@ -3,6 +3,7 @@ package treebuilder
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -246,5 +247,93 @@ func TestAPlanNamingTwoGoReleasesIsNeverBuilt(t *testing.T) {
 	}
 	if len(problems) != 1 || !strings.Contains(problems[0], "2 Go releases") {
 		t.Fatalf("problems %v", problems)
+	}
+}
+
+// A tree that keeps failing backs off, RetryAfter then twice that, and at MaxFailures is given up, standing for good,
+// so it never takes the builder again (review of tree-wiring, finding 5). Mutants: no backoff; no cap.
+func TestRepeatedFailuresBackOffAndAreGivenUp(t *testing.T) {
+	source := listedFutures{future("2", unit(t, "test", "run", keyB))}
+	ledger := openLedger(t, filepath.Join(t.TempDir(), "trees.jsonl"), time.Now())
+	h := newHarness(t, source, ledger)
+	h.fail = errors.New("build-tree: exit status 1: the store answered 500")
+	start := h.now
+	for _, step := range []struct {
+		after  time.Duration
+		builds int
+	}{{0, 1}, {RetryAfter - time.Second, 1}, {RetryAfter, 2}, {RetryAfter + 2*RetryAfter - time.Second, 2}, {3 * RetryAfter, 3}, {48 * time.Hour, 3}} {
+		h.now = start.Add(step.after)
+		h.builder.BuildOnce()
+		if len(h.builds) != step.builds {
+			t.Fatalf("at +%v: %d builds, want %d", step.after, len(h.builds), step.builds)
+		}
+	}
+	newest, _ := ledger.Newest(keyB)
+	if newest.Retry != "" || !newest.Standing(h.now) || !strings.Contains(newest.String(), "given up after 3 failures") {
+		t.Fatalf("after %d failures the newest record is %+v", MaxFailures, newest)
+	}
+}
+
+// A tree that failed waits behind every tree that hasn't, whatever the listing's order: a bad tree never takes more
+// than its share of the builder while others wait. Mutant: listing order alone.
+func TestATreeThatFailedWaitsBehindOnesThatHavent(t *testing.T) {
+	source := listedFutures{future("2", unit(t, "test", "run", keyB)), future("3", unit(t, "test", "run", keyC))}
+	ledger := openLedger(t, filepath.Join(t.TempDir(), "trees.jsonl"), time.Now())
+	h := newHarness(t, source, ledger)
+	ledger.Append(Record{Tree: keyB, Event: Failed, At: h.now.Add(-time.Hour).Format(time.RFC3339), Retry: h.now.Add(-time.Minute).Format(time.RFC3339)})
+	h.buildOnce(t, true)
+	h.buildOnce(t, true)
+	if len(h.builds) != 2 || h.builds[0].Tree != keyC || h.builds[1].Tree != keyB {
+		t.Fatalf("builds %v, want c, never tried, before b, which failed", h.builds)
+	}
+}
+
+// A checkout that hiccups (GitHub's 5xx, the network) is transient: retried after a minute, doubling to TransientCap,
+// never standing, and never counted toward giving the tree up (review of tree-wiring, finding 6). Mutants: a
+// transient failure standing; transients counted as failures.
+func TestATransientFailureIsRetriedSoonAndNeverStands(t *testing.T) {
+	source := listedFutures{future("2", unit(t, "test", "run", keyB))}
+	ledger := openLedger(t, filepath.Join(t.TempDir(), "trees.jsonl"), time.Now())
+	h := newHarness(t, source, ledger)
+	h.fail = fmt.Errorf("%w: checking it out keyless: git fetch: 502", ErrTransient)
+	h.buildOnce(t, true)
+	newest, _ := ledger.Newest(keyB)
+	if !newest.Transient || newest.Standing(h.now) || newest.Retry != h.now.Add(TransientRetry).Format(time.RFC3339) {
+		t.Fatalf("a transient failure is recorded %+v", newest)
+	}
+	for range 5 {
+		h.now = h.now.Add(TransientCap)
+		h.buildOnce(t, true)
+	}
+	if newest, _ = ledger.Newest(keyB); newest.Retry != h.now.Add(TransientCap).Format(time.RFC3339) {
+		t.Fatalf("the sixth transient failure retries at %s, want capped at %v", newest.Retry, TransientCap)
+	}
+	// Six transients later, a real failure is the tree's first: it backs off RetryAfter, never given up.
+	h.now, h.fail = h.now.Add(TransientCap), errors.New("build-tree: exit status 1")
+	h.buildOnce(t, true)
+	if newest, _ = ledger.Newest(keyB); newest.Transient || newest.Retry != h.now.Add(RetryAfter).Format(time.RFC3339) {
+		t.Fatalf("a real failure after six transient ones is %+v, want the first, retried after %v", newest, RetryAfter)
+	}
+}
+
+// A tree whose build keeps taking the builder down (a crash, every time it's built) is given up at MaxFailures like
+// one that keeps failing, not rebuilt at every restart. Mutant: crashes not counted.
+func TestATreeThatKeepsCrashingTheBuilderIsGivenUp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trees.jsonl")
+	now := time.Date(2026, 10, 10, 13, 0, 0, 0, time.UTC)
+	for crash := 1; crash <= MaxFailures; crash++ {
+		ledger, err := OpenLedger(path, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if newest, _ := ledger.Newest(keyB); crash > 1 && newest.Event != Interrupted {
+			t.Fatalf("after crash %d the tree is %+v", crash-1, newest)
+		}
+		ledger.Append(Record{Tree: keyB, Future: strings.Repeat("2", 40), At: now.Format(time.RFC3339), Event: Started})
+		ledger.Close()
+	}
+	ledger := openLedger(t, path, now)
+	if newest, _ := ledger.Newest(keyB); newest.Event != Failed || !newest.Standing(now.Add(48*time.Hour)) || !strings.Contains(newest.Cause, "died mid-build 3 times") {
+		t.Fatalf("after %d crashes the tree is %+v", MaxFailures, newest)
 	}
 }
