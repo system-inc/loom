@@ -165,6 +165,31 @@ describe('the board of changes, live', function () {
         expect(line).toMatchObject({ state: 'queued', finishedAt: null });
     });
 
+    it('keeps when a change reached its state across pushes in that state, and starts it again on a new one', async function () {
+        const change = changeId();
+        async function line(): Promise<BoardLine | undefined> {
+            return ((await (await call('/board/changes', { bearer: await boardToken() })).json()) as { changes: BoardLine[] }).changes.find(function (held) {
+                return held.change === change;
+            });
+        }
+        async function later(): Promise<void> {
+            await new Promise(function (resolve) {
+                setTimeout(resolve, 15);
+            });
+        }
+        await push(summary(change, { state: 'queued', future: null, updatedAt: '2026-10-10T00:00:00.000Z' }));
+        const queued = await line();
+        expect(queued?.stateSince).toBe(queued?.firstSeenAt);
+        await later();
+        await push(summary(change, { state: 'testing', updatedAt: '2026-10-10T00:01:00.000Z' }));
+        const testing = await line();
+        expect(Date.parse(testing?.stateSince ?? '')).toBeGreaterThan(Date.parse(queued?.stateSince ?? ''));
+        await later();
+        await push(summary(change, { state: 'testing', units: { planned: 4, passed: 2, failed: 0, void: 0 }, updatedAt: '2026-10-10T00:02:00.000Z' }));
+        expect((await line())?.stateSince).toBe(testing?.stateSince);
+        expect((await line())?.firstSeenAt).toBe(queued?.firstSeenAt);
+    });
+
     it('opens its stream to a board token offered as a subprotocol beside loom, and to nothing else', async function () {
         const bearer = await boardToken();
         expect((await boardStream('loom')).status).toBe(401);

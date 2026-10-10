@@ -8,8 +8,19 @@
 // turns sound on, a chime made in the page.
 
 import { loomMark } from './LoomMark';
+import { phosphorIcon, type PhosphorIconName } from './PhosphorIcons';
 
 const celebrationGold = '#ffd166';
+
+// Each step's icon, and the icon and word for the phase a change on its way is in, with Kirk's words for the phases.
+const stepIcons: PhosphorIconName[] = ['PaperPlaneTilt', 'Stack', 'Hammer', 'Flask', 'Scales', 'FlagCheckered'];
+const phaseIcons: Record<string, PhosphorIconName> = { queued: 'GearSix', building: 'Hammer', testing: 'Flask', parked: 'PauseCircle' };
+
+function iconMarkup(names: PhosphorIconName[], size: number): Record<string, string> {
+    return Object.fromEntries(names.map(function (name) {
+        return [name, phosphorIcon(name, size)];
+    }));
+}
 
 export function renderLoomLivePage(nonce: string): string {
     return `<!doctype html>
@@ -52,12 +63,13 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .step .head { display: flex; align-items: center; gap: 8px; }
 .step .name { font-weight: 650; }
 .step .time { margin-left: auto; font-size: 12px; color: var(--muted); }
-.step .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--off); flex: none; }
-.step[data-state="done"] .dot { background: var(--passed); }
+.step .icon { display: inline-flex; color: var(--off); flex: none; }
+.step[data-state="done"] .icon { color: var(--passed); }
 .step[data-state="active"] { border-color: var(--violet); background: #1a1630; }
-.step[data-state="active"] .dot { background: var(--violet); box-shadow: 0 0 0 4px rgba(182,156,255,.25); animation: beat 1s ease-in-out infinite; }
+.step[data-state="active"] .icon { color: var(--violet); animation: beat 1s ease-in-out infinite; }
+.step[data-state="active"] .time { color: var(--text); }
 .step[data-state="red"] { border-color: var(--failed); background: #2a1414; }
-.step[data-state="red"] .dot { background: var(--failed); }
+.step[data-state="red"] .icon { color: var(--failed); }
 .cols { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 6fr) minmax(0, 3fr); gap: 14px; flex: 1; }
 .middle { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
@@ -70,6 +82,16 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .posted b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .posted .place { margin-left: auto; font-size: 12px; color: var(--violet); }
 .posted .meta { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.posted .phase { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.posted .phase .icon { display: inline-flex; }
+.posted .phase .since { margin-left: auto; color: var(--text); }
+.posted[data-phase="queued"] .phase { color: var(--soft); }
+.posted[data-phase="queued"] .phase .icon { animation: spin 3s linear infinite; }
+.posted[data-phase="building"] .phase { color: var(--violet); }
+.posted[data-phase="building"] .phase .icon { animation: beat 1s ease-in-out infinite; }
+.posted[data-phase="testing"] .phase { color: var(--running); }
+.posted[data-phase="testing"] .phase .icon { animation: beat 1s ease-in-out infinite; }
+.posted[data-phase="parked"] .phase { color: var(--void); }
 .list { display: flex; flex-direction: column; gap: 8px; }
 .empty { color: var(--faint); font-size: 13px; }
 .block { display: flex; align-items: center; gap: 18px; }
@@ -122,6 +144,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .piece.phi { border: 2px solid currentColor; background: transparent; border-radius: 2px; display: grid; place-items: center; }
 .piece.phi::after { content: ""; width: 7px; height: 7px; border: 2px solid currentColor; border-radius: 50%; }
 @keyframes beat { 50% { opacity: .55; } }
+@keyframes spin { to { transform: rotate(360deg); } }
 @keyframes arrive { from { opacity: 0; transform: translateX(-14px); } to { opacity: 1; transform: none; } }
 @keyframes fall { 0% { transform: translateY(0) rotate(0); } 100% { transform: translateY(105vh) rotate(720deg); } }
 @keyframes burst { 0% { transform: scale(.6); opacity: 0; } 30% { transform: scale(1.06); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
@@ -227,6 +250,10 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     var soundOn = false;
     try { soundOn = localStorage.getItem('loom.sound') === 'on'; } catch (error) { soundOn = false; }
     var onTheWay = ['queued', 'building', 'testing', 'parked'];
+    var stepIcons = ${JSON.stringify(stepIcons)};
+    var phaseIcons = ${JSON.stringify(phaseIcons)};
+    var phaseWords = { queued: 'setup', building: 'building', testing: 'testing', parked: 'parked' };
+    var icons = ${JSON.stringify(iconMarkup([...stepIcons, ...Object.values(phaseIcons), 'XCircle'], 16))};
     var stages = [['Posted', 'owners submit'], ['Block', 'the next block forms'], ['Build', 'products, once each'], ['Test', 'only what changed'], ['Verdict', 'by written rule'], ['Landed', 'main moves']];
     var panels = ['panel-posted', 'panel-block', 'panel-build', 'panel-test', 'panel-verdict', 'panel-landed'];
 
@@ -237,10 +264,18 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         return node;
     }
 
+    // Seconds count up on their own until a minute, then beside the minutes, so a live clock always ticks.
     function duration(seconds) {
         seconds = Math.max(0, Math.round(seconds));
-        if (seconds >= 3600) { return Math.floor(seconds / 3600) + 'h ' + String(Math.floor((seconds % 3600) / 60)).padStart(2, '0') + 'm'; }
-        return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+        if (seconds < 60) { return seconds + 's'; }
+        if (seconds < 3600) { return Math.floor(seconds / 60) + 'm ' + String(seconds % 60).padStart(2, '0') + 's'; }
+        return Math.floor(seconds / 3600) + 'h ' + String(Math.floor((seconds % 3600) / 60)).padStart(2, '0') + 'm';
+    }
+
+    function icon(name) {
+        var holder = element('span', 'icon');
+        holder.innerHTML = icons[name];
+        return holder;
     }
 
     // A change the board first saw already finished has no trip it can time.
@@ -291,16 +326,18 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             var red = line && ((line.state === 'red' && index >= 4) || (line.state === 'refused' && index === 0));
             step.dataset.state = red ? 'red' : index < current ? 'done' : index === current ? 'active' : '';
             var head = element('div', 'head');
-            head.appendChild(element('span', 'dot'));
             var name = stage[0];
             var sub = stage[1];
             if (index === 5 && line && line.state === 'red') { name = 'Red'; sub = 'to its owner, with a repro'; }
             if (index === 0 && line && line.state === 'parked') { sub = 'parked, waits to restack'; }
             if (index === 0 && line && line.state === 'refused') { sub = 'refused at the door'; }
+            head.appendChild(icon(index === 5 && line && line.state === 'red' ? 'XCircle' : stepIcons[index]));
             head.appendChild(element('span', 'name', name));
             var time = element('span', 'mono time', '');
-            // The step it's on counts up from its arrival; the last step, once it's there, holds the whole trip.
-            if (index === current || (index === 5 && current >= 5)) {
+            // The step it's on counts up from when the change reached its state; the last step, once it's there,
+            // holds the whole trip from arrival.
+            if (index === current && current < 5) { time.dataset.from = line.stateSince || line.firstSeenAt; }
+            if (index === 5 && current >= 5) {
                 time.dataset.from = line.firstSeenAt;
                 if (line.finishedAt) { time.dataset.to = line.finishedAt; }
             }
@@ -335,7 +372,15 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             top.appendChild(element('b', null, change.owner));
             top.appendChild(element('span', 'mono place', '#' + (index + 1)));
             card.appendChild(top);
-            card.appendChild(element('span', 'mono meta', change.sha.slice(0, 12) + ' \\u00B7 ' + change.state + (change.units.planned > 0 ? ' \\u00B7 ' + change.units.planned + ' units' : '')));
+            card.appendChild(element('span', 'mono meta', change.sha.slice(0, 12) + (change.units.planned > 0 ? ' \\u00B7 ' + change.units.planned + ' units' : '')));
+            card.dataset.phase = change.state;
+            var phase = element('span', 'phase');
+            phase.appendChild(icon(phaseIcons[change.state]));
+            phase.appendChild(element('span', null, phaseWords[change.state]));
+            var since = element('span', 'mono since', '');
+            since.dataset.from = change.stateSince || change.firstSeenAt;
+            phase.appendChild(since);
+            card.appendChild(phase);
             list.appendChild(card);
         });
     }

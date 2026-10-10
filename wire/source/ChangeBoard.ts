@@ -23,10 +23,12 @@ export interface ChangeUnits {
     void: number;
 }
 
-// A change as the board shows it: Queue's summary, plus when the board first saw it and when it finished, on the
-// board's own clock (ISO times), so a page can tell how long a change took from arriving to landing.
+// A change as the board shows it: Queue's summary, plus when the board first saw it, when it reached the state it is
+// in now and when it finished, on the board's own clock (ISO times), so a page can tell how long a change took from
+// arriving to landing and how long it has been setting up, building or testing.
 export interface BoardLine extends ChangeSummary {
     firstSeenAt: string;
+    stateSince: string;
     finishedAt: string | null;
 }
 
@@ -109,7 +111,8 @@ export class ChangeBoard extends DurableObject<Env> {
         super(context, environment);
         this.sql = context.storage.sql;
         // finishedAt is the board's own clock when a change reached a finished state, null while it is on its way;
-        // firstSeenAt when its first summary arrived. A board from before firstSeenAt gains the column, empty.
+        // firstSeenAt when its first summary arrived; stateSince when it reached the state it is in now. A board from
+        // before a column gains it, empty.
         this.sql.exec(`
             CREATE TABLE IF NOT EXISTS changes (
                 change TEXT PRIMARY KEY,
@@ -118,8 +121,10 @@ export class ChangeBoard extends DurableObject<Env> {
             ) WITHOUT ROWID;
         `);
         const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(changes)').toArray();
-        if (!columns.some(function (column) { return column.name === 'firstSeenAt'; })) {
-            this.sql.exec('ALTER TABLE changes ADD COLUMN firstSeenAt INTEGER');
+        for (const name of ['firstSeenAt', 'stateSince']) {
+            if (!columns.some(function (column) { return column.name === name; })) {
+                this.sql.exec(`ALTER TABLE changes ADD COLUMN ${name} INTEGER`);
+            }
         }
         context.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
     }
@@ -178,24 +183,31 @@ export class ChangeBoard extends DurableObject<Env> {
         const held = this.sql
             .exec<{ summary: string }>('SELECT summary FROM changes WHERE change = ?', summary.change)
             .toArray()[0];
-        if (held !== undefined && Date.parse((JSON.parse(held.summary) as ChangeSummary).updatedAt) > Date.parse(summary.updatedAt)) {
+        const before = held === undefined ? undefined : (JSON.parse(held.summary) as ChangeSummary);
+        if (before !== undefined && Date.parse(before.updatedAt) > Date.parse(summary.updatedAt)) {
             return;
         }
         const now = Date.now();
         const finishedAt = finishedStates.includes(summary.state) ? now : null;
+        // A summary in the state the board already holds keeps the time it got there; a new state starts the clock.
+        const sameState = before !== undefined && before.state === summary.state ? 1 : 0;
         const row = this.sql
-            .exec<{ firstSeenAt: number | null; finishedAt: number | null }>(
-                `INSERT INTO changes (change, summary, finishedAt, firstSeenAt) VALUES (?, ?, ?, ?)
+            .exec<{ firstSeenAt: number | null; stateSince: number | null; finishedAt: number | null }>(
+                `INSERT INTO changes (change, summary, finishedAt, firstSeenAt, stateSince) VALUES (?, ?, ?, ?, ?)
                  ON CONFLICT (change) DO UPDATE SET summary = excluded.summary,
-                 finishedAt = CASE WHEN excluded.finishedAt IS NULL THEN NULL ELSE COALESCE(changes.finishedAt, excluded.finishedAt) END
-                 RETURNING firstSeenAt, finishedAt`,
+                 finishedAt = CASE WHEN excluded.finishedAt IS NULL THEN NULL ELSE COALESCE(changes.finishedAt, excluded.finishedAt) END,
+                 stateSince = CASE WHEN ? = 1 THEN COALESCE(changes.stateSince, excluded.stateSince) ELSE excluded.stateSince END
+                 RETURNING firstSeenAt, stateSince, finishedAt`,
                 summary.change,
                 JSON.stringify(summary),
                 finishedAt,
                 now,
+                now,
+                sameState,
             )
             .one();
-        const frame = JSON.stringify({ kind: 'change', change: lineOf(summary, row.firstSeenAt ?? now, row.finishedAt) });
+        const firstSeenAt = row.firstSeenAt ?? now;
+        const frame = JSON.stringify({ kind: 'change', change: lineOf(summary, firstSeenAt, row.stateSince ?? firstSeenAt, row.finishedAt) });
         for (const socket of this.ctx.getWebSockets()) {
             try {
                 socket.send(frame);
@@ -210,11 +222,14 @@ export class ChangeBoard extends DurableObject<Env> {
     private changes(): BoardLine[] {
         this.sql.exec('DELETE FROM changes WHERE finishedAt IS NOT NULL AND finishedAt <= ?', Date.now() - FinishedChangeMilliseconds);
         return this.sql
-            .exec<{ summary: string; firstSeenAt: number | null; finishedAt: number | null }>('SELECT summary, firstSeenAt, finishedAt FROM changes')
+            .exec<{ summary: string; firstSeenAt: number | null; stateSince: number | null; finishedAt: number | null }>(
+                'SELECT summary, firstSeenAt, stateSince, finishedAt FROM changes',
+            )
             .toArray()
             .map(function (row) {
                 const summary = JSON.parse(row.summary) as ChangeSummary;
-                return lineOf(summary, row.firstSeenAt ?? Date.parse(summary.updatedAt), row.finishedAt);
+                const firstSeenAt = row.firstSeenAt ?? Date.parse(summary.updatedAt);
+                return lineOf(summary, firstSeenAt, row.stateSince ?? firstSeenAt, row.finishedAt);
             })
             .sort(function (left, right) {
                 return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
@@ -222,10 +237,11 @@ export class ChangeBoard extends DurableObject<Env> {
     }
 }
 
-function lineOf(summary: ChangeSummary, firstSeenAt: number, finishedAt: number | null): BoardLine {
+function lineOf(summary: ChangeSummary, firstSeenAt: number, stateSince: number, finishedAt: number | null): BoardLine {
     return {
         ...summary,
         firstSeenAt: new Date(firstSeenAt).toISOString(),
+        stateSince: new Date(stateSince).toISOString(),
         finishedAt: finishedAt === null ? null : new Date(finishedAt).toISOString(),
     };
 }
