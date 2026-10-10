@@ -83,7 +83,7 @@ export interface CandidateFacts {
     block: number | null;
     // Each plan: when the planner's units were logged, how many, and how many reused a verdict.
     plans: { at: number; units: number; reused: number }[];
-    // When a plan was withdrawn, or the candidate built again (a re-witness): planning starts again from there.
+    // When a plan was withdrawn, or the candidate built again (main's tip verified again): planning starts over there.
     replans: { at: number; why: string }[];
     runs: RunFacts[];
 }
@@ -249,7 +249,7 @@ export function timelineOf(facts: CandidateFacts, now: number): CandidateTimelin
         }
         if (run.decidedAt !== null && (run.status === 'green' || run.status === 'passed')) {
             const done = facts.branch.witness ? facts.branch.witnessedAt : facts.branch.landedAt;
-            add('land', run.decidedAt, done, 'log', facts.branch.witness ? 'a witness of main finishes witnessed, never landed' : undefined);
+            add('land', run.decidedAt, done, 'log', facts.branch.witness ? 'a verify finishes `witnessed`, never landed' : undefined);
         }
         const last = stages[stages.length - 1];
         const start = Date.parse(stages[0]?.start ?? iso(cursor));
@@ -481,7 +481,7 @@ export class Performance extends DurableObject<Env> {
             const block = typeof event.data.block === 'number' ? event.data.block : null;
             const known = this.sql.exec('SELECT 1 FROM candidates WHERE candidate = ?', future).toArray().length > 0;
             if (known) {
-                // The same tree built again (a re-witness): planning starts over from here, and the first build stays.
+                // The same tree built again (a second verify of one tip): planning starts over here; the first build stays.
                 this.sql.exec('INSERT OR IGNORE INTO replans (candidate, at, why) VALUES (?, ?, ?)', future, at, 'built again');
             }
             else {
