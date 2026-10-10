@@ -571,6 +571,33 @@ describe("today's gate and main's own red", function () {
     });
 });
 
+describe('a withdrawn plan', function () {
+    it('goes back to the planner while nothing judged it, logged with who and why, and never after a verdict', async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(21, { parity: true }))).json()) as { change: string }).change;
+        const unplan = function (body: unknown): Promise<Response> {
+            return queue.fetch(`https://queue/futures/${sha(21)}/unplan`, { method: 'POST', body: JSON.stringify(body) });
+        };
+        const ruling = { by: 'system_adamic_loom', reason: 'parity units carry the box record inputs (Loom, 00:3xZ)' };
+        expect((await unplan(ruling)).status).toBe(409);
+        const units = await planOf(['a']);
+        await postPlan(queue, sha(21), units);
+        expect((await unplan({ by: 'x' })).status).toBe(400);
+        expect((await unplan(ruling)).status).toBe(200);
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'queued', units: { planned: 0 } });
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: { future: string }[] }).futures.map((future) => future.future)).toEqual([sha(21)]);
+        // The replan with other keys is taken now, and once a batch judges it the plan stands.
+        const replanned = await planOf(['b']);
+        expect((await postPlan(queue, sha(21), replanned)).status).toBe(200);
+        const voided = batch(id, sha(21), 'run-1', [record(id, replanned[0]?.unitKey ?? '', 'run-1', 'void', 'infra')], 'void');
+        expect((await postBatch(queue, sha(21), voided)).status).toBe(200);
+        expect((await unplan(ruling)).status).toBe(409);
+        const logged = (await logOf(queue)).find((event) => event.type === 'future.unplanned');
+        expect(logged).toMatchObject({ subject: { change: id, future: sha(21) }, data: ruling });
+        expect((await replay(await logOf(queue))).futures.get(sha(21))?.units?.size).toBe(1);
+    });
+});
+
 describe('a parity run', function () {
     it("plans exactly the box record's selection when it carries one, uncached", async function () {
         const queue = await freshQueue();
@@ -628,7 +655,7 @@ describe('a landing order', function () {
                     return [key, { unitKey: key, name: `u${index}`, keyParts: {}, decision: 'run' as const, reused: null, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
                 }),
             );
-            return { tree: sha(1), base: main, changes: [], units: units, whole: null, decided: { run: 'r', status: 'green' }, voids: 0 };
+            return { tree: sha(1), base: main, changes: [], units: units, whole: null, decided: { run: 'r', status: 'green' }, voids: 0, judged: true };
         };
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'failed', 'mainRed')]))).toBe(true);
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'void', 'infra')]))).toBe(false);

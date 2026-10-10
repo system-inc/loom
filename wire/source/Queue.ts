@@ -29,6 +29,8 @@ export type EventType =
     | 'block.opened'
     | 'future.built'
     | 'unit.planned'
+    // A plan withdrawn by a ruling before anything judged it, so the planner can plan the future again.
+    | 'future.unplanned'
     | 'unit.placed'
     | 'unit.finished'
     | 'verdict.decided'
@@ -176,6 +178,8 @@ export interface FutureEntry {
     decided: { run: string; status: Decision['status'] } | null;
     // How many runs have decided it void: the judge's next run is attempt voids + 1.
     voids: number;
+    // Whether any verdict was ever logged for it, a unit's or a whole one: after that its plan stands.
+    judged: boolean;
 }
 
 export interface ChangeEntry {
@@ -526,7 +530,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'future.built') {
         const tree = event.subject.future ?? '';
         const changes = event.data.changes as string[];
-        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, whole: null, decided: null, voids: 0 });
+        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, whole: null, decided: null, voids: 0, judged: false });
         for (const change of changes) {
             const member = state.changes.get(change);
             if (member !== undefined) {
@@ -557,8 +561,23 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             }
         }
     }
+    else if (event.type === 'future.unplanned') {
+        const future = state.futures.get(event.subject.future ?? '');
+        if (future !== undefined) {
+            future.units = null;
+            for (const change of future.changes) {
+                const member = state.changes.get(change);
+                if (member !== undefined && member.state === 'testing') {
+                    member.state = 'queued';
+                }
+            }
+        }
+    }
     else if (event.type === 'verdict.decided') {
         const future = state.futures.get(event.subject.future ?? '');
+        if (future !== undefined) {
+            future.judged = true;
+        }
         if (event.subject.unitKey !== undefined) {
             // One unit's record: the index's latest for its key, and the unit's verdict at this tree.
             const record = event.data.verdict as UnitVerdict;
@@ -902,8 +921,11 @@ export class Queue extends DurableObject<Env> {
         if (factsMatch !== null && method === 'POST') {
             return this.takeFacts(request, factsMatch[1] ?? '');
         }
-        const futureMatch = /^\/futures\/([0-9a-f]{40})\/(plan|verdicts)$/.exec(path);
+        const futureMatch = /^\/futures\/([0-9a-f]{40})\/(plan|verdicts|unplan)$/.exec(path);
         if (futureMatch !== null && method === 'POST') {
+            if (futureMatch[2] === 'unplan') {
+                return this.unplan(request, futureMatch[1] ?? '');
+            }
             return futureMatch[2] === 'plan' ? this.plan(request, futureMatch[1] ?? '') : this.decideBatch(request, futureMatch[1] ?? '');
         }
         const verdictMatch = /^\/verdicts\/([0-9a-f]{64})$/.exec(path);
@@ -1271,6 +1293,31 @@ export class Queue extends DurableObject<Env> {
                 );
             }
             return jsonResponse(200, { future: tree, planned: units.length });
+        });
+    }
+
+    // Withdraws a future's plan by a ruling ({by, reason}), so the planner plans it again: only while nothing has judged
+    // it, so no verdict ever stands on a plan that was withdrawn (Loom, Oct 10 00:3xZ, parity proof 1's replan).
+    private async unplan(request: Request, tree: string): Promise<Response> {
+        const body = await readBodyText(request, MaximumChangeBodyBytes);
+        const parsed = parseJson(body ?? '');
+        if (!isPlainObject(parsed) || typeof parsed.by !== 'string' || parsed.by === '' || typeof parsed.reason !== 'string' || parsed.reason === '') {
+            return jsonResponse(400, { error: 'the body is {by, reason}: who withdraws the plan and the ruling it follows' });
+        }
+        return this.ctx.blockConcurrencyWhile(async () => {
+            const state = await this.current();
+            const future = this.liveFuture(state, tree);
+            if (future instanceof Response) {
+                return future;
+            }
+            if (future.units === null) {
+                return jsonResponse(409, { error: `future ${tree} has no plan to withdraw` });
+            }
+            if (future.judged || future.decided !== null) {
+                return jsonResponse(409, { error: `future ${tree} has verdicts, so its plan stands` });
+            }
+            await this.append('future.unplanned', { change: future.changes[0], future: tree }, { by: parsed.by, reason: parsed.reason });
+            return jsonResponse(200, { future: tree, planned: false });
         });
     }
 

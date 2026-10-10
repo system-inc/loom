@@ -20,7 +20,7 @@ const changeScopes: TokenScope[] = ['submit', 'coordinator', 'board'];
 // GET /verdicts/<unitKey>, POST /verdicts, GET /futures, POST /futures/<tree>/plan and /verdicts, GET /landings and
 // POST /landings/<change>, GET /submissions and POST /submissions/<change>/facts.
 const queueSeamPattern =
-    /^\/(?:verdicts(?:\/[0-9a-f]{64})?|futures(?:\/[0-9a-f]{40}\/(?:plan|verdicts))?|landings(?:\/chg_[0-9a-z]{26})?|submissions(?:\/chg_[0-9a-z]{26}\/facts)?)$/;
+    /^\/(?:verdicts(?:\/[0-9a-f]{64})?|futures(?:\/[0-9a-f]{40}\/(?:plan|verdicts|unplan))?|landings(?:\/chg_[0-9a-z]{26})?|submissions(?:\/chg_[0-9a-z]{26}\/facts)?)$/;
 
 export default {
     async fetch(request: Request, environment: Env): Promise<Response> {
