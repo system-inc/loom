@@ -3,8 +3,8 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { checkChangeSummary, FinishedChangeMilliseconds, type ChangeSummary } from '../../source/ChangeBoard';
-import { boardToken, call, token } from '../Helpers';
+import { checkChangeSummary, FinishedChangeMilliseconds, type BoardLine, type ChangeSummary } from '../../source/ChangeBoard';
+import { boardStream, boardToken, call, openBoard, token, waitFor } from '../Helpers';
 
 const board = (env as unknown as { ChangeBoard: DurableObjectNamespace }).ChangeBoard;
 
@@ -105,5 +105,63 @@ describe('the board of changes', function () {
         expect(html).toContain(`<script nonce="${nonce}">`);
         expect(html).toContain("fetch('/board/changes', { headers: { Authorization: 'Bearer ' + token }");
         expect(html).not.toContain('chg_');
+    });
+});
+
+// Loom Live's feed: the board's own projection, streamed, never the log.
+describe('the board of changes, live', function () {
+    it('streams a snapshot, then each recorded change with when the board first saw it, and nothing for a late push', async function () {
+        const held = changeId();
+        await push(summary(held, { state: 'queued', future: null, updatedAt: '2026-10-10T00:00:00.000Z' }));
+        const viewer = await openBoard(await boardToken());
+        await waitFor(function () {
+            return viewer.frames.length > 0;
+        });
+        const snapshot = viewer.frames[0] as { kind: string; changes: BoardLine[] };
+        expect(snapshot.kind).toBe('snapshot');
+        const first = snapshot.changes.find(function (line) {
+            return line.change === held;
+        });
+        expect(first?.firstSeenAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+        expect(first?.finishedAt).toBeNull();
+        await push(summary(held, { state: 'testing', updatedAt: '2026-10-10T00:01:00.000Z' }));
+        await push(summary(held, { state: 'queued', updatedAt: '2026-10-09T23:59:00.000Z' }));
+        await push(summary(held, { state: 'landed', updatedAt: '2026-10-10T00:02:00.000Z' }));
+        await waitFor(function () {
+            return viewer.frames.length >= 3;
+        });
+        await new Promise(function (resolve) {
+            setTimeout(resolve, 50);
+        });
+        const moved = viewer.frames.slice(1) as { kind: string; change: BoardLine }[];
+        expect(moved.map(function (frame) {
+            return [frame.kind, frame.change.state];
+        })).toEqual([['change', 'testing'], ['change', 'landed']]);
+        expect(moved.every(function (frame) {
+            return frame.change.firstSeenAt === first?.firstSeenAt;
+        })).toBe(true);
+        expect(moved[1]?.change.finishedAt).toMatch(/^\d{4}-/);
+        viewer.socket.close();
+    });
+
+    it('forgets the finish of a change that went back on its way', async function () {
+        const change = changeId();
+        await push(summary(change, { state: 'parked', updatedAt: '2026-10-10T00:00:00.000Z' }));
+        await push(summary(change, { state: 'queued', updatedAt: '2026-10-10T00:01:00.000Z' }));
+        const line = ((await (await call('/board/changes', { bearer: await boardToken() })).json()) as { changes: BoardLine[] }).changes.find(function (held) {
+            return held.change === change;
+        });
+        expect(line).toMatchObject({ state: 'queued', finishedAt: null });
+    });
+
+    it('opens its stream to a board token offered as a subprotocol beside loom, and to nothing else', async function () {
+        const bearer = await boardToken();
+        expect((await boardStream('loom')).status).toBe(401);
+        expect((await boardStream(`loom, token.${await token('board', 'submit')}`)).status).toBe(403);
+        expect((await boardStream(`token.${bearer}`)).status).toBe(400);
+        expect((await call('/board/stream', { headers: { 'Sec-WebSocket-Protocol': `loom, token.${bearer}` } })).status).toBe(426);
+        const viewer = await openBoard(bearer);
+        expect(viewer.response.headers.get('Sec-WebSocket-Protocol')).toBe('loom');
+        viewer.socket.close();
     });
 });

@@ -1,7 +1,8 @@
 // loom-pipeline's board of changes: one line per change on its way to main. The Queue object pushes each change's
 // summary here as it moves (contracts v1.1: {change, owner, sha, state, future, units, updatedAt}, at most once a
 // second), and the board never polls. It keeps every change still on its way, and a landed, red, parked or refused
-// one for a day after it last moved. One Durable Object, named `board`.
+// one for a day after it last moved. One Durable Object, named `board`. Viewers watch it over hibernating WebSockets:
+// a snapshot when they connect, then each change as it is recorded, so an open page costs nothing between pushes.
 
 import { DurableObject } from 'cloudflare:workers';
 import { ChangeIdPattern, ShaPattern } from './Changes';
@@ -21,6 +22,15 @@ export interface ChangeUnits {
     failed: number;
     void: number;
 }
+
+// A change as the board shows it: Queue's summary, plus when the board first saw it and when it finished, on the
+// board's own clock (ISO times), so a page can tell how long a change took from arriving to landing.
+export interface BoardLine extends ChangeSummary {
+    firstSeenAt: string;
+    finishedAt: string | null;
+}
+
+export const ChangeBoardSubprotocol = 'loom';
 
 export interface ChangeSummary {
     change: string;
@@ -98,7 +108,8 @@ export class ChangeBoard extends DurableObject<Env> {
     constructor(context: DurableObjectState, environment: Env) {
         super(context, environment);
         this.sql = context.storage.sql;
-        // finishedAt is the board's own clock when a change reached a finished state, null while it is on its way.
+        // finishedAt is the board's own clock when a change reached a finished state, null while it is on its way;
+        // firstSeenAt when its first summary arrived. A board from before firstSeenAt gains the column, empty.
         this.sql.exec(`
             CREATE TABLE IF NOT EXISTS changes (
                 change TEXT PRIMARY KEY,
@@ -106,6 +117,11 @@ export class ChangeBoard extends DurableObject<Env> {
                 finishedAt INTEGER
             ) WITHOUT ROWID;
         `);
+        const columns = this.sql.exec<{ name: string }>('PRAGMA table_info(changes)').toArray();
+        if (!columns.some(function (column) { return column.name === 'firstSeenAt'; })) {
+            this.sql.exec('ALTER TABLE changes ADD COLUMN firstSeenAt INTEGER');
+        }
+        context.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong'));
     }
 
     override async fetch(request: Request): Promise<Response> {
@@ -125,10 +141,39 @@ export class ChangeBoard extends DurableObject<Env> {
         if (operation === '/changes' && request.method === 'GET') {
             return jsonResponse(200, { changes: this.changes() });
         }
+        if (operation === '/stream' && request.method === 'GET') {
+            return this.openStream(request);
+        }
         return jsonResponse(404, { error: 'no such board operation' });
     }
 
-    // A summary older than the one held (an earlier push arriving late) is dropped.
+    // The Worker has checked the board token; the answer names the subprotocol the page offered beside it. The
+    // snapshot is sent before this handler yields, so no change can slip between it and the frames after.
+    private openStream(request: Request): Response {
+        if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+            return jsonResponse(426, { error: 'this endpoint speaks WebSocket' });
+        }
+        const pair = new WebSocketPair();
+        const server = pair[1];
+        this.ctx.acceptWebSocket(server);
+        server.send(JSON.stringify({ kind: 'snapshot', changes: this.changes() }));
+        return new Response(null, { status: 101, webSocket: pair[0], headers: { 'Sec-WebSocket-Protocol': ChangeBoardSubprotocol } });
+    }
+
+    override webSocketMessage(): void {
+        // Viewers only listen; "ping" is answered by the auto response without waking this object.
+    }
+
+    override webSocketClose(socket: WebSocket, code: number, reason: string): void {
+        try {
+            socket.close(code, reason);
+        }
+        catch {
+            // Already closed.
+        }
+    }
+
+    // A summary older than the one held (an earlier push arriving late) is dropped, and nobody hears of it.
     private record(summary: ChangeSummary): void {
         const held = this.sql
             .exec<{ summary: string }>('SELECT summary FROM changes WHERE change = ?', summary.change)
@@ -136,27 +181,51 @@ export class ChangeBoard extends DurableObject<Env> {
         if (held !== undefined && Date.parse((JSON.parse(held.summary) as ChangeSummary).updatedAt) > Date.parse(summary.updatedAt)) {
             return;
         }
-        const finishedAt = finishedStates.includes(summary.state) ? Date.now() : null;
-        this.sql.exec(
-            `INSERT INTO changes (change, summary, finishedAt) VALUES (?, ?, ?)
-             ON CONFLICT (change) DO UPDATE SET summary = excluded.summary, finishedAt = excluded.finishedAt`,
-            summary.change,
-            JSON.stringify(summary),
-            finishedAt,
-        );
+        const now = Date.now();
+        const finishedAt = finishedStates.includes(summary.state) ? now : null;
+        const row = this.sql
+            .exec<{ firstSeenAt: number | null; finishedAt: number | null }>(
+                `INSERT INTO changes (change, summary, finishedAt, firstSeenAt) VALUES (?, ?, ?, ?)
+                 ON CONFLICT (change) DO UPDATE SET summary = excluded.summary,
+                 finishedAt = CASE WHEN excluded.finishedAt IS NULL THEN NULL ELSE COALESCE(changes.finishedAt, excluded.finishedAt) END
+                 RETURNING firstSeenAt, finishedAt`,
+                summary.change,
+                JSON.stringify(summary),
+                finishedAt,
+                now,
+            )
+            .one();
+        const frame = JSON.stringify({ kind: 'change', change: lineOf(summary, row.firstSeenAt ?? now, row.finishedAt) });
+        for (const socket of this.ctx.getWebSockets()) {
+            try {
+                socket.send(frame);
+            }
+            catch {
+                // A socket that is closing misses the frame; a reconnect starts from a fresh snapshot.
+            }
+        }
     }
 
     // Every change on its way and every one finished in the last day, newest move first.
-    private changes(): ChangeSummary[] {
+    private changes(): BoardLine[] {
         this.sql.exec('DELETE FROM changes WHERE finishedAt IS NOT NULL AND finishedAt <= ?', Date.now() - FinishedChangeMilliseconds);
         return this.sql
-            .exec<{ summary: string }>('SELECT summary FROM changes')
+            .exec<{ summary: string; firstSeenAt: number | null; finishedAt: number | null }>('SELECT summary, firstSeenAt, finishedAt FROM changes')
             .toArray()
             .map(function (row) {
-                return JSON.parse(row.summary) as ChangeSummary;
+                const summary = JSON.parse(row.summary) as ChangeSummary;
+                return lineOf(summary, row.firstSeenAt ?? Date.parse(summary.updatedAt), row.finishedAt);
             })
             .sort(function (left, right) {
                 return Date.parse(right.updatedAt) - Date.parse(left.updatedAt);
             });
     }
+}
+
+function lineOf(summary: ChangeSummary, firstSeenAt: number, finishedAt: number | null): BoardLine {
+    return {
+        ...summary,
+        firstSeenAt: new Date(firstSeenAt).toISOString(),
+        finishedAt: finishedAt === null ? null : new Date(finishedAt).toISOString(),
+    };
 }

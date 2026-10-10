@@ -3,7 +3,7 @@
 // The tokens are checked by the same verifier as loom-wire's; Changes.ts checks the rest and asks the Queue object.
 
 import { handleAction } from './Actions';
-import { ChangeBoardName, changeBoardOf } from './ChangeBoard';
+import { ChangeBoardName, changeBoardOf, ChangeBoardSubprotocol } from './ChangeBoard';
 import { renderChangeBoardPage } from './ChangeBoardPage';
 import { handleChanges, queueOf } from './Changes';
 import { jsonResponse } from './Http';
@@ -65,6 +65,26 @@ export default {
             }
             const nonce = crypto.randomUUID().replace(/-/g, '');
             return pageResponse(renderChangeBoardPage(nonce), nonce, new URL(request.url).host);
+        }
+        // The page's live view: the board token comes only as the subprotocol token.<token>, beside loom, so it is in no
+        // URL a server logs; the board object answers with loom alone.
+        if (path === '/board/stream') {
+            if (request.method !== 'GET') {
+                return jsonResponse(405, { error: 'use GET' }, { Allow: 'GET' });
+            }
+            const claims = await authorize(request, environment, ChangeBoardName, { scopes: ['board'], queryScopes: [], subprotocol: true });
+            if (claims instanceof Response) {
+                return claims;
+            }
+            const offered = (request.headers.get('Sec-WebSocket-Protocol') ?? '').split(',').map(function (protocol) {
+                return protocol.trim();
+            });
+            if (!offered.includes(ChangeBoardSubprotocol)) {
+                return jsonResponse(400, { error: `offer the ${ChangeBoardSubprotocol} subprotocol beside the token` });
+            }
+            const headers = new Headers(request.headers);
+            headers.set('Sec-WebSocket-Protocol', ChangeBoardSubprotocol);
+            return changeBoardOf(environment).fetch(new Request('https://board/stream', { headers: headers }));
         }
         if (path === '/board/changes') {
             if (request.method !== 'GET') {
