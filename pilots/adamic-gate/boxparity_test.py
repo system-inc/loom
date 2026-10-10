@@ -113,6 +113,11 @@ check("a box stage with no phase unit is named, exit 1", code == 1 and "stage sm
 code, output = run(staged, verdicts(root, same, phases[:4] + [("p5", "failed", "gofmt")]))
 check("gofmt, which the box doesn't run, differs when it fails, exit 1", code == 1 and "stage gofmt: box absent, new fail" in output, output)
 
+darwin = plant(root, [("TestA", "pass"), ("TestB", "fail"), ("TestC", "skip"), ("TestA/sub", "pass")], stages=dict(boxStages, **{"darwin-compile": 0}))
+code, output = run(darwin, verdicts(root, same, phases))
+check("a stage ruled out by name (darwin-compile) is printed as ruled, never a difference, exit 0",
+      code == 0 and "1 ruled out" in output and "stage darwin-compile: box exit 0, not on the new path, ruled" in output, output)
+
 code, output = run(staged, verdicts(root, same, phases[:2] + [phases[4]]), "--no-stages")
 check("--no-stages compares tests alone, exit 0", code == 0 and "stages not compared" in output, output)
 

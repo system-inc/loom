@@ -24,8 +24,9 @@ record names its stage (parityverdicts.py's "phase", run.py's own unit line, who
 passes there when every unit of it passed. Each stage is compared with the box's stages_exit (0 passes). The stages the
 new path decides another way aren't phases: tests and products (their units, compared test for test above) and census
 (the judge's census step). A stage the box ran that the new path has no phase for is a difference, since the new path
-didn't check what the box did; a phase the box doesn't run (gofmt) differs only when it fails. --no-stages compares
-tests alone, and the summary says so.
+didn't check what the box did; a phase the box doesn't run (gofmt) differs only when it fails. A stage ruled out of
+the new path by name (ruledOut: darwin-compile, Kirk's decision of Oct 10) is printed as ruled, never counted.
+--no-stages compares tests alone, and the summary says so.
 """
 
 import gzip
@@ -35,6 +36,9 @@ import sys
 
 # The box stages the new path decides without a phase unit, and how.
 decidedOtherwise = {"tests": "test units", "products": "product units", "census": "the judge's census step"}
+
+# Box stages ruled out of the new path's gate by name: a known loosening, printed and never counted as a difference.
+ruledOut = {"darwin-compile": "Kirk, Oct 10: after Loom 1.0 (#36v8xkq)"}
 
 
 def boxSide(directory, topLevel):
@@ -89,9 +93,12 @@ def newSide(path, topLevel):
 def stageDifferences(summary, stages):
     """Each stage whose outcome differs, and how many stages agree."""
     boxExits = summary.get("stages_exit") or {}
-    differences, same = [], 0
+    differences, same, ruled = [], 0, []
     for stage in sorted(set(boxExits) | set(stages)):
         if stage in decidedOtherwise and stage not in stages:
+            continue
+        if stage in ruledOut and stage not in stages:
+            ruled.append("stage %s: box exit %s, not on the new path, ruled: %s" % (stage, boxExits.get(stage), ruledOut[stage]))
             continue
         box = None if stage not in boxExits else ("pass" if boxExits[stage] == 0 else "fail (exit %s)" % boxExits[stage])
         units = stages.get(stage)
@@ -104,7 +111,7 @@ def stageDifferences(summary, stages):
             continue
         named = "" if not units else " (units %s)" % ", ".join(sorted(unitKey[:12] for unitKey, status in units if status != "passed" or new == "pass"))
         differences.append("stage %s: box %s, new %s%s" % (stage, box or "absent", new or "no phase unit", named))
-    return differences, same
+    return differences, same, ruled
 
 
 def main():
@@ -131,13 +138,15 @@ def main():
     same = len(set(box) | set(new)) - len(differences)
     stageLine = "stages not compared (--no-stages)"
     if withStages:
-        stageDiffers, stagesSame = stageDifferences(summary, stages)
-        stageLine = "%d stages the same, %d differ" % (stagesSame, len(stageDiffers))
+        stageDiffers, stagesSame, stagesRuled = stageDifferences(summary, stages)
+        stageLine = "%d stages the same, %d differ, %d ruled out" % (stagesSame, len(stageDiffers), len(stagesRuled))
         differences += stageDiffers
     print("boxparity: %s, %s at %s: %d tests the same, %d differ (box %d, new %d, from %d units); %s" % (
         "identical" if not differences else "differs", summary.get("sha", "?")[:12], summary.get("base", "?")[:12], same,
         len(differences) - (len(stageDiffers) if withStages else 0), len(box), len(new), len(set(units.values())), stageLine))
     for line in differences:
+        print(line)
+    for line in (stagesRuled if withStages else []):
         print(line)
     return 1 if differences else 0
 
