@@ -40,7 +40,7 @@ type ServeOptions struct {
 	// MinimumFreeMegabytes is the room a unit needs on the instance (#zzmz489): below it on the workspace's disk or a
 	// strict runner's root, serve asks the pool for nothing and looks again every UnfitPause, so a full instance stops
 	// taking units it can only break (Oct 9: instances at 0.15 s a unit drained the queue from 21:00Z). Zero means
-	// 1500, the units' own floor.
+	// the units' own floor, Unit.FreeFloorBytes.
 	MinimumFreeMegabytes int64
 	// UnfitPause is how long serve waits before looking at an unfit disk again. Zero means 30 s.
 	UnfitPause time.Duration
@@ -90,7 +90,9 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		options.Report = io.Discard
 	}
 	if options.MinimumFreeMegabytes == 0 {
-		options.MinimumFreeMegabytes = 1500
+		// A prebuilt unit refuses itself under the runner's free floor, so serve stands down at the same room, or it
+		// would take units only to refuse them.
+		options.MinimumFreeMegabytes = int64(unitOptions.FreeFloorBytes >> 20)
 	}
 	if options.UnfitPause == 0 {
 		options.UnfitPause = 30 * time.Second
@@ -121,6 +123,15 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		if time.Until(options.Deadline) < options.Margin {
 			summary.Stopped = "at the deadline"
 			break
+		}
+		// The blob cache gives up what it must before the disks are read, so a full cache never stands an instance down;
+		// a disk under the floor with the cache empty is unfit just below.
+		ready := newBlobCache(unitOptions, unitOptions.testRoot()).ready()
+		if errors.Is(ready, errUnfit) {
+			// Then every tree's source no unit holds.
+			newSourceCache(unitOptions.testRoot()).trim(0)
+		} else if ready != nil {
+			fmt.Fprintf(options.Report, "loom-runner serve: readying the blob cache: %v\n", ready)
 		}
 		unfit := unfitDisk(options, disks)
 		// A strict runner's instance is its alone, so what earlier units left on its root is no one's: the first time

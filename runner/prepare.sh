@@ -5,7 +5,12 @@
 # quoted at every use; nothing of the job is ever part of this text.
 #
 #	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep> <root>
+#	prepare.sh environment <tree> <gate inputs sha256 or ""> <environment file> <root>
 #	prepare.sh trim-only <root>
+#
+# environment readies only what a prebuilt test job's binaries run with (prebuilt.go), over <tree>, the tree's source
+# the runner already unpacked from the action store: the instance's adamic toolchain (env.sh, which must exist: exit 2
+# without it), stage3/api's npm packages and the gate inputs. No checkout, no setup, and nothing of Go.
 #
 # <root> holds everything it keeps between units beside the tree (the npm trees, the gate inputs, the setup marker) and
 # is where it looks for what earlier units left: /tmp only for a strict runner, whose instance is the runner's alone.
@@ -36,7 +41,12 @@ if [ "${1:-}" = trim-only ]; then
 	say "trimmed ${root}: $(freeMegabytes) MB free"
 	exit 0
 fi
-tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6 root=$7
+mode=checkout
+if [ "${1:-}" = environment ]; then
+	mode=environment tree=${2:-} sha= base= gateInputs=${3:-} environmentFile=${4:-} trim=keep root=${5:-}
+else
+	tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6 root=$7
+fi
 case ${root} in /*) ;; *) echo "loom-runner prepare: the root must be an absolute path"; exit 2 ;; esac
 mkdir -p "${root}"
 repository=https://github.com/system-inc/adamic
@@ -53,69 +63,78 @@ export GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2=c
 free=$(freeMegabytes)
 [ "${free:-0}" -ge 1500 ] || { say "only ${free} MB free after trimming"; exit 2; }
 
-# The checkout: kept from earlier units, but only one whose own configuration names no remote helper, rewrite, hook or
-# credential; anything else is made again from the public repository.
-if [ -d "${tree}/.git" ] && git -C "${tree}" config --local --name-only --get-regexp '^(url\.|credential|http\.|core\.(askpass|sshcommand|fsmonitor|hookspath)|include)' > /dev/null 2>&1; then
-	say "the kept checkout's configuration names a helper or rewrite; making it again"
-	rm -rf "${tree}"
-fi
-# GitHub turns away anonymous fetches when many instances check out at once, so each step retries with backoff.
-# LOOM_PREPARE_ATTEMPTS is for the runner's tests; the runner never passes it, so a unit always gets four.
-retry() {
-	local attempt attempts=${LOOM_PREPARE_ATTEMPTS:-4}
-	for attempt in $(seq 1 "${attempts}"); do
-		"$@" && return 0
-		[ "${attempt}" -lt "${attempts}" ] && sleep $((attempt * 10 + RANDOM % 10))
+if [ "${mode}" = checkout ]; then
+	# The checkout: kept from earlier units, but only one whose own configuration names no remote helper, rewrite, hook or
+	# credential; anything else is made again from the public repository.
+	if [ -d "${tree}/.git" ] && git -C "${tree}" config --local --name-only --get-regexp '^(url\.|credential|http\.|core\.(askpass|sshcommand|fsmonitor|hookspath)|include)' > /dev/null 2>&1; then
+		say "the kept checkout's configuration names a helper or rewrite; making it again"
+		rm -rf "${tree}"
+	fi
+	# GitHub turns away anonymous fetches when many instances check out at once, so each step retries with backoff.
+	# LOOM_PREPARE_ATTEMPTS is for the runner's tests; the runner never passes it, so a unit always gets four.
+	retry() {
+		local attempt attempts=${LOOM_PREPARE_ATTEMPTS:-4}
+		for attempt in $(seq 1 "${attempts}"); do
+			"$@" && return 0
+			[ "${attempt}" -lt "${attempts}" ] && sleep $((attempt * 10 + RANDOM % 10))
+		done
+		return 1
+	}
+	if [ ! -d "${tree}/.git" ]; then
+		[ "${free:-0}" -ge 4500 ] || { say "only ${free} MB free, too little to clone"; exit 2; }
+		retry git clone -q --filter=blob:none "${repository}" "${tree}" || { say "cloning ${repository} failed"; exit 2; }
+	fi
+	find "${tree}/.git" -maxdepth 6 -name index.lock -delete 2> /dev/null
+	# The commit must be one the public repository holds. git fetch of a sha the checkout already has succeeds without
+	# asking the remote, so each commit is first fetched into an empty object store, where only GitHub can supply it (the
+	# commit object alone: --depth=1 --filter=tree:0), and only then into the checkout.
+	probe=$(mktemp -d "${root}/loom-probe-XXXXXX")
+	git init -q --bare "${probe}"
+	for commit in "${sha}" ${base:+"${base}"}; do
+		if ! retry git -C "${probe}" fetch -q --depth=1 --filter=tree:0 "${repository}" "${commit}"; then
+			git -C "${probe}" fetch -q --depth=1 --filter=tree:0 "${repository}" "${commit}" 2>&1 | tail -3
+			rm -rf "${probe}"
+			say "refused: ${commit} can't be fetched from ${repository} without credentials"
+			exit 3
+		fi
+		retry git -C "${tree}" fetch -q "${repository}" "${commit}" || { rm -rf "${probe}"; say "fetching ${commit} into the checkout failed"; exit 2; }
 	done
-	return 1
-}
-if [ ! -d "${tree}/.git" ]; then
-	[ "${free:-0}" -ge 4500 ] || { say "only ${free} MB free, too little to clone"; exit 2; }
-	retry git clone -q --filter=blob:none "${repository}" "${tree}" || { say "cloning ${repository} failed"; exit 2; }
-fi
-find "${tree}/.git" -maxdepth 6 -name index.lock -delete 2> /dev/null
-# The commit must be one the public repository holds. git fetch of a sha the checkout already has succeeds without
-# asking the remote, so each commit is first fetched into an empty object store, where only GitHub can supply it (the
-# commit object alone: --depth=1 --filter=tree:0), and only then into the checkout.
-probe=$(mktemp -d "${root}/loom-probe-XXXXXX")
-git init -q --bare "${probe}"
-for commit in "${sha}" ${base:+"${base}"}; do
-	if ! retry git -C "${probe}" fetch -q --depth=1 --filter=tree:0 "${repository}" "${commit}"; then
-		git -C "${probe}" fetch -q --depth=1 --filter=tree:0 "${repository}" "${commit}" 2>&1 | tail -3
-		rm -rf "${probe}"
-		say "refused: ${commit} can't be fetched from ${repository} without credentials"
+	rm -rf "${probe}"
+	git -C "${tree}" switch -q --detach "${sha}" && [ "$(git -C "${tree}" rev-parse HEAD)" = "${sha}" ] || { say "checking out ${sha} failed"; exit 2; }
+	if [ -n "${base}" ] && ! git -C "${tree}" merge-base --is-ancestor "${base}" "${sha}"; then
+		say "refused: ${sha} doesn't descend from its base ${base}"
 		exit 3
 	fi
-	retry git -C "${tree}" fetch -q "${repository}" "${commit}" || { rm -rf "${probe}"; say "fetching ${commit} into the checkout failed"; exit 2; }
-done
-rm -rf "${probe}"
-git -C "${tree}" switch -q --detach "${sha}" && [ "$(git -C "${tree}" rev-parse HEAD)" = "${sha}" ] || { say "checking out ${sha} failed"; exit 2; }
-if [ -n "${base}" ] && ! git -C "${tree}" merge-base --is-ancestor "${base}" "${sha}"; then
-	say "refused: ${sha} doesn't descend from its base ${base}"
-	exit 3
-fi
-# Submodules: each must be on GitHub over HTTPS (after the ssh rewrite), public, fetched with no credentials.
-while read -r _ url; do
-	case ${url} in
-		https://github.com/* | git@github.com:*) ;;
-		*) say "refused: submodule ${url} isn't on GitHub"; exit 3 ;;
-	esac
-done < <(git -C "${tree}" config -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
-if ! git -C "${tree}" submodule update -q --init --recursive; then
-	say "the submodule update failed; making the submodules again"
-	git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
-	rm -rf "${tree}/.git/modules"
-	retry git -C "${tree}" submodule update -q --init --recursive || { say "the submodules of ${sha} can't be fetched"; exit 2; }
-fi
+	# Submodules: each must be on GitHub over HTTPS (after the ssh rewrite), public, fetched with no credentials.
+	while read -r _ url; do
+		case ${url} in
+			https://github.com/* | git@github.com:*) ;;
+			*) say "refused: submodule ${url} isn't on GitHub"; exit 3 ;;
+		esac
+	done < <(git -C "${tree}" config -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
+	if ! git -C "${tree}" submodule update -q --init --recursive; then
+		say "the submodule update failed; making the submodules again"
+		git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
+		rm -rf "${tree}/.git/modules"
+		retry git -C "${tree}" submodule update -q --init --recursive || { say "the submodules of ${sha} can't be fetched"; exit 2; }
+	fi
 
-# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance.
-if [ ! -f "${root}/adamic-setup-done" ]; then
-	(cd "${tree}" && bash cloud/setup.sh --wasi-sdk > "${root}/adamic-setup.log" 2>&1) && touch "${root}/adamic-setup-done" || { say "cloud/setup.sh failed"; tail -20 "${root}/adamic-setup.log"; exit 2; }
+	# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance.
+	if [ ! -f "${root}/adamic-setup-done" ]; then
+		(cd "${tree}" && bash cloud/setup.sh --wasi-sdk > "${root}/adamic-setup.log" 2>&1) && touch "${root}/adamic-setup-done" || { say "cloud/setup.sh failed"; tail -20 "${root}/adamic-setup.log"; exit 2; }
+	fi
 fi
+toolchain=
 for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do
-	[ -f "${environment}" ] && { source "${environment}"; break; }
+	[ -f "${environment}" ] && { source "${environment}"; toolchain=${environment}; break; }
 done
-(cd / && go list fmt testing > /dev/null 2>&1) || { say "the Go toolchain lacks its standard library after setup"; rm -f "${root}/adamic-setup-done"; exit 2; }
+if [ "${mode}" = checkout ]; then
+	(cd / && go list fmt testing > /dev/null 2>&1) || { say "the Go toolchain lacks its standard library after setup"; rm -f "${root}/adamic-setup-done"; exit 2; }
+elif [ -z "${toolchain}" ]; then
+	# A prebuilt unit's tests still run clang and node; an instance without adamic's toolchain would fail them red.
+	say "the instance has no adamic toolchain (adamic-tools/env.sh): its tests' clang and node would be missing"
+	exit 2
+fi
 mkdir -p -m 1777 "${TMPDIR:-${root}}"
 
 # stage3/api's pinned npm packages, npm ci from the public registry once per lockfile, hardlinked into the tree.
@@ -165,8 +184,12 @@ fi
 
 # Every Go module's dependencies from Go's public module proxy first: tests that build a nested module read any
 # "go: downloading" on stderr as a failure.
-git -C "${tree}" ls-files --recurse-submodules '*go.mod' | grep -v -e testdata/ -e node_modules/ | while read -r module; do
-	(cd "${tree}/$(dirname "${module}")" && go mod download > /dev/null 2>&1)
-done
-say "${sha} ready in $((SECONDS - started)) s"
+if [ "${mode}" = checkout ]; then
+	git -C "${tree}" ls-files --recurse-submodules '*go.mod' | grep -v -e testdata/ -e node_modules/ | while read -r module; do
+		(cd "${tree}/$(dirname "${module}")" && go mod download > /dev/null 2>&1)
+	done
+	say "${sha} ready in $((SECONDS - started)) s"
+else
+	say "the environment is ready in $((SECONDS - started)) s"
+fi
 env -0 > "${environmentFile}"

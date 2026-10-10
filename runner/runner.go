@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/poster"
 	"github.com/system-inc/loom/protocol"
 )
@@ -59,6 +60,16 @@ type Options struct {
 	Root string
 	// Tree is where a test job's checkout is kept across units. Empty means adamic under Root.
 	Tree string
+	// Store is the action store's public domain, where a prebuilt test job's tree index and blobs are read: the
+	// runner's own setting, never the unit's. Empty means builder.PublicRead.
+	Store string
+	// BlobCacheBytes bounds the blob cache under Root (blobs.go). Zero means DefaultBlobCacheBytes.
+	BlobCacheBytes int64
+	// FreeFloorBytes is the free room a prebuilt test job needs on its root's and its workspace's disks before it
+	// starts, after the blob cache gives up what it must. Zero means DefaultFreeFloorBytes.
+	FreeFloorBytes uint64
+	// free reads a filesystem's free bytes; nil means builder.Free. Tests plant a full disk through it.
+	free func(path string) (uint64, error)
 }
 
 func (options Options) withDefaults() Options {
@@ -90,6 +101,18 @@ func (options Options) withDefaults() Options {
 	}
 	if options.WireDrainTimeout == 0 {
 		options.WireDrainTimeout = 30 * time.Second
+	}
+	if options.Store == "" {
+		options.Store = builder.PublicRead
+	}
+	if options.BlobCacheBytes == 0 {
+		options.BlobCacheBytes = DefaultBlobCacheBytes
+	}
+	if options.FreeFloorBytes == 0 {
+		options.FreeFloorBytes = DefaultFreeFloorBytes
+	}
+	if options.free == nil {
+		options.free = builder.Free
 	}
 	return options
 }

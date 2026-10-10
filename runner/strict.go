@@ -73,10 +73,11 @@ func goBuildArguments(testPackage protocol.TestPackage) []string {
 	return []string{"go", "test", "-count=1", "-exec", "/bin/true", "-run=" + testPackage.Run, testPackage.Package}
 }
 
-// runTest runs a test job: prepare.sh fetches the commit from the public repository and readies the checkout, then each
-// package's go test runs in it, as many at once as half the CPUs, each writing its go test -json lines to a part file.
-// The parts become loom-out/test.jsonl.gz, their CPU seconds loom-out/cpu.tsv. Failed: a package's go test failed or
-// the unit ran out of time. Broken: the job was refused, the instance couldn't be readied, or its disk filled.
+// runTest runs a test job. One naming its tree's build (job.Tree) runs Workshop's prebuilt test binaries and builds
+// nothing (prebuilt.go). Otherwise prepare.sh fetches the commit from the public repository and readies the checkout,
+// then each package's go test runs in it (runPackages): the path every unit takes until the placer names a tree, and a
+// phase job's always. Failed: a package's go test failed or the unit ran out of time. Broken: the job was refused, the
+// instance couldn't be readied, or its disk filled.
 func (run *unitRun) runTest(runContext context.Context) string {
 	job := run.unit.Test
 	if job.Phase != "" && !run.options.PhaseJobs {
@@ -85,13 +86,9 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	}
 	started := time.Now()
 	deadline := started.Add(time.Duration(run.unit.TimeoutSeconds) * time.Second)
-	root, tree := run.options.Root, run.options.Tree
-	switch {
-	case root != "":
-	case run.options.Strict:
-		root = "/tmp"
-	default:
-		root = filepath.Join(run.options.WorkspaceParent, "loom-test-root")
+	root, tree := run.options.testRoot(), run.options.Tree
+	if job.Tree != "" {
+		return run.runPrebuilt(runContext, job, root, started, deadline)
 	}
 	if tree == "" {
 		// /tmp/adamic for a strict runner: the checkout the instance's opening clones, kept across units.
@@ -147,7 +144,30 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	if job.Phase != "" {
 		return run.runPhase(runContext, job, environment, tree, root, out, deadline)
 	}
+	return run.runPackages(runContext, job, out, started, deadline, func(testContext context.Context, index int, part string) packageResult {
+		testPackage := job.Packages[index]
+		return run.runPackage(testContext, testPackage, packageEnvironment(environment, testPackage), tree, part)
+	})
+}
 
+// testRoot is where a test job keeps what outlives a unit: Root, or /tmp for a strict runner, whose instance is its
+// alone, or loom-test-root under the workspace parent.
+func (options Options) testRoot() string {
+	switch {
+	case options.Root != "":
+		return options.Root
+	case options.Strict:
+		return "/tmp"
+	default:
+		return filepath.Join(options.WorkspaceParent, "loom-test-root")
+	}
+}
+
+// runPackages runs each of the job's packages with runOne, as many at once as half the CPUs, each writing its go test
+// -json lines to <part>.jsonl. The parts become loom-out/test.jsonl.gz, their CPU seconds loom-out/cpu.tsv. Failed: a
+// package's tests failed or the unit ran out of time. Broken: a package couldn't be run at all, the runner was
+// stopped, or the disk filled.
+func (run *unitRun) runPackages(runContext context.Context, job *protocol.TestJob, out string, started, deadline time.Time, runOne func(testContext context.Context, index int, part string) packageResult) string {
 	testContext, cancel := context.WithDeadline(runContext, deadline)
 	defer cancel()
 	results := make([]packageResult, len(job.Packages))
@@ -172,13 +192,13 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	}()
 	slots := make(chan struct{}, max(1, runtime.NumCPU()/2))
 	var group sync.WaitGroup
-	for index, testPackage := range job.Packages {
+	for index := range job.Packages {
 		group.Add(1)
 		go func() {
 			defer group.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			results[index] = run.runPackage(testContext, testPackage, packageEnvironment(environment, testPackage), tree, filepath.Join(out, fmt.Sprintf("part-%d", index)))
+			results[index] = runOne(testContext, index, filepath.Join(out, fmt.Sprintf("part-%d", index)))
 		}()
 	}
 	group.Wait()
@@ -200,7 +220,7 @@ func (run *unitRun) runTest(runContext context.Context) string {
 			code = 1
 			status = worse(status, protocol.StatusFailed)
 			run.say(fmt.Sprintf("%s exited %d", testPackage.Package, result.code))
-			for _, line := range lastLines(filepath.Join(out, fmt.Sprintf("part-%d.stderr", index)), 5) {
+			for _, line := range lastLines(filepath.Join(out, fmt.Sprintf("part-%d%s", index, result.log)), 5) {
 				run.say("  " + line)
 			}
 		}
@@ -346,7 +366,7 @@ func (run *unitRun) gofmtTool(gofmtContext context.Context, environment []string
 	// The last GOTOOLCHAIN in an environment is the one a command gets, so this one outranks adamic's auto.
 	environment = append(slices.Clone(environment), "GOTOOLCHAIN="+release[0])
 	var output, stderr bytes.Buffer
-	state, err := run.goCommand(gofmtContext, []string{"go", "env", "GOROOT"}, environment, tree, &output, &stderr)
+	state, err := run.groupCommand(gofmtContext, []string{"go", "env", "GOROOT"}, environment, tree, &output, &stderr)
 	if err != nil || !state.Success() {
 		return "", fmt.Errorf("the key's Go release %s can't be had here: go env GOROOT under GOTOOLCHAIN=%s failed (%v): %s", release[0], release[0], err, strings.TrimSpace(stderr.String()))
 	}
@@ -360,7 +380,7 @@ func (run *unitRun) gofmtTool(gofmtContext context.Context, environment []string
 	}
 	output.Reset()
 	stderr.Reset()
-	state, err = run.goCommand(gofmtContext, []string{"go", "version", gofmt}, environment, tree, &output, &stderr)
+	state, err = run.groupCommand(gofmtContext, []string{"go", "version", gofmt}, environment, tree, &output, &stderr)
 	if err != nil || !state.Success() {
 		return "", fmt.Errorf("go version %s failed (%v): %s", gofmt, err, strings.TrimSpace(stderr.String()))
 	}
@@ -407,7 +427,7 @@ func (run *unitRun) runGofmt(runContext context.Context, job *protocol.TestJob, 
 	started := time.Now()
 	for _, batch := range gofmtBatches(paths) {
 		// "--" ends gofmt's flags, though CheckTestJob already refuses a path with a leading dash.
-		state, err := run.goCommand(gofmtContext, append([]string{gofmt, "-l", "--"}, batch...), unitEnvironment, tree, &stdout, &stderr)
+		state, err := run.groupCommand(gofmtContext, append([]string{gofmt, "-l", "--"}, batch...), unitEnvironment, tree, &stdout, &stderr)
 		if err != nil {
 			run.fail(protocol.PhaseStart, fmt.Errorf("starting gofmt: %w (the instance's, never the change's)", err))
 			return protocol.StatusBroken
@@ -584,19 +604,20 @@ func wasiReady(environment map[string]string) error {
 	return nil
 }
 
-// A packageResult is how one package's go test ended.
+// A packageResult is how one package's tests ended.
 type packageResult struct {
 	code                       int
 	buildSeconds, testSeconds  float64
 	userSeconds, systemSeconds float64
-	err                        error // the runner couldn't run it at all
+	err                        error  // the runner couldn't run it at all
+	log                        string // the suffix of the part file whose last lines say why it failed
 }
 
 // runPackage compiles the package's tests, then runs them, go test's -json lines to <part>.jsonl and its stderr to
 // <part>.stderr. Past the context's deadline the process group gets SIGTERM, then SIGKILL after KillGrace.
 func (run *unitRun) runPackage(testContext context.Context, testPackage protocol.TestPackage, environment []string, tree string, part string) packageResult {
-	var result packageResult
-	build, err := run.goCommand(testContext, goBuildArguments(testPackage), environment, tree, io.Discard, io.Discard)
+	result := packageResult{log: ".stderr"}
+	build, err := run.groupCommand(testContext, goBuildArguments(testPackage), environment, tree, io.Discard, io.Discard)
 	if err != nil {
 		result.err = err
 		return result
@@ -614,7 +635,7 @@ func (run *unitRun) runPackage(testContext context.Context, testPackage protocol
 		return result
 	}
 	defer stderr.Close()
-	tested, err := run.goCommand(testContext, goTestArguments(testPackage), environment, tree, stdout, stderr)
+	tested, err := run.groupCommand(testContext, goTestArguments(testPackage), environment, tree, stdout, stderr)
 	if err != nil {
 		result.err = err
 		return result
@@ -629,9 +650,9 @@ func (run *unitRun) runPackage(testContext context.Context, testPackage protocol
 	return result
 }
 
-// goCommand runs argv (go or gofmt, from the environment's PATH) in its own process group in directory and waits for
-// it.
-func (run *unitRun) goCommand(commandContext context.Context, argv []string, environment []string, directory string, stdout io.Writer, stderr io.Writer) (*os.ProcessState, error) {
+// groupCommand runs argv (go or gofmt from the environment's PATH, or a prebuilt test binary by its path) in its own
+// process group in directory and waits for it.
+func (run *unitRun) groupCommand(commandContext context.Context, argv []string, environment []string, directory string, stdout io.Writer, stderr io.Writer) (*os.ProcessState, error) {
 	path := ""
 	for _, variable := range environment {
 		if value, found := strings.CutPrefix(variable, "PATH="); found {
@@ -709,7 +730,7 @@ func failedTests(out string, parts int) []string {
 // diskFilled says whether a package ran out of disk: its output says so, or the disk is still nearly full.
 func diskFilled(out string, parts int) bool {
 	for index := range parts {
-		for _, suffix := range []string{".jsonl", ".stderr"} {
+		for _, suffix := range []string{".jsonl", ".stderr", ".output"} {
 			if content, err := os.ReadFile(filepath.Join(out, fmt.Sprintf("part-%d%s", index, suffix))); err == nil && bytes.Contains(content, []byte("no space left on device")) {
 				return true
 			}

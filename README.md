@@ -66,6 +66,32 @@ and changed paths as `ADAMIC_GATE_SAMPLE` and `ADAMIC_GATE_CHANGED`. A `TestWASI
 clang first on `PATH`, and is refused as broken where the SDK's builtins are missing. These tests are adamic's own code
 at the verified commit, and they run with the user's permissions.
 
+**A job naming its tree's build.** A test job with `tree` set (the tree key `loom build-tree` prints) runs what
+Workshop built and builds nothing (`runner/prebuilt.go`, #pcn6prz). In place of the checkout and `go test` above, it:
+1. keeps every blob it reads from Loom's public store in one cache, `<root>/loom-blobs/<sha256>`, bounded (4 GiB by
+   default) with the least recently used going first; before every unit, while the root's or the workspace's disk has
+   under its floor free (3 GiB by default), it removes more, then the unpacked sources no unit holds, and with nothing
+   left to remove it refuses the unit as unfit, broken, never failed;
+2. reads `trees/<tree>.json` from the store (the runner's own setting, never the unit's), holds it to its key, and
+   fetches each package's test binary, the products its tests read, and the tree's source, every one checked against
+   its sha256 as it arrives and again when read from the cache, each fetch's bytes and seconds on the unit's record; a
+   fetch is written to `.partial-` and renamed only when whole, so a kill or a full disk never leaves a blob's name on
+   anything else; whatever the store lacks or can't give whole is named, and the unit is broken, never red;
+3. keeps each tree's source unpacked at `<root>/loom-sources/<sha256>` for every unit of the tree (98,381 files took
+   41 s to unpack on a Mac), unpacked beside it and renamed only when whole, at most two kept, held by a lock while a
+   unit runs in it;
+4. readies the environment with `prepare.sh environment` (the instance's adamic toolchain, which must already be set
+   up, stage3/api's npm packages and the gate inputs; no git, no setup, no Go), with the products in the unit's own
+   `ADAMIC_BUILD_CACHE_DIR`;
+5. runs each binary as `go test -json` would, in the package's directory of the source:
+   `<binary> -test.paniconexit0 -test.timeout=3h0m0s -test.count=1 -test.v=test2json -test.run=<pattern>
+   [-test.skip=<pattern>]`, its output through Go's own test2json conversion (`runner/test2json`, vendored) into the
+   same go test lines. A stand-in `go` comes first on the tests' `PATH` and refuses every command; a unit whose test
+   ran it and failed is broken, Loom's, naming the command.
+
+These binaries are Workshop's builds from Loom's store, not compiled on the instance from the public repository at the
+job's commit.
+
 **What it writes.** The go test lines as `loom-out/test.jsonl.gz` and each package's CPU seconds as `loom-out/cpu.tsv`,
 uploaded through the run token, and the unit's events through the run token. On the instance: the checkout, its caches
 (`<root>/adamic-npm`, `<root>/adamic-tools`, `<root>/adamic-setup-done`, Go's caches in HOME) and the unit's workspace, removed when
