@@ -274,7 +274,7 @@ func TestWarmCompilesEveryPackageOnceAndNamesOneThatDoesNotCompile(t *testing.T)
 func most(t *testing.T, gauge Gauge) int64 {
 	t.Helper()
 	var now, peak atomic.Int64
-	admitted(12, 4, gauge, 0.8, func(int) {
+	admitted(12, 4, gauge, 0.8, nil, func(int) {
 		value := now.Add(1)
 		for {
 			old := peak.Load()
@@ -284,7 +284,7 @@ func most(t *testing.T, gauge Gauge) int64 {
 		}
 		time.Sleep(20 * time.Millisecond)
 		now.Add(-1)
-	})
+	}, nil)
 	return peak.Load()
 }
 

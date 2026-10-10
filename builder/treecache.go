@@ -20,7 +20,8 @@ var treeHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // no file changes, so sharing a cache among that tree's actions is safe; across trees it could serve a stale product
 // (Release's gate-truth question, Oct 10 02:25Z). Two commits with the same content share a tree hash and so a cache.
 // A tree with changes to tracked files is refused, since its hash wouldn't name what's built. Only the keep most
-// recent tree caches stay; older ones are removed, and only directories named by a tree hash are touched.
+// recent tree caches stay; older ones are removed file by file (RemoveTree), and only directories named by a tree
+// hash are touched.
 func TreeCache(base, tree string, keep int) (string, error) {
 	status, err := exec.Command("git", "-C", tree, "status", "--porcelain", "--untracked-files=no").Output()
 	if err != nil {
@@ -63,7 +64,7 @@ func TreeCache(base, tree string, keep int) (string, error) {
 	sort.Slice(caches, func(left, right int) bool { return caches[left].modified > caches[right].modified })
 	for index, old := range caches {
 		if index >= max(1, keep) && old.path != directory {
-			if err = os.RemoveAll(old.path); err != nil {
+			if err = RemoveTree(base, old.path); err != nil {
 				return "", err
 			}
 		}

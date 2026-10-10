@@ -18,6 +18,10 @@ import (
 // buildTree is Kirk's shape on Workshop: one future's tree built cold, every test package's binary and the products
 // its tests use, with the tree's source, all uploaded straight to R2 so a runner only downloads and runs. It prints
 // one JSON line per package and the tree's summary, and exits 1 when any package failed to build.
+//
+// Workshop is the house's only builder, so build-tree keeps its disk and its threads (#ckv0pmg, #eqebk7b): it trims
+// Go's build cache under --go-cache-gb, refuses to start while any filesystem it writes has under --floor-gb free and
+// starts no job while one does, and removes the tree's working directory once its index is up.
 func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("build-tree", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -26,11 +30,13 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	future := flags.String("future", "", "the future's commit")
 	storeFlags := addStoreFlags(flags)
 	cache := flags.String("cache", filepath.Join(home, "loom-builder", "trees"), "the base of each tree's own build directory, <base>/<tree hash>")
-	keep := flags.Int("keep", 2, "tree directories kept under --cache, newest first")
+	keep := flags.Int("keep", 2, "tree directories kept under --cache, newest first, when a tree's upload fails")
 	jobs := flags.Int("jobs", 8, "packages built at once")
 	compile := flags.Int("compile", 0, "packages compiled at once across every go process (0: every thread but four)")
+	floorGB := flags.Uint64("floor-gb", 200, "free space every filesystem the build writes keeps, in GB: below it the build doesn't start, and no job starts")
+	goCacheGB := flags.Uint64("go-cache-gb", 150, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--keep N] [--jobs N] [--compile N]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--go-cache-gb N]")
 		return 2
 	}
 	started := time.Now()
@@ -43,6 +49,24 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	if err = os.MkdirAll(*cache, 0o755); err != nil {
+		return fail(err)
+	}
+	goCache, err := exec.Command("go", "env", "GOCACHE").Output()
+	if err != nil {
+		return fail(err)
+	}
+	trimmed, err := builder.TrimGoCache(strings.TrimSpace(string(goCache)), *goCacheGB*builder.GB)
+	if err != nil {
+		return fail(fmt.Errorf("trimming Go's build cache: %w", err))
+	}
+	if trimmed > 0 {
+		fmt.Fprintf(stderr, "build-tree: trimmed %.1f GB from Go's build cache, least recently used first\n", float64(trimmed)/float64(builder.GB))
+	}
+	watched := map[string]string{"the cache base": *cache, "Go's build cache": strings.TrimSpace(string(goCache)), "the temporary directory": os.TempDir()}
+	if err = builder.CheckFloor(watched, *floorGB*builder.GB, nil); err != nil {
+		return fail(fmt.Errorf("not starting: %w", err))
+	}
 	directory, err := builder.TreeCache(*cache, *tree, *keep)
 	if err != nil {
 		return fail(err)
@@ -52,7 +76,8 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: builder.GateEnvironment(), Jobs: *jobs, Compile: *compile}
+	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: builder.GateEnvironment(),
+		Jobs: *jobs, Compile: *compile, Floor: *floorGB * builder.GB, Watched: watched}
 	for _, path := range []string{build.Cache, build.Out, filepath.Join(directory, "logs")} {
 		if err = os.MkdirAll(path, 0o755); err != nil {
 			return fail(err)
@@ -77,7 +102,6 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	defer os.RemoveAll(scratch)
 	held, err := builder.ServeHeldProducts(store, scratch)
 	if err != nil {
 		return fail(err)
@@ -134,6 +158,11 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"seconds": time.Since(started).Seconds(), "sourceBytes": len(source),
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
+	// The tree is in the store: its working directory goes, file by file. Kept when the index didn't go up, for a retry.
+	if err = builder.TreeDone(*cache, directory, indexWritten); err != nil {
+		fmt.Fprintln(stderr, "build-tree: removing the tree's directory:", err)
+		return 1
+	}
 	return buildTreeExit(stderr, treeKey, failed, indexWritten)
 }
 

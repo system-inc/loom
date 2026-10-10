@@ -103,6 +103,12 @@ type TreeBuild struct {
 	Gauge Gauge
 	// Held is a HeldProducts server's address: the store's products, offered to buildcache before it builds one.
 	Held string
+	// Floor is the free bytes every Watched filesystem (by name: the cache base, Go's build cache, the temporary
+	// directory) keeps: no job starts while one is under it (#ckv0pmg). Zero watches nothing. Free reads a
+	// filesystem (nil means Free).
+	Floor   uint64
+	Watched map[string]string
+	Free    func(path string) (uint64, error)
 }
 
 func (build TreeBuild) busy() float64 {
@@ -183,7 +189,10 @@ func (build TreeBuild) environment(extra ...string) []string {
 // the tree is published.
 func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 	results := make([]TreePackage, len(packages))
-	admitted(len(packages), build.Jobs, build.gauge(), build.busy(), func(index int) {
+	refuse := func(index int, err error) {
+		results[index] = TreePackage{Package: packages[index].Package, Directory: packages[index].Directory, Products: []string{}, Error: "not started: " + err.Error()}
+	}
+	admitted(len(packages), build.Jobs, build.gauge(), build.busy(), build.disk(), func(index int) {
 		test := packages[index]
 		started := time.Now()
 		result := TreePackage{Package: test.Package, Directory: test.Directory, Products: []string{}}
@@ -204,7 +213,7 @@ func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 		}
 		result.Seconds = time.Since(started).Seconds()
 		results[index] = result
-	})
+	}, refuse)
 	return results
 }
 
@@ -214,7 +223,12 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 	used := map[string]map[string]bool{}
 	failed := map[string]string{}
 	var mutex sync.Mutex
-	admitted(len(tests), build.Jobs, build.gauge(), build.busy(), func(index int) {
+	refuse := func(index int, err error) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		failed[tests[index].Package] += fmt.Sprintf("%s: not started: %v\n", tests[index].Test, err)
+	}
+	admitted(len(tests), build.Jobs, build.gauge(), build.busy(), build.disk(), func(index int) {
 		test := tests[index]
 		log := filepath.Join(logs, fmt.Sprintf("product-%d.log", index))
 		command := exec.Command("go", "test", "-count=1", "-p", build.perJob(), "-run", "^"+test.Test+"$", "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
@@ -238,7 +252,7 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 		for _, product := range products {
 			used[test.Package][product] = true
 		}
-	})
+	}, refuse)
 	byPackage := map[string][]string{}
 	for pkg, set := range used {
 		for product := range set {
@@ -273,11 +287,19 @@ func (index TreeIndex) encode() ([]byte, error) {
 // A Gauge reads the machine: the fraction of its CPU busy and of its memory available, ok false when it can't.
 type Gauge func() (busy, available float64, ok bool)
 
+// admissionPoll is how long admitted waits before reading the disk again while it is under the floor.
+var admissionPoll = time.Second
+
 // admitted runs work for each index, at most jobs at once, and while gauge reads the machine at or over target busy,
 // or under a fifth of its memory available, starts no more (Kirk, Oct 10: "target using like 80% of it"). It starts
 // at most one job per reading, so it ramps instead of lunging, and always lets one run, so other load on the machine
 // slows a build and never stops it. A nil gauge, or one that can't read, admits every job up to jobs.
-func admitted(count, jobs int, gauge Gauge, target float64, work func(index int)) {
+//
+// The disk is the third reading, and the one that never yields (#ckv0pmg): while disk says a filesystem the build
+// writes is under its floor, no job starts at all. It waits for running jobs to finish (one may be what is filling
+// the disk, and finishing may free it), and when none is left and the disk is still short, each job not yet started is
+// refused with disk's reason, so a build fails loudly rather than filling the disk or waiting forever. nil reads none.
+func admitted(count, jobs int, gauge Gauge, target float64, disk func() error, work func(index int), refuse func(index int, err error)) {
 	next := make(chan int)
 	var group sync.WaitGroup
 	var running atomic.Int64
@@ -298,11 +320,32 @@ func admitted(count, jobs int, gauge Gauge, target float64, work func(index int)
 				break
 			}
 		}
+		short := error(nil)
+		for disk != nil {
+			if short = disk(); short == nil || running.Load() == 0 {
+				break
+			}
+			time.Sleep(admissionPoll)
+		}
+		if short != nil {
+			refuse(index, short)
+			continue
+		}
 		running.Add(1)
 		next <- index
 	}
 	close(next)
 	group.Wait()
+}
+
+// disk is the build's disk reading for admitted: an error naming a watched filesystem under Floor, or nil.
+func (build TreeBuild) disk() func() error {
+	if build.Floor == 0 || len(build.Watched) == 0 {
+		return nil
+	}
+	return func() error {
+		return CheckFloor(build.Watched, build.Floor, build.Free)
+	}
 }
 
 // ProcGauge reads Linux's /proc/stat twice, half a second apart, for the CPU busy between, and /proc/meminfo for the

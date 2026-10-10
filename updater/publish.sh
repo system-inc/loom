@@ -11,7 +11,8 @@
 # names this commit for those hosts only. Rolling back is copying an older manifests/<commit>.txt over current.txt.
 #
 # Workshop is the only builder, so its disk is guarded both ways. It refuses to start while the temporary directory,
-# the out directory, Go's build cache or its module cache has under LOOM_PUBLISH_FLOOR_GB free (default 10). After a
+# the out directory, Go's build cache or its module cache has under LOOM_PUBLISH_FLOOR_GB free (default 10; Workshop
+# runs it with LOOM_PUBLISH_FLOOR_GB=200, the floor build-tree keeps there, #ckv0pmg). After a
 # publish the out directory keeps the manifests current.txt names and the newest LOOM_PUBLISH_KEEP others (default
 # 10), and only the blobs those name; the rest go, file by file. LOOM_PUBLISH_PLATFORMS replaces the platforms
 # (default "linux/amd64 darwin/arm64").
