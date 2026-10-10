@@ -87,30 +87,50 @@ retry() {
 # repository: Home, Oct 10, held only objects/pack/tmp_pack_* under .git/modules/cohere/modules/TypeScript. Every update
 # after it fails on that submodule ("could not get a repository handle"), so each such .git file goes, and its gitdir
 # with it when that lies inside the checkout's own .git, and the update clones that submodule again. Whole ones are kept.
+# It fails closed: a checkout whose .git it can't enter clears nothing, and a gitdir is removed only when it resolves
+# inside that .git, so a .git file naming any other directory never costs that directory.
 clearSubmoduleStubs() {
-	local pointer gitdir inside
-	inside=$(cd "${tree}/.git" && pwd -P)
+	local pointer gitdir inside resolved
+	inside=$(cd "${tree:?}/.git" 2> /dev/null && pwd -P)
+	[ -n "${inside}" ] || { say "can't enter ${tree}/.git, so no stub is cleared"; return 1; }
 	while IFS= read -r -d '' pointer; do
 		gitdir=$(sed -n 's/^gitdir: //p' "${pointer}")
 		case ${gitdir} in /*) ;; *) gitdir=$(dirname "${pointer}")/${gitdir} ;; esac
 		git --git-dir="${gitdir}" rev-parse -q --verify HEAD > /dev/null 2>&1 && continue
-		case $(cd "${gitdir}" 2> /dev/null && pwd -P)/ in "${inside}"/*) rm -rf "${gitdir}" ;; esac
-		rm -f "${pointer}"
+		resolved=$(cd "${gitdir}" 2> /dev/null && pwd -P)
+		case ${resolved:-/nowhere}/ in "${inside:?}"/?*) rm -rf "${resolved:?}" ;; esac
+		rm -f "${pointer:?}"
 		say "cleared ${pointer#"${tree}/"}: the gitdir it names isn't a repository"
 	done < <(find "${tree}" \( -name .git -type d -prune \) -o \( -name node_modules -prune \) -o \( -name .git -type f -print0 \))
 }
 # The submodules, at the commits the checkout records. A failed update first clears what a killed clone left and tries
 # again, keeping every submodule that is whole; only when that fails too are they all made again, and a kill during
-# that leaves stubs the next unit clears the same way.
+# that leaves stubs the next unit clears the same way. The whole step holds <tree>/.git/loom-submodules.lock: runners
+# that share a root (the coordinator's slots on one box run with one ~/loom-test-root) would otherwise see each other's
+# clone in progress as a stub. A prepare killed holding it lets go with its process. Where flock is missing (a developer's
+# Mac running the tests), or the lock can't be made (a .git it can't enter, where the update fails and nothing is
+# cleared anyway), the step runs unlocked.
 makeSubmodules() {
+	local status
+	if exec 8> "${tree:?}/.git/loom-submodules.lock"; then
+		command -v flock > /dev/null && flock 8
+	else
+		say "can't make ${tree}/.git/loom-submodules.lock, so the submodules are made unlocked"
+	fi
+	updateSubmodules
+	status=$?
+	exec 8>&-
+	return "${status}"
+}
+updateSubmodules() {
 	git -C "${tree}" submodule update -q --init --recursive && return 0
 	say "the submodule update failed; clearing what a killed clone left and updating again"
-	clearSubmoduleStubs
+	clearSubmoduleStubs || return 1
 	retry git -C "${tree}" submodule update -q --init --recursive && return 0
 	say "the submodule update failed again; making the submodules again"
 	git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
-	rm -rf "${tree}/.git/modules"
-	clearSubmoduleStubs
+	rm -rf "${tree:?}/.git/modules"
+	clearSubmoduleStubs || return 1
 	retry git -C "${tree}" submodule update -q --init --recursive
 }
 if [ "${mode}" = submodules ]; then
