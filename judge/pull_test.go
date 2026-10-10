@@ -214,3 +214,30 @@ func TestAnEarlierAttemptsPassIsCarriedOnlyWithinTheSameFuture(t *testing.T) {
 		t.Fatalf("judged %d (%v) with a unit whose only pass was on another future", judged, err)
 	}
 }
+
+func TestCarriedListsTheUnitsAndSourceRunsTheLoopCarries(t *testing.T) {
+	tree := strings.Repeat("d", 40)
+	early, late, red, killed := strings.Repeat("1", 64), strings.Repeat("2", 64), strings.Repeat("3", 64), strings.Repeat("4", 64)
+	runOf := func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) }
+	killedPass := []protocol.Event{{Unit: killed, Type: "started"}, {Unit: killed, Type: "exit", Code: code(0), Signal: "killed"}, {Unit: killed, Type: "finished", Status: "passed"}}
+	streams := map[string][]protocol.Event{
+		runOf(tree, 1): append(append(finishedStream(early, "passed"), finishedStream(late, "passed")...), killedPass...),
+		runOf(tree, 2): append(finishedStream(late, "passed"), finishedStream(red, "failed")...),
+	}
+	units := []PlannedUnitWire{}
+	for _, unit := range []string{early, late, red, killed} {
+		units = append(units, PlannedUnitWire{UnitKey: unit, Decision: "run"})
+	}
+	puller := Puller{Source: listedFutures{{Future: tree, Attempt: 3, Units: units}}, RunOf: runOf,
+		Read: func(run string) ([]protocol.Event, error) { return streams[run], nil }}
+	got, err := puller.Carried(tree, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != (CarriedUnit{early, runOf(tree, 1)}) || got[1] != (CarriedUnit{late, runOf(tree, 2)}) {
+		t.Fatalf("carried %+v: want early from attempt 1 and late from its newest pass, attempt 2; never the red or the killed pass", got)
+	}
+	if _, err := puller.Carried(strings.Repeat("e", 40), 3); err == nil {
+		t.Fatal("listed carried units for a future Queue doesn't list")
+	}
+}

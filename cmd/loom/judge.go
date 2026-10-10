@@ -27,6 +27,9 @@ import (
 // and its batch is posted to Queue's /futures/<tree>/verdicts. Main's recorded verdicts are judge.NoMainRecords until
 // Queue's index answers by unit at a base, so a failure main shares is the change's until then (it errs toward red).
 func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) > 0 && arguments[0] == "carried" {
+		return judgeCarried(arguments[1:], stdout, stderr)
+	}
 	flags := flag.NewFlagSet("judge", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	queue := flags.String("queue", "", "loom-pipeline's base URL")
@@ -51,7 +54,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0) {
-		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]] [--void <tree>:<attempt> --cause <why>]")
+		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]] [--void <tree>:<attempt> --cause <why>]; loom judge carried --tree <tree> --attempt <N> ...")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -283,4 +286,52 @@ func remoteTip(repository, branch string) (string, error) {
 		return "", fmt.Errorf("origin has no branch %s", branch)
 	}
 	return fields[0], nil
+}
+
+// judgeCarried prints the units the judge will carry into one attempt of a listed future, one "<unitKey> <source run>"
+// line each (Loom, Oct 10 01:27Z): Fabric's placer places every other planned unit, so placer and judge can't disagree
+// about which units an attempt runs. It reads the same listing and runs, through the same code, as the judge's loop,
+// and any failure exits nonzero with nothing printed, so the placer fails closed.
+func judgeCarried(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("judge carried", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	queue := flags.String("queue", "", "loom-pipeline's base URL")
+	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
+	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin, where runs' events live")
+	tree := flags.String("tree", "", "the future's tested tree sha")
+	attempt := flags.Int("attempt", 0, "the attempt being placed")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if *queue == "" || *tokenFile == "" || *tree == "" || *attempt < 1 {
+		fmt.Fprintln(stderr, "usage: loom judge carried --queue <url> --token-file <path> --tree <tree> --attempt <N> [--wire <url>]")
+		return 2
+	}
+	token, err := os.ReadFile(*tokenFile)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge carried:", err)
+		return 1
+	}
+	home, _ := os.UserHomeDir()
+	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintln(stderr, "judge carried:", err)
+		return 1
+	}
+	puller := judge.Puller{
+		Source: judge.HTTPFutures{Base: *queue, Token: strings.TrimSpace(string(token))},
+		RunOf:  coordinator.FutureRun,
+		Read: func(run string) ([]protocol.Event, error) {
+			return coordinator.ReadRunEvents(context.Background(), *wire, secret, run)
+		},
+	}
+	units, err := puller.Carried(*tree, *attempt)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge carried:", err)
+		return 1
+	}
+	for _, unit := range units {
+		fmt.Fprintf(stdout, "%s %s\n", unit.UnitKey, unit.Run)
+	}
+	return 0
 }

@@ -170,18 +170,11 @@ func (puller Puller) PullOnce() (int, error) {
 		if err != nil {
 			return judged, fmt.Errorf("future %s: reading run %s: %w", future.Future, run, err)
 		}
-		// This future's earlier attempts, newest first: only these are ever carried from.
-		earlier := map[string][]protocol.Event{}
-		order := []string{}
-		for prior := attempt - 1; prior >= 1; prior-- {
-			priorRun := puller.RunOf(future.Future, prior)
-			priorEvents, err := puller.Read(priorRun)
-			if err != nil {
-				return judged, fmt.Errorf("future %s: reading run %s: %w", future.Future, priorRun, err)
-			}
-			earlier[priorRun], order = priorEvents, append(order, priorRun)
+		order, earlier, err := puller.earlier(future, attempt)
+		if err != nil {
+			return judged, err
 		}
-		if open := openUnits(future, events, earlier); open > 0 {
+		if open := openUnits(future, events, order, earlier); open > 0 {
 			if why := puller.stale(run, events, open); why != "" {
 				loop, job := puller.jobOf(future, run, events)
 				if _, err := loop.VoidFuture(job, InfraSilent, why); err != nil {
@@ -259,21 +252,76 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	return loop, Job{Record: record, Change: record.Change, Future: future.Future, Base: future.Base, Run: run, Plan: plan}
 }
 
-// openUnits is how many units the future runs that have no finished event in its run and no passed attempt in an
-// earlier run of it, which the judge carries.
-func openUnits(future PlannedFuture, events []protocol.Event, earlier map[string][]protocol.Event) int {
+// A CarriedUnit is a unit the judge carries into a future's attempt, and the earlier run of it that passed it.
+type CarriedUnit struct {
+	UnitKey string
+	Run     string
+}
+
+// carried is every unit of the future the judge carries from its earlier attempts (order, newest first): the newest
+// earlier attempt whose runner status is passed, which means a finished passed event and no signal or deadline on its
+// exit. It is the one definition: openUnits counts these done, the loop judges them from that run, and
+// `loom judge carried` prints them for Fabric's placer, which places every other planned unit.
+func carried(future PlannedFuture, order []string, earlier map[string][]protocol.Event) []CarriedUnit {
+	units := []CarriedUnit{}
+	for _, unit := range future.Units {
+		if unit.Decision == "reuse" {
+			continue
+		}
+		for _, run := range order {
+			if prior, found := FinishedFromEvents(eventsOf(earlier[run], unit.UnitKey)); found && prior.Attempt.Status == Passed {
+				units = append(units, CarriedUnit{UnitKey: unit.UnitKey, Run: run})
+				break
+			}
+		}
+	}
+	return units
+}
+
+// Carried lists the units the judge will carry into attempt of the listed future tree, and their source runs.
+func (puller Puller) Carried(tree string, attempt int) ([]CarriedUnit, error) {
+	futures, err := puller.Source.Planned()
+	if err != nil {
+		return nil, err
+	}
+	for _, future := range futures {
+		if future.Future != tree {
+			continue
+		}
+		order, earlier, err := puller.earlier(future, attempt)
+		if err != nil {
+			return nil, err
+		}
+		return carried(future, order, earlier), nil
+	}
+	return nil, fmt.Errorf("future %s isn't listed planned and undecided", tree)
+}
+
+// earlier reads a future's attempts before attempt, newest first: only these are ever carried from.
+func (puller Puller) earlier(future PlannedFuture, attempt int) ([]string, map[string][]protocol.Event, error) {
+	earlier := map[string][]protocol.Event{}
+	order := []string{}
+	for prior := attempt - 1; prior >= 1; prior-- {
+		run := puller.RunOf(future.Future, prior)
+		events, err := puller.Read(run)
+		if err != nil {
+			return nil, nil, fmt.Errorf("future %s: reading run %s: %w", future.Future, run, err)
+		}
+		earlier[run], order = events, append(order, run)
+	}
+	return order, earlier, nil
+}
+
+// openUnits is how many units the future runs that have no finished event in its run and aren't carried.
+func openUnits(future PlannedFuture, events []protocol.Event, order []string, earlier map[string][]protocol.Event) int {
 	finished := map[string]bool{}
 	for _, event := range events {
 		if event.Type == "finished" {
 			finished[event.Unit] = true
 		}
 	}
-	for _, priorEvents := range earlier {
-		for _, unit := range future.Units {
-			if prior, found := FinishedFromEvents(eventsOf(priorEvents, unit.UnitKey)); found && prior.Attempt.Status == Passed {
-				finished[unit.UnitKey] = true
-			}
-		}
+	for _, unit := range carried(future, order, earlier) {
+		finished[unit.UnitKey] = true
 	}
 	open := 0
 	for _, unit := range future.Units {
