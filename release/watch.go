@@ -45,9 +45,11 @@ type State struct {
 type Steps struct {
 	Head     func(context.Context) (string, error)               // fetches the branch and names its head
 	Descends func(context.Context, string, string) (bool, error) // whether the second commit descends from the first
-	Order    func(context.Context, string) (string, error)       // the commit's release-order file, empty when it has none
-	Publish  func(context.Context, string, string) error         // publish.sh, with --canary <host> when one is given
-	Promote  func(string) error                                  // the commit's own manifest becomes current.txt
+	// Order is updater/release-order as each commit after the first, up to the second, that changes it left it, oldest
+	// first: a file kept from an earlier release is that release's, never this one's. It fails rather than read none.
+	Order   func(context.Context, string, string) ([]OrderAt, error)
+	Publish func(context.Context, string, string) error // publish.sh, with --canary <host> when one is given
+	Promote func(string) error                          // the commit's own manifest becomes current.txt
 	// Upload is upload.sh, blobs first and current.txt last: <out>/current.txt, or the manifest file given.
 	Upload func(context.Context, string) error
 	// Published is the current.txt the boxes read (<base>/current.txt), fetched past any cache.
@@ -264,11 +266,12 @@ func (watcher *Watcher) begin(callContext context.Context, state *State) error {
 		watcher.stop(state, fmt.Sprintf("%s's head doesn't descend from the release the fleet runs, %s", watcher.Config.Branch, short(published.Top())))
 		return nil
 	}
-	text, err := watcher.Steps.Order(callContext, head)
+	// Every commit the release spans declares its order, not only the head: the merge train may land several at once.
+	orders, err := watcher.Steps.Order(callContext, published.Top(), head)
 	if err != nil {
-		return err
+		return fmt.Errorf("reading the release-order of %s..%s: %w", short(published.Top()), short(head), err)
 	}
-	if state.Order, err = ParseOrder(text); err != nil {
+	if state.Order, err = MergeOrders(orders); err != nil {
 		watcher.stop(state, err.Error())
 		return nil
 	}

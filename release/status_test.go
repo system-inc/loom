@@ -312,12 +312,17 @@ func TestTheStepsOnWorkshop(t *testing.T) {
 	git(origin, "add", "-A")
 	git(origin, "commit", "-q", "-m", "second")
 	second := git(origin, "rev-parse", "HEAD")
+	git(origin, "commit", "-q", "--allow-empty", "-m", "third, the order file kept as it was")
+	third := git(origin, "rev-parse", "HEAD")
+	git(origin, "rm", "-q", OrderFile)
+	git(origin, "commit", "-q", "-m", "fourth, the order file gone")
+	fourth := git(origin, "rev-parse", "HEAD")
 	config := DefaultConfig(directory)
 	config.Repository, config.Out = clone, filepath.Join(directory, "out")
 	steps := Commands(config, io.Discard)
 	head, err := steps.Head(context.Background())
-	if err != nil || head != second {
-		t.Fatalf("head %q, %v (want %s)", head, err, second)
+	if err != nil || head != fourth {
+		t.Fatalf("head %q, %v (want %s)", head, err, fourth)
 	}
 	if descends, err := steps.Descends(context.Background(), first, second); err != nil || !descends {
 		t.Fatalf("second from first: %v, %v", descends, err)
@@ -325,11 +330,24 @@ func TestTheStepsOnWorkshop(t *testing.T) {
 	if descends, err := steps.Descends(context.Background(), second, first); err != nil || descends {
 		t.Fatalf("first from second: %v, %v", descends, err)
 	}
-	if order, err := steps.Order(context.Background(), second); err != nil || order != "workers after fleet" {
-		t.Fatalf("second's order %q, %v", order, err)
+	// The order is read from every commit in the range that changes the file, as that commit left it: one declared
+	// before the head and removed by it still counts, and a file kept from an earlier release is that release's.
+	for _, test := range []struct {
+		from, to string
+		want     []OrderAt
+	}{
+		{first, second, []OrderAt{{second, "workers after fleet"}}},
+		{second, third, nil},
+		{first, fourth, []OrderAt{{second, "workers after fleet"}, {fourth, ""}}},
+		{third, fourth, []OrderAt{{fourth, ""}}},
+	} {
+		if orders, err := steps.Order(context.Background(), test.from, test.to); err != nil || !reflect.DeepEqual(orders, test.want) {
+			t.Fatalf("%s..%s: %+v, %v, want %+v", test.from[:7], test.to[:7], orders, err, test.want)
+		}
 	}
-	if order, err := steps.Order(context.Background(), first); err != nil || order != "" {
-		t.Fatalf("first's order %q, %v", order, err)
+	// A range git can't read is an error, never "no order".
+	if orders, err := steps.Order(context.Background(), first, commit("0")); err == nil {
+		t.Fatalf("an unreadable range read as %+v", orders)
 	}
 	os.MkdirAll(filepath.Join(config.Out, "manifests"), 0o755)
 	os.WriteFile(filepath.Join(config.Out, "current.txt"), []byte("canary Cloud\n"+manifestOf(commit("a"))+manifestOf(commit("b"))), 0o644)

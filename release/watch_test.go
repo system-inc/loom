@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,18 +31,19 @@ func manifestOf(version string) string {
 // (remote, what the boxes read), a branch head, the reports the boxes post (through the real receiver), a clock the test
 // moves, and counts of what was published and uploaded.
 type world struct {
-	t         *testing.T
-	config    Config
-	now       time.Time
-	head      string
-	orders    map[string]string
-	descends  bool
-	asked     time.Time // when the canary's serve last asked; zero is "just now", every time
-	poolError error
-	publishes atomic.Int32
-	uploads   atomic.Int32
-	promoted  []string
-	remote    string
+	t          *testing.T
+	config     Config
+	now        time.Time
+	head       string
+	orders     map[string]string // each commit's release-order, when it changes it; main's commits run a, b, c...
+	orderError error
+	descends   bool
+	asked      time.Time // when the canary's serve last asked; zero is "just now", every time
+	poolError  error
+	publishes  atomic.Int32
+	uploads    atomic.Int32
+	promoted   []string
+	remote     string
 	// uploadError fails the next uploads, and lost has them succeed with nothing reaching the boxes.
 	uploadError error
 	lost        bool
@@ -82,7 +84,19 @@ func (w *world) steps() Steps {
 	return Steps{
 		Head:     func(context.Context) (string, error) { return w.head, nil },
 		Descends: func(context.Context, string, string) (bool, error) { return w.descends, nil },
-		Order:    func(_ context.Context, commit string) (string, error) { return w.orders[commit], nil },
+		// Order walks main's history, a commit per letter: each after from, up to to, that declares an order.
+		Order: func(_ context.Context, from, to string) ([]OrderAt, error) {
+			if w.orderError != nil {
+				return nil, w.orderError
+			}
+			var orders []OrderAt
+			for letter := from[0] + 1; letter <= to[0]; letter++ {
+				if text, found := w.orders[commit(string(letter))]; found {
+					orders = append(orders, OrderAt{Commit: commit(string(letter)), Text: text})
+				}
+			}
+			return orders, nil
+		},
 		Publish: func(_ context.Context, version, canary string) error {
 			w.publishes.Add(1)
 			os.WriteFile(filepath.Join(w.config.Out, "manifests", version+".txt"), []byte(manifestOf(version)), 0o644)
@@ -616,7 +630,9 @@ func TestTwoWatchersNeverPublishAtOnce(t *testing.T) {
 }
 
 // A release's order is honored: a step after the fleet holds the release (and the next one) until it is marked done; a
-// step before the fleet holds publishing itself; a rule the watcher can't honor stops the release unpublished.
+// step before the fleet holds publishing itself; every commit the release spans declares, not only its head, and an
+// order git can't read releases nothing; a rule the watcher can't honor, or two commits that disagree, stop the release
+// unpublished.
 func TestAReleaseHonorsItsOrder(t *testing.T) {
 	t.Run("workers after the fleet", func(t *testing.T) {
 		w := newWorld(t)
@@ -667,6 +683,42 @@ func TestAReleaseHonorsItsOrder(t *testing.T) {
 		w.tick()
 		if w.state().Phase != PhaseCanary || w.publishes.Load() != 1 {
 			t.Fatalf("marked, still %+v", w.state())
+		}
+	})
+	t.Run("declared by a commit before the head", func(t *testing.T) {
+		w := newWorld(t)
+		w.head = commit("c") // b and c land in one pass
+		w.orders[commit("b")] = "fleet after workers\n"
+		w.orders[commit("c")] = "fleet after workers # c needs them too\nschema after fleet\n"
+		w.tick()
+		if state := w.state(); state.Phase != PhaseBefore || !reflect.DeepEqual(state.Order, Order{Before: []string{"workers"}, After: []string{"schema"}}) || w.publishes.Load() != 0 {
+			t.Fatalf("%+v, %d published\n%s", state, w.publishes.Load(), w.log.String())
+		}
+	})
+	t.Run("two commits that disagree", func(t *testing.T) {
+		w := newWorld(t)
+		w.head = commit("c")
+		w.orders[commit("b")] = "workers after fleet\n"
+		w.orders[commit("c")] = "fleet after workers\n"
+		w.tick()
+		if state := w.state(); state.Phase != PhaseStopped || !strings.Contains(state.Why, short(commit("b"))+" puts workers after the fleet, and "+short(commit("c"))+" puts it before") || w.publishes.Load() != 0 {
+			t.Fatalf("%+v, %d published", state, w.publishes.Load())
+		}
+	})
+	t.Run("an order git can't read", func(t *testing.T) {
+		w := newWorld(t)
+		w.head = commit("b")
+		w.orderError = errors.New("git log: exit status 128")
+		if err := w.watcher().Tick(context.Background()); err == nil || !strings.Contains(err.Error(), "reading the release-order") {
+			t.Fatalf("a pass that couldn't read the order: %v", err)
+		}
+		if w.publishes.Load() != 0 || w.state().Phase != PhaseIdle {
+			t.Fatalf("released with its order unread: %d published, %+v", w.publishes.Load(), w.state())
+		}
+		w.orderError = nil
+		w.tick()
+		if w.publishes.Load() != 1 {
+			t.Fatalf("read, still %d published", w.publishes.Load())
 		}
 	})
 	t.Run("a rule it can't honor", func(t *testing.T) {

@@ -206,10 +206,10 @@ func ReadConfig(content string, defaults Config) (Config, error) {
 	return config, nil
 }
 
-// An Order is what a release declares in its commit's updater/release-order: the steps that must be done before the
-// fleet takes it (it waits, unpublished, until each is marked done), and those to do once the fleet has it (it is
-// finished only once each is marked, and the next release waits on it). The watcher does none of the steps itself;
-// it honors them and says which it waits on.
+// An Order is what a release's commits declare in updater/release-order: the steps that must be done before the fleet
+// takes it (it waits, unpublished, until each is marked done), and those to do once the fleet has it (it is finished
+// only once each is marked, and the next release waits on it). The watcher does none of the steps itself; it honors
+// them and says which it waits on.
 type Order struct {
 	Before []string `json:"before,omitempty"`
 	After  []string `json:"after,omitempty"`
@@ -255,4 +255,42 @@ func ParseOrder(content string) (Order, error) {
 		}
 	}
 	return order, nil
+}
+
+// An OrderAt is updater/release-order as one commit left it: empty when the commit removed it.
+type OrderAt struct {
+	Commit string
+	Text   string
+}
+
+// MergeOrders is a release's order: every step any commit it spans declares, in the order they are first declared,
+// since one release carries every commit the merge train landed since the last. A step declared before the fleet by
+// one commit and after it by another can't be honored both ways, so it is refused, as an order that doesn't read is.
+func MergeOrders(orders []OrderAt) (Order, error) {
+	merged := Order{}
+	declared := map[string]string{} // by step: "before" or "after"
+	by := map[string]string{}       // by step: the commit that first declared it
+	for _, at := range orders {
+		order, err := ParseOrder(at.Text)
+		if err != nil {
+			return Order{}, fmt.Errorf("%s's %w", short(at.Commit), err)
+		}
+		for _, side := range []struct {
+			name  string
+			steps []string
+			into  *[]string
+		}{{"before", order.Before, &merged.Before}, {"after", order.After, &merged.After}} {
+			for _, step := range side.steps {
+				switch declared[step] {
+				case "":
+					declared[step], by[step] = side.name, at.Commit
+					*side.into = append(*side.into, step)
+				case side.name:
+				default:
+					return Order{}, fmt.Errorf("%s puts %s %s the fleet, and %s puts it %s", short(by[step]), step, declared[step], short(at.Commit), side.name)
+				}
+			}
+		}
+	}
+	return merged, nil
 }

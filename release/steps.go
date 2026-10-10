@@ -59,11 +59,28 @@ func Commands(config Config, log io.Writer) Steps {
 			}
 			return err == nil, err
 		},
-		Order: func(callContext context.Context, commit string) (string, error) {
-			if _, err := git(callContext, "cat-file", "-e", commit+":"+OrderFile); err != nil {
-				return "", nil
+		Order: func(callContext context.Context, from, to string) ([]OrderAt, error) {
+			// Every commit in the range that changes the file, merges and both sides of them included; ls-tree names
+			// the file or, when the commit removed it, nothing, and any failure is an error, never "no order".
+			changed, err := git(callContext, "log", "--format=%H", "--reverse", "--full-history", from+".."+to, "--", OrderFile)
+			if err != nil {
+				return nil, err
 			}
-			return git(callContext, "show", commit+":"+OrderFile)
+			var orders []OrderAt
+			for _, commit := range strings.Fields(changed) {
+				entry, err := git(callContext, "ls-tree", commit, "--", OrderFile)
+				if err != nil {
+					return nil, err
+				}
+				at := OrderAt{Commit: commit}
+				if entry != "" {
+					if at.Text, err = git(callContext, "show", commit+":"+OrderFile); err != nil {
+						return nil, err
+					}
+				}
+				orders = append(orders, at)
+			}
+			return orders, nil
 		},
 		Publish: func(callContext context.Context, commit, canary string) error {
 			if canary != "" {
