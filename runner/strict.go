@@ -116,7 +116,9 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	// A phase job's checkout takes its npm packages from its tree's build, placed in the root for prepare.sh to link.
 	if job.Tree != "" {
 		placeContext, cancel := context.WithDeadline(runContext, deadline)
+		fetchStarted := time.Now()
 		err := run.placeNodePackages(placeContext, job.Tree, root)
+		run.timing.FetchSeconds = seconds(time.Since(fetchStarted))
 		cancel()
 		if err != nil {
 			run.fail(protocol.PhaseFetch, fmt.Errorf("the tree's npm packages: %w: Loom's, never the change's", err))
@@ -136,7 +138,10 @@ func (run *unitRun) runTest(runContext context.Context) string {
 		trim = "trim"
 	}
 	run.phase(livestatus.PhasePreparing)
+	prepareStarted := time.Now()
 	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim, root, owner(run.options)}, run.prepareEnvironment(), run.workspace, time.Until(deadline))
+	// The checkout's fetch is prepare.sh's, so a checkout unit's preparation holds it.
+	run.timing.PrepareSeconds = seconds(time.Since(prepareStarted))
 	switch {
 	case err != nil:
 		run.fail(protocol.PhaseStart, err)
@@ -173,6 +178,8 @@ func (run *unitRun) runTest(runContext context.Context) string {
 		return protocol.StatusBroken
 	}
 	run.phase(livestatus.PhaseTesting)
+	testStarted := time.Now()
+	defer func() { run.timing.TestSeconds = seconds(time.Since(testStarted)) }()
 	if job.Phase != "" {
 		return run.runPhase(runContext, job, environment, tree, root, out, deadline)
 	}

@@ -178,12 +178,11 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	// What the units in hand may hold between them: every thread, and nine tenths of the memory, since a share's memory
 	// is a ceiling its cgroup kills at, never an average.
 	capacity := share{cpus: machine.cpus, memoryMegabytes: machine.memoryMegabytes * 9 / 10}
-	var cgroups *unitCgroups
-	if options.Units > 1 {
-		var err error
-		if cgroups, err = delegatedCgroups(); err != nil {
-			fmt.Fprintf(options.Report, "loom-runner serve: units run without a cgroup of their own: %v\n", err)
-		}
+	// Every unit runs in a cgroup of its own where systemd delegated one, a unit run alone on the whole machine's share,
+	// so every unit's timing says its peak memory and a unit past its memory is killed alone.
+	cgroups, err := delegatedCgroups()
+	if err != nil && options.Units > 1 {
+		fmt.Fprintf(options.Report, "loom-runner serve: units run without a cgroup of their own: %v\n", err)
 	}
 	// A drain ends every wait at once, but never an ask in flight, whose unit the pool has already taken off its queue,
 	// and never a unit in hand.
@@ -217,6 +216,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	type inHand struct {
 		unit    protocol.Unit
 		share   *share
+		alone   bool
 		live    *livestatus.Unit
 		started time.Time
 	}
@@ -226,24 +226,25 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		had    bool
 	}
 	hands := map[*inHand]bool{}
-	// holding is the shares of the units in hand, alone whether one runs alone.
+	// holding is the shares of the units running beside others, and aloneInHand whether one runs alone.
 	holding := share{}
-	alone := false
+	aloneInHand := false
 	finished := make(chan finish, options.Units)
 	settle := func(done finish) {
 		delete(hands, done.hand)
-		if done.hand.share != nil {
+		if done.hand.alone {
+			aloneInHand = false
+		} else {
 			holding.cpus -= done.hand.share.cpus
 			holding.memoryMegabytes -= done.hand.share.memoryMegabytes
 		}
-		alone = false
 		var next *livestatus.Unit
 		for other := range hands {
 			if next == nil || other.live.StartedAt.Before(next.StartedAt) {
 				next = other.live
 			}
 		}
-		finishLive(live, done.hand.unit, done.result.Status, done.hand.started, next, done.hand.share == nil, unitOptions.LiveStatus)
+		finishLive(live, done.hand.unit, done.result.Status, done.hand.started, next, done.hand.alone, unitOptions.LiveStatus)
 		summary.Units++
 		switch done.result.Status {
 		case protocol.StatusPassed:
@@ -276,19 +277,33 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		case <-timer.C:
 		}
 	}
-	// start runs a unit in its own goroutine on its share (nil: alone, on the whole machine).
-	start := func(unit protocol.Unit, unitShare *share) {
-		hand := &inHand{unit: unit, share: unitShare, live: liveUnit(unit, livestatus.PhaseStarting, time.Now()), started: time.Now()}
+	// cgroupsMade names each unit's cgroup.
+	cgroupsMade := 0
+	cgroupFor := func(unit protocol.Unit, cpus, memoryMegabytes int) *unitCgroup {
+		cgroupsMade++
+		group, err := cgroups.make(fmt.Sprintf("%d-%d", os.Getpid(), cgroupsMade), cpus, memoryMegabytes)
+		if err != nil {
+			fmt.Fprintf(options.Report, "loom-runner serve: unit %s runs without a cgroup of its own: %v\n", unit.Unit, err)
+		}
+		return group
+	}
+	// start runs a unit in its own goroutine: alone, on the whole machine (its share is nil where there are no
+	// cgroups), or beside others on its share.
+	start := func(unit protocol.Unit, unitShare *share, alone bool) {
+		hand := &inHand{unit: unit, share: unitShare, alone: alone, live: liveUnit(unit, livestatus.PhaseStarting, time.Now()), started: time.Now()}
 		hands[hand] = true
 		ownOptions, ownRunners := unitOptions, runners
 		if unitShare != nil {
+			unitShare.inHand = len(hands)
+			ownOptions.share = unitShare
+		}
+		if alone {
+			aloneInHand = true
+		} else {
 			holding.cpus += unitShare.cpus
 			holding.memoryMegabytes += unitShare.memoryMegabytes
-			ownOptions.share = unitShare
 			// Several units at once can't share one live status file, nor serve's phase for the unit in hand.
 			ownOptions.LiveStatus, ownRunners.live = "", nil
-		} else {
-			alone = true
 		}
 		live.Update(func(status *livestatus.Status) { status.Unit = hand.live })
 		go func() {
@@ -301,7 +316,6 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			finished <- finish{hand: hand, result: result, had: had}
 		}()
 	}
-	cgroupsMade := 0
 	for {
 		if serveContext.Err() != nil {
 			summary.Stopped = "by a signal"
@@ -318,7 +332,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		askUntil := options.Deadline.Add(-options.Margin)
 		// Room for one more: no unit running alone, fewer than Units in hand, shares left for a default one, and, with any
 		// in hand, the machine under its busy target.
-		if alone || len(hands) >= options.Units || holding.cpus+options.UnitCpus > capacity.cpus && len(hands) > 0 ||
+		if aloneInHand || len(hands) >= options.Units || holding.cpus+options.UnitCpus > capacity.cpus && len(hands) > 0 ||
 			holding.memoryMegabytes+options.UnitMemoryMegabytes > capacity.memoryMegabytes && len(hands) > 0 {
 			rest(askUntil, time.Hour)
 			continue
@@ -415,7 +429,14 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			if since := time.Since(waited); since > time.Second {
 				fmt.Fprintf(options.Report, "loom-runner serve: unit %s runs alone; it waited %.0f s for the units in hand\n", unit.Unit, since.Seconds())
 			}
-			start(unit, nil)
+			var whole *share
+			if cgroups != nil {
+				whole = &share{cpus: machine.cpus, memoryMegabytes: capacity.memoryMegabytes}
+				if whole.cgroup = cgroupFor(unit, whole.cpus, whole.memoryMegabytes); whole.cgroup == nil {
+					whole = nil
+				}
+			}
+			start(unit, whole, true)
 			continue
 		}
 		unitShare := &share{cpus: options.UnitCpus, memoryMegabytes: options.UnitMemoryMegabytes}
@@ -434,13 +455,8 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		if since := time.Since(waited); since > time.Second {
 			fmt.Fprintf(options.Report, "loom-runner serve: unit %s waited %.0f s for room for its %d cpus and %d MB\n", unit.Unit, since.Seconds(), unitShare.cpus, unitShare.memoryMegabytes)
 		}
-		cgroupsMade++
-		group, err := cgroups.make(fmt.Sprintf("%d-%d", os.Getpid(), cgroupsMade), unitShare.cpus, unitShare.memoryMegabytes)
-		if err != nil {
-			fmt.Fprintf(options.Report, "loom-runner serve: unit %s runs without a cgroup of its own: %v\n", unit.Unit, err)
-		}
-		unitShare.cgroup = group
-		start(unit, unitShare)
+		unitShare.cgroup = cgroupFor(unit, unitShare.cpus, unitShare.memoryMegabytes)
+		start(unit, unitShare, false)
 	}
 	// Serving has stopped: every unit in hand runs to its finish (or stops with serveContext).
 	for len(hands) > 0 {

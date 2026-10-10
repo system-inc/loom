@@ -16,7 +16,8 @@ import (
 // A box serve running several units at once (#ef2rgaq). Each mutant below must make a test here fail:
 //
 //	the shares in hand not held to the machine's threads, or to its memory: TestServeRunsUnitsAtOnceWithinTheMachine
-//	a declared share ignored, or not said on the started event: TestADeclaredShareIsHeldAndSaid
+//	a declared share ignored, or not said on the started or timing event, or the units in hand miscounted:
+//	TestADeclaredShareIsHeldAndSaid
 //	another unit asked for while the machine is past its busy target: TestServeAsksForNoMoreWhileTheMachineIsBusy
 //	a unit that can't run beside others started beside them: TestAUnitThatCantRunBesideOthersRunsAlone
 //	a trim run while a unit holds the root: TestATrimNeverRunsUnderALiveUnit
@@ -158,6 +159,23 @@ func TestADeclaredShareIsHeldAndSaid(t *testing.T) {
 	}
 	if spans[0].cpus != 3 || spans[0].megabytes != 30000 || spans[1].cpus != 1 || spans[1].megabytes != 16384 {
 		t.Fatalf("started events say %d cpus %d MB and %d cpus %d MB", spans[0].cpus, spans[0].megabytes, spans[1].cpus, spans[1].megabytes)
+	}
+	// Each unit's timing says its share and how many units were in hand when it started: the second small one, two.
+	inHand := map[string]int{}
+	pool.mutex.Lock()
+	for _, id := range []string{"big", "a", "b"} {
+		for _, event := range pool.events[id] {
+			if event.Type == "timing" && event.Timing != nil {
+				inHand[id] = event.Timing.UnitsInHand
+				if id == "big" && (event.Timing.ShareCpus != 3 || event.Timing.ShareMemoryMegabytes != 30000) {
+					t.Errorf("the big unit's timing says %+v", event.Timing)
+				}
+			}
+		}
+	}
+	pool.mutex.Unlock()
+	if inHand["big"] != 1 || max(inHand["a"], inHand["b"]) != 2 {
+		t.Fatalf("units in hand by the timing events: %v", inHand)
 	}
 }
 

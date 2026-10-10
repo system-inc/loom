@@ -24,6 +24,8 @@ type share struct {
 	cpus            int
 	memoryMegabytes int
 	cgroup          *unitCgroup
+	// inHand is how many units serve held when this one started, itself among them.
+	inHand int
 }
 
 // alongside says whether a unit may run beside others on this serve: a prebuilt test job, on serve's own runner.

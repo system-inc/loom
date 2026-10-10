@@ -231,6 +231,9 @@ func runOn(runContext context.Context, binary string, unit protocol.Unit, option
 		command.Env = append(os.Environ(), housecache.Variable+"="+options.HouseCache)
 	}
 	command.Stdin = bytes.NewReader(encoded)
+	// In the unit's cgroup when it has one, so the named runner and its tests keep to the unit's share.
+	command.SysProcAttr = &syscall.SysProcAttr{}
+	options.share.attach(command.SysProcAttr)
 	watcher := &startWatcher{writer: options.Events}
 	command.Stdout, command.Stderr = watcher, options.Diagnostics
 	command.Cancel = func() error { return command.Process.Signal(syscall.SIGTERM) }

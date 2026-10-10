@@ -476,6 +476,11 @@ func TestAPrebuiltUnitRunsGreenWithNoGo(t *testing.T) {
 	if !strings.Contains(runner, "fetched trees/"+fixture.tree.key+".json, ") || !strings.Contains(runner, "ready in ") {
 		t.Errorf("the index's fetch and the time to be ready aren't on the record:\n%s", runner)
 	}
+	// The timing event says the same as fields (#g1jvdbq): the bytes from the store, none from the cache, and a time
+	// for each phase it had.
+	if timing := eventsOfType(events, "timing")[0].Timing; timing.StoreBytes == 0 || timing.CacheBytes != 0 || timing.PrepareSeconds <= 0 || timing.TestSeconds <= 0 {
+		t.Errorf("the first unit's timing: %+v", timing)
+	}
 	// A second unit of the same tree reads every blob from the cache.
 	before := fixture.store.blobGets()
 	result, events, _ = runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
@@ -484,6 +489,9 @@ func TestAPrebuiltUnitRunsGreenWithNoGo(t *testing.T) {
 	}
 	if runner := strings.Join(outputLines(events, "runner"), "\n"); !strings.Contains(runner, "2 blobs: 0 bytes from the store") {
 		t.Errorf("the second unit's blobs didn't come from the cache:\n%s", runner)
+	}
+	if timing := eventsOfType(events, "timing")[0].Timing; timing.StoreBytes != 0 || timing.CacheBytes == 0 {
+		t.Errorf("the second unit's timing: %+v", timing)
 	}
 }
 
