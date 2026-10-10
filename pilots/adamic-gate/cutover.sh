@@ -50,7 +50,7 @@ say() {
 }
 
 landerKey() {
-	ssh workshop 'cat ~/.ssh/loom_lander.pub' | awk '{print $1" "$2}'
+	ssh Workshop 'cat ~/.ssh/loom_lander.pub' | awk '{print $1" "$2}'
 }
 
 # One line per deploy key: id, read_only, the key's type and body.
@@ -191,7 +191,7 @@ prove() {
 	say "${reference} is ${now}, probing"
 	if [ "${now}" = on ]; then
 		proveRefused "Kirk's credential from this Mac" local "git@github.com:${repository}.git" || failed=1
-		# ssh:// rather than git@github.com:, which threadripper's git config rewrites to https (no credential there).
+		# ssh:// rather than git@github.com:, which Cloud's git config rewrites to https (no credential there).
 		proveRefused "threadripper's deploy key" threadripper "ssh://git@github.com/${repository}.git" || failed=1
 	else
 		proveRefused "the lander's key" workshop "git@github-lander:${repository}.git" '~/loom-lander/adamic.git' || failed=1
@@ -229,7 +229,7 @@ case ${action} in
 		othersReadOnly
 		gh api -X PUT "repos/${repository}/rulesets/${ruleset}" -f enforcement=active --jq '"  ruleset \(.id) \(.enforcement)"'
 		if [ "${reference}" = main ]; then
-			ssh workshop 'systemctl --user start loom-pusher.timer' && echo "  loom-pusher.timer started"
+			ssh Workshop 'systemctl --user start loom-pusher.timer' && echo "  loom-pusher.timer started"
 			for agent in "${macAgents[@]}"; do
 				launchctl bootout "gui/$(id -u)/${agent}" 2> /dev/null && echo "  ${agent} booted out" || true
 			done
@@ -242,7 +242,7 @@ case ${action} in
 		gh api -X PUT "repos/${repository}/rulesets/${ruleset}" -f enforcement=disabled --jq '"  ruleset \(.id) \(.enforcement)"'
 		landerOff
 		if [ "${reference}" = main ]; then
-			ssh workshop 'systemctl --user stop loom-pusher.timer' && echo "  loom-pusher.timer stopped"
+			ssh Workshop 'systemctl --user stop loom-pusher.timer' && echo "  loom-pusher.timer stopped"
 			for agent in "${macAgents[@]}"; do
 				agentLoaded "${agent}" || { launchctl bootstrap "gui/$(id -u)" "${HOME}/Library/LaunchAgents/${agent}.plist" && echo "  ${agent} bootstrapped"; }
 			done

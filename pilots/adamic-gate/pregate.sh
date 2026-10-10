@@ -21,8 +21,8 @@
 #
 # Nothing builds on Kirk's Mac (@system_adamic, Oct 8 23:43Z), so the binaries are made on a box, darwin/arm64:
 #	rsync -a --exclude .git --exclude wire/node_modules ~/Projects/system/loom/ chonchon:loom-src/
-#	ssh chonchon 'cd loom-src && source ~/adamic-tools/env.sh && GOOS=darwin GOARCH=arm64 go build -o /tmp/loom-pregate-darwin ./cmd/loom && GOOS=darwin GOARCH=arm64 go build -o /tmp/loom-adamic-gate-darwin ./pilots/adamic-gate'
-#	scp chonchon:/tmp/loom-pregate-darwin ~/.loom/bin/loom-pregate && scp chonchon:/tmp/loom-adamic-gate-darwin ~/.loom/bin/adamic-gate
+#	ssh Chonchon 'cd loom-src && source ~/adamic-tools/env.sh && GOOS=darwin GOARCH=arm64 go build -o /tmp/loom-pregate-darwin ./cmd/loom && GOOS=darwin GOARCH=arm64 go build -o /tmp/loom-adamic-gate-darwin ./pilots/adamic-gate'
+#	scp Chonchon:/tmp/loom-pregate-darwin ~/.loom/bin/loom-pregate && scp Chonchon:/tmp/loom-adamic-gate-darwin ~/.loom/bin/adamic-gate
 # (/tmp/adamic-gate on a box is the gate's TMPDIR, a directory, hence the names.)
 set -uo pipefail
 
