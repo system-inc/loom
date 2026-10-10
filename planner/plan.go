@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/system-inc/loom/protocol"
 )
 
 // GateEnvironment is the env every test unit runs with today (run.py's gateEnvironment): the four gate switches.
@@ -24,6 +26,8 @@ type PlannedResult struct {
 	Decision string   `json:"decision"` // reuse | run
 	Reason   string   `json:"reason"`
 	Reused   string   `json:"reused,omitempty"`
+	// Resources is what the unit needs from its machine (unit-needs.json), for placement only, never keyed.
+	Resources *protocol.Resources `json:"resources,omitempty"`
 }
 
 // PlanTree plans every package with tests on a checked-out tree: one test unit per package, keyed by KeyFor and
@@ -127,6 +131,11 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	if err != nil {
 		return nil, err
 	}
+	needs, err := LoadUnitNeeds(gateTools)
+	if err != nil {
+		return nil, err
+	}
+	resources := map[string]*protocol.Resources{}
 	environment := GateEnvironment
 	if selection != nil && selection.inputs != nil {
 		environment = map[string]string{}
@@ -174,6 +183,9 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 		if err != nil {
 			return nil, err
 		}
+		if resources[listed.ImportPath], err = needs.For(directory, unit.Run); err != nil {
+			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
+		}
 		planned = append(planned, PlannedUnit{Name: listed.ImportPath, UnitKey: key})
 		parts[listed.ImportPath] = keyParts
 	}
@@ -183,7 +195,7 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	}
 	for _, choice := range choices {
 		results = append(results, PlannedResult{Name: choice.Name, UnitKey: choice.UnitKey, KeyParts: parts[choice.Name],
-			Decision: choice.Action, Reason: choice.Reason, Reused: choice.Reused})
+			Decision: choice.Action, Reason: choice.Reason, Reused: choice.Reused, Resources: resources[choice.Name]})
 	}
 	return results, nil
 }
