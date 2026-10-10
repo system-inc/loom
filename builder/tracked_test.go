@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/system-inc/loom/planner"
 )
 
 // A tree's source carries its manifest (#cyasrr4). Each mutant below must make a test here fail:
@@ -24,6 +26,25 @@ import (
 //	git run with the environment's GIT_DIR: TestTheManifestIsTheSameForTheSameTree
 //	the manifest's files chunked with their neighbors: TestTheManifestsChunksMoveOnlyWithTheirRepository
 //	a tracked path under .tracked let through: TestATreeTrackingTheManifestsDirectoryIsRefused
+//
+// From the review of 98eae8c:
+//
+//	the source not checked against the manifest: TestASourceItsManifestContradictsFailsNamed
+//	a file's content not hashed: TestASourceItsManifestContradictsFailsNamed
+//	a file's executable bit not checked: TestASourceItsManifestContradictsFailsNamed
+//	a path the index lists and no commit records let through: TestASourceItsManifestContradictsFailsNamed
+//	a path a commit records and the index doesn't list let through: TestASourceItsManifestContradictsFailsNamed
+//	a submodule at a manifest file's name let through: TestASubmoduleAtAManifestFilesNameIsRefused
+//	that name compared with its case: TestASubmoduleAtAManifestFilesNameIsRefused
+//	the source's listing read with the environment's GIT_INDEX_FILE: TestGitAnswersForTheTreesOwnRepository
+//	TreeHash read with the environment's GIT_DIR: TestGitAnswersForTheTreesOwnRepository
+//	GIT_INDEX_FILE not dropped from LocalGit's environment: TestGitAnswersForTheTreesOwnRepository
+//	replace refs honored: TestAReplacedCommitIsReadAsItIs
+//	a commit object not hashed against HEAD: TestACommitObjectNotHeadsIsRefused
+//	a commit object's tree line not checked: TestACommitObjectNotHeadsIsRefused
+//
+// Grafts are ignored too (an empty GIT_GRAFT_FILE), and TestAReplacedCommitIsReadAsItIs grafts HEAD, but no mutant
+// fails for it: a graft changes only the parents git walks, and rev-parse, cat-file and ls-tree read no parents.
 
 // gitIn runs git in directory and returns what it printed.
 func gitIn(t *testing.T, directory string, arguments ...string) []byte {
@@ -259,5 +280,152 @@ func TestATreeTrackingTheManifestsDirectoryIsRefused(t *testing.T) {
 	tree := gitTree(t, map[string]string{"a.txt": "a\n", TrackedDirectory + "/note": "mine\n"})
 	if _, err := SourceChunks(tree); err == nil || !strings.Contains(err.Error(), "tracks "+TrackedDirectory+"/note") {
 		t.Fatalf("a tree tracking %s/note: %v", TrackedDirectory, err)
+	}
+}
+
+// A source whose files aren't what its manifest records fails the build, naming the first path in byte order that
+// differs, in the tree or a submodule: a file a build step changed (or one assume-unchanged hides from git status), made
+// executable, made a link's place, removed, staged though no commit has it, or dropped from the index.
+func TestASourceItsManifestContradictsFailsNamed(t *testing.T) {
+	for name, change := range map[string]struct {
+		change func(top string)
+		want   string
+	}{
+		"a file a build step changed": {func(top string) { os.WriteFile(filepath.Join(top, "top.txt"), []byte("built over\n"), 0o644) }, "at top.txt: it hashes to"},
+		"a change assume-unchanged hides": {func(top string) {
+			gitIn(t, top, "update-index", "--assume-unchanged", "z.txt")
+			os.WriteFile(filepath.Join(top, "z.txt"), []byte("hidden\n"), 0o644)
+		}, "at z.txt: it hashes to"},
+		"two files changed": {func(top string) {
+			os.WriteFile(filepath.Join(top, "z.txt"), []byte("z, changed\n"), 0o644)
+			os.WriteFile(filepath.Join(top, "a", "b.txt"), []byte("b, changed\n"), 0o644)
+		}, "first at a/b.txt: it hashes to"},
+		"a file made executable": {func(top string) { os.Chmod(filepath.Join(top, "a", "b.txt"), 0o755) }, "at a/b.txt: its executable bit is true"},
+		"a link made a file": {func(top string) {
+			os.Remove(filepath.Join(top, "link"))
+			os.WriteFile(filepath.Join(top, "link"), []byte("top.txt"), 0o644)
+		}, "at link: it is a file, and its commit records mode 120000"},
+		"a file removed": {func(top string) { os.Remove(filepath.Join(top, "z.txt")) }, "at z.txt: it is missing"},
+		"a file staged that no commit has": {func(top string) {
+			os.WriteFile(filepath.Join(top, "staged.txt"), []byte("staged\n"), 0o644)
+			gitIn(t, top, "add", "staged.txt")
+		}, "at staged.txt: the index lists it, and no commit records it"},
+		"a file dropped from the index": {func(top string) { gitIn(t, top, "rm", "-q", "--cached", "z.txt") }, "at z.txt: its commit records it, and the index doesn't list it"},
+		"a submodule's file changed": {func(top string) {
+			os.WriteFile(filepath.Join(top, "sub", "deep", "inner", "inner.txt"), []byte("inner, changed\n"), 0o644)
+		}, "at sub/deep/inner/inner.txt: it hashes to"},
+	} {
+		top := trackedTree(t)
+		change.change(top)
+		_, err := SourceChunks(top)
+		if err == nil || !strings.Contains(err.Error(), "isn't what its manifest records, first "+strings.TrimPrefix(change.want, "first ")) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// A submodule at a path through a name a manifest file takes (HEAD, commit, files: in any case, since a filesystem
+// that folds case takes them for the same) is refused at build time, at any depth: its manifest directory would be
+// where its parent's file is, and every runner's unpack would fail.
+func TestASubmoduleAtAManifestFilesNameIsRefused(t *testing.T) {
+	for _, at := range []string{"files", "deep/HEAD", "Commit", "head/x"} {
+		inner := gitTree(t, map[string]string{"i.txt": "i\n"})
+		top := gitTree(t, map[string]string{"top.txt": "top\n"})
+		gitIn(t, top, "submodule", "add", "-q", inner, at)
+		gitCommit(t, top)
+		if _, err := SourceChunks(top); err == nil || !strings.Contains(err.Error(), "submodule "+at+" is at a path through") {
+			t.Errorf("a submodule at %s: %v", at, err)
+		}
+	}
+	inner := gitTree(t, map[string]string{"i.txt": "i\n"})
+	sub := gitTree(t, map[string]string{"s.txt": "s\n"})
+	gitIn(t, sub, "submodule", "add", "-q", inner, "files")
+	gitCommit(t, sub)
+	top := gitTree(t, map[string]string{"top.txt": "top\n"})
+	gitIn(t, top, "submodule", "add", "-q", sub, "sub")
+	gitCommit(t, top)
+	gitIn(t, top, "submodule", "update", "-q", "--init", "--recursive")
+	if _, err := SourceChunks(top); err == nil || !strings.Contains(err.Error(), "submodule sub/files is at a path through") {
+		t.Errorf("a submodule's submodule at files: %v", err)
+	}
+}
+
+// Git answers for the tree's own repository whatever the environment names: with GIT_INDEX_FILE naming an index that
+// lacks files, or GIT_DIR another repository, the source and TreeHash are what they are without.
+func TestGitAnswersForTheTreesOwnRepository(t *testing.T) {
+	top := trackedTree(t)
+	want, err := SourceChunks(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHash, err := planner.TreeHash(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partial := filepath.Join(t.TempDir(), "index")
+	for _, arguments := range [][]string{{"read-tree", "HEAD"}, {"rm", "-q", "--cached", "top.txt", "a/b.txt"}} {
+		command := exec.Command("git", arguments...)
+		command.Dir, command.Env = top, append(os.Environ(), "GIT_INDEX_FILE="+partial)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatal(err, string(output))
+		}
+	}
+	other := gitTree(t, map[string]string{"other.txt": "other\n"})
+	for _, variable := range [][2]string{{"GIT_INDEX_FILE", partial}, {"GIT_DIR", filepath.Join(other, ".git")}} {
+		t.Setenv(variable[0], variable[1])
+		got, err := SourceChunks(top)
+		hash, hashErr := planner.TreeHash(top)
+		os.Unsetenv(variable[0])
+		if err != nil || !slices.Equal(got.Chunks, want.Chunks) {
+			t.Errorf("with %s set, the source is another: %v", variable[0], err)
+		}
+		if hashErr != nil || hash != wantHash {
+			t.Errorf("with %s set, TreeHash is %s, not %s: %v", variable[0], hash, wantHash, hashErr)
+		}
+	}
+}
+
+// A replace ref on HEAD changes nothing git answers here, and neither does a graft: the manifest's commit is HEAD's
+// own object, its files HEAD's own tree, and TreeHash that tree, as a runner's checkout of the same commit has them.
+func TestAReplacedCommitIsReadAsItIs(t *testing.T) {
+	top := trackedTree(t)
+	head := strings.TrimSpace(string(gitIn(t, top, "rev-parse", "HEAD")))
+	tree := strings.TrimSpace(string(gitIn(t, top, "rev-parse", "HEAD^{tree}")))
+	files := gitIn(t, top, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
+	empty := strings.TrimSpace(string(gitIn(t, top, "hash-object", "-t", "tree", "-w", "--stdin")))
+	gitIn(t, top, "replace", head, strings.TrimSpace(string(gitIn(t, top, "commit-tree", "-m", "replaced", empty))))
+	os.WriteFile(filepath.Join(top, ".git", "info", "grafts"), []byte(head+"\n"), 0o644)
+	if replaced := strings.TrimSpace(string(gitIn(t, top, "rev-parse", "HEAD^{tree}"))); replaced == tree {
+		t.Fatal("the replace ref replaced nothing")
+	}
+	source, err := SourceChunks(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpacked := unpackSource(t, source)
+	commit, _ := os.ReadFile(filepath.Join(unpacked, TrackedDirectory, "commit"))
+	listing, _ := os.ReadFile(filepath.Join(unpacked, TrackedDirectory, "files"))
+	if sum, _ := gitObject("commit", bytes.NewReader(commit), int64(len(commit)), len(head)); sum != head || !bytes.Equal(listing, files) {
+		t.Errorf("the manifest's commit hashes to %s, not HEAD %s, or its files aren't HEAD's tree's", sum, head)
+	}
+	if hash, err := planner.TreeHash(top); err != nil || hash != tree {
+		t.Errorf("TreeHash is %s, not HEAD's own tree %s: %v", hash, tree, err)
+	}
+}
+
+// A commit object is HEAD's only when it hashes to HEAD and names the tree HEAD^{tree} does.
+func TestACommitObjectNotHeadsIsRefused(t *testing.T) {
+	top := trackedTree(t)
+	head := strings.TrimSpace(string(gitIn(t, top, "rev-parse", "HEAD")))
+	tree := strings.TrimSpace(string(gitIn(t, top, "rev-parse", "HEAD^{tree}")))
+	object := gitIn(t, top, "cat-file", "commit", "HEAD")
+	if err := checkCommitObject(head, object, tree); err != nil {
+		t.Fatalf("HEAD's own object: %v", err)
+	}
+	if err := checkCommitObject(head, bytes.Replace(object, []byte("more"), []byte("MORE"), 1), tree); err == nil || !strings.Contains(err.Error(), "hashes to") {
+		t.Errorf("another object: %v", err)
+	}
+	if err := checkCommitObject(head, object, strings.Repeat("0", len(tree))); err == nil || !strings.Contains(err.Error(), "first line") {
+		t.Errorf("an object naming another tree: %v", err)
 	}
 }

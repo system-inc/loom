@@ -9,11 +9,12 @@ import (
 	"io"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/system-inc/loom/planner"
 )
 
 // Kirk's design (Oct 10 13:54Z): a tree's source is chunks, each a gzipped tar named by its sha256, so a change makes
@@ -75,11 +76,10 @@ func (source Source) Bytes() int64 {
 // SourceChunks is the tree's tracked files, submodules included (git ls-files --recurse-submodules), and its manifest
 // (TrackedManifest: what git answers about each repository in it, which a source with no .git can't ask), as chunks. A
 // tracked symbolic link goes in as a link, and one Unpack would refuse fails here, at build time, as does a tree
-// whose manifest can't be made.
+// whose manifest can't be made, and one whose files aren't what its manifest records (checkSource). Git is asked
+// through planner.LocalGit, as the manifest and the tree's hash are.
 func SourceChunks(tree string) (Source, error) {
-	command := exec.Command("git", "ls-files", "--recurse-submodules", "-z")
-	command.Dir = tree
-	listing, err := command.Output()
+	listing, err := planner.LocalGit(tree, "ls-files", "--recurse-submodules", "-z").Output()
 	if err != nil {
 		return Source{}, fmt.Errorf("git ls-files in %s: %w", tree, err)
 	}
@@ -89,8 +89,11 @@ func SourceChunks(tree string) (Source, error) {
 			names = append(names, name)
 		}
 	}
-	manifest, err := TrackedManifest(tree)
+	manifest, tracked, err := trackedManifest(tree)
 	if err != nil {
+		return Source{}, err
+	}
+	if err = checkSource(tree, names, tracked); err != nil {
 		return Source{}, err
 	}
 	return chunkSource(tree, names, manifest)

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -114,17 +115,38 @@ func TreeToolchain(tree string) (string, string, error) {
 	return "", "", nil
 }
 
+// localGitDropped are the environment's variables that point git at another repository, index or object store than
+// the directory it runs in, or swap objects for others: with any of them set, a tree's answers could be another's.
+var localGitDropped = []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS", "GIT_GRAFT_FILE"}
+
+// LocalGit is git with arguments, run in directory, answering for that repository's own objects alone: no variable
+// that would point it at another repository, index or object store, no replace refs (--no-replace-objects), and no
+// grafts (an empty graft file). TreeHash and a tree's source (builder.SourceChunks, its manifest) ask git through it,
+// so what keys a tree, what its source holds and what its manifest says are read the same way.
+func LocalGit(directory string, arguments ...string) *exec.Cmd {
+	command := exec.Command("git", append([]string{"--no-replace-objects"}, arguments...)...)
+	command.Dir = directory
+	for _, variable := range os.Environ() {
+		if name, _, _ := strings.Cut(variable, "="); !slices.Contains(localGitDropped, name) {
+			command.Env = append(command.Env, variable)
+		}
+	}
+	command.Env = append(command.Env, "GIT_GRAFT_FILE="+os.DevNull)
+	return command
+}
+
 // TreeHash is a checked-out tree's commit's git tree hash. A tree with changes to tracked files is refused, since its
 // hash wouldn't name what's built or planned.
 func TreeHash(tree string) (string, error) {
-	status, err := exec.Command("git", "-C", tree, "status", "--porcelain", "--untracked-files=no").Output()
+	status, err := LocalGit(tree, "status", "--porcelain", "--untracked-files=no").Output()
 	if err != nil {
 		return "", fmt.Errorf("git status in %s: %w", tree, err)
 	}
 	if strings.TrimSpace(string(status)) != "" {
 		return "", fmt.Errorf("%s has changes to tracked files, so its tree hash wouldn't name what's built:\n%s", tree, status)
 	}
-	hash, err := exec.Command("git", "-C", tree, "rev-parse", "HEAD^{tree}").Output()
+	hash, err := LocalGit(tree, "rev-parse", "HEAD^{tree}").Output()
 	if err != nil {
 		return "", fmt.Errorf("git rev-parse HEAD^{tree} in %s: %w", tree, err)
 	}
