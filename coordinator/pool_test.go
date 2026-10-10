@@ -446,6 +446,12 @@ func TestARunTakesTheIdItIsGiven(t *testing.T) {
 	if len(wire.events(settings.Run)) != queued {
 		t.Fatal("the refused run posted events")
 	}
+	// A plan post that set the plan and lost its answer is retried, and the retry's 200 is its own plan: it runs.
+	wire.lostPlans = 1
+	settings.Run = FutureRun(strings.Repeat("e", 40), 2)
+	if result := run(t, settings, shell("a", "echo a")); result.Run != settings.Run || len(wire.events(settings.Run)) == 0 {
+		t.Fatalf("a retried plan post refused its own run %s", settings.Run)
+	}
 	settings.Run = "not a run/id"
 	if _, err := Run(context.Background(), settings, protocol.Job{Name: "j", Units: []protocol.JobUnit{shell("a", "true")}}); err == nil {
 		t.Fatal("a run id the wire won't take was accepted")

@@ -31,24 +31,25 @@ var testSecret = []byte("loom-test-secret")
 // run's log read back by position. Tokens are verified with the test secret. As the Worker does, it drops
 // an event it already holds and refuses a batch that would change one.
 type fakeWire struct {
-	mutex    sync.Mutex
-	plans    map[string]protocol.Plan
-	lines    map[string][]protocol.Event // a run's log; an event's position is its index plus one
-	verdict  map[string]protocol.Verdict
-	blobs    map[string][]byte
-	cache    map[string]protocol.CacheEntry
-	machines []BoardMachine
-	pools    map[string][]protocol.Unit // each pool's queue
-	ranks    map[string][]int           // each queued unit's priority, beside it in pools
-	priority map[string][]int           // each pool's batches' priorities, in the order they came
-	taken    map[string][]protocol.Unit // units a worker took off the queue just before a cancel, handed out next
-	racing   int                        // the next cancels find a worker took one of the run's units just before them
-	swallow  int                        // the next asks to take a unit lose it, as an ask whose turn ended does
-	ghosts   int                        // the next units taken go to a worker that says started, then is gone
-	sleepers int                        // the next units taken go to a worker that says started, is silent 600 ms, then passes
-	reading  map[string]int             // reads of each run's log in flight
-	mostRead int                        // the most reads of one run's log ever in flight at once
-	server   *httptest.Server
+	mutex     sync.Mutex
+	plans     map[string]protocol.Plan
+	lines     map[string][]protocol.Event // a run's log; an event's position is its index plus one
+	verdict   map[string]protocol.Verdict
+	blobs     map[string][]byte
+	cache     map[string]protocol.CacheEntry
+	machines  []BoardMachine
+	pools     map[string][]protocol.Unit // each pool's queue
+	ranks     map[string][]int           // each queued unit's priority, beside it in pools
+	priority  map[string][]int           // each pool's batches' priorities, in the order they came
+	taken     map[string][]protocol.Unit // units a worker took off the queue just before a cancel, handed out next
+	racing    int                        // the next cancels find a worker took one of the run's units just before them
+	swallow   int                        // the next asks to take a unit lose it, as an ask whose turn ended does
+	ghosts    int                        // the next units taken go to a worker that says started, then is gone
+	sleepers  int                        // the next units taken go to a worker that says started, is silent 600 ms, then passes
+	lostPlans int                        // the next plan posts set the plan and answer 502, an answer lost after the work
+	reading   map[string]int             // reads of each run's log in flight
+	mostRead  int                        // the most reads of one run's log ever in flight at once
+	server    *httptest.Server
 }
 
 func newFakeWire(t *testing.T) *fakeWire {
@@ -175,6 +176,11 @@ func newFakeWire(t *testing.T) *fakeWire {
 				return
 			}
 			wire.plans[parts[1]] = plan
+			if wire.lostPlans > 0 {
+				wire.lostPlans--
+				http.Error(writer, "bad gateway", http.StatusBadGateway)
+				return
+			}
 			writer.WriteHeader(http.StatusCreated)
 		case len(parts) == 3 && parts[2] == "events":
 			if _, done := wire.verdict[parts[1]]; done {

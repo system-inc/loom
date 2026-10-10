@@ -25,20 +25,22 @@ type wireClient struct {
 var errNotFound = errors.New("not found")
 
 func (wire *wireClient) call(callContext context.Context, method string, path string, token string, body []byte) ([]byte, error) {
-	answer, _, err := wire.callStatus(callContext, method, path, token, body)
+	answer, _, _, err := wire.callStatus(callContext, method, path, token, body)
 	return answer, err
 }
 
-// callStatus is call with the status of the answer it returns, for a caller that tells a 201 from a 200.
-func (wire *wireClient) callStatus(callContext context.Context, method string, path string, token string, body []byte) ([]byte, int, error) {
+// callStatus is call with the status of the answer it returns and whether it was a retry, for a caller that tells a
+// 201 from a 200: a retry's 200 may be its own earlier try's work, which landed and lost its answer.
+func (wire *wireClient) callStatus(callContext context.Context, method string, path string, token string, body []byte) ([]byte, int, bool, error) {
 	var lastError error
 	for attempt := range 3 {
+		retried := attempt > 0
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * time.Second)
 		}
 		request, err := http.NewRequestWithContext(callContext, method, strings.TrimSuffix(wire.url, "/")+path, bytes.NewReader(body))
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, retried, err
 		}
 		request.Header.Set("Authorization", "Bearer "+token)
 		if body != nil {
@@ -53,26 +55,27 @@ func (wire *wireClient) callStatus(callContext context.Context, method string, p
 		response.Body.Close()
 		switch {
 		case response.StatusCode == http.StatusNotFound:
-			return nil, response.StatusCode, errNotFound
+			return nil, response.StatusCode, retried, errNotFound
 		case response.StatusCode/100 == 2:
-			return answer, response.StatusCode, nil
+			return answer, response.StatusCode, retried, nil
 		case response.StatusCode/100 == 5 || response.StatusCode == http.StatusTooManyRequests:
 			lastError = fmt.Errorf("%s %s: %s %s", method, path, response.Status, bytes.TrimSpace(answer))
 		default:
-			return nil, response.StatusCode, fmt.Errorf("%s %s: %s %s", method, path, response.Status, bytes.TrimSpace(answer))
+			return nil, response.StatusCode, retried, fmt.Errorf("%s %s: %s %s", method, path, response.Status, bytes.TrimSpace(answer))
 		}
 	}
-	return nil, 0, lastError
+	return nil, 0, true, lastError
 }
 
-// postPlan sets the run's plan and says whether this post set it (201) or found the same plan already set (200).
+// postPlan sets the run's plan and says whether this post set it: a 201, or a 200 on a retry, since the try before it
+// (a 5xx, or an answer lost on the way) may have set it. Only a first try's 200 says another coordinator did.
 func (wire *wireClient) postPlan(callContext context.Context, run string, token string, plan protocol.Plan) (bool, error) {
 	body, err := json.Marshal(plan)
 	if err != nil {
 		return false, err
 	}
-	_, status, err := wire.callStatus(callContext, http.MethodPost, "/runs/"+run+"/plan", token, body)
-	return status == http.StatusCreated, err
+	_, status, retried, err := wire.callStatus(callContext, http.MethodPost, "/runs/"+run+"/plan", token, body)
+	return status == http.StatusCreated || (status == http.StatusOK && retried), err
 }
 
 func (wire *wireClient) postVerdict(callContext context.Context, run string, token string, verdict protocol.Verdict) error {
