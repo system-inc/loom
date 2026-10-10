@@ -141,12 +141,15 @@ async function authorizeBuilder(request: Request, environment: ActionEnvironment
     return verification.claims;
 }
 
-// Routes /actions/blobs/<sha256> (HEAD, PUT) and /actions/<productKey> (PUT). Anything else under /actions is a 404;
+// Routes /actions/blobs/<sha256> (HEAD, PUT), /actions/<productKey> (PUT) and /actions/list (GET). Anything else under /actions is a 404;
 // a path outside /actions is null, for the Worker's other routes.
 export async function handleAction(request: Request, environment: ActionEnvironment): Promise<Response | null> {
     const path = new URL(request.url).pathname;
     if (path !== '/actions' && !path.startsWith('/actions/')) {
         return null;
+    }
+    if (path === '/actions/list') {
+        return listActions(request, environment);
     }
     const blobMatch = /^\/actions\/blobs\/([^/]+)$/.exec(path);
     const refMatch = /^\/actions\/([^/]+)$/.exec(path);
@@ -232,5 +235,32 @@ async function putActionRef(store: R2Bucket, productKey: string, builder: string
         heldBuilder: heldBuilder,
         builder: builder,
         sha256: target,
+    });
+}
+
+// One page of what the action store holds, for Workshop's daily audit of its index (#k62gwdt): `GET
+// /actions/list?prefix=refs|blobs[&cursor=<c>]` answers `{ keys, cursor }`, the action refs' product keys or the
+// blobs' sha256s, at most 1,000 a page, and cursor null on the last. A build token only, like every write here.
+async function listActions(request: Request, environment: ActionEnvironment): Promise<Response> {
+    if (request.method !== 'GET') {
+        return jsonResponse(405, { error: 'GET only' }, { Allow: 'GET' });
+    }
+    const claims = await authorizeBuilder(request, environment);
+    if (claims instanceof Response) {
+        return claims;
+    }
+    const parameters = new URL(request.url).searchParams;
+    const which = parameters.get('prefix');
+    if (which !== 'refs' && which !== 'blobs') {
+        return jsonResponse(400, { error: 'prefix is refs or blobs' });
+    }
+    const prefix = which === 'refs' ? ActionRefPrefix : 'blobs/';
+    const cursor = parameters.get('cursor');
+    const listed = await environment.PublicStore.list({ prefix: prefix, limit: 1000, cursor: cursor === null || cursor === '' ? undefined : cursor });
+    return jsonResponse(200, {
+        keys: listed.objects.map(function (object) {
+            return object.key.slice(prefix.length);
+        }),
+        cursor: listed.truncated ? listed.cursor : null,
     });
 }

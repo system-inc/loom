@@ -181,6 +181,41 @@ describe('the action store', function () {
     });
 });
 
+describe('the action store listing', function () {
+    it('pages through refs and blobs for a build token only', async function () {
+        const workshop = await token('workshop', 'build');
+        const keys: string[] = [];
+        for (let index = 0; index < 3; index++) {
+            const key = await freshKey();
+            const manifest = await putProduct(workshop, key, { out: randomBytes(16) });
+            expect((await answer(`/actions/${key}`, { method: 'PUT', bearer: workshop, body: manifest })).status).toBe(201);
+            keys.push(key);
+        }
+        const listed: string[] = [];
+        let cursor = '';
+        for (;;) {
+            const page = await answer(`/actions/list?prefix=refs&cursor=${encodeURIComponent(cursor)}`, { bearer: workshop });
+            expect(page.status).toBe(200);
+            const body = (await page.json()) as { keys: string[]; cursor: string | null };
+            listed.push(...body.keys);
+            if (body.cursor === null) {
+                break;
+            }
+            cursor = body.cursor;
+        }
+        for (const key of keys) {
+            expect(listed).toContain(key);
+        }
+        const blobs = (await (await answer('/actions/list?prefix=blobs', { bearer: workshop })).json()) as { keys: string[] };
+        expect(blobs.keys.every(function (key) {
+            return /^[0-9a-f]{64}$/.test(key);
+        })).toBe(true);
+        expect((await answer('/actions/list?prefix=refs', { bearer: await token(freshRun(), 'coordinator') })).status).toBe(403);
+        expect((await answer('/actions/list?prefix=everything', { bearer: workshop })).status).toBe(400);
+        expect((await answer('/actions/list?prefix=refs', { method: 'PUT', bearer: workshop, body: 'x' })).status).toBe(405);
+    });
+});
+
 describe('an action manifest', function () {
     it('is canonical, so two honest builds of one key write the same bytes', async function () {
         const key = await freshKey();
