@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/coordinator"
+	"github.com/system-inc/loom/jsonlines"
 	"github.com/system-inc/loom/judge"
+	"github.com/system-inc/loom/placer"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 )
@@ -63,6 +65,8 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
 	censusGit := flags.String("census-git", "", "with --census-rows, a clone of Adamic whose origin answers whether a pending skip's awaited branch is on main")
 	treeGit := flags.String("tree-git", "", "a clone of Adamic holding the commits Workshop built (the tree builder's): a rerun on a unit's base runs that commit's tree build, keyed from it; without it, every rerun on a base is void, base tree not built")
+	userHome, _ := os.UserHomeDir()
+	placedLedger := flags.String("placed", filepath.Join(userHome, "loom-placer", "placed.jsonl"), "the placer's ledger, read for when each decided run was placed: its unit rows' queue wait")
 	storeFlags := addStoreFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -202,6 +206,9 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Stale: judge.StaleAfter,
 	})
 	puller.Loop.RequireRunner = *requireRunner
+	// Each decided run's unit rows go to the store's bucket, the placer's ledger saying when the run was placed (#g1jvdbq).
+	puller.Rows, puller.Placed = judge.BucketRows{Bucket: store.Bucket}, placedFrom(*placedLedger)
+	puller.Report = func(line string) { fmt.Fprintln(stdout, line) }
 	puller.Loop.Warm = warmRule(warmRunner, *warmAttempts, *poolsPath)
 	if *poolsPath != "" {
 		// A failure is rerun with the need NeedOf reads now; when that's more than its attempt was placed with, it's
@@ -718,4 +725,21 @@ func rerunTree(treeGit string, indexed func(tree string) (bool, error), sha, pla
 		return "", fmt.Sprintf("base tree not built: trees/%s.json, base %s's, isn't in the store", tree, sha), nil
 	}
 	return tree, "", nil
+}
+
+// placedFrom reads when a run was placed from the placer's ledger at path, read fresh at each ask without the placer's
+// lock: the newest record naming the run. A ledger that can't be read places nothing, and the rows say no queue wait.
+func placedFrom(path string) judge.PlacedOf {
+	return func(run string) (string, bool) {
+		records, err := jsonlines.Read[placer.Record](path)
+		if err != nil {
+			return "", false
+		}
+		for index := len(records) - 1; index >= 0; index-- {
+			if records[index].Run == run && records[index].At != "" {
+				return records[index].At, true
+			}
+		}
+		return "", false
+	}
 }

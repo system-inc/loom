@@ -128,6 +128,11 @@ type Puller struct {
 	// void as silent, so no future waits on a hand when a coordinator dies. Zero turns it off. The coordinator's own
 	// finished events for the units it gives up on are the real fix; this only moves a stuck run toward void.
 	Stale time.Duration
+	// Rows, when set, keeps each decided run's unit rows (rows.go), each placed when Placed says; Report hears a row
+	// that couldn't be kept. Nil keeps none.
+	Rows   Rows
+	Placed PlacedOf
+	Report func(string)
 	// emptySince is when this process first saw each run with no events at all, the age of a run that never started;
 	// a restart starts it over, which errs toward waiting.
 	emptySince map[string]time.Time
@@ -218,13 +223,19 @@ func (puller Puller) pullOne(future PlannedFuture) (bool, error) {
 			return false, nil
 		}
 		loop, job := puller.jobOf(future, run, events)
-		_, err := loop.VoidFuture(job, InfraSilent, why)
-		return err == nil, err
+		if _, err := loop.VoidFuture(job, InfraSilent, why); err != nil {
+			return false, err
+		}
+		puller.keepRows(future, attempt, run, events)
+		return true, nil
 	}
 	loop, job := puller.jobOf(future, run, events)
 	loop.Runs, job.Earlier = EventRuns{Read: runsOf(run, events, earlier), Log: puller.Log}, order
-	_, err = loop.JudgeFuture(job)
-	return err == nil, err
+	if _, err = loop.JudgeFuture(job); err != nil {
+		return false, err
+	}
+	puller.keepRows(future, attempt, run, events)
+	return true, nil
 }
 
 // VoidOne posts one listed future's run as void with the infra kind and cause given (Loop.VoidFuture): attempt must be
@@ -255,7 +266,11 @@ func (puller Puller) VoidListed(future PlannedFuture, attempt int, infra, cause 
 		return FuturePost{}, fmt.Errorf("future %s: reading run %s: %w", future.Future, run, err)
 	}
 	loop, job := puller.jobOf(future, run, events)
-	return loop.VoidFuture(job, infra, cause)
+	post, err := loop.VoidFuture(job, infra, cause)
+	if err == nil {
+		puller.keepRows(future, attempt, run, events)
+	}
+	return post, err
 }
 
 // jobOf is the loop and job that judge one listed future from its run's events.

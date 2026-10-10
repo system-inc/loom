@@ -5,7 +5,7 @@
 //
 // The key pair comes from a key = value file, ~/.loom/r2-releases.conf by default, the same file updater/upload.sh
 // reads: account_id, access_key_id and secret_access_key. That key can write anywhere in loom-artifacts, releases/
-// included, so Put writes only the action store's prefixes and the gate inputs' (Writable).
+// included, so Put writes only the action store's prefixes, the gate inputs' and the unit rows' (Writable).
 package r2
 
 import (
@@ -111,11 +111,12 @@ var ErrExists = errors.New("already written")
 // ErrChanged is a put with IfMatch refused because the key no longer holds that ETag.
 var ErrChanged = errors.New("changed since it was read")
 
-// Writable are the only key prefixes Put writes: the action store's (builder/store.go), and gate-inputs/, where the
-// gate inputs' chunks and manifests live by sha256 (gateinputs/gateinputs.go) under no lifecycle rule. The key pair can
-// write the whole bucket, releases/ included, whose current.txt every machine installs from, so a writer of the action
-// store never touches anything else even through a bug.
-var Writable = []string{"blobs/", "refs/action/", "trees/", "gate-inputs/"}
+// Writable are the only key prefixes Put writes: the action store's (builder/store.go); gate-inputs/, where the gate
+// inputs' chunks and manifests live by sha256 (gateinputs/gateinputs.go) under no lifecycle rule; and units/, where the
+// judge keeps each decided run's unit rows (judge/rows.go), under no lifecycle rule either. The key pair can write the
+// whole bucket, releases/ included, whose current.txt every machine installs from, so a writer of the action store
+// never touches anything else even through a bug.
+var Writable = []string{"blobs/", "refs/action/", "trees/", "gate-inputs/", "units/"}
 
 // An Object is one key the bucket holds: its size, its ETag, and when it was last written, which is when R2's
 // lifecycle starts counting its days.
