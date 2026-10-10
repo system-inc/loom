@@ -84,18 +84,21 @@ func TestVoidOnePostsTheListedAttemptOnlyAndNeverReruns(t *testing.T) {
 		},
 		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now},
 	}
-	if _, err := puller.VoidOne(stopped, 2, "stopped"); err == nil {
+	if _, err := puller.VoidOne(stopped, 2, InfraKill, "stopped"); err == nil {
 		t.Fatal("voided attempt 2 while Queue lists attempt 1")
 	}
-	if _, err := puller.VoidOne(strings.Repeat("e", 40), 1, "stopped"); err == nil {
+	if _, err := puller.VoidOne(strings.Repeat("e", 40), 1, InfraKill, "stopped"); err == nil {
 		t.Fatal("voided a future Queue doesn't list")
 	}
-	post, err := puller.VoidOne(stopped, 1, "an operator's stop killed its loom run")
+	post, err := puller.VoidOne(stopped, 1, InfraKill, "an operator's stop killed its loom run")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if post.Run != "future-"+stopped+"-1" || post.Decision.Status != Void || len(queue.Posts[stopped]) != 1 {
 		t.Fatalf("post %+v, want run -1 void, posted once", post)
+	}
+	if record := recordOf(t, post, never); record.Infra != InfraKill {
+		t.Fatalf("the unit that never finished is %+v, want void with the infra kind asked for", record)
 	}
 }
 

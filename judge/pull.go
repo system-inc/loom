@@ -217,29 +217,35 @@ func (puller Puller) pullOne(future PlannedFuture) (bool, error) {
 	return err == nil, err
 }
 
-// VoidOne posts one listed future's run as void, naming cause (Loop.VoidFuture): attempt must be the attempt Queue
-// lists, so a void is posted only for the run Queue is waiting on, and the next attempt is Queue's to list.
-func (puller Puller) VoidOne(tree string, attempt int, cause string) (FuturePost, error) {
+// VoidOne posts one listed future's run as void with the infra kind and cause given (Loop.VoidFuture): attempt must be
+// the attempt Queue lists, so a void is posted only for the run Queue is waiting on, and the next attempt is Queue's to
+// list.
+func (puller Puller) VoidOne(tree string, attempt int, infra, cause string) (FuturePost, error) {
 	futures, err := puller.Source.Planned()
 	if err != nil {
 		return FuturePost{}, err
 	}
 	for _, future := range futures {
-		if future.Future != tree {
-			continue
+		if future.Future == tree {
+			return puller.VoidListed(future, attempt, infra, cause)
 		}
-		if listed := max(future.Attempt, 1); listed != attempt {
-			return FuturePost{}, fmt.Errorf("future %s: Queue lists attempt %d, not %d", tree, listed, attempt)
-		}
-		run := puller.RunOf(future.Future, attempt)
-		events, err := puller.Read(run)
-		if err != nil {
-			return FuturePost{}, fmt.Errorf("future %s: reading run %s: %w", tree, run, err)
-		}
-		loop, job := puller.jobOf(future, run, events)
-		return loop.VoidFuture(job, InfraKill, cause)
 	}
 	return FuturePost{}, fmt.Errorf("future %s isn't listed planned and undecided", tree)
+}
+
+// VoidListed is VoidOne for a future already read from the listing: the placer voids an attempt it can't place
+// (InfraNeverPlaced) from the listing it placed from, without listing again.
+func (puller Puller) VoidListed(future PlannedFuture, attempt int, infra, cause string) (FuturePost, error) {
+	if listed := max(future.Attempt, 1); listed != attempt {
+		return FuturePost{}, fmt.Errorf("future %s: Queue lists attempt %d, not %d", future.Future, listed, attempt)
+	}
+	run := puller.RunOf(future.Future, attempt)
+	events, err := puller.Read(run)
+	if err != nil {
+		return FuturePost{}, fmt.Errorf("future %s: reading run %s: %w", future.Future, run, err)
+	}
+	loop, job := puller.jobOf(future, run, events)
+	return loop.VoidFuture(job, infra, cause)
 }
 
 // jobOf is the loop and job that judge one listed future from its run's events.
@@ -338,13 +344,18 @@ func (puller Puller) Carried(tree string, attempt int) ([]CarriedUnit, error) {
 		if future.Future != tree {
 			continue
 		}
-		order, earlier, err := puller.earlier(future, attempt)
-		if err != nil {
-			return nil, err
-		}
-		return carried(future, order, earlier, puller.Loop.Warm), nil
+		return puller.CarriedFrom(future, attempt)
 	}
 	return nil, fmt.Errorf("future %s isn't listed planned and undecided", tree)
+}
+
+// CarriedFrom is Carried for a future already read from the listing, as the placer reads it.
+func (puller Puller) CarriedFrom(future PlannedFuture, attempt int) ([]CarriedUnit, error) {
+	order, earlier, err := puller.earlier(future, attempt)
+	if err != nil {
+		return nil, err
+	}
+	return carried(future, order, earlier, puller.Loop.Warm), nil
 }
 
 // earlier reads a future's attempts before attempt, newest first: only these are ever carried from.

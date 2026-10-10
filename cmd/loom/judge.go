@@ -222,7 +222,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "judge: --void <tree>:<attempt> --cause <why>")
 			return 2
 		}
-		post, err := puller.VoidOne(tree, attempt, *cause)
+		post, err := puller.VoidOne(tree, attempt, judge.InfraKill, *cause)
 		if err != nil {
 			fmt.Fprintln(stderr, "judge:", err)
 			return 1
