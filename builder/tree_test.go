@@ -86,8 +86,8 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		index.Packages[result.Package] = result
 	}
 	fake, store := serve(t)
-	treeKey, err := PublishTree(store, &index, build.Out, build.Cache, source, nil)
-	if err != nil || treeKey != TreeKey(index.Tree, index.Go, GateEnvironment()) {
+	treeKey, written, err := PublishTree(store, &index, build.Out, build.Cache, source, nil)
+	if err != nil || !written || treeKey != TreeKey(index.Tree, index.Go, GateEnvironment()) {
 		t.Fatal(treeKey, err)
 	}
 	// The layout: the tree's index, one ref (the product), and four blobs (the source, the product, two binaries).
@@ -137,7 +137,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		result.Binary = ""
 		again.Packages[name] = result
 	}
-	if _, err = PublishTree(store, &again, build.Out, build.Cache, source, nil); err != nil {
+	if _, written, err = PublishTree(store, &again, build.Out, build.Cache, source, nil); err != nil || !written {
 		t.Fatal(err)
 	}
 	if fake.Count("PUT", "blobs/") != 0 || fake.Count("PUT", "refs/") != 0 || fake.Count("PUT", "trees/") != 1 {
@@ -151,7 +151,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		result.Binary = ""
 		conflicted.Packages[name] = result
 	}
-	if _, err = PublishTree(store, &conflicted, build.Out, build.Cache, source, nil); err != nil {
+	if _, written, err = PublishTree(store, &conflicted, build.Out, build.Cache, source, nil); err != nil || written {
 		t.Fatal(err)
 	}
 	if broke := conflicted.Packages["example.com/tree/a"].Error; !strings.Contains(broke, strings.Repeat("e", 64)) || !strings.Contains(broke, stored.Products[product]) {
@@ -163,8 +163,25 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	if ref, _ := fake.Object("refs/action/" + product); string(ref) != strings.Repeat("e", 64) {
 		t.Fatalf("the conflicting ref was overwritten with %q", ref)
 	}
+	// The index a better build wrote stays: package a, which built there, is still what a runner fetches.
+	if _, err = (Store{Read: fake.Public()}).FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err != nil {
+		t.Fatalf("the better index was replaced: %v", err)
+	}
+	// With no index yet, the worse build's is written, and a runner is told package a didn't build; the better build
+	// then takes its place, over the ETag it read.
+	fake.Delete("trees/" + treeKey + ".json")
+	if _, written, err = PublishTree(store, &conflicted, build.Out, build.Cache, source, nil); err != nil || !written {
+		t.Fatalf("a first index with a failure: %v %v", written, err)
+	}
 	if _, err = (Store{Read: fake.Public()}).FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err == nil || !strings.Contains(err.Error(), "didn't build") {
 		t.Fatalf("a runner fetching a package that didn't build: %v", err)
+	}
+	fake.Set("refs/action/"+product, []byte(stored.Products[product]), time.Now())
+	if _, written, err = PublishTree(store, &again, build.Out, build.Cache, source, nil); err != nil || !written {
+		t.Fatalf("a better build after a worse one: %v %v", written, err)
+	}
+	if _, err = (Store{Read: fake.Public()}).FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err != nil {
+		t.Fatalf("the better index didn't take the worse one's place: %v", err)
 	}
 }
 

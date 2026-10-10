@@ -143,7 +143,7 @@ func heldBuild(t *testing.T, store Store, version string) (TreeIndex, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = PublishTree(store, &index, build.Out, build.Cache, source, held.Held()); err != nil {
+	if _, _, err = PublishTree(store, &index, build.Out, build.Cache, source, held.Held()); err != nil {
 		t.Fatal(err)
 	}
 	if broke := index.Packages["example.com/held/p"].Error; broke != "" {

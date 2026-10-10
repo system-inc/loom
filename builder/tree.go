@@ -400,12 +400,13 @@ func each(count, jobs int, work func(index int) error) error {
 // gzipped, and the index last, so no index names what the store lacks. A product whose ref names another archive (a
 // ConflictError) fails every package that reads it, named in each one's error, and the rest of the tree still goes
 // up. A product in held (HeldProducts.Held) came from the store this build, its blob already fresh, so it is named
-// in the index and nothing more. It fills in treeIndex's blobs as it goes.
-func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte, held map[string]string) (string, error) {
+// in the index and nothing more. It fills in treeIndex's blobs as it goes, and reports whether it wrote the index
+// (writeIndex keeps one with fewer failed packages).
+func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte, held map[string]string) (string, bool, error) {
 	treeKey := TreeKey(treeIndex.Tree, treeIndex.Go, GateEnvironment())
 	var err error
 	if treeIndex.Source, err = store.PutBlob(source); err != nil {
-		return "", fmt.Errorf("the source archive: %w", err)
+		return "", false, fmt.Errorf("the source archive: %w", err)
 	}
 	names := make([]string, 0, len(treeIndex.Packages))
 	read := map[string]bool{}
@@ -442,7 +443,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	treeIndex.Products = map[string]string{}
 	conflicted := map[string]error{}
@@ -482,20 +483,62 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 		return nil
 	})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	for index, name := range names {
 		treeIndex.Packages[name] = packages[index]
 	}
+	written, err := store.writeIndex(treeKey, treeIndex)
+	if err != nil {
+		return "", false, fmt.Errorf("the tree's index: %w", err)
+	}
+	return treeKey, written, nil
+}
+
+// failures counts an index's packages that didn't build.
+func (index TreeIndex) failures() int {
+	count := 0
+	for _, built := range index.Packages {
+		if built.Error != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// writeIndex writes trees/<treeKey>.json, once every blob and ref it names is up, and reports whether it did. An
+// index the bucket already holds is replaced only by one with no more failed packages, and only over the very object
+// read (If-Match on its ETag; If-None-Match: * when there is none), so a worse build never takes a better one's place
+// and two builds racing are each held to what the other wrote.
+func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error) {
 	encoded, err := treeIndex.encode()
 	if err != nil {
-		return "", err
+		return false, err
 	}
-	store.wrote()
-	if err = store.Bucket.Put("trees/"+treeKey+".json", encoded, r2.PutOptions{ContentType: "application/json", CacheControl: "no-cache"}); err != nil {
-		return "", fmt.Errorf("the tree's index: %w", err)
+	key := "trees/" + treeKey + ".json"
+	for range 3 {
+		store.read()
+		content, object, err := store.Bucket.GetObject(key)
+		options := r2.PutOptions{ContentType: "application/json", CacheControl: "no-cache"}
+		switch {
+		case errors.Is(err, r2.ErrNotFound):
+			options.IfNoneMatch = true
+		case err != nil:
+			return false, err
+		default:
+			var held TreeIndex
+			if json.Unmarshal(content, &held) == nil && treeIndex.failures() > held.failures() {
+				return false, nil
+			}
+			options.IfMatch = object.ETag
+		}
+		store.wrote()
+		err = store.Bucket.Put(key, encoded, options)
+		if !errors.Is(err, r2.ErrExists) && !errors.Is(err, r2.ErrChanged) {
+			return err == nil, err
+		}
 	}
-	return treeKey, nil
+	return false, fmt.Errorf("%s kept changing while it was written", key)
 }
 
 // Tree reads trees/<treeKey>.json from the public domain, refusing an index that names anything but a sha256 for a

@@ -114,7 +114,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	uploadStarted := time.Now()
 	treeIndex.Seconds = time.Since(started).Seconds()
-	treeKey, err := builder.PublishTree(store, &treeIndex, build.Out, build.Cache, source, held.Held())
+	treeKey, indexWritten, err := builder.PublishTree(store, &treeIndex, build.Out, build.Cache, source, held.Held())
 	if err != nil {
 		return fail(err)
 	}
@@ -128,7 +128,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		encoder.Encode(treeIndex.Packages[result.Package])
 	}
 	encoder.Encode(map[string]any{
-		"tree": treeHash, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json",
+		"tree": treeHash, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json", "indexWritten": indexWritten,
 		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products), "productsFetched": len(held.Held()),
 		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
 		"seconds": time.Since(started).Seconds(), "sourceBytes": len(source),
