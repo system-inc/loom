@@ -10,9 +10,9 @@ import (
 	"github.com/system-inc/loom/builder"
 )
 
-// fetchActions is a test runner's side of Builder (#egbs6we): each named action's outputs, read from the public store
-// and checked hash by hash, go into the runner's ADAMIC_BUILD_CACHE_DIR, where buildcache then finds every product as
-// a hit and builds nothing. One line per action; exit 1 when any is missing or doesn't check.
+// fetchActions is a test runner's side of Builder (#egbs6we): each named action's archive, read from the public store,
+// checked against its hash and unpacked, goes into the runner's ADAMIC_BUILD_CACHE_DIR, where buildcache then finds
+// every product as a hit and builds nothing. One line per action; exit 1 when any is missing or doesn't check.
 func fetchActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("fetch-actions", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -27,7 +27,7 @@ func fetchActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	failed := 0
 	for _, key := range flags.Args() {
 		started := time.Now()
-		if err := store.Fetch(key, *cache); err != nil {
+		if err := store.FetchProduct(key, *cache); err != nil {
 			fmt.Fprintf(stdout, "%s failed %.2f s: %v\n", key, time.Since(started).Seconds(), err)
 			failed++
 			continue

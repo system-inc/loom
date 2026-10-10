@@ -6,11 +6,14 @@ package judge
 // collaborator is an interface, so a named stub stands in until the real part lands (StubFabric, StubQueue below).
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -59,10 +62,25 @@ type Queue interface {
 	PostVerdicts(future string, post FuturePost) error
 }
 
-// Blobs puts a tests list in the action store (PUT /actions/blobs/<sha256>, a build token); it returns only once the
-// store holds it, since no record may name a blob the store lacks.
+// Blobs puts a tests list in the action store at blobs/<sha256>; it returns only once the store holds it, since no
+// record may name a blob the store lacks.
 type Blobs interface {
 	Put(sha256 string, content []byte) error
+}
+
+// StoreBlobs puts each list straight into the public bucket through R2's S3 interface, with this machine's key
+// (builder.Store.PutBlob): a list the bucket holds from within builder.FreshFor isn't sent again.
+type StoreBlobs struct {
+	Store builder.Store
+}
+
+// Put refuses a list that doesn't hash to its name, and otherwise makes the bucket hold it, fresh.
+func (blobs StoreBlobs) Put(name string, content []byte) error {
+	if sum := sha256.Sum256(content); hex.EncodeToString(sum[:]) != name {
+		return fmt.Errorf("the tests list hashes to %x, not its name %s", sum, name)
+	}
+	_, err := blobs.Store.PutBlob(content)
+	return err
 }
 
 // post puts every record's tests list in the store, then posts the batch: no record names a blob the store lacks.

@@ -1,11 +1,11 @@
 package builder
 
 import (
-	"archive/tar"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/planner"
+	"github.com/system-inc/loom/r2"
 )
 
 // Kirk's shape (Oct 10 03:0xZ): Workshop builds everything for one future's tree, cold and per tree, and pushes it to
@@ -26,10 +27,11 @@ import (
 // every test package's binary (go test -c, with the unit's env and flags), the products its tests use (built by its
 // product tests into the tree's own buildcache), and the tree's source (tests read testdata), all in the action store.
 //
-// A tree key T names the build: sha256 of "loom-tree-v1", the tree hash, the Go version and the gate env. Each package
-// P is one action, refs/action/<PackageKey(T, P)>: `test` (the binary), `source.tar` (the tree's files, one blob every
-// package shares) and `cache/<buildcache key>/...` with `cache/<key>.inputs` for each product P's tests use. The tree's
-// index is refs/action/T, one output `index.json` naming each package's key and binary.
+// A tree key T names the build: sha256 of "loom-tree-v1", the tree hash, the Go version and the gate env. Its index is
+// trees/<T>.json in the store (store.go): each package's test binary, gzipped, as a blob; the buildcache products its
+// tests read, each its own archive under refs/action/<buildcache key>, so a product no tree changed goes up once; and
+// the tree's source archive, one blob every package shares. A runner reads the index, then only its own package's
+// binary, products and the source, each by sha256.
 
 // TreeKey is the key of one tree's build.
 func TreeKey(treeHash, goVersion string, environment []string) string {
@@ -37,20 +39,13 @@ func TreeKey(treeHash, goVersion string, environment []string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// PackageKey is the key of one package's action within a tree's build.
-func PackageKey(treeKey, importPath string) string {
-	sum := sha256.Sum256([]byte("loom-tree-v1\n" + treeKey + "\n" + importPath))
-	return hex.EncodeToString(sum[:])
-}
-
 // A TreePackage is one test package of a tree and what its build made.
 type TreePackage struct {
 	Package   string   `json:"package"`
 	Directory string   `json:"directory"`
-	Key       string   `json:"key"`
-	Binary    string   `json:"binary"` // sha256 of its test binary
-	Bytes     int64    `json:"bytes"`
-	Products  []string `json:"products"` // buildcache keys its product tests used
+	Binary    string   `json:"binary,omitempty"` // the blob of its test binary, gzipped
+	Bytes     int64    `json:"bytes"`            // the test binary's own size
+	Products  []string `json:"products"`         // buildcache keys its tests read
 	Seconds   float64  `json:"seconds"`
 	Error     string   `json:"error,omitempty"`
 }
@@ -174,7 +169,8 @@ func (build TreeBuild) environment(extra ...string) []string {
 	return append(append(append(os.Environ(), build.Environment...), "ADAMIC_BUILD_CACHE_DIR="+build.Cache, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on"), extra...)
 }
 
-// Binaries compiles every package's test binary into Out, cold for this tree, Jobs at a time.
+// Binaries compiles every package's test binary into Out, cold for this tree, Jobs at a time. Its blob is named when
+// the tree is published.
 func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 	results := make([]TreePackage, len(packages))
 	admitted(len(packages), build.Jobs, build.gauge(), build.busy(), func(index int) {
@@ -191,11 +187,10 @@ func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 				tail = tail[len(tail)-2000:]
 			}
 			result.Error = fmt.Sprintf("go test -c: %v\n%s", err, tail)
-		} else if content, err := os.ReadFile(binary); err != nil {
+		} else if info, err := os.Stat(binary); err != nil {
 			result.Error = err.Error()
 		} else {
-			sum := sha256.Sum256(content)
-			result.Binary, result.Bytes = hex.EncodeToString(sum[:]), int64(len(content))
+			result.Bytes = info.Size()
 		}
 		result.Seconds = time.Since(started).Seconds()
 		results[index] = result
@@ -244,77 +239,15 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 	return byPackage, failed
 }
 
-// SourceArchive writes the tree's tracked files, submodules included (git ls-files --recurse-submodules), as one tar
-// whose bytes depend only on the files: names sorted, no times or owners, mode 0644 or 0755 by the executable bit. A
-// tracked symbolic link goes in as a link.
-func SourceArchive(tree, path string) error {
-	command := exec.Command("git", "ls-files", "--recurse-submodules", "-z")
-	command.Dir = tree
-	listing, err := command.Output()
-	if err != nil {
-		return fmt.Errorf("git ls-files in %s: %w", tree, err)
-	}
-	names := []string{}
-	for _, name := range strings.Split(strings.TrimRight(string(listing), "\x00"), "\x00") {
-		if name != "" {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	writer := tar.NewWriter(file)
-	for _, name := range names {
-		full := filepath.Join(tree, filepath.FromSlash(name))
-		info, err := os.Lstat(full)
-		if err != nil {
-			return fmt.Errorf("%s: %w", name, err)
-		}
-		header := &tar.Header{Name: name, ModTime: time.Unix(0, 0), Format: tar.FormatPAX}
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(full)
-			if err != nil {
-				return err
-			}
-			header.Typeflag, header.Linkname, header.Mode = tar.TypeSymlink, target, 0o777
-		case info.Mode().IsRegular():
-			header.Typeflag, header.Size, header.Mode = tar.TypeReg, info.Size(), 0o644
-			if info.Mode()&0o111 != 0 {
-				header.Mode = 0o755
-			}
-		default:
-			continue
-		}
-		if err = writer.WriteHeader(header); err != nil {
-			return err
-		}
-		if header.Typeflag == tar.TypeReg {
-			content, err := os.ReadFile(full)
-			if err != nil {
-				return err
-			}
-			if _, err = writer.Write(content); err != nil {
-				return err
-			}
-		}
-	}
-	if err = writer.Close(); err != nil {
-		return err
-	}
-	return file.Close()
-}
-
-// A TreeIndex is index.json, the tree's own action: each package's key and binary.
+// A TreeIndex is trees/<treeKey>.json, a tree's build: the source archive's blob, each product's archive by its key,
+// and each package with its binary's blob and the products its tests read.
 type TreeIndex struct {
 	Tree     string                 `json:"tree"`
 	Future   string                 `json:"future"`
 	Go       string                 `json:"go"`
 	Source   string                 `json:"source"`
 	Seconds  float64                `json:"seconds"`
+	Products map[string]string      `json:"products"`
 	Packages map[string]TreePackage `json:"packages"`
 }
 
@@ -427,54 +360,236 @@ func cpuTimes() ([2]float64, bool) {
 	return times, true
 }
 
-// PublishTree uploads a tree's build: each package that built, as its own action (its binary, the shared source
-// archive and its products under cache/), then the tree's index. A package the index already holds goes up no
-// second time. It returns the index's manifest sha256.
-func PublishTree(store Store, index *Index, treeIndex TreeIndex, binaries, cache, source string) (string, error) {
+// publishJobs is how many products, or binaries, a tree sends at once: each is a few round trips to R2.
+const publishJobs = 8
+
+// each runs work for 0..count-1, jobs at a time, and returns every error it met.
+func each(count, jobs int, work func(index int) error) error {
+	errs := make([]error, count)
+	next := make(chan int)
+	var group sync.WaitGroup
+	for range max(1, jobs) {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for index := range next {
+				errs[index] = work(index)
+			}
+		}()
+	}
+	for index := range count {
+		next <- index
+	}
+	close(next)
+	group.Wait()
+	return errors.Join(errs...)
+}
+
+// PublishTree uploads a tree's build and returns its tree key: the source archive, then each product a built
+// package's tests read, once each, as its own archive under its buildcache key, then each built package's binary,
+// gzipped, and the index last, so no index names what the store lacks. A product whose ref names another archive (a
+// ConflictError) fails every package that reads it, named in each one's error, and the rest of the tree still goes
+// up. It fills in treeIndex's blobs as it goes.
+func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte) (string, error) {
 	treeKey := TreeKey(treeIndex.Tree, treeIndex.Go, GateEnvironment())
-	sourceContent, err := os.ReadFile(source)
+	var err error
+	if treeIndex.Source, err = store.PutBlob(source); err != nil {
+		return "", fmt.Errorf("the source archive: %w", err)
+	}
+	names := make([]string, 0, len(treeIndex.Packages))
+	read := map[string]bool{}
+	for name, built := range treeIndex.Packages {
+		names = append(names, name)
+		if built.Error == "" {
+			for _, product := range built.Products {
+				read[product] = true
+			}
+		}
+	}
+	sort.Strings(names)
+	products := make([]string, 0, len(read))
+	for product := range read {
+		products = append(products, product)
+	}
+	sort.Strings(products)
+	sums, conflicts := make([]string, len(products)), make([]error, len(products))
+	err = each(len(products), publishJobs, func(index int) error {
+		archive, _, err := ProductArchive(cache, []string{products[index]})
+		if err == nil {
+			sums[index], err = store.Publish(products[index], archive)
+		}
+		if errors.As(err, &ConflictError{}) {
+			conflicts[index], err = err, nil
+		}
+		if err != nil {
+			return fmt.Errorf("product %s: %w", products[index], err)
+		}
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	sourceSum := sha256.Sum256(sourceContent)
-	treeIndex.Source = hex.EncodeToString(sourceSum[:])
-	sourceOutput := Output{Bytes: int64(len(sourceContent)), Path: "source.tar", Sha256: treeIndex.Source}
-	for name, built := range treeIndex.Packages {
-		if built.Error != "" {
-			continue
+	treeIndex.Products = map[string]string{}
+	conflicted := map[string]error{}
+	for index, product := range products {
+		if conflicts[index] != nil {
+			conflicted[product] = conflicts[index]
+		} else {
+			treeIndex.Products[product] = sums[index]
 		}
-		built.Key = PackageKey(treeKey, built.Package)
-		treeIndex.Packages[name] = built
-		if index != nil {
-			if _, held := index.Ref(built.Key); held {
-				continue
+	}
+	packages := make([]TreePackage, len(names))
+	err = each(len(names), publishJobs, func(index int) error {
+		built := treeIndex.Packages[names[index]]
+		packages[index] = built
+		if built.Error != "" {
+			return nil
+		}
+		for _, product := range built.Products {
+			if conflict, broke := conflicted[product]; broke {
+				built.Error += conflict.Error() + "\n"
 			}
 		}
-		binary := filepath.Join(binaries, strings.ReplaceAll(built.Package, "/", "_")+".test")
-		outputs := []Output{{Bytes: built.Bytes, Executable: true, Path: "test", Sha256: built.Binary}, sourceOutput}
-		files := map[string]string{"test": binary, "source.tar": source}
-		products, productFiles, err := OutputsOf(cache, built.Products)
-		if err != nil {
-			return "", err
+		if built.Error == "" {
+			content, err := os.ReadFile(filepath.Join(binaries, strings.ReplaceAll(built.Package, "/", "_")+".test"))
+			if err != nil {
+				return fmt.Errorf("package %s: %w", built.Package, err)
+			}
+			blob, err := gzipped(content)
+			if err != nil {
+				return err
+			}
+			if built.Binary, err = store.PutBlob(blob); err != nil {
+				return fmt.Errorf("package %s: %w", built.Package, err)
+			}
 		}
-		for _, product := range products {
-			files["cache/"+product.Path] = productFiles[product.Path]
-			product.Path = "cache/" + product.Path
-			outputs = append(outputs, product)
-		}
-		sort.Slice(outputs, func(left, right int) bool { return outputs[left].Path < outputs[right].Path })
-		if _, err = store.UploadWith(built.Key, outputs, files, index); err != nil {
-			return "", fmt.Errorf("package %s: %w", built.Package, err)
-		}
+		packages[index] = built
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	for index, name := range names {
+		treeIndex.Packages[name] = packages[index]
 	}
 	encoded, err := treeIndex.encode()
 	if err != nil {
 		return "", err
 	}
-	indexFile := filepath.Join(binaries, "index.json")
-	if err = os.WriteFile(indexFile, encoded, 0o644); err != nil {
-		return "", err
+	store.wrote()
+	if err = store.Bucket.Put("trees/"+treeKey+".json", encoded, r2.PutOptions{ContentType: "application/json", CacheControl: "no-cache"}); err != nil {
+		return "", fmt.Errorf("the tree's index: %w", err)
 	}
-	sum := sha256.Sum256(encoded)
-	return store.UploadWith(treeKey, []Output{{Bytes: int64(len(encoded)), Path: "index.json", Sha256: hex.EncodeToString(sum[:])}}, map[string]string{"index.json": indexFile}, index)
+	return treeKey, nil
+}
+
+// Tree reads trees/<treeKey>.json from the public domain, refusing an index that names anything but a sha256 for a
+// blob or a buildcache key for a product, or a package that reads a product the index doesn't name.
+func (store Store) Tree(treeKey string) (TreeIndex, error) {
+	content, err := store.get("trees/" + treeKey + ".json")
+	if err != nil {
+		return TreeIndex{}, err
+	}
+	var index TreeIndex
+	if err = json.Unmarshal(content, &index); err != nil {
+		return TreeIndex{}, fmt.Errorf("tree %s: %w", treeKey, err)
+	}
+	poisoned := func(format string, arguments ...any) (TreeIndex, error) {
+		return TreeIndex{}, fmt.Errorf("tree %s: %s: the store is poisoned", treeKey, fmt.Sprintf(format, arguments...))
+	}
+	if !productKeyPattern.MatchString(index.Source) {
+		return poisoned("its source archive is %q", index.Source)
+	}
+	for product, sum := range index.Products {
+		if !productKeyPattern.MatchString(product) || !productKeyPattern.MatchString(sum) {
+			return poisoned("product %q is %q", product, sum)
+		}
+	}
+	for name, built := range index.Packages {
+		if built.Error != "" {
+			continue
+		}
+		if !productKeyPattern.MatchString(built.Binary) {
+			return poisoned("package %s's binary is %q", name, built.Binary)
+		}
+		for _, product := range built.Products {
+			if _, named := index.Products[product]; !named {
+				return poisoned("package %s reads product %q, which the index doesn't name", name, product)
+			}
+		}
+	}
+	return index, nil
+}
+
+// FetchPackage readies one package of a tree's build under directory, which must not hold it yet: test, its binary;
+// source/, the tree's files; and cache/, a buildcache directory (ADAMIC_BUILD_CACHE_DIR) holding each product its
+// tests read. It reads the tree's index, then only those blobs, each checked against its hash (and kept in Blobs
+// when set), unpacked into a scratch directory, refusing any entry that would land outside it, and a product's entry
+// that isn't that product's. Only when all of it checks does any of it move into place; a product already in cache/
+// is left as it is.
+func (store Store) FetchPackage(treeKey, importPath, directory string) (TreePackage, error) {
+	index, err := store.Tree(treeKey)
+	if err != nil {
+		return TreePackage{}, err
+	}
+	built, found := index.Packages[importPath]
+	if !found {
+		return TreePackage{}, fmt.Errorf("tree %s has no package %s", treeKey, importPath)
+	}
+	if built.Error != "" {
+		return TreePackage{}, fmt.Errorf("package %s didn't build in tree %s: %s", importPath, treeKey, built.Error)
+	}
+	for _, name := range []string{"test", "source"} {
+		if _, err := os.Lstat(filepath.Join(directory, name)); err == nil {
+			return TreePackage{}, fmt.Errorf("%s already holds %s", directory, name)
+		}
+	}
+	if err = os.MkdirAll(filepath.Join(directory, "cache"), 0o755); err != nil {
+		return TreePackage{}, err
+	}
+	scratch, err := os.MkdirTemp(directory, ".fetching-")
+	if err != nil {
+		return TreePackage{}, err
+	}
+	defer os.RemoveAll(scratch)
+	blob, err := store.blob(built.Binary)
+	if err != nil {
+		return TreePackage{}, fmt.Errorf("package %s's binary: %w", importPath, err)
+	}
+	binary, err := gunzipped(blob)
+	if err != nil {
+		return TreePackage{}, fmt.Errorf("package %s's binary: %w: the store is poisoned", importPath, err)
+	}
+	if err = os.WriteFile(filepath.Join(scratch, "test"), binary, 0o755); err != nil {
+		return TreePackage{}, err
+	}
+	if blob, err = store.blob(index.Source); err != nil {
+		return TreePackage{}, fmt.Errorf("the source archive: %w", err)
+	}
+	if err = Unpack(blob, filepath.Join(scratch, "source"), nil); err != nil {
+		return TreePackage{}, fmt.Errorf("the source archive: %w: the store is poisoned", err)
+	}
+	for _, product := range built.Products {
+		if blob, err = store.blob(index.Products[product]); err != nil {
+			return TreePackage{}, fmt.Errorf("product %s: %w", product, err)
+		}
+		own := func(name string) bool {
+			return name == product+".inputs" || (strings.HasPrefix(name, product+"/") && len(name) > len(product)+1)
+		}
+		if err = Unpack(blob, filepath.Join(scratch, "cache"), own); err != nil {
+			return TreePackage{}, fmt.Errorf("product %s: %w: the store is poisoned", product, err)
+		}
+	}
+	if err = os.MkdirAll(filepath.Join(scratch, "cache"), 0o755); err != nil {
+		return TreePackage{}, err
+	}
+	if err = (Store{}).place(filepath.Join(scratch, "cache"), filepath.Join(directory, "cache")); err != nil {
+		return TreePackage{}, err
+	}
+	for _, name := range []string{"test", "source"} {
+		if err = os.Rename(filepath.Join(scratch, name), filepath.Join(directory, name)); err != nil {
+			return TreePackage{}, err
+		}
+	}
+	return built, nil
 }

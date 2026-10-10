@@ -62,11 +62,12 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	censusRows := flags.String("census-rows", "", "the skip census's rows, comma-separated files (the tools tree's skips.json and census-extra.json); every unit whose tests pass is held to it")
 	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
 	censusGit := flags.String("census-git", "", "with --census-rows, a clone of Adamic whose origin answers whether a pending skip's awaited branch is on main")
+	storeFlags := addStoreFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0 && *poolsPath == "") {
-		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]] [--void <tree>:<attempt> --cause <why>]; loom judge carried --tree <tree> --attempt <N> ...")
+		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--r2 <key file>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]] [--void <tree>:<attempt> --cause <why>]; loom judge carried --tree <tree> --attempt <N> ...")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -76,6 +77,12 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	home, _ := os.UserHomeDir()
 	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
+	if err != nil {
+		fmt.Fprintln(stderr, "judge:", err)
+		return 1
+	}
+	// Each record's tests list goes to the action store (Loom, Oct 10 01:17Z), straight to R2 with this machine's key.
+	store, err := storeFlags.open(nil)
 	if err != nil {
 		fmt.Fprintln(stderr, "judge:", err)
 		return 1
@@ -183,10 +190,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		},
 		Main:  judge.NoMainRecords{},
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
-		Loop: judge.Loop{Now: time.Now, RequireTestLog: true, Reused: judge.HTTPReused{Base: *queue, Token: client}, Blobs: judge.HTTPBlobs{Base: *queue, Token: func() (string, error) {
-			// Each record's tests list goes to the action store, which takes a build token only (Loom, Oct 10 01:17Z).
-			return protocol.MintToken(secret, protocol.TokenClaims{Run: "judge", Scope: protocol.ScopeBuild, Expires: time.Now().Add(time.Hour).Unix()})
-		}}},
+		Loop:  judge.Loop{Now: time.Now, RequireTestLog: true, Reused: judge.HTTPReused{Base: *queue, Token: client}, Blobs: judge.StoreBlobs{Store: store}},
 		Stale: judge.StaleAfter,
 	})
 	puller.Loop.RequireRunner = *requireRunner

@@ -7,10 +7,10 @@ import (
 )
 
 func TestWorkshopRunsProductTestsUnderTheGatesEnvironment(t *testing.T) {
-	store := newFakeStore()
+	_, store := serve(t)
 	var seen []string
 	builder := Builder{
-		Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: t.TempDir(), Key: func(Action) (string, error) { return keyOf("k"), nil },
+		Store: store, Scratch: t.TempDir(), Cache: t.TempDir(), Key: func(Action) (string, error) { return keyOf("k"), nil },
 		Run: func(_ Action, environment []string) ([]byte, error) {
 			seen = environment
 			return nil, nil

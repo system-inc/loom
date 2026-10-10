@@ -36,9 +36,10 @@ type JobUnit struct {
 	TimeoutSeconds int               `json:"timeoutSeconds"`
 	Resources      Resources         `json:"resources,omitempty"`
 	// Products are built actions the unit runs, fetched by key from the action store at ProductStore before the
-	// command starts (contracts v1.1): refs/action/<key> names a manifest blob, the manifest lists the outputs, and every
-	// hash is checked. A product the store can't give whole finishes the unit broken, never failed. Argv units only, for
-	// now: a test job builds its own command and has no place for them yet.
+	// command starts (contracts v1.1): refs/action/<key> names the product's archive, a gzipped tar, whose hash is
+	// checked and whose every entry must land inside the product. A product the store can't give whole finishes the
+	// unit broken, never failed. Argv units only, for now: a test job builds its own command and has no place for them
+	// yet.
 	Products     []Product `json:"products,omitempty"`
 	ProductStore string    `json:"productStore,omitempty"`
 	// Cache says the unit is hermetic: its result depends on nothing but what its cache key holds, so a

@@ -12,8 +12,9 @@ import (
 )
 
 // fetchProducts places each product the unit runs, by its key, from the action store (contracts v1.1). The store's
-// format has one reader, Builder's: builder.Store.Fetch reads refs/action/<key>, its canonical manifest and every blob,
-// checking each hash, size and path, into a scratch directory of the runner's own. Only then is each file copied into
+// format has one reader, Builder's: builder.Store.FetchProduct reads refs/action/<key> and the archive it names,
+// checking its hash, and unpacks it, refusing any entry outside a buildcache path, into a scratch directory of the
+// runner's own. Only then is each file copied into
 // the workspace through an os.Root, so nothing an earlier input left there (a symlink, say) can steer a product
 // outside it, and nothing is placed over a file already there. The store is public and read without the run's token.
 func (run *unitRun) fetchProducts(runContext context.Context) error {
@@ -31,7 +32,7 @@ func (run *unitRun) fetchProducts(runContext context.Context) error {
 			return runContext.Err()
 		}
 		fetched := filepath.Join(run.staging, fmt.Sprintf("product-%d", index))
-		if err := store.Fetch(product.Key, fetched); err != nil {
+		if err := store.FetchProduct(product.Key, fetched); err != nil {
 			return fmt.Errorf("product %s: %w", product.Key, err)
 		}
 		err := filepath.WalkDir(fetched, func(path string, entry fs.DirEntry, err error) error {

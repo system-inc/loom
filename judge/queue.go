@@ -48,42 +48,6 @@ func (queue HTTPQueue) PostVerdicts(future string, post FuturePost) error {
 	return fmt.Errorf("POST /futures/%s/verdicts: %s: %s", future, response.Status, strings.TrimSpace(string(detail)))
 }
 
-// HTTPBlobs puts a tests list in loom's action store at PUT /actions/blobs/<sha256> with a build token
-// (wire/source/Actions.ts). The store checks the body against the name and keeps an existing blob as it is, so a put
-// is safe to repeat.
-type HTTPBlobs struct {
-	Base  string
-	Token func() (string, error) // a build token, minted per put
-	HTTP  *http.Client
-}
-
-// Put puts the list; any answer but 2xx is an error, and the record that names it isn't posted.
-func (blobs HTTPBlobs) Put(sha256 string, content []byte) error {
-	token, err := blobs.Token()
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequest("PUT", strings.TrimSuffix(blobs.Base, "/")+"/actions/blobs/"+url.PathEscape(sha256), bytes.NewReader(content))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	client := blobs.HTTP
-	if client == nil {
-		client = http.DefaultClient
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode/100 == 2 {
-		return nil
-	}
-	detail, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
-	return fmt.Errorf("PUT /actions/blobs/%s: %s: %s", sha256, response.Status, strings.TrimSpace(string(detail)))
-}
-
 // HTTPReused reads the verdict a reused unit reuses from Queue's index, `GET /verdicts/<unitKey>` with the coordinator
 // token, and holds it to what Queue checked when it took the plan: passed, and from the reused run when one is named.
 type HTTPReused struct {

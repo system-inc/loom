@@ -7,20 +7,13 @@
 // adamic's internal/buildcache made while the test ran, named by their buildcache keys: the runner writes them back
 // into its ADAMIC_BUILD_CACHE_DIR, and the product test then finds them there and builds nothing.
 //
-// The store's contract is wire/source/Actions.ts: a manifest blob, canonical, listing each output's path, sha256,
-// size and whether it is executable; refs/action/<productKey> naming it, written once, by a build token only.
+// The store is store.go's: one gzipped archive of the outputs at blobs/<sha256>, and refs/action/<productKey> naming
+// it, written once, straight to R2 with the builder's own key.
 package builder
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"io/fs"
-	"net/http"
 	"os"
 	"os/exec"
 	"path"
@@ -29,7 +22,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -42,50 +34,9 @@ type Action struct {
 
 // An Output is one file of an action's products, at its path under the cache directory.
 type Output struct {
-	Bytes      int64  `json:"bytes"`
-	Executable bool   `json:"executable"`
-	Path       string `json:"path"`
-	Sha256     string `json:"sha256"`
-}
-
-// A Manifest is what refs/action/<productKey> names: the outputs, sorted by path.
-type Manifest struct {
-	Key     string   `json:"key"`
-	Outputs []Output `json:"outputs"`
-}
-
-// Canonical is the manifest's one byte form, as Actions.ts's canonicalManifest writes it: keys sorted (the struct
-// fields are declared in that order), outputs sorted by path, no whitespace, and no HTML escaping.
-func (manifest Manifest) Canonical() ([]byte, error) {
-	outputs := append([]Output{}, manifest.Outputs...)
-	sort.Slice(outputs, func(left, right int) bool { return outputs[left].Path < outputs[right].Path })
-	var buffer bytes.Buffer
-	encoder := json.NewEncoder(&buffer)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(Manifest{Key: manifest.Key, Outputs: outputs}); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buffer.Bytes(), []byte("\n")), nil
-}
-
-// A Store is the action store: Read is the public bucket's address (refs and blobs read direct, unauthenticated),
-// Write is loom's /actions, and Token a build token, which only a builder holds.
-type Store struct {
-	Read   string
-	Write  string
-	Token  string
-	Client *http.Client
-	// SkipNative leaves out of a fetch every product its buildcache description says clang built, so the runner
-	// builds those itself (Judge's ruling until native products are reproducible, #tsn1wp8): Go products serve.
-	SkipNative bool
-	// Requests counts what this store was asked, for measuring a build's cost (#k62gwdt). Shared by copies of the Store.
-	Requests *Requests
-}
-
-// Requests counts a store's calls: reads are GETs of refs and blobs, writes are PUTs of blobs and refs.
-type Requests struct {
-	Reads  atomic.Int64
-	Writes atomic.Int64
+	Path       string
+	Bytes      int64
+	Executable bool
 }
 
 // nativeToolLine is how buildcache's description of a product names clang among its tools.
@@ -101,171 +52,7 @@ func native(inputs []byte) bool {
 	return false
 }
 
-// ErrNotStored is an action with no ref.
-var ErrNotStored = errors.New("not in the action store")
-
-func (store Store) client() *http.Client {
-	if store.Client != nil {
-		return store.Client
-	}
-	return &http.Client{Timeout: 5 * time.Minute}
-}
-
-func (store Store) get(address string) ([]byte, error) {
-	if store.Requests != nil {
-		store.Requests.Reads.Add(1)
-	}
-	response, err := store.client().Get(address)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotFound {
-		return nil, ErrNotStored
-	}
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s answered %s", address, response.Status)
-	}
-	return io.ReadAll(response.Body)
-}
-
-// blob reads one blob and checks it hashes to what was asked for.
-func (store Store) blob(sum string) ([]byte, error) {
-	content, err := store.get(store.Read + "/blobs/" + sum)
-	if err != nil {
-		return nil, err
-	}
-	if actual := sha256.Sum256(content); hex.EncodeToString(actual[:]) != sum {
-		return nil, fmt.Errorf("blob %s hashes to %x: the store is poisoned", sum, actual)
-	}
-	return content, nil
-}
-
-// Manifest reads refs/action/<key> and the manifest it names, checking the manifest is canonical and for key.
-func (store Store) Manifest(key string) (Manifest, error) {
-	manifest, _, err := store.manifestAndSum(key)
-	return manifest, err
-}
-
-func (store Store) manifestAndSum(key string) (Manifest, string, error) {
-	reference, err := store.get(store.Read + "/refs/action/" + key)
-	if err != nil {
-		return Manifest{}, "", err
-	}
-	target := strings.TrimSpace(string(reference))
-	if !productKeyPattern.MatchString(target) {
-		return Manifest{}, "", fmt.Errorf("refs/action/%s holds %q, not a manifest's sha256: the store is poisoned", key, target[:min(80, len(target))])
-	}
-	content, err := store.blob(target)
-	if err != nil {
-		return Manifest{}, "", err
-	}
-	var manifest Manifest
-	if err = json.Unmarshal(content, &manifest); err != nil {
-		return Manifest{}, "", fmt.Errorf("manifest for %s: %w", key, err)
-	}
-	canonical, err := manifest.Canonical()
-	if err != nil {
-		return Manifest{}, "", err
-	}
-	if manifest.Key != key || !bytes.Equal(canonical, content) {
-		return Manifest{}, "", fmt.Errorf("the manifest refs/action/%s names isn't that key's canonical manifest: the store is poisoned", key)
-	}
-	return manifest, target, nil
-}
-
-// Fetch writes an action's outputs under directory (a runner's ADAMIC_BUILD_CACHE_DIR). Every blob is read and
-// checked against its hash and size into a scratch directory first, and only when all of them check is each product
-// renamed into place whole, as buildcache itself publishes one, so a poisoned store leaves nothing behind. A product
-// already in the cache is left as it is, since its key says what it holds. The runner doesn't trust the store for
-// its own paths: every output is a local path under a buildcache key (<key>/<file> or <key>.inputs), listed once,
-// and it is written through an os.Root on the scratch directory, so nothing a manifest says lands outside it.
-func (store Store) Fetch(key, directory string) error {
-	manifest, err := store.Manifest(key)
-	if err != nil {
-		return err
-	}
-	if err = checkOutputPaths(manifest.Outputs); err != nil {
-		return fmt.Errorf("action %s: %w: the store is poisoned", key, err)
-	}
-	if err = os.MkdirAll(directory, 0o755); err != nil {
-		return err
-	}
-	scratch, err := os.MkdirTemp(directory, ".fetching-"+key[:min(12, len(key))]+"-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(scratch)
-	root, err := os.OpenRoot(scratch)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	// With SkipNative, each product's description is read first, and a product clang built is left out whole.
-	skipped := map[string]bool{}
-	if store.SkipNative {
-		for _, output := range manifest.Outputs {
-			product, isInputs := strings.CutSuffix(output.Path, ".inputs")
-			if !isInputs || strings.Contains(product, "/") {
-				continue
-			}
-			content, err := store.blob(output.Sha256)
-			if err != nil {
-				return fmt.Errorf("action %s, %s: %w", key, output.Path, err)
-			}
-			if native(content) {
-				skipped[product] = true
-			}
-		}
-	}
-	for _, output := range manifest.Outputs {
-		product, _, _ := strings.Cut(strings.TrimSuffix(output.Path, ".inputs"), "/")
-		if skipped[product] {
-			continue
-		}
-		content, err := store.blob(output.Sha256)
-		if err != nil {
-			return fmt.Errorf("action %s, %s: %w", key, output.Path, err)
-		}
-		if int64(len(content)) != output.Bytes {
-			return fmt.Errorf("action %s: %s is %d bytes, the manifest says %d: the store is poisoned", key, output.Path, len(content), output.Bytes)
-		}
-		mode := os.FileMode(0o644)
-		if output.Executable {
-			mode = 0o755
-		}
-		file := filepath.FromSlash(output.Path)
-		if parent := filepath.Dir(file); parent != "." {
-			if err = root.MkdirAll(parent, 0o755); err != nil {
-				return err
-			}
-		}
-		if err = root.WriteFile(file, content, mode); err != nil {
-			return err
-		}
-	}
-	entries, err := os.ReadDir(scratch)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		target := filepath.Join(directory, entry.Name())
-		if _, err := os.Stat(target); err == nil {
-			continue
-		}
-		if err = os.Rename(filepath.Join(scratch, entry.Name()), target); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// FetchAction is Fetch, named for a tree build's actions: each output lands at its own path under directory.
-func (store Store) FetchAction(key, directory string) error {
-	return store.Fetch(key, directory)
-}
-
-// productKeyPattern is a buildcache key, the first part of every output path.
+// productKeyPattern is a buildcache key, the first part of every output path, and a sha256 anywhere in the store.
 var productKeyPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // buildcachePath is a product's file under its buildcache key, <key>/<file>, or its description beside it, <key>.inputs.
@@ -275,38 +62,6 @@ func buildcachePath(path string) bool {
 		return productKeyPattern.MatchString(first) && rest != ""
 	}
 	return strings.HasSuffix(first, ".inputs") && productKeyPattern.MatchString(strings.TrimSuffix(first, ".inputs"))
-}
-
-// treePath is a tree build's output (PublishTree): a package's test binary, the tree's source archive, the tree's
-// index, or a product under cache/.
-func treePath(path string) bool {
-	switch path {
-	case "test", "source.tar", "index.json":
-		return true
-	}
-	rest, under := strings.CutPrefix(path, "cache/")
-	return under && buildcachePath(rest)
-}
-
-// checkOutputPaths refuses a manifest whose outputs a runner shouldn't write: a path that isn't local (empty,
-// absolute, or climbing out with ..), one that's neither a product's (<key>/<file>, <key>.inputs) nor a tree build's
-// (test, source.tar, index.json, cache/<key>/...), or one listed twice.
-func checkOutputPaths(outputs []Output) error {
-	seen := map[string]bool{}
-	for _, output := range outputs {
-		local := filepath.FromSlash(output.Path)
-		if !filepath.IsLocal(local) || filepath.ToSlash(filepath.Clean(local)) != output.Path {
-			return fmt.Errorf("output path %q isn't a clean local path", output.Path)
-		}
-		if !buildcachePath(output.Path) && !treePath(output.Path) {
-			return fmt.Errorf("output path %q isn't under a buildcache key", output.Path)
-		}
-		if seen[output.Path] {
-			return fmt.Errorf("output path %q is listed twice", output.Path)
-		}
-		seen[output.Path] = true
-	}
-	return nil
 }
 
 // Outputs lists every file under directory (a fresh ADAMIC_BUILD_CACHE_DIR after one product test) as the action's
@@ -343,111 +98,13 @@ func Outputs(directory string) ([]Output, map[string]string, error) {
 		if err != nil {
 			return err
 		}
-		content, err := os.ReadFile(file)
-		if err != nil {
-			return err
-		}
-		sum := sha256.Sum256(content)
-		outputs = append(outputs, Output{Bytes: info.Size(), Executable: info.Mode()&0o111 != 0, Path: relative, Sha256: hex.EncodeToString(sum[:])})
+		outputs = append(outputs, Output{Path: relative, Bytes: info.Size(), Executable: info.Mode()&0o111 != 0})
 		files[relative] = file
 		return nil
 	})
 	sort.Slice(outputs, func(left, right int) bool { return outputs[left].Path < outputs[right].Path })
 	return outputs, files, err
 }
-
-// put sends one request to loom with the build token, and returns the status and body.
-func (store Store) put(address string, body []byte) (int, []byte, error) {
-	request, err := http.NewRequest(http.MethodPut, address, bytes.NewReader(body))
-	if err != nil {
-		return 0, nil, err
-	}
-	request.ContentLength = int64(len(body))
-	request.Header.Set("Authorization", "Bearer "+store.Token)
-	if store.Requests != nil {
-		store.Requests.Writes.Add(1)
-	}
-	response, err := store.client().Do(request)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer response.Body.Close()
-	answer, _ := io.ReadAll(io.LimitReader(response.Body, 1<<16))
-	return response.StatusCode, answer, nil
-}
-
-// Upload writes an action: each output's blob, then the canonical manifest, then the ref. A ref the store already
-// holds for the same manifest is fine; one naming another manifest is a ConflictError naming both builders.
-func (store Store) Upload(key string, outputs []Output, files map[string]string) (string, error) {
-	return store.UploadWith(key, outputs, files, nil)
-}
-
-// UploadWith is Upload with Workshop's index: a blob the index holds isn't sent, and every blob and ref the store
-// takes is recorded in it.
-func (store Store) UploadWith(key string, outputs []Output, files map[string]string, index *Index) (string, error) {
-	sendBlob := func(sum string, content func() ([]byte, error), name string) error {
-		if index != nil && index.Blob(sum) {
-			return nil
-		}
-		body, err := content()
-		if err != nil {
-			return err
-		}
-		if status, answer, err := store.put(store.Write+"/blobs/"+sum, body); err != nil || status >= 300 {
-			return fmt.Errorf("blob %s (%s): %d %s %v", sum, name, status, answer, err)
-		}
-		if index != nil {
-			return index.AddBlob(sum)
-		}
-		return nil
-	}
-	for _, output := range outputs {
-		file := files[output.Path]
-		if err := sendBlob(output.Sha256, func() ([]byte, error) { return os.ReadFile(file) }, output.Path); err != nil {
-			return "", err
-		}
-	}
-	canonical, err := Manifest{Key: key, Outputs: outputs}.Canonical()
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(canonical)
-	manifestSha256 := hex.EncodeToString(sum[:])
-	if err := sendBlob(manifestSha256, func() ([]byte, error) { return canonical, nil }, "manifest"); err != nil {
-		return "", err
-	}
-	status, answer, err := store.put(store.Write+"/"+key, []byte(manifestSha256))
-	if err != nil {
-		return "", err
-	}
-	switch {
-	case status == http.StatusCreated || status == http.StatusOK:
-		if index != nil {
-			if err := index.AddRef(key, manifestSha256); err != nil {
-				return "", err
-			}
-		}
-		return manifestSha256, nil
-	case status == http.StatusConflict:
-		var conflict ConflictError
-		if json.Unmarshal(answer, &conflict) == nil && conflict.HeldBuilder != "" {
-			return "", conflict
-		}
-	}
-	return "", fmt.Errorf("ref %s: %d %s", key, status, answer)
-}
-
-// ConflictError is the store's 409 for an action ref: one key, two different manifests, both builders named. It is a
-// reproducibility failure (or a key that isn't honest), and it always fails the build that met it.
-type ConflictError struct {
-	Message     string `json:"error"`
-	Held        string `json:"held"`
-	HeldBuilder string `json:"heldBuilder"`
-	Builder     string `json:"builder"`
-	Sha256      string `json:"sha256"`
-}
-
-func (conflict ConflictError) Error() string { return conflict.Message }
 
 // A Builder builds actions on one tree: Key is Planner's productKey for an action, and Run runs one product test
 // with its environment (go test, in the tree). Every action of one Build shares one buildcache directory, Cache, so
@@ -462,12 +119,6 @@ type Builder struct {
 	Scratch string // where each action's build log goes
 	Jobs    int
 	Report  func(Result) // when set, hears each action's result as it finishes, one at a time
-	Index   *Index       // when set, Workshop's record of the store: deciding reads nothing, uploading skips what it holds
-	// TrustIndex makes an index miss a build with no read: Workshop is the store's only writer, so what its index
-	// lacks the store lacks. A miss the store did hold re-uploads to a 200 (the same bytes) or a 409 naming both
-	// builders (a build that isn't reproducible), so trusting the index can't hide anything; the daily audit counts
-	// what the store holds that the index doesn't.
-	TrustIndex bool
 }
 
 // A Result is what happened to one action.
@@ -475,16 +126,16 @@ type Result struct {
 	Action   Action
 	Key      string
 	Outcome  string // stored (already in the store), built, failed
-	Manifest string
+	Archive  string // the sha256 of its archive
 	Outputs  int
 	Products int
 	Seconds  float64
 	Error    string
 }
 
-// Build builds every action whose productKey the store doesn't hold, once each, and uploads it. An action already
-// stored builds nothing. A product test that fails, or a ref that conflicts, is that action's failure, reported, and
-// never uploaded. Results come back in the actions' order.
+// Build builds every action whose productKey the store doesn't hold whole and fresh, once each, and uploads it. An
+// action already stored builds nothing. A product test that fails, or a ref that conflicts, is that action's failure,
+// reported, and never uploaded. Results come back in the actions' order.
 func (builder Builder) Build(actions []Action) []Result {
 	jobs := max(1, builder.Jobs)
 	results := make([]Result, len(actions))
@@ -578,9 +229,8 @@ func OutputsOf(cache string, products []string) ([]Output, map[string]string, er
 			outputs = append(outputs, output)
 		}
 		inputs := filepath.Join(cache, product+".inputs")
-		if content, err := os.ReadFile(inputs); err == nil {
-			sum := sha256.Sum256(content)
-			outputs = append(outputs, Output{Bytes: int64(len(content)), Path: product + ".inputs", Sha256: hex.EncodeToString(sum[:])})
+		if info, err := os.Stat(inputs); err == nil {
+			outputs = append(outputs, Output{Path: product + ".inputs", Bytes: info.Size()})
 			files[product+".inputs"] = inputs
 		}
 	}
@@ -604,41 +254,18 @@ func (builder Builder) build(action Action) Result {
 		return finish("failed", fmt.Errorf("productKey: %w", err))
 	}
 	result.Key = key
-	if builder.Index != nil {
-		if manifest, held := builder.Index.Ref(key); held {
-			result.Manifest = manifest
-			return finish("stored", nil)
-		}
-	}
-	// An index miss (or no index) asks the store once, unless the index is trusted; what the store holds goes into
-	// the index, so the next build reads nothing for this key.
-	if builder.Index != nil && builder.TrustIndex {
-		return builder.buildAndUpload(action, key, &result, finish)
-	}
-	switch manifest, manifestSum, err := builder.Store.manifestAndSum(key); {
-	case err == nil:
-		if builder.Index != nil {
-			for _, output := range manifest.Outputs {
-				if err = builder.Index.AddBlob(output.Sha256); err != nil {
-					return finish("failed", err)
-				}
-			}
-			if err = builder.Index.AddBlob(manifestSum); err != nil {
-				return finish("failed", err)
-			}
-			if err = builder.Index.AddRef(key, manifestSum); err != nil {
-				return finish("failed", err)
-			}
-		}
-		result.Manifest = manifestSum
-		return finish("stored", nil)
-	case !errors.Is(err, ErrNotStored):
+	archive, stored, err := builder.Store.Stored(key)
+	if err != nil {
 		return finish("failed", err)
+	}
+	if stored {
+		result.Archive = archive
+		return finish("stored", nil)
 	}
 	return builder.buildAndUpload(action, key, &result, finish)
 }
 
-// buildAndUpload runs one action's product test and uploads what it used.
+// buildAndUpload runs one action's product test and uploads what it used, as one archive.
 func (builder Builder) buildAndUpload(action Action, key string, result *Result, finish func(string, error) Result) Result {
 	if err := os.MkdirAll(builder.Cache, 0o755); err != nil {
 		return finish("failed", err)
@@ -661,18 +288,18 @@ func (builder Builder) buildAndUpload(action Action, key string, result *Result,
 	if err != nil {
 		return finish("failed", err)
 	}
-	// A product test that passed and used no buildcache product is stored too, with no outputs, so the next build
-	// knows it needs nothing rather than running it again.
-	outputs, files, err := OutputsOf(builder.Cache, products)
+	// A product test that passed and used no buildcache product is stored too, as an empty archive, so the next
+	// build knows it needs nothing rather than running it again.
+	archive, files, err := ProductArchive(builder.Cache, products)
 	if err != nil {
 		return finish("failed", err)
 	}
-	result.Products, result.Outputs = len(products), len(outputs)
-	manifest, err := builder.Store.UploadWith(key, outputs, files, builder.Index)
-	result.Manifest = manifest
+	result.Products, result.Outputs = len(products), files
+	sum, err := builder.Store.Publish(key, archive)
 	if err != nil {
 		return finish("failed", err)
 	}
+	result.Archive = sum
 	return finish("built", nil)
 }
 

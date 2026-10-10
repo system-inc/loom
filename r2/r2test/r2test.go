@@ -23,8 +23,9 @@ import (
 	"github.com/system-inc/loom/r2"
 )
 
-// A Fake is one bucket. Now is its clock (nil means time.Now), PageSize how many keys a listing page holds, and
-// Refused hears each badly signed request (nil means the test fails).
+// A Fake is one bucket. Now is its clock (nil means time.Now), PageSize how many keys a listing page holds,
+// Refused hears each badly signed request (nil means the test fails), and Before, when set, runs before each signed
+// request on a key is answered, so a test can race another writer in.
 type Fake struct {
 	Server      *httptest.Server
 	Credentials r2.Credentials
@@ -32,6 +33,7 @@ type Fake struct {
 	Now         func() time.Time
 	PageSize    int
 	Refused     func(problem string)
+	Before      func(method, key string)
 
 	t        testing.TB
 	mutex    sync.Mutex
@@ -126,7 +128,8 @@ func (fake *Fake) Keys(prefix string) []string {
 	return keys
 }
 
-// Requests are the S3 requests the fake took, "<method> <key>", in order, a listing as "LIST <prefix>".
+// Requests are the requests the fake took, "<method> <key>", in order: a listing as "LIST <prefix>", and a read
+// of the public domain as "PUBLIC <key>".
 func (fake *Fake) Requests() []string {
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
@@ -198,6 +201,7 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	body, _ := io.ReadAll(request.Body)
 	if key, public := strings.CutPrefix(request.URL.Path, "/public/"); public {
 		fake.mutex.Lock()
+		fake.requests = append(fake.requests, "PUBLIC "+key)
 		held, found := fake.objects[key]
 		fake.mutex.Unlock()
 		if request.Method != http.MethodGet || !found {
@@ -225,6 +229,9 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if !inBucket || key == "" {
 		fail(writer, http.StatusNotFound, "NoSuchBucket", path)
 		return
+	}
+	if fake.Before != nil {
+		fake.Before(request.Method, key)
 	}
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()

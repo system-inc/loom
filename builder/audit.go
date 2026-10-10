@@ -1,110 +1,68 @@
 package builder
 
 import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"net/url"
 	"sort"
+	"strings"
 )
 
-// List reads every key the action store holds under prefix ("refs", the action refs' product keys, or "blobs", the
-// blobs' sha256s), page by page from loom's /actions/list with the build token.
-func (store Store) List(prefix string) ([]string, error) {
-	keys := []string{}
-	cursor := ""
-	for {
-		request, err := http.NewRequest(http.MethodGet, store.Write+"/list?prefix="+prefix+"&cursor="+url.QueryEscape(cursor), nil)
-		if err != nil {
-			return nil, err
-		}
-		request.Header.Set("Authorization", "Bearer "+store.Token)
-		if store.Requests != nil {
-			store.Requests.Reads.Add(1)
-		}
-		response, err := store.client().Do(request)
-		if err != nil {
-			return nil, err
-		}
-		var page struct {
-			Keys   []string `json:"keys"`
-			Cursor *string  `json:"cursor"`
-		}
-		err = json.NewDecoder(response.Body).Decode(&page)
-		response.Body.Close()
-		if response.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("listing %s: %s", prefix, response.Status)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("listing %s: %w", prefix, err)
-		}
-		keys = append(keys, page.Keys...)
-		if page.Cursor == nil {
-			return keys, nil
-		}
-		cursor = *page.Cursor
-	}
-}
-
-// An AuditReport compares Workshop's index with the store's own listing. Drift is what the index claims and the
-// store lacks: a build trusting the index would skip what isn't there, so it pages. A ref only the store holds is
-// unseeded (written before the index existed, or by another writer) and is reported; the public bucket's blobs/
-// also holds other tiers' blobs, so blobs outside the index are only counted.
+// An AuditReport is the store checked against itself, listed through R2's S3 interface (ListObjectsV2) with the
+// builder's key. A runner reads a ref, or a tree's index, and then the blob it names, so a ref written within
+// FreshFor whose blob is gone is drift: Dangling. So is a ref whose blob was uploaded more than FreshFor before it
+// (Stale), since that blob expires days before its ref, which Publish never writes. A ref older than FreshFor is
+// near its own end, and the lifecycle may take its blob a little before it, so it is only counted (Expiring).
 type AuditReport struct {
-	IndexRefs, IndexBlobs  int
-	StoreRefs, StoreBlobs  int
-	MissingRefs            []string `json:",omitempty"`
-	MissingBlobs           []string `json:",omitempty"`
-	UnindexedRefs          int
-	StoreBlobsOutsideIndex int
+	Refs, Blobs, Trees int
+	Expiring           int
+	Dangling           []string `json:",omitempty"`
+	Stale              []string `json:",omitempty"`
 }
 
-// Drift reports whether the index claims anything the store lacks.
+// Drift reports whether a fresh ref names a blob the store lacks or one about to expire before it.
 func (report AuditReport) Drift() bool {
-	return len(report.MissingRefs) > 0 || len(report.MissingBlobs) > 0
+	return len(report.Dangling) > 0 || len(report.Stale) > 0
 }
 
-// Audit lists the store and checks the index against it.
-func Audit(store Store, index *Index) (AuditReport, error) {
-	refs, err := store.List("refs")
+// Audit lists the store's refs, blobs and trees, and reads each ref to check the blob it names.
+func Audit(store Store) (AuditReport, error) {
+	store.read()
+	refs, err := store.Bucket.List("refs/action/")
 	if err != nil {
 		return AuditReport{}, err
 	}
-	blobs, err := store.List("blobs")
+	store.read()
+	blobs, err := store.Bucket.List("blobs/")
 	if err != nil {
 		return AuditReport{}, err
 	}
-	storeRefs, storeBlobs := map[string]bool{}, map[string]bool{}
-	for _, key := range refs {
-		storeRefs[key] = true
+	store.read()
+	trees, err := store.Bucket.List("trees/")
+	if err != nil {
+		return AuditReport{}, err
 	}
-	for _, sum := range blobs {
-		storeBlobs[sum] = true
+	uploaded := map[string]int64{}
+	for _, blob := range blobs {
+		uploaded[strings.TrimPrefix(blob.Key, "blobs/")] = blob.Modified.Unix()
 	}
-	index.mutex.Lock()
-	defer index.mutex.Unlock()
-	report := AuditReport{IndexRefs: len(index.refs), IndexBlobs: len(index.blobs), StoreRefs: len(storeRefs), StoreBlobs: len(storeBlobs)}
-	for key := range index.refs {
-		if !storeRefs[key] {
-			report.MissingRefs = append(report.MissingRefs, key)
+	report := AuditReport{Refs: len(refs), Blobs: len(blobs), Trees: len(trees)}
+	for _, ref := range refs {
+		key := strings.TrimPrefix(ref.Key, "refs/action/")
+		if store.now().Sub(ref.Modified) >= FreshFor {
+			report.Expiring++
+			continue
+		}
+		sum, err := store.heldRef(key)
+		if err != nil {
+			return AuditReport{}, err
+		}
+		blobUploaded, held := uploaded[sum]
+		switch {
+		case sum == "" || !held:
+			report.Dangling = append(report.Dangling, key)
+		case ref.Modified.Unix()-blobUploaded > int64(FreshFor.Seconds()):
+			report.Stale = append(report.Stale, key)
 		}
 	}
-	for sum := range index.blobs {
-		if !storeBlobs[sum] {
-			report.MissingBlobs = append(report.MissingBlobs, sum)
-		}
-	}
-	for key := range storeRefs {
-		if _, known := index.refs[key]; !known {
-			report.UnindexedRefs++
-		}
-	}
-	for sum := range storeBlobs {
-		if !index.blobs[sum] {
-			report.StoreBlobsOutsideIndex++
-		}
-	}
-	sort.Strings(report.MissingRefs)
-	sort.Strings(report.MissingBlobs)
+	sort.Strings(report.Dangling)
+	sort.Strings(report.Stale)
 	return report, nil
 }

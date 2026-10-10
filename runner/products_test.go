@@ -1,22 +1,25 @@
 package runner
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/protocol"
 )
 
-// productStore is the public action store as artifacts.loom.system.inc serves it: refs/action/<key> holds a
-// manifest's sha256 as text, and blobs/<sha256> holds bytes. It notes every Authorization header it was sent.
+// productStore is the public action store as artifacts.loom.system.inc serves it: refs/action/<key> holds an
+// archive's sha256 as text, and blobs/<sha256> holds bytes. It notes every Authorization header it was sent.
 type productStore struct {
 	mutex   sync.Mutex
 	objects map[string][]byte
@@ -48,22 +51,37 @@ func digest(bytes []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// build puts a product's outputs, its manifest and its ref in the store, as a builder would. edit, when given, changes
-// the manifest before it is stored, for the cases where a builder or a store lies.
-func (store *productStore) build(key string, files map[string]string, executable map[string]bool, edit func(*builder.Manifest)) {
+// build puts a product's archive, a gzipped tar of files, and its ref in the store, as a builder would. Its entries
+// go in as given, unchecked, for the cases where a builder or a store lies.
+func (store *productStore) build(key string, files map[string]string, executable map[string]bool) []byte {
+	var buffer bytes.Buffer
+	compressor := gzip.NewWriter(&buffer)
+	writer := tar.NewWriter(compressor)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		mode := int64(0o644)
+		if executable[name] {
+			mode = 0o755
+		}
+		writer.WriteHeader(&tar.Header{Name: name, Mode: mode, Size: int64(len(files[name])), Typeflag: tar.TypeReg})
+		writer.Write([]byte(files[name]))
+	}
+	writer.Close()
+	compressor.Close()
+	store.put(key, buffer.Bytes())
+	return buffer.Bytes()
+}
+
+// put stores archive under its sha256 and points key's ref at it.
+func (store *productStore) put(key string, archive []byte) {
 	store.mutex.Lock()
 	defer store.mutex.Unlock()
-	manifest := builder.Manifest{Key: key}
-	for path, text := range files {
-		store.objects["blobs/"+digest([]byte(text))] = []byte(text)
-		manifest.Outputs = append(manifest.Outputs, builder.Output{Bytes: int64(len(text)), Executable: executable[path], Path: path, Sha256: digest([]byte(text))})
-	}
-	if edit != nil {
-		edit(&manifest)
-	}
-	encoded, _ := manifest.Canonical()
-	store.objects["blobs/"+digest(encoded)] = encoded
-	store.objects["refs/action/"+key] = []byte(digest(encoded) + "\n")
+	store.objects["blobs/"+digest(archive)] = archive
+	store.objects["refs/action/"+key] = []byte(digest(archive) + "\n")
 }
 
 var productKey = strings.Repeat("a", 64)
@@ -87,11 +105,11 @@ func fetchError(events []protocol.Event) string {
 	return ""
 }
 
-// Runners fetch and never build (contracts v1.1): a product's outputs land in its directory, each at its manifest
-// path, executable where the manifest says, before the command runs; and the run's token never goes to the public store.
+// Runners fetch and never build (contracts v1.1): a product's outputs land in its directory, each at its archive
+// path, executable where the archive says, before the command runs; and the run's token never goes to the public store.
 func TestAProductsOutputsLandInItsDirectoryBeforeTheCommand(t *testing.T) {
 	store := newProductStore(t)
-	store.build(productKey, map[string]string{cached + "lint": "#!/bin/sh\necho linted\n", cached + "rules.json": "{}\n"}, map[string]bool{cached + "lint": true}, nil)
+	store.build(productKey, map[string]string{cached + "lint": "#!/bin/sh\necho linted\n", cached + "rules.json": "{}\n"}, map[string]bool{cached + "lint": true})
 	directory := "products/lint/" + cached
 	unit := productUnit(store, "sh", "-c", directory+"lint && cat "+directory+"rules.json && [ ! -x "+directory+"rules.json ] && echo modes")
 	result, events, _ := runUnit(t, unit, testOptions(t))
@@ -122,23 +140,24 @@ func TestAProductTheStoreCantGiveWholeBreaksTheUnitAndTheCommandNeverRuns(t *tes
 		says  string
 	}{
 		"never built": {func(store *productStore) {}, "not in the action store"},
-		"blob bytes that aren't their hash": {func(store *productStore) {
-			store.build(productKey, map[string]string{cached + "lint": "real"}, nil, nil)
+		"an archive that isn't its hash": {func(store *productStore) {
+			archive := store.build(productKey, map[string]string{cached + "lint": "real"}, nil)
 			// Same length as the real bytes, so only the hash can tell them apart.
-			store.objects["blobs/"+digest([]byte("real"))] = []byte("fake")
+			store.objects["blobs/"+digest(archive)] = append(archive[:len(archive)-1:len(archive)-1], archive[len(archive)-1]^1)
 		}, "poisoned"},
-		"a manifest for another key": {func(store *productStore) {
-			store.build(productKey, map[string]string{cached + "lint": "x"}, nil, func(manifest *builder.Manifest) { manifest.Key = strings.Repeat("b", 64) })
+		"a corrupted archive under its own hash": {func(store *productStore) {
+			archive := store.build(productKey, map[string]string{cached + "lint": "x"}, nil)
+			store.put(productKey, archive[:len(archive)/2])
 		}, "poisoned"},
 		"a path out of the product": {func(store *productStore) {
-			store.build(productKey, map[string]string{cached + "lint": "x"}, nil, func(manifest *builder.Manifest) { manifest.Outputs[0].Path = "../../escape" })
+			store.build(productKey, map[string]string{"../../escape": "x"}, nil)
 		}, "poisoned"},
-		"a size the manifest doesn't say": {func(store *productStore) {
-			store.build(productKey, map[string]string{cached + "lint": "x"}, nil, func(manifest *builder.Manifest) { manifest.Outputs[0].Bytes = 2 })
-		}, "the manifest says 2"},
+		"a path under no buildcache key": {func(store *productStore) {
+			store.build(productKey, map[string]string{"lint": "x"}, nil)
+		}, "poisoned"},
 		"a ref that isn't a hash": {func(store *productStore) {
 			store.objects["refs/action/"+productKey] = []byte("latest")
-		}, "not a manifest's sha256"},
+		}, "not an archive's sha256"},
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {

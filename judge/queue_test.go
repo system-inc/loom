@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/r2/r2test"
 )
 
 var hashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -103,26 +106,22 @@ func TestARefusedBatchIsAnError(t *testing.T) {
 	}
 }
 
-func TestHTTPBlobsPutsTheListWithABuildToken(t *testing.T) {
-	var path, authorization, body string
-	status := http.StatusCreated
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		content, _ := io.ReadAll(request.Body)
-		path, authorization, body = request.Method+" "+request.URL.Path, request.Header.Get("Authorization"), string(content)
-		writer.WriteHeader(status)
-	}))
-	defer server.Close()
-	blobs := HTTPBlobs{Base: server.URL, Token: func() (string, error) { return "build-token", nil }}
+func TestStoreBlobsPutsTheListStraightIntoTheBucketOnce(t *testing.T) {
+	fake := r2test.New(t)
+	bucket := fake.Bucket()
+	blobs := StoreBlobs{Store: builder.Store{Bucket: &bucket}}
 	content, ref := TestsList([]TestOutcome{outcome("TestA", "pass")})
 	if err := blobs.Put(ref.Sha256, content); err != nil {
 		t.Fatal(err)
 	}
-	if path != "PUT /actions/blobs/"+ref.Sha256 || authorization != "Bearer build-token" || body != string(content) {
-		t.Fatalf("%s %s %s", path, authorization, body)
+	if held, found := fake.Object("blobs/" + ref.Sha256); !found || string(held) != string(content) {
+		t.Fatalf("the bucket holds %q", held)
 	}
-	status = http.StatusBadRequest
-	if err := blobs.Put(ref.Sha256, content); err == nil {
-		t.Fatal("a refused put read as stored")
+	if err := blobs.Put(ref.Sha256, content); err != nil || fake.Count("PUT", "blobs/") != 1 {
+		t.Fatalf("a second put of a fresh list: %v, %v", err, fake.Requests())
+	}
+	if err := blobs.Put(strings.Repeat("b", 64), content); err == nil || fake.Count("PUT", "blobs/") != 1 {
+		t.Fatalf("a list under another name: %v", err)
 	}
 }
 
