@@ -36,7 +36,7 @@ type Queue interface {
 }
 
 // HTTPQueue calls the Queue at Base with a coordinator token minted from Secret for each call, good for ten minutes,
-// as queue_bridge.py's token() minted it.
+// the way the wire verifies it (wire/source/Token.ts).
 type HTTPQueue struct {
 	Base   string
 	Secret []byte
