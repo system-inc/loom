@@ -178,9 +178,10 @@ type Event struct {
 }
 
 // A Timing is what only the runner knows of a unit's time and size, as fields: one timing event, just before finished
-// (#g1jvdbq). The judge gathers it with the unit's started, exit and finished events and its placement into one row
-// a day's table keeps (units/<day>.jsonl), so a unit's time is read across runs without parsing streams. Every field
-// is left off at zero: a phase the unit didn't have, a source it read nothing from, a peak no cgroup measured.
+// (#g1jvdbq). The judge gathers it with the unit's started, exit and finished events and its placement into one row,
+// kept with its run's other rows (units/<YYYY>/<MM>/<DD>/<run>.jsonl), so a unit's time is read across runs without
+// parsing streams. Every field is left off at zero: a phase the unit didn't have, a source it read nothing from, a peak
+// no cgroup measured.
 type Timing struct {
 	// The unit's phases, in seconds: fetching what it reads (blobs from the store, or the checkout's commit), unpacking
 	// them, readying the environment, and its tests.
