@@ -35,7 +35,7 @@ class FakePipeline:
 class FakeGate:
     def __init__(self, record=None, landing=(0, "", ""), holds=True):
         self.found, self.landing, self.holds = record, landing, holds
-        self.queued, self.landed = [], []
+        self.queued, self.landed, self.requeued = [], [], []
 
     def record(self, tree):
         return self.found
@@ -50,6 +50,10 @@ class FakeGate:
         self.queued.append(tree)
         return True
 
+    def requeue(self, sha):
+        self.requeued.append(sha)
+        return True
+
     def land(self, record, tree, label):
         self.landed.append((record, tree))
         return self.landing
@@ -62,7 +66,7 @@ class FakeGate:
 
 
 def memory():
-    return {"queued": [], "posted": [], "held": []}
+    return {"queued": [], "posted": [], "held": [], "requeued": []}
 
 
 future = {"future": tree, "tree": tree, "base": old, "changes": [change]}
@@ -90,6 +94,15 @@ class Tick(unittest.TestCase):
             queue_bridge.tick(pipeline, gate, held)
             self.assertEqual(pipeline.posts(), [("/verdicts", {"change": change, "verdict": {
                 "future": tree, "run": "gate-logs/r/fast", "status": verdict, "cause": cause, "rule": "todays-gate-v0"}})])
+
+    def test_a_void_is_served_once_more_and_only_once(self):
+        pipeline, held = FakePipeline([future]), memory()
+        gate = FakeGate({"ref": "gate-logs/r1/fast", "status": "void", "gated": tree})
+        queue_bridge.tick(pipeline, gate, held)
+        gate.found = {"ref": "gate-logs/r2/fast", "status": "void", "gated": tree}
+        queue_bridge.tick(pipeline, gate, held)
+        self.assertEqual(gate.requeued, [tree])
+        self.assertEqual(len(pipeline.posts()), 2)
 
     def test_a_gate_merge_of_the_tree_is_its_future_and_any_other_tree_is_void(self):
         pipeline = FakePipeline([future])

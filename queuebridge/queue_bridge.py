@@ -10,7 +10,8 @@ take over. Each tick, from Kirk's Mac beside the gate lane:
    passed, red is failed with cause change (the judge's stub: any red is the change's), void is void. Main moves often,
    so the gate usually tests the change merged onto a newer main (a gate merge, second parent the change's sha): that
    merge becomes the change's future, posted with its first parent as gateMerge.base, and it is what lands. A record
-   of any other tree is void for this future.
+   of any other tree is void for this future. A void is served once more (requeue.sh, the old path's one requeue),
+   since fast-gate-watch never gates a sha twice on its own.
 2. Every landing order goes through Kirk's push script, push-main.sh --fast-gate on the order's record. A landing is
    reported with the new main, the main it moved from, and the tree it landed, once git shows that tree on main. A
    hold (exit 3) or main's pause waits; any other refusal is reported, which parks the change.
@@ -26,6 +27,7 @@ state = os.environ.get("QUEUE_BRIDGE_STATE", os.path.expanduser("~/.loom/queue-b
 repository = os.environ.get("QUEUE_BRIDGE_REPOSITORY", os.path.expanduser("~/Projects/system/adamic"))
 pushMain = os.environ.get("QUEUE_BRIDGE_PUSH_MAIN", os.path.expanduser("~/.adamic-merge-tree/cloud/integration/push-main.sh"))
 secretPath = os.environ.get("QUEUE_BRIDGE_SECRET", os.path.expanduser("~/.loom/token-secret"))
+requeueScript = os.environ.get("QUEUE_BRIDGE_REQUEUE", os.path.expanduser("~/.loom/bin/requeue.sh"))
 github = "system-inc/adamic"
 rule = "todays-gate-v0"
 
@@ -107,6 +109,11 @@ class Gate:
                              capture_output=True, text=True, timeout=60)
         return ran.returncode == 0 or "Reference already exists" in ran.stdout + ran.stderr
 
+    def requeue(self, sha):
+        """Serves sha's fast job again (requeue.sh). True when it started."""
+        ran = subprocess.run(["bash", requeueScript, sha], capture_output=True, text=True, timeout=120)
+        return ran.returncode == 0
+
     def land(self, record, tree, label):
         """push-main.sh --fast-gate on the record: (exit code, stdout, stderr)."""
         ran = subprocess.run(["bash", pushMain, "--fast-gate", record, tree, label], capture_output=True, text=True,
@@ -174,6 +181,9 @@ def tick(pipeline, gate, memory):
         log("verdict %s %s on %s: %d %s" % (change, body["verdict"]["status"], record["ref"], status, answer))
         if status in (200, 409):
             memory["posted"].append(key)
+        if body["verdict"]["status"] == "void" and status == 200 and tree not in memory["requeued"]:
+            memory["requeued"].append(tree)
+            log("requeued %s after its void: %s" % (tree[:12], "started" if gate.requeue(tree) else "requeue.sh refused"))
     status, orders = pipeline.call("GET", "/landings")
     if status != 200:
         log("landings: %d %s" % (status, orders))
@@ -208,7 +218,7 @@ def main():
         return
     path = os.path.join(state, "memory.json")
     memory = json.load(open(path)) if os.path.exists(path) else {}
-    for name in ("queued", "posted", "held"):
+    for name in ("queued", "posted", "held", "requeued"):
         memory.setdefault(name, [])
     try:
         tick(Pipeline(pipeline, token()), Gate(), memory)
