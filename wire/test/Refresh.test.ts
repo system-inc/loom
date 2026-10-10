@@ -136,7 +136,9 @@ describe('a cache entry', function () {
         for (const body of [output, events]) {
             expect((await call(blobPath(run, await sha256Hex(body)), { method: 'PUT', bearer: coordinator, body: body })).status).toBe(201);
         }
-        const first = await uploaded(env.Store, blobKey(await sha256Hex(output)));
+        // Each blob against its own first upload: the event log went up after the output, so it can't stand in for it.
+        const firstOutput = await uploaded(env.Store, blobKey(await sha256Hex(output)));
+        const firstEvents = await uploaded(env.Store, blobKey(await sha256Hex(events)));
         age(stale);
         const key = await sha256Hex(randomBytes(32));
         const entry = {
@@ -151,7 +153,7 @@ describe('a cache entry', function () {
         };
         const put = await call(`/cache/${key}`, { method: 'PUT', bearer: await token(run, 'coordinator'), body: JSON.stringify(entry) });
         expect(put.status).toBe(201);
-        expect(await uploaded(env.Store, blobKey(await sha256Hex(output)))).toBeGreaterThan(first);
-        expect(await uploaded(env.Store, blobKey(await sha256Hex(events)))).toBeGreaterThan(first);
+        expect(await uploaded(env.Store, blobKey(await sha256Hex(output)))).toBeGreaterThan(firstOutput);
+        expect(await uploaded(env.Store, blobKey(await sha256Hex(events)))).toBeGreaterThan(firstEvents);
     });
 });
