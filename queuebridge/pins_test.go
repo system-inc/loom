@@ -132,6 +132,10 @@ func pinned(t *testing.T, clone Clone, files map[string]string, links map[string
 }
 
 func TestEveryPinIsFoundRecursivelyAndProvenFetchable(t *testing.T) {
+	// The scratch stores go under a temporary directory of this test's own, so another process's (this test run
+	// elsewhere at once) is never counted as left behind.
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
 	served := newServer(t)
 	typeScript := commitIn(t, map[string]string{"src/a.ts": "let a = 1\n"}, nil, served.repository(t, "TypeScript"))
 	cohere := commitIn(t, map[string]string{".gitmodules": gitmodules([2]string{"TypeScript", github("TypeScript")}), "a.go": "package cohere\n"},
@@ -150,7 +154,7 @@ func TestEveryPinIsFoundRecursivelyAndProvenFetchable(t *testing.T) {
 		t.Fatalf("no gitlinks: %+v, %v", pins, err)
 	}
 	// The scratch stores are gone.
-	if left, _ := filepath.Glob(filepath.Join(os.TempDir(), "loom-pins-*")); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(scratch, "loom-pins-*")); len(left) != 0 {
 		t.Fatalf("scratch left behind: %q", left)
 	}
 }
