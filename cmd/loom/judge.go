@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,11 +14,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/system-inc/loom/coordinator"
-	"github.com/system-inc/loom/jsonlines"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/placer"
 	"github.com/system-inc/loom/planner"
@@ -727,19 +728,54 @@ func rerunTree(treeGit string, indexed func(tree string) (bool, error), sha, pla
 	return tree, "", nil
 }
 
-// placedFrom reads when a run was placed from the placer's ledger at path, read fresh at each ask without the placer's
-// lock: the newest record naming the run. A ledger that can't be read places nothing, and the rows say no queue wait.
+// placedFrom reads when a run was placed from the placer's ledger at path, without the placer's lock: the newest record
+// naming the run. The ledger only grows between compactions, so each ask reads only the lines appended since the last
+// one into an index by run; a compaction (a new file renamed over it) or a cut-back (a smaller file) reads it whole
+// again. A ledger that can't be read places nothing, and the rows say no queue wait.
 func placedFrom(path string) judge.PlacedOf {
-	return func(run string) (string, bool) {
-		records, err := jsonlines.Read[placer.Record](path)
+	index := &placedIndex{path: path}
+	return index.placed
+}
+
+// A placedIndex is the placer ledger's placed time by run, as of offset bytes into the file it last read.
+type placedIndex struct {
+	mutex  sync.Mutex
+	path   string
+	file   os.FileInfo
+	offset int64
+	at     map[string]string
+}
+
+func (index *placedIndex) placed(run string) (string, bool) {
+	index.mutex.Lock()
+	defer index.mutex.Unlock()
+	info, err := os.Stat(index.path)
+	if err != nil {
+		return "", false
+	}
+	if index.file == nil || !os.SameFile(index.file, info) || info.Size() < index.offset {
+		index.offset, index.at = 0, map[string]string{}
+	}
+	index.file = info
+	if info.Size() > index.offset {
+		file, err := os.Open(index.path)
 		if err != nil {
 			return "", false
 		}
-		for index := len(records) - 1; index >= 0; index-- {
-			if records[index].Run == run && records[index].At != "" {
-				return records[index].At, true
+		defer file.Close()
+		appended := make([]byte, info.Size()-index.offset)
+		read, _ := file.ReadAt(appended, index.offset)
+		appended = appended[:read]
+		// Only whole lines: a line the placer is still writing is read on the next ask.
+		whole := bytes.LastIndexByte(appended, '\n') + 1
+		for _, line := range bytes.Split(appended[:whole], []byte("\n")) {
+			var record placer.Record
+			if json.Unmarshal(line, &record) == nil && record.Run != "" && record.At != "" {
+				index.at[record.Run] = record.At
 			}
 		}
-		return "", false
+		index.offset += int64(whole)
 	}
+	at, found := index.at[run]
+	return at, found
 }
