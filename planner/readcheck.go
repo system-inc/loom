@@ -3,6 +3,7 @@ package planner
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -74,9 +75,12 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 	if err != nil {
 		return nil, ReadSet{}, err
 	}
-	present := map[string]bool{}
+	present, made := map[string]bool{}, map[string]bool{}
 	for _, path := range accesses.Present {
 		present[path] = true
+	}
+	for _, path := range accesses.Made {
+		made[path] = true
 	}
 	inKey, keyedGitlinks := map[string]bool{}, map[string]bool{}
 	if keyed != nil {
@@ -123,7 +127,9 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 				// A .. after a name stays for the index to resolve as the kernel did.
 				relative, ok = uncleaned, true
 			}
-			if !ok || declared[relative] {
+			// A declared submodule (a reads line naming cohere) is held whole only by a key with no read set; a set
+			// replaces it, so the submodule's own root is measured like any path in it.
+			if _, gitlink := index.gitlinks[relative]; !ok || declared[relative] && !gitlink {
 				continue
 			}
 			// A path in a submodule, or one that resolves into one through a symlink (a superproject testdata link
@@ -143,6 +149,11 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 				untracked := ""
 				if _, isTracked := index.entries[resolved.resolved]; (group.read || group.listing || present[path]) && !resolved.outside &&
 					!isTracked && index.children[resolved.resolved] == nil {
+					untracked = index.submoduleOf(resolved.resolved)
+				}
+				if untracked == "" && group.listing && !resolved.outside && listsUntracked(tree, root, resolved.resolved, index, made) {
+					// A listing names every entry the run saw, and one the submodule doesn't track (what an install
+					// left there) has no state but the submodule's commit.
 					untracked = index.submoduleOf(resolved.resolved)
 				}
 				if untracked != "" {
@@ -205,6 +216,37 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 		measured = keyed.Union(measured)
 	}
 	return findings, measured.normal(), nil
+}
+
+// listsUntracked says whether a listed directory, on the checkout the run ran in, holds an entry the index doesn't
+// track and the run didn't make: its listing saw a name no key part holds. A directory it can't read counts, since
+// what the run saw there is unknown. A submodule's .git is git's own and never counts.
+func listsUntracked(tree, root, directory string, index *submoduleIndex, made map[string]bool) bool {
+	entries, err := os.ReadDir(filepath.Join(tree, filepath.FromSlash(directory)))
+	if err != nil {
+		return true
+	}
+	madeByRun := func(path string) bool {
+		for candidate := path; ; candidate = filepath.Dir(candidate) {
+			if made[candidate] {
+				return true
+			}
+			if parent := filepath.Dir(candidate); parent == candidate {
+				return false
+			}
+		}
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == ".git" || index.children[directory][name] || index.children[directory][name+"/"] {
+			continue
+		}
+		// The trace names a path by the tree's spelling or its resolved one.
+		if !madeByRun(filepath.Join(tree, filepath.FromSlash(directory), name)) && !madeByRun(filepath.Join(root, filepath.FromSlash(directory), name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // uncleanedRelative is an uncleaned path's (uncleanedPath's) repo-relative name, and whether it is one: a path that

@@ -199,6 +199,7 @@ func TestTraceAccessesReadsLookupsAndListings(t *testing.T) {
 			"/work/sub/missing.txt", "/work/sub/probe", "/work/sub/x"},
 		Listings: []string{"/work/sub/dir"},
 		Present:  []string{"/work/sub/bin/tool", "/work/sub/data.txt", "/work/sub/dir", "/work/sub/link", "/work/sub/probe", "/work/sub/x"},
+		Made:     []string{"/work/sub/made", "/work/sub/out.txt"},
 	}
 	if !reflect.DeepEqual(accesses, want) {
 		t.Fatalf("accesses\n%q\nwant\n%q", accesses, want)
@@ -239,6 +240,7 @@ func TestTraceAccessesFollowEachProcesssWorkingDirectory(t *testing.T) {
 		Lookups:  []string{"/work/default/x/orphan.txt", "/work/sub", "/work/sub/data.txt", "/work/sub/dir/b.txt"},
 		Listings: []string{},
 		Present:  []string{"/work/sub", "/work/sub/data.txt"},
+		Made:     []string{},
 	}
 	if !reflect.DeepEqual(accesses, want) {
 		t.Fatalf("accesses\n%q\nwant\n%q", accesses, want)
@@ -285,6 +287,7 @@ func TestTraceAccessesLeaveOutWhatTheRunMade(t *testing.T) {
 		Lookups:  []string{"/w/sub/cache", "/w/sub/input.txt", "/w/sub/log.txt", "/w/sub/old.txt", "/w/sub/out.txt"},
 		Listings: []string{},
 		Present:  []string{"/w/sub/input.txt", "/w/sub/old.txt"},
+		Made:     []string{"/w/sub/alias", "/w/sub/cache", "/w/sub/input.txt", "/w/sub/lock", "/w/sub/moved.txt", "/w/sub/old.txt", "/w/sub/out.txt"},
 	}
 	if !reflect.DeepEqual(accesses, want) {
 		t.Fatalf("accesses\n%q\nwant\n%q", accesses, want)

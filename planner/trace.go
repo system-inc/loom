@@ -46,12 +46,14 @@ var (
 // TracedAccesses is every path a trace shows a run reaching, absolute. Reads are what it opened for reading or
 // executed and got; Lookups every other path it named, stat'ed, probed or missed (a failed open of any kind but a
 // write); Listings every directory it listed. Present is the lookups that found the path there before the run made
-// anything of it: with the reads and the listings, what the run saw exist.
+// anything of it: with the reads and the listings, what the run saw exist. Made is what the run made itself (a
+// directory's whole contents with it), which a directory's listing on disk afterward holds and the tree never did.
 type TracedAccesses struct {
 	Reads    []string
 	Lookups  []string
 	Listings []string
 	Present  []string
+	Made     []string
 }
 
 // TracedReads is every file a trace shows read: a successful open, openat or openat2 that isn't write-only, or a
@@ -239,7 +241,8 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			}
 		}
 	}
-	return TracedAccesses{Reads: sortedKeys(reads), Lookups: sortedKeys(lookups), Listings: sortedKeys(listings), Present: sortedKeys(present)}, nil
+	return TracedAccesses{Reads: sortedKeys(reads), Lookups: sortedKeys(lookups), Listings: sortedKeys(listings), Present: sortedKeys(present),
+		Made: sortedKeys(made)}, nil
 }
 
 // A pathChange is a call that changes the tree's paths: whether its paths follow directory descriptors, whether it

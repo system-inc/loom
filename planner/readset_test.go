@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -524,5 +525,40 @@ func TestAMissThroughDotDotPastALinkKeysThePathTheKernelProbed(t *testing.T) {
 	fixture.bump(t, map[string]string{"dir/x": "now here\n"})
 	if _, after := fixture.key(t); after == before {
 		t.Fatalf("sub/dir/x, the path the kernel probed, appeared and the key stayed (measured %+v)", first.Measured)
+	}
+}
+
+// A listing names every entry the run saw (the second review's finding 3): when the listed directory holds an entry
+// the submodule doesn't track and the run didn't make, the key holds the submodule's commit, as for any untracked file
+// the run found. A listing of a directory holding only tracked entries, the run's own files, or the submodule's .git
+// keys as before, the submodule's own root included, which is measured though a reads line declares it. Mutants that
+// each fail it: a listing's untracked entries never looked at; the run's own files counted as untracked; the
+// submodule's .git counted as untracked; a declared submodule's root never measured.
+func TestAListingThatSawUntrackedEntriesKeysTheSubmodulesCommit(t *testing.T) {
+	useReadSets(t)
+	fixture := newReadSetFixture(t)
+	listing := func(directory string) string {
+		return `9 getdents64(5<` + filepath.Join(fixture.tree, directory) + `>, 0x55 /* 4 entries */, 32768) = 96` + "\n"
+	}
+	measure := func(trace string) ReadSet {
+		t.Helper()
+		parts, _ := fixture.key(t)
+		check, err := CheckTrace(fixture.tree, fixture.gateTools, parts, strings.NewReader(trace))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return check.Measured
+	}
+	made := `9 openat(AT_FDCWD<` + fixture.tree + `>, "sub/dir/out.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644) = 3` + "\n"
+	writeFiles(t, filepath.Join(fixture.tree, "sub"), map[string]string{"dir/out.txt": "the run's own\n"})
+	for _, clean := range []string{"sub/dir", "sub"} {
+		// The submodule's own root, though a reads line declares it, is measured: a set replaces the declaration.
+		if set := measure(made + listing(clean)); len(set.Gitlinks) != 0 || !slices.Contains(set.Listings, clean) {
+			t.Fatalf("a listing of %s's tracked entries, the run's own and .git: %+v, want it measured and no commit", clean, set)
+		}
+	}
+	writeFiles(t, filepath.Join(fixture.tree, "sub"), map[string]string{"dir/installed.js": "untracked\n"})
+	if set := measure(made + listing("sub/dir")); !reflect.DeepEqual(set.Gitlinks, []string{"sub"}) {
+		t.Fatalf("a listing that saw an untracked entry: %+v, want the submodule's commit", set)
 	}
 }
