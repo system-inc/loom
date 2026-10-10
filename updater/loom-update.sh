@@ -8,7 +8,15 @@
 # Settings, each from the environment or else from ~/.loom/update.conf (key=value lines, # comments):
 #	base    LOOM_UPDATE_BASE     where current.txt and blobs/<sha256> are served (required)
 #	host    LOOM_UPDATE_HOST     this machine's name for the manifest's canary hosts (default: hostname -s)
-#	report  LOOM_UPDATE_REPORT   a URL each new version is POSTed to as {host, version, previous, at} (optional)
+#	report  LOOM_UPDATE_REPORT   a URL this machine's state is POSTed to (optional), whenever it changes and every 5
+#	                             minutes besides: {host, version, previous, updated, hooked, held, refused, services, at}
+#	hold    LOOM_UPDATE_HOLD     "current" keeps the version installed; a version keeps (or brings) this machine on
+#	                             exactly that one, from <base>/manifests/<version>.txt. Either way current.txt isn't read
+#	                             until the hold is removed, and the log and the report say so.
+#
+# Every executable in ~/.loom/health.d/ prints a line per service it watches, "<service> <state> [<key>=<value>...]",
+# such as "loom-serve.service active running restarts=0", and the report carries those lines as its services: how the
+# release watcher on Workshop sees a canary stay healthy (docs/releases.md). The updater itself knows no service.
 #
 # A version installs into ~/.loom/versions/<version>/ beside its SHA256SUMS. Services run ~/.loom/bin/<name>, a
 # symlink to that version's file, each replaced by renaming a new symlink over it; ~/.loom/version names the version
@@ -37,6 +45,7 @@ setting() { # setting <key> <environment value>: the value, from the environment
 base=$(setting base "${LOOM_UPDATE_BASE:-}")
 host=$(setting host "${LOOM_UPDATE_HOST:-}")
 report=$(setting report "${LOOM_UPDATE_REPORT:-}")
+hold=$(setting hold "${LOOM_UPDATE_HOLD:-}")
 [ -n "${host}" ] || host=$(hostname -s)
 base=${base%/}
 
@@ -46,9 +55,10 @@ say() { # say <line>: one line to update.log and to stderr.
 	printf '%s\n' "${line}" >> "${log}"
 	printf '%s\n' "${line}" >&2
 }
-refuse() { # refuse <why>: logs it, removes a half-made version, and exits; nothing was switched.
+refuse() { # refuse <why>: logs it, removes a half-made version, reports it once the lock is held, and exits.
 	say "refused: $*"
 	[ -n "${staging:-}" ] && [ -d "${staging}" ] && clear "${staging}"
+	[ -n "${reporting:-}" ] && post "$*"
 	exit 1
 }
 # clear <directory>: removes a version's files one by one, then the directory; something else in it keeps it.
@@ -82,6 +92,10 @@ place() {
 mkdir -p "${versions}" "${bin}" "${root}/updated.d" || exit 1
 case "${host}" in *[!A-Za-z0-9._-]*) refuse "host '${host}' is not a plain host name" ;; esac
 [ -n "${base}" ] || refuse "no base URL: set LOOM_UPDATE_BASE or base= in ${root}/update.conf"
+case "${hold}" in "" | current) ;; *)
+	printf '%s\n' "${hold}" | grep -Eq '^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$' || refuse "hold '${hold}' is neither current nor a version's plain name"
+	;;
+esac
 
 # One run at a time: update.lock is a directory, made by mkdir (atomic on every system), holding its run's pid. A pid
 # that is no longer a running loom-update (dead, or its number reused by something else) leaves the lock stale, and
@@ -121,26 +135,69 @@ if [ -f "${log}" ] && [ "$(wc -c < "${log}")" -gt 1048576 ]; then
 	tail -n 2000 "${log}" > "${log}.$$" && mv -f "${log}.$$" "${log}"
 fi
 
-current() { cat "${root}/$1" 2> /dev/null; } # current <version | previous>: that version, or nothing.
-# post <version> <previous>: reports the version once; a failed report is retried by the next run, never fatal.
+current() { cat "${root}/$1" 2> /dev/null; } # current <version | previous | hooked | updated | held>: its line, or nothing.
+quoted() { LC_ALL=C tr -cd ' -~' | sed 's/[\\"]/\\&/g'; } # quoted: stdin as the inside of a JSON string, printable ASCII
+# services: each health.d probe's lines, "<service> <state> [<key>=<value>...]", as JSON strings joined by commas. A
+# probe that exits non-zero adds "<probe> probe-failed"; a line of any other shape is dropped, and at most 32 are kept.
+services() {
+	local probe line
+	for probe in "${root}/health.d"/*; do
+		[ -f "${probe}" ] && [ -x "${probe}" ] || continue
+		"${probe}" < /dev/null 2> /dev/null || echo "$(basename "${probe}") probe-failed"
+	done | LC_ALL=C grep -E '^[A-Za-z0-9][A-Za-z0-9._@-]* [a-z][a-z-]*( [ -~]*)?$' | head -n 32 | cut -c1-200 |
+		while IFS= read -r line; do printf '"%s"\n' "$(printf '%s' "${line}" | quoted)"; done | paste -sd, -
+}
+# post [refusal]: reports this machine's state: the version it runs, the one before, when it last switched, the version
+# whose hooks all passed, its hold, this run's refusal if any, and its services. Sent when that differs from what the
+# report URL last accepted (kept in reported) and every 5 minutes besides, so a machine gone quiet reads as quiet; a
+# failed report is logged and sent again by the next run, and never fails the update.
 post() {
 	[ -n "${report}" ] || return 0
-	[ "$(cat "${root}/reported" 2> /dev/null)" = "$1" ] && return 0
-	local body
-	body=$(printf '{"host":"%s","version":"%s","previous":"%s","at":"%s"}' "${host}" "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
-	if curl -fsS -m 20 -X POST -H 'content-type: application/json' --data "${body}" "${report}" > /dev/null 2>&1; then
-		echo "$1" > "${root}/reported"
+	local state
+	state=$(printf '{"host":"%s","version":"%s","previous":"%s","updated":"%s","hooked":"%s","held":"%s","refused":"%s","services":[%s]' \
+		"${host}" "$(current version)" "$(current previous)" "$(current updated)" "$(current hooked)" "${hold}" \
+		"$(printf '%s' "${1:-}" | cut -c1-400 | quoted)" "$(services)")
+	[ "$(cat "${root}/reported" 2> /dev/null)" = "${state}" ] && [ -z "$(find "${root}/reported" -mmin +4 2> /dev/null)" ] && return 0
+	if curl -fsS -m 20 -X POST -H 'content-type: application/json' --data "${state},\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" "${report}" > /dev/null 2>&1; then
+		printf '%s\n' "${state}" > "${root}/reported.$$" && mv -f "${root}/reported.$$" "${root}/reported"
 	else
-		say "report of $1 to ${report} failed; the next run tries again"
+		say "report of $(current version) to ${report} failed; the next run tries again"
 	fi
 }
+reporting=1
+# A hold is logged once when it is set, changed or removed, and kept in held while it stands.
+if [ "${hold}" != "$(current held)" ]; then
+	if [ -n "${hold}" ]; then
+		say "held at ${hold} by the hold setting: current.txt is not read until it is removed"
+		place "${root}/held" - "${hold}"
+	else
+		say "hold at $(current held) removed: following current.txt again"
+		rm -f "${root}/held"
+	fi
+fi
 
 case "$(uname -s)" in Linux) system=linux ;; Darwin) system=darwin ;; *) refuse "unknown system $(uname -s)" ;; esac
 case "$(uname -m)" in x86_64 | amd64) architecture=amd64 ;; aarch64 | arm64) architecture=arm64 ;; *) refuse "unknown architecture $(uname -m)" ;; esac
 platform=${system}/${architecture}
 
 manifest=${root}/current.txt.$$
-curl -fsS -m 60 -o "${manifest}" "${base}/current.txt" || refuse "fetching ${base}/current.txt"
+# What this machine follows: current.txt; under a hold on a version, that version's own manifest, which upload.sh keeps
+# beside the blobs for every version it ever published; under a hold on the current version, the version installed.
+source=current.txt
+[ -n "${hold}" ] && [ "${hold}" != current ] && source=manifests/${hold}.txt
+if [ "${hold}" = current ]; then
+	standing=$(current version)
+	if [ -z "${standing}" ]; then
+		post ""
+		echo "loom-update: held with nothing installed" >&2
+		exit 0
+	fi
+	[ -f "${versions}/${standing}/SHA256SUMS" ] || refuse "held at ${standing}, whose ${versions}/${standing}/SHA256SUMS is missing"
+	awk -v version="${standing}" -v platform="${platform}" 'BEGIN { print "version " version } { print $2, platform, $1; n++ } END { print "end", n + 0 }' \
+		"${versions}/${standing}/SHA256SUMS" > "${manifest}"
+else
+	curl -fsS -m 60 -o "${manifest}" "${base}/${source}" || refuse "fetching ${base}/${source}"
+fi
 # The entry for this host: the top section, or the canary section when the canary line names this host. Each section
 # is a version line, its file lines and an end line counting them, and a canary line comes first and promises a second
 # section, so a manifest cut short at any line is refused rather than read as a smaller one. Printed as "version <v>"
@@ -188,8 +245,9 @@ END {
 	entry = mine ? 1 : 0
 	if (files[entry] == "") fail("version " version[entry] " has no file for " platform)
 	printf "version %s\n%s", version[entry], files[entry]
-}' "${manifest}" > "${manifest}.wanted" || refuse "${base}/current.txt: $(cat "${manifest}.wanted")"
+}' "${manifest}" > "${manifest}.wanted" || refuse "${base}/${source}: $(cat "${manifest}.wanted")"
 version=$(sed -n '1s/^version //p' "${manifest}.wanted")
+case "${hold}" in "" | current | "${version}") ;; *) refuse "${base}/${source} names version ${version}, not the held ${hold}" ;; esac
 sed '1d' "${manifest}.wanted" | LC_ALL=C sort > "${manifest}"
 installed=$(current version)
 
@@ -219,7 +277,7 @@ hooks() {
 if [ "${installed}" = "${version}" ] && cmp -s "${manifest}" "${versions}/${version}/SHA256SUMS" && pointed; then
 	status=0
 	[ "$(current hooked)" = "${version}" ] || { hooks "$(current previous)"; status=$?; }
-	post "${version}" "$(current previous)"
+	post ""
 	exit "${status}"
 fi
 
@@ -263,6 +321,7 @@ while read -r sha name; do
 done < "${manifest}"
 [ -n "${installed}" ] && [ "${installed}" != "${version}" ] && place "${root}/previous" - "${installed}"
 place "${root}/version" - "${version}"
+place "${root}/updated" - "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 previous=$(current previous)
 say "installed ${version}, previous ${installed:-none} (${fetched})"
 
@@ -281,5 +340,5 @@ done
 
 hooks "${installed}"
 status=$?
-post "${version}" "${installed}"
+post ""
 exit "${status}"

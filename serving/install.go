@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/updater"
 )
 
 //go:embed systemd/loom-serve.service
@@ -108,12 +109,14 @@ func WorkerName(host, machineId string) (string, error) {
 }
 
 // Paths are what Install reads and writes: the box's serve.conf and pool token, the systemd user unit directory, the
-// updater's hook, the serving binary the updater installed, and the host's name, machine id, user and /proc.
+// updater's hook and health probe, the serving binary the updater installed, and the host's name, machine id, user and
+// /proc.
 type Paths struct {
 	Config    string
 	Token     string
 	Units     string
 	Hook      string
+	Probe     string
 	Binary    string
 	Host      string
 	MachineId string
@@ -121,12 +124,13 @@ type Paths struct {
 	Proc      string
 }
 
-// HomePaths are a box's: ~/.loom/serve.conf, ~/.loom/serve-token, ~/.config/systemd/user, ~/.loom/updated.d/50-serve
-// and ~/.loom/bin/loom-runner, this host, /etc/machine-id, this user and /proc.
+// HomePaths are a box's: ~/.loom/serve.conf, ~/.loom/serve-token, ~/.config/systemd/user, ~/.loom/updated.d/50-serve,
+// ~/.loom/health.d/50-serve and ~/.loom/bin/loom-runner, this host, /etc/machine-id, this user and /proc.
 func HomePaths(home string) Paths {
 	host, _ := os.Hostname()
 	return Paths{Config: filepath.Join(home, ".loom", "serve.conf"), Token: filepath.Join(home, ".loom", "serve-token"),
 		Units: filepath.Join(home, ".config", "systemd", "user"), Hook: filepath.Join(home, ".loom", "updated.d", HookName),
+		Probe:  filepath.Join(home, ".loom", "health.d", HookName),
 		Binary: filepath.Join(home, ".loom", "bin", "loom-runner"), Host: host, MachineId: "/etc/machine-id", User: os.Getuid(), Proc: "/proc"}
 }
 
@@ -141,7 +145,7 @@ type Systemctl func(arguments ...string) (string, error)
 
 // Install readies loom-serve on this box and leaves it running the release now installed. First everything that can
 // be refused: serve.conf, the token (a file holding one, owned by this user and readable by no one else), the worker's
-// name, the hook and the unit, each written only when its text changed (the unit beside its name and renamed over it,
+// name, the hook, the health probe and the unit, each written only when its text changed (the unit beside its name and renamed over it,
 // then systemd's view of it reloaded). Only then, last, is serve touched: started when it isn't running, reloaded when
 // its unit changed or it runs another binary than the one the updater installed (a reload drains: the unit in hand
 // finishes, and Restart=always starts the new runner), and otherwise left alone. So a refused install never reloads
@@ -178,6 +182,14 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 	if _, err := WriteChanged(paths.Hook, hookText, 0o755); err != nil {
 		return fmt.Errorf("the updater's hook: %w", err)
 	}
+	// The probe puts serve's state in every report the updater posts: the canary's health, and `loom release status`.
+	probe, err := updater.Probe(UnitName)
+	if err != nil {
+		return err
+	}
+	if _, err := WriteChanged(paths.Probe, probe, 0o755); err != nil {
+		return fmt.Errorf("the updater's health probe: %w", err)
+	}
 	unit := Unit(config, worker)
 	changed, err := WriteChanged(filepath.Join(paths.Units, UnitName), unit, 0o644)
 	if err != nil {
@@ -203,7 +215,7 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(report, "loom-runner install-serve: %s started\n", UnitName)
-	case changed || !sameFile(filepath.Join(paths.Proc, pid, "exe"), paths.Binary):
+	case changed || !SameFile(filepath.Join(paths.Proc, pid, "exe"), paths.Binary):
 		if _, err := systemctl("reload", UnitName); err != nil {
 			return err
 		}
@@ -214,7 +226,7 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 	return nil
 }
 
-// writeChanged writes content to path, beside it first and renamed over it so nothing reads half of it, unless path
+// WriteChanged writes content to path, beside it first and renamed over it so nothing reads half of it, unless path
 // already holds exactly that. It says whether it wrote.
 func WriteChanged(path, content string, mode os.FileMode) (bool, error) {
 	if held, err := os.ReadFile(path); err == nil && string(held) == content {
@@ -238,9 +250,9 @@ func WriteChanged(path, content string, mode os.FileMode) (bool, error) {
 	return true, nil
 }
 
-// sameFile is whether two paths are one file, a running process's /proc/<pid>/exe and an installed binary's link
+// SameFile is whether two paths are one file, a running process's /proc/<pid>/exe and an installed binary's link
 // alike; unreadable reads as not the same, so serve is reloaded rather than left on an unknown binary.
-func sameFile(left, right string) bool {
+func SameFile(left, right string) bool {
 	leftInfo, leftErr := os.Stat(left)
 	rightInfo, rightErr := os.Stat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)

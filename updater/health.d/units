@@ -1,0 +1,14 @@
+#!/bin/sh
+# A health probe for the updater's report (docs/updater.md): one line per systemd user unit it names,
+# "<unit> <ActiveState> <SubState> restarts=<NRestarts>", or "<unit> not-found" for one systemd doesn't know.
+# Written into ~/.loom/health.d/ with its units filled in, by `loom-runner install-serve` (loom-serve.service) and on
+# Workshop by `loom release install` (its daemons), never by hand.
+units="UNITS"
+for unit in ${units}; do
+	systemctl --user show "${unit}" --property=LoadState,ActiveState,SubState,NRestarts 2> /dev/null |
+		awk -F= -v unit="${unit}" '{ value[$1] = $2 } END {
+			if (value["LoadState"] == "" || value["LoadState"] == "not-found") { print unit " not-found"; exit }
+			restarts = value["NRestarts"] == "" ? "" : " restarts=" value["NRestarts"]
+			print unit " " value["ActiveState"] " " value["SubState"] restarts
+		}'
+done

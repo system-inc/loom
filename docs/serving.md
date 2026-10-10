@@ -28,6 +28,7 @@ A pinned runner must be a release at or after the one that brought this hand-off
 | `~/.loom/serve.conf` | `key = value` lines, `#` comments, as `update.conf`: `pool` (required, the pool's name on the wire) and `phase-jobs` (`yes` for a pool that takes phase units, like `box-phase`; default `no`). Anything else is refused. |
 | `~/.loom/serve-token` | The pool token for that pool (`loom pool token <pool>`), mode 600. `install-serve` refuses one that is empty, not this user's, or readable by anyone else. |
 | `~/.loom/updated.d/50-serve` | The hook (`serving/updated.d/50-serve`), written by `install-serve` when its text changed: it runs `install-serve` from the release just installed, or, when that release has none (a rollback past it), passes with a note and leaves serve as it runs. |
+| `~/.loom/health.d/50-serve` | The health probe (`updater/health.d/units` for `loom-serve.service`), written by `install-serve` when its text changed: serve's state and restarts in every report the updater posts, which is how the release watcher judges a canary and `loom release status` shows serve (docs/releases.md). |
 | `~/.config/systemd/user/loom-serve.service` | The rendered unit, written only when its text changed. |
 | `~/loom-serve/root` | The runner's root: its blob cache and unpacked sources, under the runner's own bounds (4 GiB of blobs, at most two sources, 3 GiB free before a prebuilt unit starts). |
 | `~/loom-serve/units` | Each unit's workspace while it runs. |
