@@ -356,6 +356,9 @@ func TestCheckUnitRefusesWhatARunnerCouldOnlyRunWrongly(t *testing.T) {
 	if err := CheckUnit(good()); err != nil {
 		t.Fatalf("the good unit is refused: %v", err)
 	}
+	if requiring := good(); func() error { requiring.Requires = []string{"go", "wasiSdk"}; return CheckUnit(requiring) }() != nil {
+		t.Fatal("a unit requiring go and wasiSdk is refused")
+	}
 	cases := map[string]func(*Unit){
 		"no run":            func(u *Unit) { u.Run = "" },
 		"run with a slash":  func(u *Unit) { u.Run = "a/b" },
@@ -374,6 +377,8 @@ func TestCheckUnitRefusesWhatARunnerCouldOnlyRunWrongly(t *testing.T) {
 		"output escapes":    func(u *Unit) { u.Outputs[0].Glob = "../x" },
 		"no store":          func(u *Unit) { u.Store = nil },
 		"store not http":    func(u *Unit) { u.Store = &Endpoint{Url: "file:///tmp"} },
+		"unknown toolchain": func(u *Unit) { u.Requires = []string{"go", "rust"} },
+		"toolchain twice":   func(u *Unit) { u.Requires = []string{"go", "go"} },
 	}
 	for name, breakIt := range cases {
 		unit := good()

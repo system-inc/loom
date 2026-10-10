@@ -6,7 +6,9 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 // Sha256Pattern is how every input, output and blob is addressed: 64 lowercase hex digits.
@@ -47,6 +49,11 @@ func CheckUnit(unit Unit) error {
 	}
 	if unit.SequenceStart < 0 {
 		return fmt.Errorf("sequenceStart is a sequence, 0 or more")
+	}
+	for index, toolchain := range unit.Requires {
+		if !slices.Contains(Toolchains, toolchain) || slices.Index(unit.Requires, toolchain) != index {
+			return fmt.Errorf("requires %q isn't a toolchain named once (%s)", toolchain, strings.Join(Toolchains, ", "))
+		}
 	}
 	if unit.Directory != "" && !filepath.IsLocal(filepath.FromSlash(unit.Directory)) {
 		return fmt.Errorf("directory %q isn't inside the workspace", unit.Directory)
