@@ -112,8 +112,9 @@ func TestAnAttemptPlannedAgainAfterItWasPlacedIsVoided(t *testing.T) {
 	}
 }
 
-// A ledger write that fails partway is cut back, so no half line sits before the next record. Mutant: no cut back.
-func TestAFailedLedgerWriteLeavesNoHalfLine(t *testing.T) {
+// A record whose line didn't reach the ledger's file is never held (jsonlines cuts a half-written line back). Mutant:
+// the record held before its write.
+func TestARecordThatDidntReachTheLedgerIsntHeld(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "placed.jsonl")
 	ledger, err := OpenLedger(path)
 	if err != nil {
@@ -123,16 +124,11 @@ func TestAFailedLedgerWriteLeavesNoHalfLine(t *testing.T) {
 	if err := ledger.Append(Record{Future: tree, Attempt: 1, Run: "r1"}); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := os.ReadFile(path)
-	saved := writeLine
-	writeLine = func(file *os.File, line []byte) error {
-		file.Write(line[:len(line)/2])
-		return errors.New("no space left on device")
-	}
-	err = ledger.Append(Record{Future: tree, Attempt: 2, Run: "r2"})
-	writeLine = saved
-	if after, _ := os.ReadFile(path); err == nil || string(after) != string(before) {
-		t.Fatalf("after a failed write (%v) the ledger is %q, want %q", err, after, before)
+	// A directory where the file was fails every write, for root too.
+	os.Remove(path)
+	os.Mkdir(path, 0o700)
+	if err := ledger.Append(Record{Future: tree, Attempt: 2, Run: "r2"}); err == nil {
+		t.Fatal("a write that couldn't happen passed")
 	}
 	if _, found := ledger.Find(tree, 2); found {
 		t.Fatal("a record that didn't reach the file is held")
