@@ -398,12 +398,48 @@ class Facts(unittest.TestCase):
         other = self.commit({"b.go": "package a\n"})
         self.assertIsNone(queue_bridge.revertOf(reverted, other))
 
-    def test_main_s_head_is_origin_main_as_the_fetch_read_it(self):
-        older = self.base
-        tip = self.commit({"b.go": "package a\n"})
-        self.run("push", "-q", "origin", "HEAD:refs/heads/main")
-        self.assertEqual(queue_bridge.Gate().facts(older, older)["mainHead"], tip)
-        self.assertEqual(queue_bridge.Gate().facts("9" * 40, older)["mainHead"], tip)
+    def pushFromAnotherTree(self):
+        """A landing pushed to origin from another clone, as the pusher lands: this clone's origin/main doesn't follow."""
+        import subprocess
+        other = os.path.join(self.tmp.name, "other")
+        subprocess.run(["git", "clone", "-q", os.path.join(self.tmp.name, "origin.git"), other], check=True)
+        environment = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        subprocess.run(["git", "-C", other, "commit", "-q", "--allow-empty", "-m", "landed"], check=True, env=environment)
+        subprocess.run(["git", "-C", other, "push", "-q", "origin", "HEAD:refs/heads/main"], check=True)
+        return subprocess.run(["git", "-C", other, "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_main_s_head_is_origin_s_own_even_when_the_sha_s_fetch_fails(self):
+        landed = self.pushFromAnotherTree()
+        stale = self.run("rev-parse", "origin/main")
+        self.assertNotEqual(stale, landed)
+        # A sha origin doesn't hold fails its fetch; the head is still origin's, not the old local ref.
+        facts = queue_bridge.Gate().facts("9" * 40, self.base)
+        self.assertEqual((facts["shaExists"], facts["mainHead"]), (False, landed))
+        # main was fetched on its own and checked, so this clone's origin/main follows origin despite the sha's failed fetch.
+        self.assertEqual(self.run("rev-parse", "origin/main"), landed)
+        facts = queue_bridge.Gate().facts(self.base, self.base)
+        self.assertEqual((facts["shaExists"], facts["baseOnMain"], facts["mainHead"]), (True, True, landed))
+
+    def test_a_remote_that_can_t_be_read_checks_nothing_this_tick(self):
+        self.run("remote", "set-url", "origin", os.path.join(self.tmp.name, "gone.git"))
+        with self.assertRaises(queue_bridge.GitError):
+            queue_bridge.Gate().facts(self.base, self.base)
+        # A fetch that fails for any reason but origin lacking the sha says nothing about the sha.
+        with self.assertRaises(queue_bridge.GitError):
+            queue_bridge.fetchSha("9" * 40)
+        pipeline = FakePipeline(unchecked=[{"change": change, "sha": self.base, "base": self.base, "paths": []}])
+        queue_bridge.tick(pipeline, queue_bridge.Gate(), memory())
+        self.assertEqual(pipeline.posts(), [])
+
+    def test_git_s_exit_code_is_checked_everywhere(self):
+        with self.assertRaises(queue_bridge.GitError):
+            queue_bridge.git("rev-parse", "--verify", "refs/heads/nowhere")
+        self.assertEqual(queue_bridge.git("rev-parse", "--verify", "-q", "refs/heads/nowhere", allowed=(0, 1)), "")
+        self.assertTrue(queue_bridge.isAncestor(self.base, self.base))
+        with self.assertRaises(queue_bridge.GitError):
+            queue_bridge.isAncestor("9" * 40, self.base)
+        self.assertFalse(queue_bridge.Gate().contains(self.base, self.commit({"c.go": "package a\n"})))
+        self.assertEqual(queue_bridge.Gate().parents("9" * 40), [])
 
 
 if __name__ == "__main__":

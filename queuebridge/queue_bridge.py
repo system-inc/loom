@@ -116,6 +116,7 @@ def testOnly(paths):
 
 
 # push-main's Python test names: a test a non-test file names is gate logic (l.787-795).
+shaPattern = re.compile(r"^[0-9a-f]{40}$")
 pythonTestPattern = re.compile(r"(_test\.py$|-test\.py$|(^|/)test_[^/]*\.py$)")
 
 
@@ -130,7 +131,8 @@ def gateNamedOf(sha, diffPaths):
     for path in diffPaths:
         if not pythonTestPattern.search(path):
             continue
-        found = [line.split(":", 1)[1] for line in git("grep", "-l", "-F", "-e", path.rsplit("/", 1)[-1], sha, "--", ".").splitlines() if ":" in line]
+        # grep exits 1 when nothing names the test.
+        found = [line.split(":", 1)[1] for line in git("grep", "-l", "-F", "-e", path.rsplit("/", 1)[-1], sha, "--", ".", allowed=(0, 1)).splitlines() if ":" in line]
         users = sorted(user for user in found if user != path and not testOnlyPattern.search(user) and not user.endswith((".md", ".txt")))
         if users:
             named.append({"path": path, "users": users})
@@ -151,7 +153,8 @@ def revertOf(base, sha, depth=30):
     if change is None:
         return None
     for commit in git("rev-list", "--first-parent", "-n", str(depth), "origin/main").splitlines():
-        parent = git("rev-parse", "--verify", "-q", commit + "^1")
+        # --verify -q exits 1 for a root commit, which has no parent.
+        parent = git("rev-parse", "--verify", "-q", commit + "^1", allowed=(0, 1))
         if parent and patchId(commit, parent) == change:
             return commit
     return None
@@ -188,29 +191,67 @@ class Pipeline:
                 return error.code, {"error": text.decode(errors="replace")[:300]}
 
 
-def git(*arguments):
+class GitError(RuntimeError):
+    """git exited with a code its caller didn't allow, or timed out: what it printed says nothing, so nothing is decided
+    from it this tick (#6gj7n9p: a fetch that failed whole left origin/main old, and its head went to the queue fresh)."""
+
+
+def gitRun(*arguments, allowed=(0,)):
+    """git run in the clone, when it exits with an allowed code; GitError for any other code or a timeout."""
     try:
-        return subprocess.run(["git", "-C", repository, *arguments], capture_output=True, text=True, timeout=300).stdout.strip()
+        ran = subprocess.run(["git", "-C", repository, *arguments], capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        log("git %s timed out" % " ".join(arguments[:2]))
-        return ""
+        raise GitError("git %s timed out" % " ".join(arguments[:2]))
+    if ran.returncode not in allowed:
+        raise GitError("git %s exited %d: %s" % (" ".join(arguments[:2]), ran.returncode, ran.stderr.strip()[-300:]))
+    return ran
+
+
+def git(*arguments, allowed=(0,)):
+    """git's stdout, stripped, when it exits with an allowed code; GitError otherwise."""
+    return gitRun(*arguments, allowed=allowed).stdout.strip()
+
+
+def fetchSha(sha):
+    """Fetches sha from origin: True once this clone holds it, False when origin says it has no such object, and
+    GitError for any other failure, since a network blip isn't an answer about the sha."""
+    ran = gitRun("fetch", "-q", "--no-tags", "origin", sha, allowed=(0, 128))
+    if ran.returncode == 0:
+        return True
+    if "not our ref" in ran.stderr:
+        return False
+    raise GitError("git fetch %s exited 128: %s" % (sha[:12], ran.stderr.strip()[-300:]))
+
+
+def isAncestor(older, newer):
+    """Whether older is newer or an ancestor of it: merge-base answers 0 or 1, and anything else is GitError."""
+    return gitRun("merge-base", "--is-ancestor", older, newer, allowed=(0, 1)).returncode == 0
+
+
+def mainHeadOf():
+    """main's head as origin holds it now, asked of origin itself: no local ref that a failed fetch left behind."""
+    listed = git("ls-remote", "origin", "refs/heads/main").split()
+    if len(listed) != 2 or not shaPattern.match(listed[0]) or listed[1] != "refs/heads/main":
+        raise GitError("ls-remote named no main: %r" % " ".join(listed)[:200])
+    return listed[0]
 
 
 class Gate:
     """Today's gate, as the bridge sees it: git's facts, records on origin, the branch that queues a tree, push-main."""
 
     def facts(self, sha, base):
-        """What git says about a submitted change, read from origin through this clone."""
-        git("fetch", "-q", "--no-tags", "origin", "main", sha)
-        # main's head as this fetch read it: a witness is of main's tip only when this is its sha (#6gj7n9p).
-        head = git("rev-parse", "--verify", "-q", "origin/main")
-        mainHead = {"mainHead": head} if shaPattern.match(head) else {}
-        exists = subprocess.run(["git", "-C", repository, "cat-file", "-e", sha + "^{commit}"], capture_output=True).returncode == 0
+        """What git says about a submitted change, read from origin through this clone. GitError when git can't say:
+        the change then stays unchecked for the next tick."""
+        # main's head, asked of origin: a witness is of main's tip only when this is its sha (#6gj7n9p).
+        mainHead = {"mainHead": mainHeadOf()}
+        # main on its own, checked, so origin/main is fresh for the ancestry below; then the sha, whose absence is an answer.
+        git("fetch", "-q", "--no-tags", "origin", "main")
+        fetched = fetchSha(sha)
+        exists = fetched and subprocess.run(["git", "-C", repository, "cat-file", "-e", sha + "^{commit}"], capture_output=True).returncode == 0
         if not exists:
             return {"shaExists": False, "baseIsAncestor": False, "baseOnMain": False, "diffPaths": [], **mainHead}
-        ancestor = lambda older, newer: subprocess.run(["git", "-C", repository, "merge-base", "--is-ancestor", older, newer], capture_output=True).returncode == 0
         diffPaths = sorted(path for path in git("diff", "--no-renames", "--name-only", base, sha).splitlines() if path)
-        return {"shaExists": True, "baseIsAncestor": ancestor(base, sha), "baseOnMain": ancestor(base, "origin/main"),
+        return {"shaExists": True, "baseIsAncestor": isAncestor(base, sha), "baseOnMain": isAncestor(base, "origin/main"),
                 "diffPaths": diffPaths, "historyPaths": historyOf(base, sha), "gateNamed": gateNamedOf(sha, diffPaths),
                 "revertOf": revertOf(base, sha), **mainHead}
 
@@ -222,11 +263,13 @@ class Gate:
         if refs:
             git("fetch", "-q", "--no-tags", "origin", *["+refs/heads/%s:refs/remotes/origin/%s" % (ref, ref) for ref in refs])
         for ref in refs:
-            status = git("show", "origin/%s:status.txt" % ref).split("\n")[0].split(":")[0].strip()
+            # A record still running may not have written its status or fast.json yet: only the files it holds are read.
+            held = git("ls-tree", "--name-only", "origin/%s" % ref).splitlines()
+            status = git("show", "origin/%s:status.txt" % ref).split("\n")[0].split(":")[0].strip() if "status.txt" in held else ""
             if status not in ("green", "red", "void"):
                 continue
             try:
-                fast = json.loads(git("show", "origin/%s:fast.json" % ref) or "{}")
+                fast = json.loads(git("show", "origin/%s:fast.json" % ref) if "fast.json" in held else "{}")
             except ValueError:
                 fast = {}
             return {"ref": ref, "status": status, "gated": fast.get("gated") or fast.get("sha") or ""}
@@ -239,7 +282,7 @@ class Gate:
         try:
             lines = gzip.decompress(raw).decode(errors="replace").splitlines() if raw else None
             fast = json.loads(git("show", "origin/%s:fast.json" % ref) or "{}")
-        except (OSError, ValueError):
+        except (OSError, ValueError, GitError):
             return None
         return failingTests(lines, fast)
 
@@ -266,11 +309,10 @@ class Gate:
 
     def parents(self, sha):
         """sha's parents, from git (a gate merge lives under refs/gate-merges, so fetch it by sha): [] when origin lacks it."""
-        listed = git("rev-list", "--parents", "-n", "1", sha).split()
-        if not listed:
-            git("fetch", "-q", "--no-tags", "origin", sha)
-            listed = git("rev-list", "--parents", "-n", "1", sha).split()
-        return listed[1:]
+        held = subprocess.run(["git", "-C", repository, "cat-file", "-e", sha + "^{commit}"], capture_output=True).returncode == 0
+        if not held and not fetchSha(sha):
+            return []
+        return git("rev-list", "--parents", "-n", "1", sha).split()[1:]
 
     def check(self, arguments, label):
         """push-main.sh in check-only mode: every check it runs, the landing commit built, nothing pushed."""
@@ -295,7 +337,7 @@ class Gate:
         return git("rev-parse", "origin/main")
 
     def contains(self, main, tree):
-        return subprocess.run(["git", "-C", repository, "merge-base", "--is-ancestor", tree, main]).returncode == 0
+        return isAncestor(tree, main)
 
     def landedAt(self, tree):
         """The first-parent commit on origin/main that brought tree in: (that commit, the main it moved from), or None.
@@ -410,9 +452,6 @@ def decide(pipeline, gate, memory):
             log("requeued %s after its void: %s" % (tree[:12], "started" if gate.requeue(tree) else "requeue.sh refused"))
 
 
-shaPattern = re.compile(r"^[0-9a-f]{40}$")
-
-
 def withHead(pipeline, read):
     """git's facts, read after the queue's seq is noted: asOf orders their mainHead against the queue's own log, so a
     landing logged while git answered outranks the head it read. Facts that can't say main's head (the queue's seq or
@@ -423,7 +462,11 @@ def withHead(pipeline, read):
     if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
         log("the queue's seq is unreadable (%d %s): no facts posted this tick" % (status, str(head)[:200]))
         return None
-    facts = read()
+    try:
+        facts = read()
+    except GitError as error:
+        log("git can't say: %s" % error)
+        return None
     if "mainHead" not in facts:
         log("origin/main is unreadable: no facts posted this tick")
         return None
@@ -445,7 +488,10 @@ def tick(pipeline, gate, memory):
         log("facts for %s: %d %s" % (submitted["change"], status, answer))
     # Once outside verdicts are refused, Judge decides every future and this only carries git's facts (#hkmzefm).
     if decidesHere:
-        decide(pipeline, gate, memory)
+        try:
+            decide(pipeline, gate, memory)
+        except GitError as error:
+            log("deciding stops for this tick, git can't say: %s" % error)
     # Landing is the pusher's on workshop, with the lander key (#83m6zw8); this Mac lands only while it's asked to.
     if not landsHere:
         return
@@ -454,31 +500,39 @@ def tick(pipeline, gate, memory):
         log("landings: %d %s" % (status, orders))
         return
     for order in orders["landings"]:
-        change, tree = order["change"], order["future"]
-        if order["run"] == "ruled-gate:docs":
-            code, out, err = gate.landRuled(docsRuling, tree, "queue %s (%s)" % (change, order["owner"]))
-        elif order["run"] == "test-only":
-            code, out, err = gate.landTestOnly(tree, "queue %s (%s)" % (change, order["owner"]))
-        else:
-            code, out, err = gate.land(order["run"], tree, "queue %s (%s)" % (change, order["owner"]))
-        reason = ([line for line in err.splitlines() if line.startswith("refused")] or err.splitlines()[-1:] or ["exit %d" % code])[0]
-        # Whatever push-main said, git says whether the tree is on main now (a retry after a landing it printed in a
-        # form this missed answers "already holds").
-        landed = gate.landedAt(tree) if code == 0 or "already holds" in reason else None
-        if landed is not None:
-            status, answer = pipeline.call("POST", "/landings/" + change, {"main": landed[0], "from": landed[1], "landed": tree})
-            log("landed %s: main %s..%s, %d %s" % (change, landed[1][:12], landed[0][:12], status, answer))
-            continue
-        if code == 0:
-            log("push-main exited 0 for %s without a main that holds %s; holding: %s" % (change, tree[:12], out.strip()[-300:]))
-            continue
-        if code == 3 or "landings are paused" in reason:
-            if "%s %s" % (change, reason) not in memory["held"]:
-                memory["held"].append("%s %s" % (change, reason))
-                log("holding %s: %s" % (change, reason[:300]))
-            continue
-        status, answer = pipeline.call("POST", "/landings/" + change, {"refused": reason[:600], "main": gate.main()})
-        log("refused %s: %s; %d %s" % (change, reason[:300], status, answer))
+        try:
+            landOne(pipeline, gate, memory, order)
+        except GitError as error:
+            log("landing %s waits for the next tick, git can't say: %s" % (order["change"], error))
+
+
+def landOne(pipeline, gate, memory, order):
+    """One landing order through push-main, and what git then says it did, reported."""
+    change, tree = order["change"], order["future"]
+    if order["run"] == "ruled-gate:docs":
+        code, out, err = gate.landRuled(docsRuling, tree, "queue %s (%s)" % (change, order["owner"]))
+    elif order["run"] == "test-only":
+        code, out, err = gate.landTestOnly(tree, "queue %s (%s)" % (change, order["owner"]))
+    else:
+        code, out, err = gate.land(order["run"], tree, "queue %s (%s)" % (change, order["owner"]))
+    reason = ([line for line in err.splitlines() if line.startswith("refused")] or err.splitlines()[-1:] or ["exit %d" % code])[0]
+    # Whatever push-main said, git says whether the tree is on main now (a retry after a landing it printed in a
+    # form this missed answers "already holds").
+    landed = gate.landedAt(tree) if code == 0 or "already holds" in reason else None
+    if landed is not None:
+        status, answer = pipeline.call("POST", "/landings/" + change, {"main": landed[0], "from": landed[1], "landed": tree})
+        log("landed %s: main %s..%s, %d %s" % (change, landed[1][:12], landed[0][:12], status, answer))
+        return
+    if code == 0:
+        log("push-main exited 0 for %s without a main that holds %s; holding: %s" % (change, tree[:12], out.strip()[-300:]))
+        return
+    if code == 3 or "landings are paused" in reason:
+        if "%s %s" % (change, reason) not in memory["held"]:
+            memory["held"].append("%s %s" % (change, reason))
+            log("holding %s: %s" % (change, reason[:300]))
+        return
+    status, answer = pipeline.call("POST", "/landings/" + change, {"refused": reason[:600], "main": gate.main()})
+    log("refused %s: %s; %d %s" % (change, reason[:300], status, answer))
 
 
 def main():

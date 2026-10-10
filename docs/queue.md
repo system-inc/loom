@@ -4,7 +4,7 @@ The Queue (`wire/source/Queue.ts`) decides from its own hash-chained log, and it
 
 ## Readings of main's head
 
-- **Facts.** git's facts carry `mainHead`, which is origin/main as the reader fetched it, and `asOf`, which is the Queue's seq when the reading began. The bridge reads `GET /head` before it asks git. The Queue's own GitHub path notes its seq before it asks. The two fields come together or not at all, and an `asOf` past the log is refused.
+- **Facts.** git's facts carry `mainHead`, which is main's head as origin holds it (the bridge asks `git ls-remote origin refs/heads/main`, never a local ref that a failed fetch could leave old), and `asOf`, which is the Queue's seq when the reading began. The bridge reads `GET /head` before it asks git. The Queue's own GitHub path notes its seq before it asks. The two fields come together or not at all, and an `asOf` past the log is refused.
 - **Landings.** A landing's `main` is a reading too.
 - **Ranking.** A landing at seq s ranks 2s. A fact read after seq s ranks 2s + 1.
   - The newest rank is main's tip.
@@ -15,7 +15,7 @@ The Queue (`wire/source/Queue.ts`) decides from its own hash-chained log, and it
   - So does a witness of a head that main has since moved past.
   - So does a witness whose facts came from a bridge that predates `mainHead`.
 - **When main's head can't be read.**
-  - If the bridge can't read the Queue's seq or origin/main, it posts no facts that tick, so the change stays unchecked and is read again on the next tick.
+  - If the bridge can't read the Queue's seq or origin's main, or any git command it runs exits with a code its caller doesn't allow, it posts no facts that tick, so the change stays unchecked and is read again on the next tick. A sha's fetch counts as "origin has no such sha" only when origin says so (`not our ref`).
   - If the Queue's GitHub path can't read main's head, it answers 503 and logs nothing.
   - Either way, no change is checked without the head, because a witness checked without it would be silent about main forever.
 
