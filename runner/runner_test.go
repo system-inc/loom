@@ -290,8 +290,10 @@ func TestOutputLinesKeepTheirOrderAndAFinalLineWithoutNewline(t *testing.T) {
 
 func TestSequenceSurvivesAFastWriterOnBothStreams(t *testing.T) {
 	const lines = 5000
-	script := fmt.Sprintf(`for i in $(seq 0 %d); do echo out$i; done &
-for i in $(seq 0 %d); do echo err$i >&2; done
+	// seq and sed write the lines, not a shell echo loop: under load a shell's echo can take EINTR writing to a full
+	// pipe and drop its line itself (Oct 10, a review reproduced it), which this test would blame on the runner.
+	script := fmt.Sprintf(`seq 0 %d | sed 's/^/out/' &
+seq 0 %d | sed 's/^/err/' >&2
 wait`, lines-1, lines-1)
 	_, events, _ := runUnit(t, testUnit("sh", "-c", script), testOptions(t))
 	for _, stream := range []struct{ name, prefix string }{{"stdout", "out"}, {"stderr", "err"}} {
