@@ -317,6 +317,7 @@ export class Performance extends DurableObject<Env> {
         this.runs = (environment as unknown as { LoomRuns?: Fetcher }).LoomRuns ?? null;
         this.sql.exec(`
             CREATE TABLE IF NOT EXISTS cursor (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS unreadable (seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, line TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS branches (branch TEXT PRIMARY KEY, owner TEXT NOT NULL, sha TEXT NOT NULL, witness INTEGER NOT NULL,
                 submittedAt INTEGER NOT NULL, checkedAt INTEGER, landedAt INTEGER, witnessedAt INTEGER);
             CREATE TABLE IF NOT EXISTS candidates (candidate TEXT PRIMARY KEY, branch TEXT NOT NULL, branches TEXT NOT NULL, builtAt INTEGER NOT NULL, block INTEGER);
@@ -343,7 +344,13 @@ export class Performance extends DurableObject<Env> {
             await this.ctx.storage.setAlarm(Date.now());
         }
         const url = new URL(request.url);
-        const reading = { readAt: this.lastRoundAt === 0 ? null : iso(this.lastRoundAt), seq: this.cursor() };
+        // When it last read, the last event it read, and the log lines it skipped because it couldn't read them.
+        const unreadable = this.sql.exec<{ lines: number; first: number | null }>('SELECT COUNT(*) AS lines, MIN(seq) AS first FROM unreadable').toArray()[0];
+        const reading = {
+            readAt: this.lastRoundAt === 0 ? null : iso(this.lastRoundAt),
+            seq: this.cursor(),
+            unreadable: unreadable === undefined || unreadable.lines === 0 ? null : { lines: unreadable.lines, firstSeq: unreadable.first },
+        };
         const candidateMatch = /^\/candidates\/([0-9a-f]{40})$/.exec(url.pathname);
         if (candidateMatch !== null) {
             const facts = this.facts(candidateMatch[1] ?? '');
@@ -382,6 +389,10 @@ export class Performance extends DurableObject<Env> {
         try {
             await this.follow();
         }
+        catch (error) {
+            // Said and left for the next round, which the finally below always arms.
+            console.error(`performance: a round failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
         finally {
             await this.ctx.storage.setAlarm(Date.now() + FollowMilliseconds);
         }
@@ -397,7 +408,10 @@ export class Performance extends DurableObject<Env> {
 
     private async followOnce(): Promise<void> {
         await this.followLog();
-        await this.learnPlannedRuns();
+        // Without the planned listing this round, the runs already known are still followed.
+        await this.learnPlannedRuns().catch(function (error: unknown) {
+            console.error(`performance: the planned candidates couldn't be read: ${error instanceof Error ? error.message : String(error)}`);
+        });
         const open = this.sql.exec<{ run: string; position: number; decided: number }>('SELECT run, position, decidedAt IS NOT NULL AS decided FROM runs WHERE closed = 0').toArray();
         for (let index = 0; index < open.length; index += maximumRunsAtOnce) {
             await Promise.all(
@@ -436,8 +450,11 @@ export class Performance extends DurableObject<Env> {
                 let seq = this.cursor();
                 for (const line of lines) {
                     const event = readEvent(line);
+                    // A line it can't read is skipped by its seq and counted, as the headline does, never stopping the rest.
                     if (event === null) {
-                        console.error(`performance: skipped a log line it can't read, after seq ${seq}: ${line.slice(0, 200)}`);
+                        seq++;
+                        this.sql.exec('INSERT OR REPLACE INTO unreadable (seq, at, line) VALUES (?, ?, ?)', seq, Date.now(), line.slice(0, 200));
+                        console.error(`performance: skipped log line ${seq}, which it can't read: ${line.slice(0, 200)}`);
                         continue;
                     }
                     this.keepLogFact(event);
@@ -576,7 +593,7 @@ export class Performance extends DurableObject<Env> {
                     await response.body?.cancel();
                     throw new Error(`the runs Worker answered ${response.status}`);
                 }
-                text = await response.text();
+                text = new TextDecoder().decode(await response.arrayBuffer());
             }
             catch (error) {
                 // Nothing to say within the wait: the run's events are read through, for now.

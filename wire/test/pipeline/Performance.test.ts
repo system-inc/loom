@@ -16,10 +16,15 @@ const queues = (env as unknown as { Queue: DurableObjectNamespace }).Queue;
 const performances = (env as unknown as { Performance: DurableObjectNamespace }).Performance;
 
 // The log's data was cut to keep the fixture small, so it is chained again here, as the Queue's appends chain it.
-async function seedQueue(events: QueueEvent[]): Promise<void> {
+async function seedQueue(events: QueueEvent[], unreadable: Record<number, string> = {}): Promise<void> {
     const rows: { seq: number; json: string; hash: string; type: string; change: string | null }[] = [];
     let prev = GenesisHash;
     for (const event of events) {
+        // A row stored as text the object can't read stands where its event would, as a bad line would on the wire.
+        if (unreadable[event.seq] !== undefined) {
+            rows.push({ seq: event.seq, json: unreadable[event.seq]!, hash: 'h'.repeat(64), type: event.type, change: null });
+            continue;
+        }
         const chained = { ...event, prev: prev };
         const json = canonical(chained);
         prev = await sha256Text(json);
@@ -80,7 +85,7 @@ afterEach(async function () {
         (instance as { state: unknown }).state = null;
     });
     await runInDurableObject(performances.get(performances.idFromName('performance')), async function (_instance: unknown, state: DurableObjectState) {
-        state.storage.sql.exec('DELETE FROM cursor; DELETE FROM branches; DELETE FROM candidates; DELETE FROM plans; DELETE FROM replans; DELETE FROM planned; DELETE FROM runs; DELETE FROM units;');
+        state.storage.sql.exec('DELETE FROM cursor; DELETE FROM unreadable; DELETE FROM branches; DELETE FROM candidates; DELETE FROM plans; DELETE FROM replans; DELETE FROM planned; DELETE FROM runs; DELETE FROM units;');
         await state.storage.deleteAlarm();
     });
 });
@@ -180,6 +185,22 @@ describe("the verify of main's timeline", function () {
         const other = (await (await call('/performance/candidates?day=2026-10-10&branch=chg_none', { bearer: board })).json()) as { candidates: unknown[] };
         expect(other.candidates).toEqual([]);
         expect((await call('/performance/candidates?day=yesterday', { bearer: board })).status).toBe(400);
+    });
+
+    it('skips a log line it cannot read by its seq, counts it, and reads on', async function () {
+        // The Queue's own replay refuses the bad row (its /futures throws, said in the test's output), so the round
+        // learns no planned run; the log itself is still read through.
+        await seedQueue(verifyLog, { 2: 'not json' });
+        await runInDurableObject(performances.get(performances.idFromName('performance')), async function (instance: unknown) {
+            const performance = instance as Performance;
+            performance.runs = fakeRuns({}).fetcher;
+            await performance.follow();
+        });
+        const read = await readTimeline(verifyCandidate);
+        // The candidate's build was the line it couldn't read, so there is no candidate; the rest of the log was read.
+        expect(read.status).toBe(404);
+        expect(read.body.seq).toBe(277);
+        expect((read.body as { unreadable?: unknown }).unreadable).toEqual({ lines: 1, firstSeq: 2 });
     });
 
     it('takes the nearest rank, so a percentile is a figure some unit really had', function () {
