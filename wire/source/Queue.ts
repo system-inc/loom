@@ -460,6 +460,22 @@ export function gitRefusalOf(request: Omit<ChangeRecord, 'change' | 'submittedAt
     if (outside.length > 0) {
         return `paths outside the diff base..sha: ${outside.join(', ')}`;
     }
+    // Every path of the diff is declared (#969a59c): every path rule below and after reads the declared paths, so a
+    // change can't leave out the one a rule would refuse.
+    const declared = new Set(request.paths);
+    const undeclared = facts.diffPaths.filter(function (path) {
+        return !declared.has(path);
+    });
+    if (undeclared.length > 0) {
+        return `the paths leave out ${undeclared.length} of the diff base..sha: ${undeclared.slice(0, 5).join(', ')}; declare every path`;
+    }
+    // A harness change can hide a check that can't fail, so it comes with its mutant evidence (push-main l.806-811).
+    const harness = request.paths.filter(function (path) {
+        return /^stage3\/(fixtures|meter)\//.test(path) && !/(_test\.go$|\/testdata\/)/.test(path);
+    });
+    if (harness.length > 0 && !request.paths.some((path) => /mutant/i.test(path))) {
+        return `it changes test harness (${harness.slice(0, 3).join(', ')}) with no mutant evidence among its paths`;
+    }
     return null;
 }
 

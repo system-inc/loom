@@ -11,7 +11,7 @@ function sha(seed: number): string {
 }
 
 // A stand-in for GitHub: every sha exists, descends from main, and touches the paths it's given, unless told otherwise.
-function facts(overrides: Partial<GitFacts> = {}, diffPaths = ['internal/lower/a.go', 'internal/lower/a_test.go']): GitFacts {
+function facts(overrides: Partial<GitFacts> = {}, diffPaths = ['internal/lower/a.go']): GitFacts {
     return { shaExists: true, baseIsAncestor: true, baseOnMain: true, diffPaths: diffPaths, ...overrides };
 }
 
@@ -76,6 +76,9 @@ describe('the queue', function () {
             [sha(10)]: facts({ shaExists: false }),
             [sha(11)]: facts({ baseIsAncestor: false }),
             [sha(12)]: facts({ baseOnMain: false }),
+            [sha(15)]: facts({}, ['internal/lower/a.go', 'internal/lower/b.go']),
+            [sha(16)]: facts({}, ['stage3/fixtures/a.ts', 'stage3/fixtures/a_test.go']),
+            [sha(17)]: facts({}, ['stage3/meter/m.py', 'stage3/meter/mutants/m-mutant.txt']),
         });
         const cases: [Record<string, unknown>, string][] = [
             [change(10), 'is not on GitHub'],
@@ -83,6 +86,10 @@ describe('the queue', function () {
             [change(12), 'is not on main'],
             [change(13, { paths: ['internal/lower/a.go', 'cloud/elsewhere.sh'] }), 'paths outside the diff base..sha: cloud/elsewhere.sh'],
             [change(14, { parent: 'chg_' + 'z'.repeat(26) }), 'is not a change this queue holds'],
+            // Every path of the diff is declared, so no path rule can be dodged by leaving one out.
+            [change(15), 'the paths leave out 1 of the diff base..sha: internal/lower/b.go'],
+            // A harness change comes with its mutant evidence; a test file or testdata there isn't harness.
+            [change(16, { paths: ['stage3/fixtures/a.ts', 'stage3/fixtures/a_test.go'] }), 'it changes test harness (stage3/fixtures/a.ts) with no mutant evidence'],
         ];
         for (const [request, reason] of cases) {
             const response = await submit(queue, request);
@@ -94,8 +101,9 @@ describe('the queue', function () {
             log.map(function (event) {
                 return event.type;
             }),
-        ).toEqual(['change.refused', 'change.refused', 'change.refused', 'change.refused', 'change.refused']);
+        ).toEqual(['change.refused', 'change.refused', 'change.refused', 'change.refused', 'change.refused', 'change.refused', 'change.refused']);
         expect(log[0]?.data).toMatchObject({ facts: { shaExists: false }, reason: `sha ${sha(10)} is not on GitHub` });
+        expect((await submit(queue, change(17, { paths: ['stage3/meter/m.py', 'stage3/meter/mutants/m-mutant.txt'] }))).status).toBe(201);
     });
 
     it('refuses a malformed change before asking git', async function () {
@@ -762,8 +770,16 @@ describe('outside verdicts, behind their switch', function () {
 
 describe('an empty plan', function () {
     it("is taken only for a Markdown-only future, listed for Judge, and decided only by Judge's docs rule", async function () {
-        const docsFacts = facts({}, ['docs/a.md', 'README.md', 'internal/lower/a.go']);
-        const queue = await freshQueue({ [sha(302)]: docsFacts, [sha(303)]: docsFacts, [sha(304)]: docsFacts });
+        const queue = await freshQueue({
+            [sha(302)]: facts({}, ['docs/a.md', 'internal/lower/a.go']),
+            [sha(303)]: facts({}, ['docs/a.md']),
+            [sha(304)]: facts({}, ['README.md', 'docs/a.md']),
+            [sha(305)]: facts({}, ['docs/a.md', 'internal/lower/a.go']),
+        });
+        // Declaring only the Markdown of a diff that holds code is refused at the door, so it never reaches a plan.
+        const hiding = await submit(queue, change(305, { paths: ['docs/a.md'] }));
+        expect(hiding.status).toBe(422);
+        expect(((await hiding.json()) as { reason: string }).reason).toContain('the paths leave out 1 of the diff base..sha: internal/lower/a.go');
         const idOf = async function (seed: number, paths: string[], fields: Record<string, unknown> = {}): Promise<string> {
             const answer = await submit(queue, change(seed, { paths: paths, ...fields }));
             return ((await answer.json()) as { change: string }).change;
