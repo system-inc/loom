@@ -359,7 +359,8 @@ function forwardToPool(environment: Env, pool: string, operation: string, reques
 }
 
 // A pool (docs/protocol.md, The pool). The units, the cancel, the queued, retiring a worker and the pool's state belong to no one run, so any
-// run's coordinator token reaches them, and a board token may watch. Only the pool's own pool token asks for next.
+// run's coordinator token reaches them, and a board token may watch, its workers' live statuses among the pool's state.
+// Only the pool's own pool token asks for next or posts a worker's live status.
 async function handlePool(request: Request, environment: Env, pool: string, operation: string): Promise<Response> {
     if (operation === '') {
         if (request.method !== 'GET') {
@@ -371,15 +372,16 @@ async function handlePool(request: Request, environment: Env, pool: string, oper
         }
         return forwardToPool(environment, pool, 'status', request);
     }
-    if (!['units', 'next', 'cancel', 'queued', 'retire', 'restore'].includes(operation)) {
+    if (!['units', 'next', 'live', 'cancel', 'queued', 'retire', 'restore'].includes(operation)) {
         return jsonResponse(404, { error: 'no such endpoint' });
     }
     if (request.method !== 'POST') {
         return methodNotAllowed('POST');
     }
-    // A pool token's run is its pool's name, so a token for another pool is refused like a token for another run.
+    // A pool token's run is its pool's name, so a token for another pool is refused like a token for another run. A
+    // worker's live status goes with the same token as its asks.
     const claims =
-        operation === 'next'
+        operation === 'next' || operation === 'live'
             ? await authorize(request, environment, pool, { scopes: poolScope, queryScopes: [] })
             : await authorize(request, environment, null, { scopes: coordinatorScope, queryScopes: [] });
     if (claims instanceof Response) {
