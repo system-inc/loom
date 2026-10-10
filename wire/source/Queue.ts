@@ -17,6 +17,8 @@ export const MaximumChangeBodyBytes = 1024 * 1024;
 export const MaximumFutureBodyBytes = 32 * 1024 * 1024;
 export const MaximumEventsPage = 1000;
 export const UnitKeyVersion = 'loom-unit-v1';
+// The one rule that decides an empty-planned future (#p74thc8): Judge runs every check push-main --ruled-gate ran.
+export const DocsRule = 'ruled-gate-docs-v0';
 // The board hears each moved change at most once a second (contracts v1.1), and a failed push is tried again.
 export const BoardPushMilliseconds = 1000;
 export const BoardRetryMilliseconds = 5000;
@@ -35,6 +37,8 @@ export type EventType =
     | 'block.decided'
     | 'future.built'
     | 'unit.planned'
+    // The planner's empty plan: no unit's key moved for a Markdown-only future, which Judge decides by its docs rule.
+    | 'future.planned'
     // A plan withdrawn by a ruling before anything judged it, so the planner can plan the future again.
     | 'future.unplanned'
     | 'unit.placed'
@@ -205,6 +209,8 @@ export interface FutureEntry {
     changes: string[];
     // null until the planner posts its units.
     units: Map<string, UnitEntry> | null;
+    // The planner's reason when its plan is empty (no unit's key moved, every path Markdown), else null.
+    empty: { reason: string } | null;
     // Today's gate's whole verdict, on an unplanned future only.
     whole: Verdict | null;
     // The run that decided the future and how: a judge's batch, today's gate's whole verdict, or a plan that reused
@@ -522,8 +528,9 @@ export function futureLandable(future: FutureEntry | undefined): boolean {
     if (future.units === null) {
         return future.whole !== null && decisionOf(future.whole) === 'green' && future.whole.future === future.tree;
     }
+    // An empty plan has no unit to recompute: Judge's green under the docs rule (the only batch it takes) decides it.
     if (future.units.size === 0) {
-        return false;
+        return future.empty !== null;
     }
     const verdicts: UnitVerdict[] = [];
     for (const unit of future.units.values()) {
@@ -640,7 +647,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'future.built') {
         const tree = event.subject.future ?? '';
         const changes = event.data.changes as string[];
-        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, whole: null, decided: null, voids: 0, judged: false });
+        state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, empty: null, whole: null, decided: null, voids: 0, judged: false });
         // A block's prefix future (main, +A, +B) is the newest change's own; the changes ahead of it keep theirs.
         const tested = event.data.block === undefined ? changes : changes.slice(-1);
         for (const change of tested) {
@@ -674,10 +681,24 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             }
         }
     }
+    else if (event.type === 'future.planned') {
+        const future = state.futures.get(event.subject.future ?? '');
+        if (future !== undefined) {
+            future.units = new Map();
+            future.empty = { reason: event.data.reason as string };
+            for (const change of future.changes) {
+                const member = state.changes.get(change);
+                if (member !== undefined && member.state === 'queued') {
+                    member.state = 'testing';
+                }
+            }
+        }
+    }
     else if (event.type === 'future.unplanned') {
         const future = state.futures.get(event.subject.future ?? '');
         if (future !== undefined) {
             future.units = null;
+            future.empty = null;
             for (const change of future.changes) {
                 const member = state.changes.get(change);
                 if (member !== undefined && member.state === 'testing') {
@@ -879,11 +900,15 @@ function isResources(value: unknown): value is Resources {
     );
 }
 
-// The planner's body for POST /futures/<tree>/plan: the unit list, each unit once, its key computed from its parts.
-export async function checkPlan(body: string): Promise<PlannedUnit[] | string> {
+// The planner's body for POST /futures/<tree>/plan: the unit list, each unit once, its key computed from its parts, or
+// {empty: true, reason} when no unit's key moved.
+export async function checkPlan(body: string): Promise<PlannedUnit[] | { reason: string } | string> {
     const parsed = parseJson(body);
+    if (isPlainObject(parsed) && parsed.empty === true) {
+        return typeof parsed.reason === 'string' && parsed.reason !== '' ? { reason: parsed.reason } : 'an empty plan names its reason';
+    }
     if (!Array.isArray(parsed) || parsed.length === 0) {
-        return 'the plan is a non-empty JSON list of units';
+        return 'the plan is a non-empty JSON list of units, or {empty: true, reason}';
     }
     const units: PlannedUnit[] = [];
     const names = new Set<string>();
@@ -1647,6 +1672,9 @@ export class Queue extends DurableObject<Env> {
         if (typeof units === 'string') {
             return jsonResponse(422, { error: units });
         }
+        if (!Array.isArray(units)) {
+            return this.planEmpty(tree, units.reason);
+        }
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
             const future = this.liveFuture(state, tree);
@@ -1700,6 +1728,36 @@ export class Queue extends DurableObject<Env> {
                 );
             }
             return jsonResponse(200, { future: tree, planned: units.length });
+        });
+    }
+
+    // The planner's empty plan (#p74thc8): no unit's key moved. The queue locks it a second time, on the paths: every path
+    // of every change in the future is Markdown, and no parity run or witness, which plan their units, ever takes one.
+    private async planEmpty(tree: string, reason: string): Promise<Response> {
+        return this.ctx.blockConcurrencyWhile(async () => {
+            const state = await this.current();
+            const future = this.liveFuture(state, tree);
+            if (future instanceof Response) {
+                return future;
+            }
+            if (future.units !== null) {
+                return jsonResponse(future.empty !== null ? 200 : 409, future.empty !== null ? { future: tree, planned: 0 } : { error: `future ${tree} is already planned` });
+            }
+            if (future.decided !== null) {
+                return jsonResponse(409, { error: `future ${tree} was decided ${future.decided.status} by today's gate, run ${future.decided.run}` });
+            }
+            const records = future.changes.map(function (change) {
+                return state.changes.get(change)?.record;
+            });
+            if (records.some((record) => record === undefined || record.parity === true || record.witness === true)) {
+                return jsonResponse(422, { error: 'a parity run or a witness plans its units' });
+            }
+            const other = records.flatMap((record) => record?.paths ?? []).filter((path) => !path.endsWith('.md'));
+            if (other.length > 0 || records.every((record) => (record?.paths.length ?? 0) === 0)) {
+                return jsonResponse(422, { error: `an empty plan is only for a future whose every path is Markdown, not ${other.slice(0, 5).join(' ') || 'no paths'}` });
+            }
+            await this.append('future.planned', { change: future.changes[0], future: tree }, { empty: true, reason: reason });
+            return jsonResponse(200, { future: tree, planned: 0 });
         });
     }
 
@@ -1758,6 +1816,9 @@ export class Queue extends DurableObject<Env> {
             }
             if (!future.changes.includes(batch.change)) {
                 return jsonResponse(422, { error: `change ${batch.change} is not in future ${tree}` });
+            }
+            if (future.empty !== null && batch.rule !== DocsRule) {
+                return jsonResponse(422, { error: `an empty-planned future is decided only by ${DocsRule}, not ${batch.rule}` });
             }
             const planned = [...future.units.keys()];
             if (!sortedEqual(batch.plan, planned)) {
@@ -1946,6 +2007,7 @@ export class Queue extends DurableObject<Env> {
                     base: future.base,
                     parity: parityOf(state, future),
                     attempt: future.voids + 1,
+                    ...(future.empty === null ? {} : { empty: true, reason: future.empty.reason, rule: DocsRule }),
                     change: { change: record?.change, sha: record?.sha, base: record?.base, owner: record?.owner },
                     units: [...(future.units?.values() ?? [])].map(function (unit) {
                         return {

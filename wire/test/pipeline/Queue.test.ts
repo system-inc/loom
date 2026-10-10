@@ -760,6 +760,44 @@ describe('outside verdicts, behind their switch', function () {
     });
 });
 
+describe('an empty plan', function () {
+    it("is taken only for a Markdown-only future, listed for Judge, and decided only by Judge's docs rule", async function () {
+        const docsFacts = facts({}, ['docs/a.md', 'README.md', 'internal/lower/a.go']);
+        const queue = await freshQueue({ [sha(302)]: docsFacts, [sha(303)]: docsFacts, [sha(304)]: docsFacts });
+        const idOf = async function (seed: number, paths: string[], fields: Record<string, unknown> = {}): Promise<string> {
+            const answer = await submit(queue, change(seed, { paths: paths, ...fields }));
+            return ((await answer.json()) as { change: string }).change;
+        };
+        const empty = { empty: true, reason: 'no unit key moved' };
+        const code = await idOf(301, ['internal/lower/a.go']);
+        expect((await postPlan(queue, sha(301), empty as unknown as unknown[])).status).toBe(422);
+        const mixed = await idOf(302, ['docs/a.md', 'internal/lower/a.go']);
+        expect((await postPlan(queue, sha(302), empty as unknown as unknown[])).status).toBe(422);
+        const parity = await idOf(303, ['docs/a.md'], { parity: true });
+        const parityFuture = ((await (await queue.fetch(`https://queue/changes/${parity}`)).json()) as { future: string }).future;
+        expect((await postPlan(queue, parityFuture, empty as unknown as unknown[])).status).toBe(422);
+        expect((await postPlan(queue, sha(304), { empty: true } as unknown as unknown[])).status).toBe(422);
+        const docs = await idOf(304, ['docs/a.md', 'README.md']);
+        expect((await postPlan(queue, sha(304), empty as unknown as unknown[])).status).toBe(200);
+        expect((await postPlan(queue, sha(304), empty as unknown as unknown[])).status).toBe(200);
+        const planned = (await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: Record<string, unknown>[] };
+        expect(planned.futures.find((future) => future.future === sha(304))).toMatchObject({ empty: true, reason: 'no unit key moved', rule: 'ruled-gate-docs-v0', units: [] });
+        expect(await landings(queue)).toEqual([]);
+        // Only Judge's docs rule decides it; any other rule is refused and logs nothing.
+        const before = (await logOf(queue)).length;
+        expect((await postBatch(queue, sha(304), { ...batch(docs, sha(304), 'run-1', [], 'green'), rule: 'judge-v1' })).status).toBe(422);
+        expect((await logOf(queue)).length).toBe(before);
+        expect(await landings(queue)).toEqual([]);
+        const decided = await postBatch(queue, sha(304), { ...batch(docs, sha(304), 'run-1', [], 'green'), rule: 'ruled-gate-docs-v0' });
+        expect(decided.status, await decided.clone().text()).toBe(200);
+        expect(await landings(queue)).toEqual([expect.objectContaining({ change: docs, future: sha(304) })]);
+        const replayed = await replay(await logOf(queue));
+        expect(replayed.futures.get(sha(304))?.empty).toEqual({ reason: 'no unit key moved' });
+        expect(replayed.futures.get(sha(304))?.decided).toEqual({ run: 'run-1', status: 'green' });
+        expect([code, mixed, parity].every((id) => replayed.changes.get(id)?.state === 'queued')).toBe(true);
+    });
+});
+
 describe('a resubmit', function () {
     it('moves a red or parked change to a new sha under the same id, rechecked by git, and never back to a tested sha', async function () {
         const queue = await freshQueue();
@@ -937,13 +975,16 @@ describe('a landing order', function () {
                     return [key, { unitKey: key, name: `u${index}`, keyParts: {}, decision: 'run' as const, reused: null, resources: null, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
                 }),
             );
-            return { tree: sha(1), base: main, changes: [], units: units, whole: null, decided: { run: 'r', status: 'green' }, voids: 0, judged: true };
+            return { tree: sha(1), base: main, changes: [], units: units, empty: null, whole: null, decided: { run: 'r', status: 'green' }, voids: 0, judged: true };
         };
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'failed', 'mainRed')]))).toBe(true);
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'void', 'infra')]))).toBe(false);
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), null]))).toBe(false);
         expect(futureLandable(futureWith([verdictOf('', 'passed', null), verdictOf('', 'passed', null, sha(2))]))).toBe(false);
         expect(futureLandable(futureWith([]))).toBe(false);
+        // An empty plan lands on Judge's green alone, since nothing is left to recompute.
+        expect(futureLandable({ ...futureWith([]), empty: { reason: 'no key moved' } })).toBe(true);
+        expect(futureLandable({ ...futureWith([]), empty: { reason: 'no key moved' }, decided: null })).toBe(false);
         expect(futureLandable({ ...futureWith([verdictOf('', 'passed', null)]), decided: { run: 'r', status: 'void' } })).toBe(false);
     });
 });
