@@ -29,6 +29,9 @@ type Pool struct {
 	// Kinds are the unit kinds the pool takes when it is limited to some (a box pool that runs phases): empty takes
 	// tests and products.
 	Kinds []string `json:"kinds,omitempty"`
+	// Cold marks a pool whose workers give each test unit a Go cache private to it and empty at its start. Only a
+	// cold pool decides a test unit (Release, Oct 10 02:48Z), so only a cold pool counts for a declared need.
+	Cold bool `json:"cold,omitempty"`
 }
 
 // PhaseRunner is the runner a phase unit keys on: the runner of the pool that takes kind phase, never a test pool's
@@ -112,19 +115,20 @@ func LoadUnitNeeds(gateTools string) (UnitNeeds, error) {
 	return needs, nil
 }
 
-// For is a unit's resources (nil: no declared need), refused when no pool serving the unit's runner can hold it, so
-// the unit is never planned to wait unplaced. An empty runner (a product's key) may go to any pool.
+// For is a unit's resources (nil: no declared need), refused when no cold pool serving the unit's runner can hold it,
+// so the unit is never planned to wait unplaced: a test unit places only on cold pools. An empty runner (a product's
+// key) may go to any cold pool.
 func (needs UnitNeeds) For(directory, run string, pools []Pool, runner string) (*protocol.Resources, error) {
 	resources := needs.Need(directory, run)
 	if resources == nil {
 		return nil, nil
 	}
 	for _, pool := range pools {
-		if (runner == "" || pool.Runner == runner) && pool.MemoryMegabytes >= resources.MemoryMegabytes && pool.Cpus >= resources.Cpus {
+		if pool.Cold && (runner == "" || pool.Runner == runner) && pool.MemoryMegabytes >= resources.MemoryMegabytes && pool.Cpus >= resources.Cpus {
 			return resources, nil
 		}
 	}
-	return nil, fmt.Errorf("%s needs %d MB and %d cpus, which no pool serving runner %s holds", directory, resources.MemoryMegabytes, resources.Cpus, short(runner))
+	return nil, fmt.Errorf("%s needs %d MB and %d cpus, which no cold pool serving runner %s holds", directory, resources.MemoryMegabytes, resources.Cpus, short(runner))
 }
 
 // Need is a unit's declared need (nil: none), the largest of the entries for its directory and run pattern, with no

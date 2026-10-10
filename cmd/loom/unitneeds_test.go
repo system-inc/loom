@@ -19,8 +19,8 @@ func TestUnitNeedsPrintsThePlannersStamp(t *testing.T) {
 	}
 	poolsFile := filepath.Join(t.TempDir(), "pools.json")
 	runner := strings.Repeat("8a", 32)
-	os.WriteFile(poolsFile, []byte(`{"pools": [{"name": "codex-strict", "tier": "codex-strict", "runner": "`+runner+`", "memoryMegabytes": 16384, "cpus": 4},
-		{"name": "box-strict-8a70", "tier": "box-strict", "runner": "`+runner+`", "memoryMegabytes": 65536, "cpus": 8}]}`), 0o644)
+	os.WriteFile(poolsFile, []byte(`{"pools": [{"name": "codex-strict", "tier": "codex-strict", "runner": "`+runner+`", "memoryMegabytes": 16384, "cpus": 4, "cold": true},
+		{"name": "box-strict-8a70", "tier": "box-strict", "runner": "`+runner+`", "memoryMegabytes": 65536, "cpus": 8, "cold": true}]}`), 0o644)
 	needs := func(arguments ...string) (int, string) {
 		var stdout, stderr bytes.Buffer
 		code := run(append([]string{"unit-needs", "--gate-tools", tools, "--pools", poolsFile, "--runner", runner}, arguments...), &stdout, &stderr)

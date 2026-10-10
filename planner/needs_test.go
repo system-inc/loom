@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// A declared need is stamped on its unit for placement and never moves the key; a need no pool serving the key's
+// A declared need is stamped on its unit for placement and never moves the key; a need no cold pool serving the key's
 // runner holds is refused at plan time, so the unit can't wait unplaced; and a need without its record is refused.
 // Not parallel: it points the package's PoolsFile at its own table.
 func TestADeclaredNeedIsStampedNeverKeyedAndRefusedWhenNoPoolHoldsIt(t *testing.T) {
@@ -16,10 +16,11 @@ func TestADeclaredNeedIsStampedNeverKeyedAndRefusedWhenNoPoolHoldsIt(t *testing.
 	runner, other := strings.Repeat("d", 64), strings.Repeat("e", 64)
 	tools := Tools{Runner: runner, Go: "go1.27.0"}
 	poolsFile := filepath.Join(t.TempDir(), "pools.json")
-	// The big pool serves another runner, so only the small one counts for this key.
-	os.WriteFile(poolsFile, []byte(`{"pools": [{"name": "codex-strict", "tier": "codex-strict", "runner": "`+runner+`", "memoryMegabytes": 16384, "cpus": 4},
-		{"name": "box-strict", "tier": "box-strict", "runner": "`+runner+`", "memoryMegabytes": 65536, "cpus": 8},
-		{"name": "box-other", "tier": "box-strict", "runner": "`+other+`", "memoryMegabytes": 262144, "cpus": 64}]}`), 0o644)
+	// The big pool serves another runner, and the warm one isn't cold, so only the small cold ones count for this key.
+	os.WriteFile(poolsFile, []byte(`{"pools": [{"name": "codex-strict", "tier": "codex-strict", "runner": "`+runner+`", "memoryMegabytes": 16384, "cpus": 4, "cold": true},
+		{"name": "box-strict", "tier": "box-strict", "runner": "`+runner+`", "memoryMegabytes": 65536, "cpus": 8, "cold": true},
+		{"name": "box-warm", "tier": "box-strict", "runner": "`+runner+`", "memoryMegabytes": 98304, "cpus": 16},
+		{"name": "box-other", "tier": "box-strict", "runner": "`+other+`", "memoryMegabytes": 262144, "cpus": 64, "cold": true}]}`), 0o644)
 	saved := PoolsFile
 	PoolsFile = poolsFile
 	defer func() { PoolsFile = saved }()
@@ -50,6 +51,11 @@ func TestADeclaredNeedIsStampedNeverKeyedAndRefusedWhenNoPoolHoldsIt(t *testing.
 	// 128 GB: only the pool of another runner could hold it, and this key's runner isn't served there.
 	if _, err := plan(`{"version": 1, "units": [{"package": "a", "memoryMegabytes": 131072, "cpus": 4, "record": "gate-logs/x/fast"}]}`); err == nil {
 		t.Error("a need only another runner's pool holds was planned")
+	}
+	// Mutant (Release, Oct 10 02:48Z): 16 cpus only the warm pool of this runner holds. A test unit is decided only on a
+	// cold pool, so planning it would leave it waiting unplaced.
+	if _, err := plan(`{"version": 1, "units": [{"package": "a", "memoryMegabytes": 20480, "cpus": 16, "record": "gate-logs/x/fast"}]}`); err == nil {
+		t.Error("a need only a warm pool holds was planned")
 	}
 	if _, err := plan(`{"version": 1, "units": [{"package": "a", "memoryMegabytes": 20480}]}`); err == nil {
 		t.Error("a need without the record that measured it was planned")

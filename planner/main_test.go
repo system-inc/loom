@@ -19,8 +19,8 @@ func TestMain(m *testing.M) {
 	}
 	PoolsFile = filepath.Join(directory, "pools.json")
 	NoReuseFile = filepath.Join(directory, "no-reuse")
-	table := `{"pools": [{"name": "codex-strict", "tier": "codex-strict", "runner": "` + strings.Repeat("d", 64) + `", "memoryMegabytes": 16384, "cpus": 4},
-		{"name": "box-phase", "tier": "box-strict", "runner": "` + PhasePoolRunner + `", "memoryMegabytes": 65536, "cpus": 8, "kinds": ["phase"]}]}`
+	table := `{"pools": [{"name": "codex-strict", "tier": "codex-strict", "runner": "` + strings.Repeat("d", 64) + `", "memoryMegabytes": 16384, "cpus": 4, "cold": true},
+		{"name": "box-phase", "tier": "box-strict", "runner": "` + PhasePoolRunner + `", "memoryMegabytes": 65536, "cpus": 8, "kinds": ["phase"], "cold": true}]}`
 	if err := os.WriteFile(PoolsFile, []byte(table), 0o644); err != nil {
 		panic(err)
 	}
