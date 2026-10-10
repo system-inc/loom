@@ -90,13 +90,9 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return 1
 		}
 	}
-	var table []judge.PoolEntry
 	if *poolsPath != "" {
-		content, err := os.ReadFile(*poolsPath)
-		if err == nil {
-			table, err = judge.LoadPools(content)
-		}
-		if err != nil {
+		// Read once here so a bad table stops the judge at start; each rerun reads it again (readPools).
+		if _, err := readPools(*poolsPath); err != nil {
 			fmt.Fprintln(stderr, "judge:", err)
 			return 1
 		}
@@ -139,9 +135,15 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			// Placed by its declared need, as its first placement was: a pool that can't hold it never takes it.
 			unit.Resources = resources
 			rerunConfig := config
-			if table != nil {
+			if *poolsPath != "" {
 				// One table (Loom, Oct 10 02:02Z): the pools serving the key's runner whose workers hold the unit's need,
 				// read from the listing or else unit-needs.json, one slot each, a strict unit's silence up to its ceiling.
+				// The table is read fresh, like the needs, so a pool Fabric resizes is seen by the next rerun, never only
+				// after a restart (typeaware's 16 cpus wait on box-strict-8a70's, Release 02:21Z).
+				table, err := readPools(*poolsPath)
+				if err != nil {
+					return nil, err
+				}
 				needs, err := loadNeeds(*needsGit)
 				if err != nil {
 					return nil, err
@@ -545,6 +547,15 @@ func gateReport(suiteText string, events []judge.LogEvent, canaryTree string) ([
 // strictSilence is how long a strict rerun may go silent before its worker counts as gone: the unit's 1800 s ceiling,
 // since a strict runner says nothing while a package's go test runs (Loom, Oct 10 01:57Z).
 const strictSilence = 1800 * time.Second
+
+// readPools reads the pool table at path (workshop's ~/.loom/pools.json).
+func readPools(path string) ([]judge.PoolEntry, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return judge.LoadPools(content)
+}
 
 // loadNeeds reads unit-needs.json from origin's loom/planner-reads tip through the judge's own clone, fetched fresh
 // into a ref of its own, so a declared need lands in the next rerun. No clone means no needs beyond the listing's.

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/system-inc/loom/judge"
+	"github.com/system-inc/loom/protocol"
 )
 
 func TestADryRunPrintsTheBatchAndPostsNothing(t *testing.T) {
@@ -159,5 +160,33 @@ func TestTheGateReadsEachMutantsNewestDecidedBatchFromTheLog(t *testing.T) {
 	// No canary read: held.
 	if _, promote, _ := gateReport(suite, events[:6], canary); promote {
 		t.Fatal("promoted without a canary reading")
+	}
+}
+
+// A rerun reads the pool table as it is now: a pool Fabric resizes after the judge starts holds the next rerun's need
+// (typeaware's 16 cpus on box-strict-8a70, Release Oct 10 02:21Z), never only after a restart.
+func TestTheJudgeReadsThePoolTableFreshForEachRerun(t *testing.T) {
+	path := t.TempDir() + "/pools.json"
+	write := func(cpus int) {
+		table := `{"pools":[{"name":"box-strict-8a70","tier":"box-strict","runner":"8a70","memoryMegabytes":65536,"cpus":` + strconv.Itoa(cpus) + `}]}`
+		if err := os.WriteFile(path, []byte(table), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(8)
+	if table, err := readPools(path); err != nil || len(table) != 1 || table[0].Cpus != 8 {
+		t.Fatalf("table %+v (%v), want the box at 8 cpus", table, err)
+	}
+	write(16)
+	table, err := readPools(path)
+	if err != nil || len(table) != 1 || table[0].Cpus != 16 {
+		t.Fatalf("table %+v (%v), want the resized box at 16 cpus", table, err)
+	}
+	if fit := judge.FitPools(table, "test", "8a70", protocol.Resources{MemoryMegabytes: 9710, Cpus: 16}); len(fit) != 1 {
+		t.Fatalf("fit %v, want the resized box for a 16-cpu need", fit)
+	}
+	write(0)
+	if _, err := readPools(path); err == nil {
+		t.Fatal("read a table whose pool has no cpus")
 	}
 }
