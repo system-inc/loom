@@ -461,11 +461,11 @@ describe("the queue's board pushes", function () {
                 return line.change === id;
             });
         };
-        expect(await lineOf()).toBeUndefined();
-        expect(await runDurableObjectAlarm(queue)).toBe(true);
+        // The alarm is due at once, so the runtime may run it before the test does; either way the line arrives.
+        await runDurableObjectAlarm(queue);
         expect(await lineOf()).toMatchObject({ change: id, owner: 'system_adamic_compiler', sha: sha(41), state: 'testing', future: sha(41), units: { planned: 0, passed: 0, failed: 0, void: 0 } });
         await report(queue, id, { main: sha(50), from: main, landed: sha(41) });
-        expect(await runDurableObjectAlarm(queue)).toBe(true);
+        await runDurableObjectAlarm(queue);
         expect(await lineOf()).toMatchObject({ change: id, state: 'landed' });
         const pushed = await runInDurableObject(queue, function (_instance: Queue, context: DurableObjectState) {
             return context.storage.sql.exec<{ value: string }>("SELECT value FROM facts WHERE name = 'boardSeq'").toArray()[0]?.value;
@@ -492,7 +492,7 @@ describe("the queue's board pushes", function () {
         await postWhole(queue, id, sha(41), 'passed', null, 'second');
         const another = ((await (await submit(queue, change(42))).json()) as { change: string }).change;
         reads.length = 0;
-        expect(await runDurableObjectAlarm(queue)).toBe(true);
+        await runDurableObjectAlarm(queue);
         expect(reads).toEqual([]);
         expect(
             ((await (await board.get(board.idFromName('board')).fetch('https://board/changes')).json()) as { changes: { change: string }[] }).changes.some(function (line) {
@@ -636,6 +636,88 @@ describe('blocks, behind their switch', function () {
         expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'parked', future: null });
         const feed = (await (await queue.fetch('https://queue/events?owners=1')).text()).trim();
         expect(feed).toContain('conflicts with the changes ahead of it in block 1: x.go');
+    });
+});
+
+describe('a decided block', function () {
+    it('lands its longest green prefix as one order, sends the changes behind a red back, and opens the next block at once', async function () {
+        const queue = await freshQueue();
+        await runInDurableObject(queue, function (instance: Queue) {
+            instance.blocksReady = true;
+        });
+        await queue.fetch('https://queue/rules', { method: 'POST', body: JSON.stringify({ rule: 'blocks', value: { on: true, budget: 8 }, commit: sha(99) }) });
+        const idOf = async function (seed: number): Promise<string> {
+            return ((await (await submit(queue, change(seed))).json()) as { change: string }).change;
+        };
+        const built = function (block: number, prefixes: unknown[]): Promise<Response> {
+            return queue.fetch(`https://queue/blocks/${block}/built`, { method: 'POST', body: JSON.stringify({ base: main, prefixes: prefixes, conflicts: [] }) });
+        };
+        const decide = function (id: string, tree: string, status: string, cause: string | null): Promise<Response> {
+            return queue.fetch('https://queue/verdicts', {
+                method: 'POST',
+                body: JSON.stringify({ change: id, verdict: { future: tree, run: 'r-' + tree.slice(-4), status: status, cause: cause, rule: 'todays-gate-v0' } }),
+            });
+        };
+        const blockList = async function (): Promise<[number, string[]][]> {
+            const listed = (await (await queue.fetch('https://queue/blocks?state=unbuilt')).json()) as { blocks: { block: number; changes: { change: string }[] }[] };
+            return listed.blocks.map((block) => [block.block, block.changes.map((item) => item.change)]);
+        };
+        // Block 1 is A alone (it opened the instant A cleared); B, C and D wait behind it.
+        const a = await idOf(81);
+        const b = await idOf(82);
+        const c = await idOf(83);
+        const d = await idOf(84);
+        expect(await blockList()).toEqual([[1, [a]]]);
+        await built(1, [{ tree: sha(181), change: a }]);
+        await decide(a, sha(181), 'passed', null);
+        // Decided: A lands alone, and block 1 holds the slot until it has, so block 2 builds on the main A makes.
+        expect((await landings(queue)).map((order) => [order.change, order.future])).toEqual([[a, sha(181)]]);
+        expect(await blockList()).toEqual([]);
+        await report(queue, a, { main: sha(181), from: main, landed: sha(181) });
+        expect(await blockList()).toEqual([[2, [b, c, d]]]);
+        // Block 2's chain: main+B, +C, +D. C's prefix is red (C's own), so B's prefix lands, carrying B; D waits again.
+        await built(2, [{ tree: sha(182), change: b }, { tree: sha(183), change: c }, { tree: sha(184), change: d }]);
+        await decide(b, sha(182), 'passed', null);
+        expect(await landings(queue)).toEqual([]);
+        await decide(c, sha(183), 'failed', 'change');
+        expect((await landings(queue)).map((order) => [order.change, order.future])).toEqual([[b, sha(182)]]);
+        expect(await (await queue.fetch(`https://queue/changes/${c}`)).json()).toMatchObject({ state: 'red' });
+        expect(await (await queue.fetch(`https://queue/changes/${d}`)).json()).toMatchObject({ state: 'queued', future: null });
+        expect(await blockList()).toEqual([]);
+        await report(queue, b, { main: sha(182), from: sha(181), landed: sha(182) });
+        expect(await blockList()).toEqual([[3, [d]]]);
+        await built(3, [{ tree: sha(185), change: d }]);
+        await decide(d, sha(185), 'passed', null);
+        expect((await landings(queue)).map((order) => order.change)).toEqual([d]);
+        const replayed = await replay(await logOf(queue));
+        expect([a, b, c, d].map((id) => replayed.changes.get(id)?.state)).toEqual(['landed', 'landed', 'red', 'testing']);
+        expect(replayed.blocks.get(2)).toMatchObject({ resolved: true, landing: b });
+    });
+
+    it('lands a longer green prefix that carries the changes ahead of it, and waits on a void', async function () {
+        const queue = await freshQueue();
+        await runInDurableObject(queue, function (instance: Queue) {
+            instance.blocksReady = true;
+        });
+        await queue.fetch('https://queue/rules', { method: 'POST', body: JSON.stringify({ rule: 'blocks', value: { on: true, budget: 8 }, commit: sha(99) }) });
+        const ids: string[] = [];
+        for (const seed of [91, 92, 93]) {
+            ids.push(((await (await submit(queue, change(seed))).json()) as { change: string }).change);
+        }
+        const [x, y, z] = ids as [string, string, string];
+        const post = (path: string, body: unknown): Promise<Response> => queue.fetch(`https://queue${path}`, { method: 'POST', body: JSON.stringify(body) });
+        await post('/blocks/1/built', { base: main, prefixes: [{ tree: sha(191), change: x }], conflicts: [] });
+        await post('/verdicts', { change: x, verdict: { future: sha(191), run: 'r1', status: 'passed', cause: null, rule: 'g' } });
+        await report(queue, x, { main: sha(191), from: main, landed: sha(191) });
+        await post('/blocks/2/built', { base: sha(191), prefixes: [{ tree: sha(192), change: y }, { tree: sha(193), change: z }], conflicts: [] });
+        await post('/verdicts', { change: z, verdict: { future: sha(193), run: 'r3', status: 'passed', cause: null, rule: 'g' } });
+        await post('/verdicts', { change: y, verdict: { future: sha(192), run: 'r2', status: 'void', cause: 'infra', rule: 'g' } });
+        // Y's prefix voided: the block waits for its rerun.
+        expect(await landings(queue)).toEqual([]);
+        await post('/verdicts', { change: y, verdict: { future: sha(192), run: 'r2b', status: 'passed', cause: null, rule: 'g' } });
+        expect((await landings(queue)).map((order) => [order.change, order.future])).toEqual([[z, sha(193)]]);
+        await report(queue, z, { main: sha(193), from: sha(191), landed: sha(193) });
+        expect(await (await queue.fetch(`https://queue/changes/${y}`)).json()).toMatchObject({ state: 'landed', landed: sha(193) });
     });
 });
 

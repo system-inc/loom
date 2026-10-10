@@ -31,6 +31,8 @@ export type EventType =
     | 'block.opened'
     // The workshop builder wrote a block's merge chain: its prefixes are futures and its conflicts are parked.
     | 'block.built'
+    // A block's prefixes decided up to its first red: the longest green prefix lands, the changes behind the red wait again.
+    | 'block.decided'
     | 'future.built'
     | 'unit.planned'
     // A plan withdrawn by a ruling before anything judged it, so the planner can plan the future again.
@@ -243,6 +245,9 @@ export interface BlockEntry {
     block: number;
     changes: string[];
     built: boolean;
+    // Decided: the change whose prefix lands (the longest green one), or null when none does; the slot is free.
+    resolved: boolean;
+    landing: string | null;
 }
 
 export interface QueueState {
@@ -586,11 +591,26 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     }
     else if (event.type === 'block.opened') {
         const changes = event.data.changes as string[];
-        state.blocks.set(event.data.block as number, { block: event.data.block as number, changes: changes, built: false });
+        state.blocks.set(event.data.block as number, { block: event.data.block as number, changes: changes, built: false, resolved: false, landing: null });
         for (const change of changes) {
             const member = state.changes.get(change);
             if (member !== undefined) {
                 member.block = event.data.block as number;
+            }
+        }
+    }
+    else if (event.type === 'block.decided') {
+        const block = state.blocks.get(event.data.block as number);
+        if (block !== undefined) {
+            block.resolved = true;
+            block.landing = (event.data.lands ?? null) as string | null;
+        }
+        for (const change of event.data.back as string[]) {
+            const member = state.changes.get(change);
+            if (member !== undefined) {
+                member.block = null;
+                member.future = null;
+                member.verdict = null;
             }
         }
     }
@@ -1290,7 +1310,12 @@ export class Queue extends DurableObject<Env> {
     // waiting change is checked, on its way, in no block and no future yet.
     private async openBlock(): Promise<void> {
         const state = await this.current();
-        if (!state.rules.blocks.on || state.blocks.size > 0) {
+        // Lockstep: a block holds the slot until it's decided and its landing has landed (or left the line), so the next
+        // chain is built on the main that landing made.
+        const inFlight = [...state.blocks.values()].some(function (block) {
+            return !block.resolved || (block.landing !== null && isLive(state.changes.get(block.landing)));
+        });
+        if (!state.rules.blocks.on || inFlight) {
             return;
         }
         const waiting = state.line.filter(function (change) {
@@ -1301,6 +1326,37 @@ export class Queue extends DurableObject<Env> {
             return;
         }
         await this.append('block.opened', {}, { block: state.blocks.size + 1, changes: waiting.slice(0, state.rules.blocks.budget) });
+    }
+
+    // Decides a block once its prefixes are decided in order up to the first red (lockstep): the longest green prefix
+    // before any red lands as one landing order (its newest change's), a void waits for its rerun, and every change
+    // behind the red goes back to wait for the next block, which opens at once. A parked change (a conflict) was never
+    // a prefix. Logged as block.decided {block, lands, back}.
+    private async decideBlock(number: number | null): Promise<void> {
+        const state = await this.current();
+        const block = number === null ? undefined : state.blocks.get(number);
+        if (block === undefined || block.resolved || !block.built) {
+            return;
+        }
+        const prefixes = block.changes.filter(function (change) {
+            const entry = state.changes.get(change);
+            return entry !== undefined && entry.block === block.block && entry.future !== null;
+        });
+        let lands: string | null = null;
+        let back: string[] = [];
+        for (const [index, change] of prefixes.entries()) {
+            const status = state.futures.get(state.changes.get(change)?.future ?? '')?.decided?.status;
+            if (status === undefined || status === 'void') {
+                return;
+            }
+            if (status === 'red') {
+                back = prefixes.slice(index + 1);
+                break;
+            }
+            lands = change;
+        }
+        await this.append('block.decided', {}, { block: block.block, lands: lands, back: back });
+        await this.openBlock();
     }
 
     // A rule moves only by a rule.changed naming the landed commit that changed it. Blocks is the one rule tonight.
@@ -1372,6 +1428,7 @@ export class Queue extends DurableObject<Env> {
                 await this.append('future.built', { change: added[index], future: String(prefix.tree) }, { base: base, changes: added.slice(0, index + 1), block: block });
             }
             await this.append('block.built', {}, { block: block, base: base });
+            await this.decideBlock(block);
             return jsonResponse(200, { block: block, futures: prefixes.length, parked: conflicts.length });
         });
     }
@@ -1534,6 +1591,7 @@ export class Queue extends DurableObject<Env> {
                 await this.append('change.red', { change: checked.change, future: future.tree }, { verdict: checked.verdict });
                 await this.parkDependents(checked.change);
             }
+            await this.decideBlock(entry.block);
             return jsonResponse(200, { change: checked.change, state: entry.state, landable: futureLandable(future) });
         });
     }
@@ -1682,6 +1740,7 @@ export class Queue extends DurableObject<Env> {
                 await this.append('change.red', { change: batch.change, future: tree, run: batch.run }, { decision: logged, kicks: batch.kicks });
                 await this.parkDependents(batch.change);
             }
+            await this.decideBlock(state.changes.get(batch.change)?.block ?? null);
             return jsonResponse(200, { future: tree, decided: decision.status, landable: futureLandable(future) });
         });
     }
@@ -1717,6 +1776,13 @@ export class Queue extends DurableObject<Env> {
             // A parity run is tested, never landed: no landing order is ever written for one.
             if (entry.record.parity === true) {
                 return [];
+            }
+            // In a block, only the decided block's longest green prefix lands, once, carrying every change ahead of it.
+            if (entry.block !== null) {
+                const block = state.blocks.get(entry.block);
+                if (block === undefined || !block.resolved || block.landing !== change) {
+                    return [];
+                }
             }
             const future = state.futures.get(entry.future);
             return [{ change: change, future: entry.future, base: future?.base ?? entry.record.base, owner: entry.record.owner, run: future?.decided?.run ?? '' }];
@@ -1756,6 +1822,7 @@ export class Queue extends DurableObject<Env> {
                     { reason: `the push of ${entry.future} onto main ${parsed.main} was refused: ${parsed.refused}. Resubmit on main.`, main: parsed.main },
                 );
                 await this.parkDependents(change);
+                await this.openBlock();
                 return jsonResponse(200, { change: change, state: 'parked' });
             }
             if (parsed.landed !== entry.future) {
@@ -1764,7 +1831,15 @@ export class Queue extends DurableObject<Env> {
             if (typeof parsed.from !== 'string' || !shaPattern.test(parsed.from) || parsed.from === parsed.main) {
                 return jsonResponse(400, { error: 'from is the main the push moved from, 40 lowercase hex digits, not the new main' });
             }
+            // A block's prefix carries every change ahead of it: they land together, the landing change last.
+            const landedFuture = state.futures.get(entry.future);
+            const carried = entry.block === null ? [] : (landedFuture?.changes ?? []).filter((member) => member !== change && isLive(state.changes.get(member)));
+            for (const member of carried) {
+                await this.append('change.landed', { change: member, future: entry.future }, { main: parsed.main, from: parsed.from, landed: parsed.landed });
+            }
             await this.append('change.landed', { change: change, future: entry.future }, { main: parsed.main, from: parsed.from, landed: parsed.landed });
+            // A block's landing frees its slot: the next block opens on the main it made.
+            await this.openBlock();
             return jsonResponse(200, { change: change, state: 'landed', landed: parsed.main });
         });
     }
