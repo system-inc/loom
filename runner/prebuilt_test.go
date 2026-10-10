@@ -25,6 +25,7 @@ import (
 
 	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/builder/moduletest"
+	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 )
@@ -1153,6 +1154,30 @@ func TestABinaryPastTheDeadlineIsKilled(t *testing.T) {
 	exits := eventsOfType(events, "exit")
 	if result.Status != protocol.StatusFailed || len(exits) != 1 || !exits[0].TimedOut || time.Since(started) > 15*time.Second {
 		t.Fatalf("%s after %.1f s, exits %+v; errors %q", result.Status, time.Since(started).Seconds(), exits, errorPhases(events))
+	}
+}
+
+// A build job's tests are stopped at the build ceiling, and the unit is named over its budget with its packages: the
+// judge reads it overBudgetRun, void, never red (#8j1qygw). Mutants: no ceiling (the test runs to the unit's 30 s
+// deadline); the error missing its cause or its package.
+func TestABuildJobPastItsCeilingIsNamedOverBudget(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	held := buildCeiling
+	buildCeiling = time.Second
+	t.Cleanup(func() { buildCeiling = held })
+	unit := fixture.unit("^TestSleep$")
+	unit.TimeoutSeconds = 30
+	unit.Test.Build = true
+	options := fixture.options(t)
+	options.KillGrace = time.Second
+	started := time.Now()
+	result, events, _ := runUnit(t, unit, options)
+	if result.Status != protocol.StatusFailed || time.Since(started) > 15*time.Second {
+		t.Fatalf("%s after %.1f s; errors %q", result.Status, time.Since(started).Seconds(), errorPhases(events))
+	}
+	finished, found := judge.FinishedFromEvents(events)
+	if !found || finished.OverBudget != judge.OverBudgetRun || !strings.Contains(errorPhases(events), lowerPackage) {
+		t.Fatalf("the judge reads over budget %q; errors %q", finished.OverBudget, errorPhases(events))
 	}
 }
 

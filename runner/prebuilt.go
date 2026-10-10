@@ -275,15 +275,38 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		return protocol.StatusBroken
 	}
 	run.phase(livestatus.PhaseTesting)
-	status := run.runPackages(runContext, job, out, started, deadline, func(testContext context.Context, index int, part string) packageResult {
+	// A build job's tests have buildCeiling of wall time (Kirk's build law): past it they are stopped, and the unit is
+	// named over its budget, which the judge records void, never red, its packages the owner's to speed up.
+	testDeadline, ceiling := deadline, time.Time{}
+	if job.Build {
+		if ceiling = time.Now().Add(buildCeiling); ceiling.Before(testDeadline) {
+			testDeadline = ceiling
+		}
+	}
+	status := run.runPackages(runContext, job, out, started, testDeadline, func(testContext context.Context, index int, part string) packageResult {
 		if packages[index].built.Error != "" {
 			return buildFailedPackage(packages[index], part)
 		}
 		return run.runBinary(testContext, packages[index], filepath.Join(binaries, fmt.Sprintf("%d.test", index)),
 			packageEnvironment(environment, packages[index].test), source, part)
 	})
+	if job.Build && testDeadline.Equal(ceiling) && runContext.Err() == nil && !time.Now().Before(ceiling) {
+		names := []string{}
+		for _, testPackage := range job.Packages {
+			names = append(names, testPackage.Package)
+		}
+		run.fail(protocol.PhaseRun, fmt.Errorf("%s: the build unit's tests ran past its %v ceiling (%s): void, its owner's to speed up or split, never the branch's red",
+			overBudgetRun, buildCeiling, strings.Join(names, ", ")))
+		return protocol.StatusFailed
+	}
 	return run.settleGo(standIn, status)
 }
+
+// buildCeiling is a build job's wall time for its tests (Kirk's build law, #8j1qygw), and overBudgetRun the cause that
+// starts the error a unit past it says, as the judge reads it (judge.OverBudgetRun). A test shortens the ceiling.
+var buildCeiling = 60 * time.Second
+
+const overBudgetRun = "overBudgetRun"
 
 // treeIndex reads trees/<treeKey>.json from the store, as builder.ParseTree checks it, and holds it to its key: the
 // index's own tree, Go release, platform and the gate's environment must hash to the key the job named.
