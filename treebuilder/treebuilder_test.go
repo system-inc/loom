@@ -218,7 +218,8 @@ func TestAFailedBuildStandsUntilItsRetry(t *testing.T) {
 }
 
 // A plan that can't say which build its units run is named and never built: units carrying two tree keys, or a
-// running test unit carrying none (a planner older than tree keys). Mutant: the first key taken.
+// running test or phase unit carrying none (a planner older than tree keys; a phase unit reads its tree's npm
+// packages, #v03v751). Mutant: the first key taken.
 func TestAPlanNamingNoOneTreeIsNeverBuilt(t *testing.T) {
 	wants, problems := Wanted([]judge.PlannedFuture{
 		future("1", unit(t, "test", "run", keyA), unit(t, "test", "run", keyB)),
@@ -228,7 +229,7 @@ func TestAPlanNamingNoOneTreeIsNeverBuilt(t *testing.T) {
 	if len(wants) != 1 || wants[0].Tree != keyC {
 		t.Fatalf("wanted %v, want only future 3's tree", wants)
 	}
-	if len(problems) != 2 || !strings.Contains(problems[0], "2 tree keys") || !strings.Contains(problems[1], "1 running units carry no tree key") {
+	if len(problems) != 2 || !strings.Contains(problems[0], "2 tree keys") || !strings.Contains(problems[1], "2 running units carry no tree key") {
 		t.Fatalf("problems %v", problems)
 	}
 }

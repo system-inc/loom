@@ -21,17 +21,24 @@ var notIdCharacters = regexp.MustCompile(`[^a-z0-9]+`)
 var testOutputs = []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "loom-out/cpu.tsv"}}
 
 // JobUnitFor is the job that runs one planned test unit at a commit, for Judge's reruns (#82tz9ty): a structured test
-// job of the unit's package and selection, under the test kind's ceiling, requiring every toolchain its key names.
-// It carries no cache flag, so a rerun reuses nothing. The id is the package's path and the commit, so a rerun of
-// one unit on the candidate and on main's base never share one.
-func JobUnitFor(parts KeyParts, sha string) (protocol.JobUnit, error) {
+// job of the unit's package and selection, under the test kind's ceiling, requiring every toolchain its key names,
+// naming tree, the key of Workshop's build of that commit's tree (#v03v751), whose test binaries it runs, as the
+// future's own run did: a rerun that compiled on its runner, or went without the tree's npm packages, couldn't tell a
+// change's red from main's. A rerun with no tree is refused, never placed to build. It carries no cache flag, so a
+// rerun reuses nothing. The id is the package's path and the commit, so a rerun of one unit on the candidate and on
+// main's base never share one.
+func JobUnitFor(parts KeyParts, sha, tree string) (protocol.JobUnit, error) {
 	if parts.Kind != "test" {
 		return protocol.JobUnit{}, fmt.Errorf("a %q unit has no job yet; only test units rerun", parts.Kind)
+	}
+	if tree == "" {
+		return protocol.JobUnit{}, fmt.Errorf("a rerun at %.12s names no tree build, and a runner never builds", sha)
 	}
 	test, err := goTestJob(parts, sha, nil)
 	if err != nil {
 		return protocol.JobUnit{}, err
 	}
+	test.Tree = tree
 	directory := strings.TrimPrefix(parts.Package, protocol.AdamicModule+"/")
 	id := strings.Trim(notIdCharacters.ReplaceAllString(strings.ToLower(directory), "-"), "-") + "-" + sha[:12]
 	return jobUnitOf(id, parts, test, testOutputs)

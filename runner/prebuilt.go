@@ -29,7 +29,8 @@ import (
 
 // A prebuilt test job (job.Tree set) runs what Workshop built for its tree and builds nothing (Kirk's law, Oct 10,
 // #pcn6prz). The job names its tree's build by key; trees/<key>.json in the action store names, by sha256, each
-// package's test binary, the chunks of the tree's source and the products each package's tests read. The runner
+// package's test binary, the chunks of the tree's source (its npm packages among them, installed on Workshop: no
+// runner runs npm, #v03v751) and the products each package's tests read. The runner
 // fetches those blobs through its blob cache (blobs.go), every hash checked, only the chunks it doesn't already hold,
 // keeps the tree's source assembled for every unit of the tree (sources.go, assemble.go), unpacks the products and
 // binaries into the unit's own directory, and runs each package's
@@ -208,6 +209,11 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	}
 	sources.trim(keepSources)
 	source := held.tree()
+	// The tree's npm packages came in its source, a chunk of their own; nothing here installs one.
+	if err := builder.CheckNodePackages(source, index); err != nil {
+		run.fail(protocol.PhaseStart, fmt.Errorf("%w: Loom's, never the change's", err))
+		return protocol.StatusBroken
+	}
 	products := filepath.Join(run.directory, "adamic-build")
 	binaries := filepath.Join(run.directory, "binaries")
 	if err := unpackPrebuilt(prepareContext, index, packages, files, products, binaries); err != nil {

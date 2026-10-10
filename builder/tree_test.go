@@ -74,7 +74,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	if len(failed) != 0 || len(products["example.com/tree/a"]) != 1 || products["example.com/tree/a"][0] != product {
 		t.Fatalf("products %v, failed %v", products, failed)
 	}
-	source, err := SourceChunks(tree)
+	source, err := SourceChunks(tree, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

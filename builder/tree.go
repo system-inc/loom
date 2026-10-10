@@ -396,12 +396,13 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 	return byPackage, failed
 }
 
-// TreeIndexFormat is the shape of tree index this release writes and reads (TreeIndex.Format): 2, whose source is
-// chunks (1, and no format at all, named one whole archive). A change to what an index holds or how a runner reads it
-// is a new format: indexes in the old one stay at their keys, read as missing (ParseTree reads an index for its format
-// first, so one of another shape is ErrIndexFormat, never misread), so the tree builder builds them again and the
-// placer releases no unit to a runner that would refuse them.
-const TreeIndexFormat = 2
+// TreeIndexFormat is the shape of tree index this release writes and reads (TreeIndex.Format): 3, whose source holds
+// its npm projects' packages, each named in Node (2's held none, so its runners ran npm; 2 and 1 had chunks, and 1,
+// and no format at all, named one whole archive). A change to what an index holds or how a runner reads it is a new
+// format: indexes in the old one stay at their keys, read as missing (ParseTree reads an index for its format first,
+// so one of another shape is ErrIndexFormat, never misread), so the tree builder builds them again and the placer
+// releases no unit to a runner that would refuse them.
+const TreeIndexFormat = 3
 
 // A TreeIndex is trees/<treeKey>.json, a tree's build: the source's chunks, each product's archive by its key, and
 // each package with its binary's blob and the products its tests read.
@@ -417,6 +418,10 @@ type TreeIndex struct {
 	Goarch string `json:"goarch"`
 	// Source is the tree's source as chunks, in path order, their ranges never meeting (CheckChunks).
 	Source []SourceChunk `json:"source"`
+	// Node is each npm project whose packages Workshop installed into the source (node.go): its lockfile's sha256 and
+	// the chunk of Source holding its node_modules. A runner refuses a source holding a lockfile Node doesn't name
+	// (CheckNodePackages).
+	Node []NodeProject `json:"node"`
 	// Modules is the blob of the tree's module download cache (ModuleCacheArchive): the only place a runner's go
 	// reads a module from. Empty: none published.
 	Modules  string                 `json:"modules,omitempty"`
@@ -851,7 +856,8 @@ var ErrIndexFormat = errors.New("an index format this Loom doesn't read: unfit")
 
 // ParseTree reads the index trees/<treeKey>.json holds. One of another format is ErrIndexFormat, read for its format
 // alone. It refuses an index that names anything but a sha256 for a blob or a buildcache key for a product, source
-// chunks out of order or whose ranges meet (CheckChunks), a package that reads a product the index doesn't name, or a
+// chunks out of order or whose ranges meet (CheckChunks), an npm project that isn't one of NodeProjects or whose chunk
+// isn't one of the source's inside its node_modules (checkNode), a package that reads a product the index doesn't name, or a
 // built package whose directory isn't a local path, where its tests would run outside the tree's source.
 func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 	var format struct {
@@ -871,6 +877,9 @@ func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 		return TreeIndex{}, fmt.Errorf("tree %s: %s: the store is poisoned", treeKey, fmt.Sprintf(format, arguments...))
 	}
 	if err := CheckChunks(index.Source); err != nil {
+		return poisoned("%v", err)
+	}
+	if err := checkNode(index); err != nil {
 		return poisoned("%v", err)
 	}
 	if index.Modules != "" && !productKeyPattern.MatchString(index.Modules) {

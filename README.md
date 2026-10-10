@@ -59,7 +59,9 @@ text. It:
 7. with `--exclusive`, runs adamic's own `cloud/setup.sh --wasi-sdk` at that commit, once per instance, which installs
    adamic's toolchain into HOME from the sources that script names; without it, uses the machine's own toolchain, and
    a machine with none is unfit for the unit; then loads its `env.sh`;
-8. runs `npm ci --ignore-scripts` for `stage3/api` from https://registry.npmjs.org, once per lockfile;
+8. links `stage3/api`'s npm packages into the checkout from `<root>/adamic-npm/<lockfile sha256>`, where the runner
+   placed them from the tree build a phase job names (Workshop installs them, `builder/node.go`; no runner runs npm), and
+   a checkout whose lockfile has none placed can't be readied;
 9. fetches the gate inputs named by the job's hash from Loom's public store
    (https://artifacts.loom.system.inc/gate-inputs/, where `loom gate-inputs publish` writes them), checking every chunk
    and the total by sha256;
@@ -100,7 +102,8 @@ Workshop built and builds nothing (`runner/prebuilt.go`, #pcn6prz). In place of 
    set back), is made from that tree: renamed in, the entries of its chunks the new tree lacks removed, the rest of the
    chunks unpacked in, so a one-file change costs about one chunk (`runner/assemble.go`);
 4. readies the environment with `prepare.sh environment` (the instance's adamic toolchain, which must already be set
-   up, stage3/api's npm packages and the gate inputs; no git, no setup, no Go), with the products in the unit's own
+   up, and the gate inputs; no git, no setup, no npm, no Go: stage3/api's npm packages came in the tree's source,
+   installed on Workshop), with the products in the unit's own
    `ADAMIC_BUILD_CACHE_DIR`;
 5. runs each binary as `go test -json` would, in the package's directory of the source:
    `<binary> -test.paniconexit0 -test.timeout=3h0m0s -test.count=1 -test.v=test2json -test.run=<pattern>
@@ -129,7 +132,7 @@ uploaded through the run token, and the unit's events through the run token. On 
 (`<root>/adamic-npm`, `<root>/adamic-tools`, `<root>/adamic-setup-done`, Go's caches in HOME) and the unit's workspace, removed when
 the unit ends.
 
-**What it reads.** The public adamic repository and its public submodules on GitHub, https://registry.npmjs.org, Go's
+**What it reads.** The public adamic repository and its public submodules on GitHub, Go's
 module proxy (https://proxy.golang.org) and checksum database (https://sum.golang.org), Loom's public store, and what
 adamic's own `cloud/setup.sh` downloads, which as of adamic 3a391aff13 is: https://go.dev and https://dl.google.com
 (the Go toolchain), GitHub releases (LLVM, the WASI SDK) and https://nodejs.org (Node.js). setup.sh sets

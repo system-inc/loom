@@ -122,13 +122,14 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	if got := decisions("fut-3"); len(got) != 1 || got["example.com/plan/a"] != "run" {
 		t.Errorf("fut-3 is a parity run of a alone, run though a's key passed: %v", got)
 	}
-	// Every test unit carries the tree key build-tree writes this tree's index under: its git tree hash, the Go
-	// release and platform go reports inside it, and the gate environment, read here apart from the planner's code.
+	// Every unit carries the tree key build-tree writes this tree's index under (a phase unit for its npm packages
+	// alone, #v03v751): its git tree hash, the Go release and platform go reports inside it, and the gate environment,
+	// read here apart from the planner's code.
 	want := buildTreeKey(t, tree)
 	for future, units := range posted {
 		for _, unit := range units {
-			if wanted := map[bool]string{true: "", false: want}[unit.KeyParts.Kind == "phase"]; unit.Tree != wanted {
-				t.Errorf("%s posted %s (%s) with tree %q, want %q", future, unit.Name, unit.KeyParts.Kind, unit.Tree, wanted)
+			if unit.Tree != want {
+				t.Errorf("%s posted %s (%s) with tree %q, want %q", future, unit.Name, unit.KeyParts.Kind, unit.Tree, want)
 			}
 		}
 	}

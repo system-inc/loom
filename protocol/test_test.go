@@ -115,6 +115,12 @@ func TestAPhaseJobIsChecked(t *testing.T) {
 			t.Fatalf("a good phase job %q refused: %v", phase, err)
 		}
 	}
+	// A phase job names its tree's build for its checkout's npm packages (#v03v751).
+	named := phaseJob()
+	named.Tree = strings.Repeat("f", 64)
+	if err := CheckTestJob(named); err != nil {
+		t.Fatalf("a phase job naming its tree refused: %v", err)
+	}
 	refused := map[string]func(job *TestJob){
 		"packages beside a phase":     func(job *TestJob) { job.Packages = testJob().Packages },
 		"no tools":                    func(job *TestJob) { job.Tools = "" },
@@ -131,7 +137,7 @@ func TestAPhaseJobIsChecked(t *testing.T) {
 		"a line break in the phase":   func(job *TestJob) { job.Phase = "vet\nid" },
 		"changed paths beside run.py": func(job *TestJob) { job.ChangedPaths = []string{"a.go"} },
 		"a Go release beside run.py":  func(job *TestJob) { job.Go = "go1.27.1" },
-		"a tree beside a phase":       func(job *TestJob) { job.Tree = strings.Repeat("f", 64) },
+		"a tree that isn't a key":     func(job *TestJob) { job.Tree = strings.Repeat("F", 64) },
 	}
 	for name, change := range refused {
 		job := phaseJob()

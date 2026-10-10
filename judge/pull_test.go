@@ -25,7 +25,7 @@ func finishedStream(unit, status string) []protocol.Event {
 func TestThePullerJudgesOnlyFinishedFuturesAndRerunsByKeyParts(t *testing.T) {
 	done, running := strings.Repeat("d", 40), strings.Repeat("e", 40)
 	unit, reused := strings.Repeat("1", 64), strings.Repeat("2", 64)
-	units := []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"package":"p"}`), Decision: "run"}, {UnitKey: reused, Decision: "reuse"}}
+	units := []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"package":"p"}`), Decision: "run", Tree: strings.Repeat("7", 64)}, {UnitKey: reused, Decision: "reuse"}}
 	change := PlannedChange{Change: "chg_A", Sha: done, Base: baseTree, Owner: "system_adamic_library"}
 	source := listedFutures{{Future: done, Base: baseTree, Change: change, Units: units}, {Future: running, Base: baseTree, Change: change, Units: units}}
 	streams := map[string][]protocol.Event{"future-" + done + "-1": finishedStream(unit, "failed"), "future-" + running + "-1": {{Unit: unit, Type: "started"}}}
@@ -35,8 +35,8 @@ func TestThePullerJudgesOnlyFinishedFuturesAndRerunsByKeyParts(t *testing.T) {
 		Source: source,
 		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 		Read:   func(run string) ([]protocol.Event, error) { return streams[run], nil },
-		Rerun: func(keyParts json.RawMessage, _ protocol.Resources, sha string) ([]protocol.Event, error) {
-			reruns = append(reruns, string(keyParts)+"@"+sha[:1])
+		Rerun: func(keyParts json.RawMessage, _ protocol.Resources, sha, tree string) ([]protocol.Event, error) {
+			reruns = append(reruns, string(keyParts)+"@"+sha[:1]+" tree "+tree[:min(len(tree), 1)])
 			if sha == baseTree {
 				return finishedStream("job-on-base", "passed"), nil
 			}
@@ -57,8 +57,9 @@ func TestThePullerJudgesOnlyFinishedFuturesAndRerunsByKeyParts(t *testing.T) {
 	if post.Decision.Status != "red" || post.Run != "future-"+done+"-1" || len(post.Decision.Kicks) != 1 {
 		t.Fatalf("post %+v", post.Decision)
 	}
-	if strings.Join(reruns, ",") != `{"package":"p"}@d,{"package":"p"}@b` {
-		t.Fatalf("reruns %v, want the unit's keyParts on the candidate then on main's base", reruns)
+	// The candidate's rerun runs its plan's build; the base's tree is the caller's to key (#v03v751).
+	if strings.Join(reruns, ",") != `{"package":"p"}@d tree 7,{"package":"p"}@b tree ` {
+		t.Fatalf("reruns %v, want the unit's keyParts on the candidate's planned tree, then on main's base with none", reruns)
 	}
 }
 
@@ -78,7 +79,7 @@ func TestVoidOnePostsTheListedAttemptOnlyAndNeverReruns(t *testing.T) {
 		Source: source,
 		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 		Read:   func(run string) ([]protocol.Event, error) { return finishedStream(unit, "passed"), nil },
-		Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) {
+		Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) {
 			t.Fatal("a void reran a unit")
 			return nil, nil
 		},
@@ -127,7 +128,7 @@ func TestTheBackstopVoidsOnlyARunQuietForFortyFiveMinutes(t *testing.T) {
 				Source: listedFutures{{Future: tree, Base: baseTree, Change: PlannedChange{Change: "chg_A"}, Units: units}},
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-1" },
 				Read:   func(string) ([]protocol.Event, error) { return c.events, nil },
-				Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) {
+				Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) {
 					t.Fatal("the backstop placed a unit")
 					return nil, nil
 				},
@@ -197,7 +198,7 @@ func TestAnEarlierAttemptsPassIsCarriedOnlyWithinTheSameFuture(t *testing.T) {
 	}
 	pullerFor := func(source listedFutures, queue *StubQueue) Puller {
 		return NewPuller(Puller{Source: source, RunOf: runOf, Read: func(run string) ([]protocol.Event, error) { return streams[run], nil },
-			Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) {
+			Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) {
 				t.Fatal("placed a unit")
 				return nil, nil
 			},
@@ -347,7 +348,7 @@ func TestThePullerReadsAUnitsKindAndRunnerFromItsKey(t *testing.T) {
 				return []protocol.Event{{Unit: unit, Type: "started", RunnerSha256: ranOn}, {Unit: unit, Type: "exit", Code: code(1)}, {Unit: unit, Type: "finished", Status: "failed"}}, nil
 			},
 			// A phase red is never rerun alone; a void attempt is placed again, and this placement never reports.
-			Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) { return nil, nil },
+			Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) { return nil, nil },
 			Main:  NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now, RequireTestLog: true},
 		})
 		if judged, err := puller.PullOnce(); err != nil || judged != 1 {
@@ -466,7 +467,7 @@ func TestAFailureWhoseNeedGrewIsVoidNeverAFlake(t *testing.T) {
 				Source: source,
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 				Read:   func(string) ([]protocol.Event, error) { return finishedStream(unit, "failed"), nil },
-				Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) {
+				Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) {
 					reruns++
 					return finishedStream("job", "passed"), nil
 				},
@@ -544,7 +545,7 @@ func TestAFailureThatRanBelowItsNeedIsVoidNeverARed(t *testing.T) {
 				Source: source,
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 				Read:   func(string) ([]protocol.Event, error) { return stream, nil },
-				Rerun: func(_ json.RawMessage, _ protocol.Resources, sha string) ([]protocol.Event, error) {
+				Rerun: func(_ json.RawMessage, _ protocol.Resources, sha, _ string) ([]protocol.Event, error) {
 					reruns++
 					if sha == baseTree {
 						return finishedStream("job", "passed"), nil
@@ -664,7 +665,7 @@ func TestAnOverBudgetUnitIsVoidNeverRedFlakeOrGreen(t *testing.T) {
 				Source: source,
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 				Read:   func(string) ([]protocol.Event, error) { return c.first, nil },
-				Rerun: func(_ json.RawMessage, _ protocol.Resources, sha string) ([]protocol.Event, error) {
+				Rerun: func(_ json.RawMessage, _ protocol.Resources, sha, _ string) ([]protocol.Event, error) {
 					reruns++
 					if sha == baseTree {
 						return finishedStream("job", "passed"), nil

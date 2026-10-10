@@ -14,7 +14,7 @@ import (
 
 var treeKey = strings.Repeat("7", 64)
 
-// withTree is units with the tree key on each test and product unit, as the planner posts them.
+// withTree is units with the tree key on each test, product and phase unit, as the planner posts them.
 func withTree(t *testing.T, units []judge.PlannedUnitWire, tree string) []judge.PlannedUnitWire {
 	t.Helper()
 	carried := []judge.PlannedUnitWire{}
@@ -23,7 +23,7 @@ func withTree(t *testing.T, units []judge.PlannedUnitWire, tree string) []judge.
 		if err := json.Unmarshal(unit.KeyParts, &parts); err != nil {
 			t.Fatal(err)
 		}
-		if planner.RunsTreeBuild(parts.Kind) {
+		if planner.ReadsTreeBuild(parts.Kind) {
 			unit.Tree = tree
 		}
 		carried = append(carried, unit)
@@ -73,7 +73,8 @@ func TestAnAttemptIsHeldUntilItsTreeIsUpThenPlacedNamingIt(t *testing.T) {
 	test, _ := unitOf(t, placement, testKey)
 	product, _ := unitOf(t, placement, productKey)
 	phase, _ := unitOf(t, placement, phaseKey)
-	if test.Test.Tree != treeKey || product.Test.Tree != treeKey || phase.Test.Tree != "" {
+	// A phase job names it too, for its checkout's npm packages alone (#v03v751).
+	if test.Test.Tree != treeKey || product.Test.Tree != treeKey || phase.Test.Tree != treeKey {
 		t.Fatalf("trees named: test %q, product %q, phase %q", test.Test.Tree, product.Test.Tree, phase.Test.Tree)
 	}
 	if record, _ := ledger.Find(tree, 1); !record.placed() || len(record.Placed) != 3 {

@@ -248,8 +248,8 @@ type Want struct {
 	Go string
 }
 
-// Wanted lists the trees the listed futures run, in listing order, each once: the tree key a future's test and product
-// units carry when one of them runs (not reused). A future whose units carry two keys, or a running one none, is
+// Wanted lists the trees the listed futures run, in listing order, each once: the tree key a future's test, product and
+// phase units carry when one of them runs (not reused). A future whose units carry two keys, or a running one none, is
 // named, never built: its plan can't say which build its units run.
 func Wanted(futures []judge.PlannedFuture) ([]Want, []string) {
 	wants, problems, seen := []Want{}, []string{}, map[string]bool{}
@@ -257,7 +257,7 @@ func Wanted(futures []judge.PlannedFuture) ([]Want, []string) {
 		keys, releases, running, keyless := map[string]bool{}, map[string]bool{}, false, 0
 		for _, unit := range future.Units {
 			var parts planner.KeyParts
-			if json.Unmarshal(unit.KeyParts, &parts) != nil || !planner.RunsTreeBuild(parts.Kind) {
+			if json.Unmarshal(unit.KeyParts, &parts) != nil || !planner.ReadsTreeBuild(parts.Kind) {
 				continue
 			}
 			if unit.Tree == "" {

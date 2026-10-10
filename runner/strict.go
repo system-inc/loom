@@ -88,12 +88,22 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	started := time.Now()
 	deadline := started.Add(time.Duration(run.unit.TimeoutSeconds) * time.Second)
 	root, tree := run.options.testRoot(), run.options.Tree
-	if job.Tree != "" {
+	if job.Tree != "" && job.Phase == "" {
 		return run.runPrebuilt(runContext, job, root, started, deadline)
 	}
 	if tree == "" {
 		// /tmp/adamic for a strict runner: the checkout the instance's opening clones, kept across units.
 		tree = filepath.Join(root, "adamic")
+	}
+	// A phase job's checkout takes its npm packages from its tree's build, placed in the root for prepare.sh to link.
+	if job.Tree != "" {
+		placeContext, cancel := context.WithDeadline(runContext, deadline)
+		err := run.placeNodePackages(placeContext, job.Tree, root)
+		cancel()
+		if err != nil {
+			run.fail(protocol.PhaseFetch, fmt.Errorf("the tree's npm packages: %w: Loom's, never the change's", err))
+			return protocol.StatusBroken
+		}
 	}
 	script := filepath.Join(run.directory, "prepare.sh")
 	environmentFile := filepath.Join(run.directory, "environment")

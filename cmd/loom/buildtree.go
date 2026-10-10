@@ -38,6 +38,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	wantGo := flags.String("go", "", "the Go release the plan's units are keyed on: refused before building when this go is another")
 	storeFlags := addStoreFlags(flags)
 	cache := flags.String("cache", filepath.Join(home, "loom-builder", "trees"), "the base of each tree's own build directory, <base>/<tree hash>")
+	nodeCache := flags.String("node-cache", filepath.Join(home, "loom-builder", "node"), "where each npm project's packages are installed once per lockfile, <base>/<lockfile sha256>, and the pinned npm")
 	keep := flags.Int("keep", 2, "tree directories kept under --cache, newest first, when a tree's upload fails")
 	jobs := flags.Int("jobs", 8, "packages built at once")
 	compile := flags.Int("compile", 0, "packages compiled at once across every go process (0: every thread but four)")
@@ -45,7 +46,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tempFloorGB := flags.Uint64("temp-floor-gb", 20, "free space the temporary directory keeps, in GB (it may be memory)")
 	goCacheGB := flags.Uint64("go-cache-gb", 500, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
 		return 2
 	}
 	started := time.Now()
@@ -128,6 +129,12 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
+	// The tree's npm packages, installed here once per lockfile and shipped in its source, so no runner runs npm: first,
+	// so an install that fails fails the build before its products and binaries, not after (Workshop, Oct 10).
+	installs, err := builder.InstallNodePackages(*tree, *nodeCache)
+	if err != nil {
+		return fail(fmt.Errorf("the tree's npm packages: %w", err))
+	}
 	packages, err := builder.TestPackages(*tree)
 	if err != nil {
 		return fail(err)
@@ -192,7 +199,11 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	built := build.Binaries(packages)
 	binarySeconds := time.Since(binariesStarted).Seconds()
 	phase("source and modules", nil)
-	source, err := builder.SourceChunks(*tree)
+	source, err := builder.SourceChunks(*tree, installs)
+	if err != nil {
+		return fail(err)
+	}
+	node, err := builder.NodeChunks(source, installs)
 	if err != nil {
 		return fail(err)
 	}
@@ -208,7 +219,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	// The platform the binaries are built for is in the key: a runner on another can't run them.
 	treeIndex := builder.TreeIndex{Tree: identity.Tree, Future: *future, Go: identity.Go, Goos: identity.Goos, Goarch: identity.Goarch,
-		Packages: map[string]builder.TreePackage{}}
+		Node: node, Packages: map[string]builder.TreePackage{}}
 	for _, result := range built {
 		result.Products = products[result.Package]
 		if result.Products == nil {
@@ -245,7 +256,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products), "productsFetched": len(held.Held()),
 		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
 		"seconds": time.Since(started).Seconds(), "sourceChunks": len(source.Chunks), "sourceBytes": source.Bytes(),
-		"sourceChunksSent": source.Sent, "sourceBytesSent": source.SentBytes,
+		"sourceChunksSent": source.Sent, "sourceBytesSent": source.SentBytes, "node": treeIndex.Node,
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
 	phase("built", func(tree *livestatus.Tree) { tree.Failed = failed })
