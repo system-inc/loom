@@ -193,7 +193,17 @@ func TestAClonesOwnSettingsThatCouldCarryAKeyAreRefusedBeforeAnyFetch(t *testing
 	made := newWorld(t)
 	before := gitIn(t, made.work, "rev-parse", "origin/main")
 	made.pushFromAnotherTree(t)
+	// A real file an include would read, holding a credential helper: the include is refused by its own name, so the
+	// file is never read.
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere.gitconfig")
+	os.WriteFile(elsewhere, []byte("[credential]\n\thelper = \"!f() { echo username=kirk; echo password=key; }; f\"\n"), 0o644)
 	for _, setting := range [][2]string{
+		{"include.path", elsewhere},
+		// Section and key names are any case; git stores them lowered, and so does the check.
+		{"Credential.Helper", "!f() { echo password=key; }; f"},
+		{"URL.https://kirk:key@x/.insteadOf", "https://github.com/"},
+		{"HTTP.ExtraHeader", "Authorization: Basic a2lyazprZXk="},
+		{"Include.Path", elsewhere},
 		{"url.https://kirk:key@stand-in.example/.insteadOf", "https://github.com/"},
 		{"http.https://stand-in.example/.extraHeader", "Authorization: Basic a2lyazprZXk="},
 		{"http.extraHeader", "Authorization: Basic a2lyazprZXk="},
