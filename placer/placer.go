@@ -688,10 +688,10 @@ func (pass *pass) fit(parts planner.KeyParts, job protocol.JobUnit) ([]string, s
 		if len(judge.FitPools([]judge.PoolEntry{pool.PoolEntry}, parts.Kind, parts.Tools.Runner, job.Resources)) == 0 {
 			continue
 		}
-		if parts.Kind == "test" && pass.placer.WarmRunners[parts.Tools.Runner] && !coldPool(pool, pass.pools, pass.placer.Now()) {
+		if (parts.Kind == "test" || parts.Kind == "build") && pass.placer.WarmRunners[parts.Tools.Runner] && !coldPool(pool, pass.pools, pass.placer.Now()) {
 			continue
 		}
-		if missing := missingTools(pool, job.Requires); len(missing) > 0 {
+		if missing := missingTools(pool, requirements(job)); len(missing) > 0 {
 			unequipped = append(unequipped, fmt.Sprintf("%s lacks %s", pool.Name, strings.Join(missing, ",")))
 			continue
 		}
@@ -701,8 +701,8 @@ func (pass *pass) fit(parts planner.KeyParts, job protocol.JobUnit) ([]string, s
 		return fit, ""
 	}
 	why := fmt.Sprintf("no pool takes a %s unit on runner %.12s needing %s with %d MB and %d cpus", parts.Kind, parts.Tools.Runner,
-		strings.Join(job.Requires, ","), job.Resources.MemoryMegabytes, job.Resources.Cpus)
-	if pass.placer.WarmRunners[parts.Tools.Runner] && parts.Kind == "test" {
+		strings.Join(requirements(job), ","), job.Resources.MemoryMegabytes, job.Resources.Cpus)
+	if pass.placer.WarmRunners[parts.Tools.Runner] && (parts.Kind == "test" || parts.Kind == "build") {
 		why += " on a cold pool (its runner keeps a warm cache)"
 	}
 	if len(unequipped) > 0 {
@@ -778,7 +778,16 @@ func (pass *pass) pin(candidates []candidate) []string {
 // takes, its workers' memory and cpus, and its toolchains.
 func coordinatorTakes(pool Pool, job protocol.JobUnit) bool {
 	return pool.Takes(job.Kind) && (job.Resources.MemoryMegabytes <= 0 || pool.MemoryMegabytes >= job.Resources.MemoryMegabytes) &&
-		(job.Resources.Cpus <= 0 || pool.Cpus >= job.Resources.Cpus) && len(missingTools(pool, job.Requires)) == 0
+		(job.Resources.Cpus <= 0 || pool.Cpus >= job.Resources.Cpus) && len(missingTools(pool, requirements(job))) == 0
+}
+
+// requirements are the toolchains a job's workers must have: what it requires, and go for a build unit whatever its
+// key says, since its tests build (Kirk's build law, #8j1qygw).
+func requirements(job protocol.JobUnit) []string {
+	if job.Kind == "build" && !slices.Contains(job.Requires, "go") {
+		return append([]string{"go"}, job.Requires...)
+	}
+	return job.Requires
 }
 
 func missingTools(pool Pool, requires []string) []string {

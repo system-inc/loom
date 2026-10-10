@@ -321,3 +321,31 @@ func TestAUnitKeyedOnChangedPathsCarriesThemOnlyWhenTheyMatch(t *testing.T) {
 		t.Fatalf("voids %v, want the mismatch named", other.voids)
 	}
 }
+
+// A build unit (Kirk's build law, #8j1qygw) needs go on its workers whatever its key names, since its tests build: it
+// goes only to a pool that has go, as a build job on the tree, and with none it voids the attempt naming what's
+// missing. Mutant: the placer reading only the key's requirements.
+func TestABuildUnitGoesOnlyToAPoolWithGo(t *testing.T) {
+	buildKey := strings.Repeat("9", 64)
+	units := everyKind(t)[:1]
+	units = append(units, plannedUnit(t, buildKey, protocol.AdamicModule+"/internal/native", "run", planner.KeyParts{Kind: "build",
+		Package: protocol.AdamicModule + "/internal/native", Select: planner.Select{Run: "^(TestBuildsTheArchive)$"},
+		Tools: planner.Tools{Runner: testRunner}, Env: gateEnv(), GateInputs: strings.Repeat("f", 64)}))
+	h := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: units}}, &MemoryLedger{})
+	h.placeOnce(t, 1)
+	build, placed := unitOf(t, h.placements[0], buildKey)
+	if build.Kind != "build" || !build.Test.Build || build.TimeoutSeconds != protocol.KindCeilings["build"] || strings.Join(placed.Pools, ",") != "codex-strict" {
+		t.Fatalf("the build unit is %+v on %v", build, placed.Pools)
+	}
+	// The build unit alone, its key naming no toolchain, on a pool without go.
+	goless := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: units[1:]}}, &MemoryLedger{})
+	goless.placer.Pools = func() ([]Pool, error) {
+		pools := fixturePools()
+		pools[0].Has = []string{"clang", "node", "wasiSdk"}
+		return pools, nil
+	}
+	goless.placeOnce(t, 0)
+	if len(goless.voids) != 1 || !strings.Contains(goless.voids[0], "build unit") || !strings.Contains(goless.voids[0], "codex-strict lacks go") {
+		t.Fatalf("voids %v, want the build unit refused naming the missing go", goless.voids)
+	}
+}

@@ -82,8 +82,9 @@ type TestJob struct {
 	Tree string `json:"tree,omitempty"`
 	// Build says the job's tests are builds (Kirk's build law, #8j1qygw): they assert on what the toolchain or adamic's
 	// compiler produces, as the declared list in adamic names them, so their go commands are let through to the real go
-	// under the tree's Go release, on the unit's own empty Go cache. Only on a prebuilt go test job (Tree set, no
-	// Phase); everything else a test job refuses, a build job refuses.
+	// under the tree's Go release, on the unit's own empty Go cache. Never on a phase job; a runner runs one only on its
+	// tree's build (Tree, which the placer sets), refusing it otherwise. Everything else a test job refuses, a build job
+	// refuses.
 	Build bool `json:"build,omitempty"`
 }
 
@@ -115,8 +116,8 @@ func CheckTestJob(job TestJob) error {
 	if job.Runner != "" && !Sha256Pattern.MatchString(job.Runner) {
 		return fmt.Errorf("runner %q isn't a sha256, 64 lowercase hex digits", job.Runner)
 	}
-	if job.Build && (job.Tree == "" || job.Phase != "") {
-		return fmt.Errorf("a build job is a prebuilt go test job: it names a tree and no phase")
+	if job.Build && job.Phase != "" {
+		return fmt.Errorf("a build job is a go test job, never a phase; it runs on its tree's build, which the placer names")
 	}
 	if job.Phase != "" {
 		fields := strings.Fields(job.Phase)
