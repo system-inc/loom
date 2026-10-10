@@ -274,9 +274,14 @@ func writeTar(directory string, out io.Writer) error {
 			if err != nil {
 				return err
 			}
-			resolved := filepath.Join(filepath.Dir(relative), target)
-			if filepath.IsAbs(target) || resolved == ".." || strings.HasPrefix(resolved, "../") {
-				return fmt.Errorf("%s links to %s, outside the gate inputs", relative, target)
+			// The link is followed all the way, through every other link on its path, as a reader would.
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return fmt.Errorf("%s links to %s, which doesn't resolve: %w", relative, target, err)
+			}
+			if within, err := filepath.Rel(directory, resolved); filepath.IsAbs(target) || err != nil || within == ".." ||
+				strings.HasPrefix(within, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("%s links to %s, which resolves outside the gate inputs", relative, target)
 			}
 			header.Typeflag, header.Linkname, header.Mode = tar.TypeSymlink, target, 0o777
 			return archive.WriteHeader(header)
@@ -293,7 +298,9 @@ func writeTar(directory string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if filepath.Base(relative) == "index" && filepath.Base(filepath.Dir(relative)) == ".git" {
+		// Every git directory's index: a checkout's .git/index, a submodule's .git/modules/<name>/index, a worktree's
+		// .git/worktrees/<name>/index. A file named index elsewhere in a git directory (a branch named index) isn't one.
+		if filepath.Base(relative) == "index" && strings.Contains("/"+relative, "/.git/") && bytes.HasPrefix(content, []byte("DIRC")) {
 			if content, err = NormalizeIndex(content); err != nil {
 				return fmt.Errorf("%s: %w", relative, err)
 			}
