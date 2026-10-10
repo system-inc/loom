@@ -129,7 +129,7 @@ func queueBridgeInstall(arguments []string, stdout io.Writer, stderr io.Writer) 
 		}
 		return string(output), nil
 	}
-	if err := queuebridge.Install(queuebridge.HomePaths(home), home, systemctl, stdout); err != nil {
+	if err := queuebridge.Install(queuebridge.HomePaths(home), home, time.Now(), systemctl, stdout); err != nil {
 		fmt.Fprintf(stderr, "loom queue-bridge install: %v\n", err)
 		return 1
 	}

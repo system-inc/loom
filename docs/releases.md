@@ -46,6 +46,23 @@ A commit may declare what must happen around the fleet taking it, in `updater/re
 
 One release carries every commit since the fleet's release, and the merge train may land several in one pass, so the order is read from each commit in that range that changes `updater/release-order`, as that commit left it (`git log --full-history <fleet's release>..<head> -- updater/release-order`), and the steps are their union. A file kept unchanged from an earlier release is that release's order, never this one's; a commit that removes the file declares nothing, and doesn't undo what an earlier commit in the range declared. A step one commit puts before the fleet and another after stops the release. When git can't read the range, the pass fails and nothing is released, so an unread order is never read as none.
 
+## A daemon that needs a new file
+
+A release that makes a daemon read a file no box has yet (a token, a clone, a settings file) says so in two places, so
+it never surprises anyone after promotion (#18kj26x; release 7's queue bridge stopped on Workshop until its token was
+minted).
+
+- **The commit declares it.** It adds a step before the fleet to `updater/release-order`, named for the file, say
+  `fleet after queue-bridge-token`. The watcher holds publishing until whoever made the file marks it, with
+  `loom release mark <commit> queue-bridge-token`.
+- **The daemon's install checks it.** An install the updater's hook runs after every release (`loom queue-bridge install`,
+  hook 61; `loom push install`, hook 60) writes the release's units first, then preflights every file a pass reads. When
+  one is missing or unfit it exits non-zero, naming each gap (the bridge's token missing, expired or not a coordinator
+  one, or its clone missing or not keyless; the lander's token secret or its clone's origin). It also names a token under
+  a week from its expiry. The failed hook goes in `update.log`, runs again every minute until it passes, and the box's
+  report says its hooks didn't pass for the release, which the watcher names: the canary, Cloud, stops the release; any
+  other box is LAGGING.
+
 ## Holding a box
 
 `hold = current` or `hold = <version>` in a box's `update.conf` keeps it there (docs/updater.md, "A hold"). Its reports carry the hold; the watcher skips it and names it HELD; status shows it held, not lagging. A hold is known only from the box's reports, so one last heard held more than 12 minutes ago is named SILENT, with the hold it last reported, and lags the release like any other box rather than being held forever. A held box that reports the release itself has it, and isn't named.

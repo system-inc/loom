@@ -277,25 +277,33 @@ func (clone Clone) revertOf(base, sha string) (any, error) {
 	return nil, nil
 }
 
-// Facts are what git says about a submitted change, read from origin through the clone, with its submodule pins each
-// proven keyless-fetchable or not (PinsOf). A GitError when git can't
-// say: the change then stays unchecked for the next pass.
-func (clone Clone) Facts(sha, base string) (map[string]any, error) {
-	// Keyless by construction: an origin that would need a key (ssh, an alias like github-lander) is refused before
-	// anything is fetched from it, and the change waits.
+// keylessClone refuses a clone a keyless pass can't read through: an origin that would need a key (ssh, an alias like
+// github-lander), or own settings that could carry one or send git elsewhere. Facts runs it before any git reaches the
+// network, and the install's preflight runs it too.
+func (clone Clone) keylessClone() error {
 	origin, err := clone.git([]string{"remote", "get-url", "origin"})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	// Its own configuration holds nothing that could carry a key or send git elsewhere, read before any git that reaches
-	// the network runs with it.
+	// Its own configuration holds nothing that could carry a key or send git elsewhere.
 	if err := clone.ownSettings(); err != nil {
-		return nil, err
+		return err
 	}
 	// The origin holds to the pins' rule (PinUrl): github.com over https, as owner/name, nothing in the url that is a key.
 	// A local path, as the tests' clones have, needs no key either.
 	if address, refused := PinUrl(origin); (refused != "" || address != origin) && !filepath.IsAbs(origin) {
-		return nil, &GitError{fmt.Sprintf("the clone's origin %q isn't a github.com repository over https with no key in it: the bridge reads the public repository keyless", origin)}
+		return &GitError{fmt.Sprintf("the clone's origin %q isn't a github.com repository over https with no key in it: the bridge reads the public repository keyless", origin)}
+	}
+	return nil
+}
+
+// Facts are what git says about a submitted change, read from origin through the clone, with its submodule pins each
+// proven keyless-fetchable or not (PinsOf). A GitError when git can't
+// say: the change then stays unchecked for the next pass.
+func (clone Clone) Facts(sha, base string) (map[string]any, error) {
+	// Keyless by construction: refused before anything is fetched, and the change waits.
+	if err := clone.keylessClone(); err != nil {
+		return nil, err
 	}
 	// main's head, asked of origin: a witness is of main's tip only when this is its sha (#6gj7n9p).
 	head, err := clone.mainHead()

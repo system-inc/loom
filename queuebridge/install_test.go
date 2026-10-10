@@ -1,6 +1,7 @@
 package queuebridge
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"os"
@@ -9,6 +10,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/system-inc/loom/protocol"
 )
 
 // Each mutant below must make a test here fail:
@@ -17,6 +21,7 @@ import (
 //	install enabling or starting the timer: TestInstallWritesTheUnitsAndNeverStartsThem
 //	install without queue-bridge.conf: TestInstallRefusesAMachineThatIsntTheBridge
 //	the hook installing on a machine without queue-bridge.conf: TestTheHookInstallsOnlyOnTheBridge
+//	install passing with any gap in what a pass reads, or before writing the units: TestInstallPreflightsWhatAPassReads
 
 func TestQueueBridgeConfReadsEachSettingOverWorkshopsDefaults(t *testing.T) {
 	home := "/home/ahra"
@@ -68,25 +73,50 @@ type machine struct {
 	fail  bool
 }
 
+// installedAt is the time every install here runs at, so a token's expiry reads the same every run.
+var installedAt = time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+
+// newMachine is a home with config as its queue-bridge.conf and, when it has one, what a pass reads at the defaults:
+// a coordinator token for 30 days, and a bare clone whose origin is a local path, as the tests' clones are.
 func newMachine(t *testing.T, config string) *machine {
 	home := t.TempDir()
 	made := &machine{home: home, paths: HomePaths(home)}
 	if config != "" {
 		os.MkdirAll(filepath.Dir(made.paths.Config), 0o755)
 		os.WriteFile(made.paths.Config, []byte(config), 0o644)
+		defaults := DefaultConfig(home)
+		made.token(t, protocol.ScopeCoordinator, installedAt.Add(30*24*time.Hour))
+		origin := filepath.Join(home, "origin.git")
+		gitIn(t, home, "init", "-q", "--bare", origin)
+		gitIn(t, home, "init", "-q", "--bare", defaults.Repository)
+		gitIn(t, defaults.Repository, "remote", "add", "origin", origin)
 	}
 	return made
 }
 
+// token writes the bridge's token at its default path: scope, expiring at expires.
+func (made *machine) token(t *testing.T, scope string, expires time.Time) {
+	t.Helper()
+	token, err := protocol.MintToken([]byte(strings.Repeat("s", 64)), protocol.TokenClaims{Run: "queue-bridge", Scope: scope, Expires: expires.Unix()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(DefaultConfig(made.home).Token, []byte(token+"\n"), 0o600)
+}
+
 func (made *machine) install() error {
+	return made.installReporting(io.Discard)
+}
+
+func (made *machine) installReporting(report io.Writer) error {
 	made.calls = nil
-	return Install(made.paths, made.home, func(arguments ...string) (string, error) {
+	return Install(made.paths, made.home, installedAt, func(arguments ...string) (string, error) {
 		made.calls = append(made.calls, arguments)
 		if made.fail {
 			return "", errors.New("systemctl failed")
 		}
 		return "", nil
-	}, io.Discard)
+	}, report)
 }
 
 // Install writes the hook and the units, tells systemd only when a unit changed, and never enables, starts or stops
@@ -160,5 +190,57 @@ func TestTheHookInstallsOnlyOnTheBridge(t *testing.T) {
 	os.Remove(made.paths.Config)
 	if code, output := run(current); code != 0 || strings.Contains(output, "ran ") || !strings.Contains(output, "isn't the bridge") {
 		t.Fatalf("without queue-bridge.conf: exit %d, %s", code, output)
+	}
+}
+
+// Install writes the release's units first, then preflights what a pass reads and fails naming every gap, so the
+// updater's hook fails and the release says so before a pass fails quietly in its log (#18kj26x). A token near its
+// expiry is named and passes.
+func TestInstallPreflightsWhatAPassReads(t *testing.T) {
+	for name, each := range map[string]struct {
+		breakIt func(t *testing.T, made *machine)
+		want    string
+	}{
+		"no token": {func(t *testing.T, made *machine) { os.Remove(DefaultConfig(made.home).Token) }, "loom coordinator-token queue-bridge --days N >"},
+		"an expired token": {func(t *testing.T, made *machine) {
+			made.token(t, protocol.ScopeCoordinator, installedAt.Add(-time.Minute))
+		}, "expired at 2026-10-10T11:59:00Z"},
+		"a board token": {func(t *testing.T, made *machine) { made.token(t, protocol.ScopeBoard, installedAt.Add(time.Hour)) }, "is a board token, not a coordinator one"},
+		"a token that isn't one": {func(t *testing.T, made *machine) {
+			os.WriteFile(DefaultConfig(made.home).Token, []byte("not-a-token\n"), 0o600)
+		}, "malformed token"},
+		"no clone": {func(t *testing.T, made *machine) {
+			os.Rename(DefaultConfig(made.home).Repository, DefaultConfig(made.home).Repository+".gone")
+		}, "git clone --bare https://github.com/system-inc/adamic.git"},
+		"a clone that needs a key": {func(t *testing.T, made *machine) {
+			gitIn(t, DefaultConfig(made.home).Repository, "remote", "set-url", "origin", "git@github-lander:system-inc/adamic.git")
+		}, "isn't a github.com repository over https with no key in it"},
+		"a clone with a rewrite": {func(t *testing.T, made *machine) {
+			gitIn(t, DefaultConfig(made.home).Repository, "config", "url.https://kirk:key@x/.insteadOf", "https://github.com/")
+		}, "holds url.https://kirk:key@x/.insteadof"},
+	} {
+		made := newMachine(t, "queue = https://loom.system.inc\n")
+		each.breakIt(t, made)
+		err := made.install()
+		if err == nil || !strings.Contains(err.Error(), "a pass can't run on this machine") || !strings.Contains(err.Error(), each.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(made.paths.Units, ServiceName)); err != nil {
+			t.Errorf("%s: the units weren't written first: %v", name, err)
+		}
+	}
+	// Every gap at once is named at once.
+	made := newMachine(t, "queue = https://loom.system.inc\n")
+	os.Remove(DefaultConfig(made.home).Token)
+	os.Rename(DefaultConfig(made.home).Repository, DefaultConfig(made.home).Repository+".gone")
+	if err := made.install(); err == nil || !strings.Contains(err.Error(), "its token") || !strings.Contains(err.Error(), "its clone") {
+		t.Fatalf("two gaps: %v", err)
+	}
+	// Three days from expiry: named, and the install passes.
+	made = newMachine(t, "queue = https://loom.system.inc\n")
+	made.token(t, protocol.ScopeCoordinator, installedAt.Add(3*24*time.Hour))
+	var report bytes.Buffer
+	if err := made.installReporting(&report); err != nil || !strings.Contains(report.String(), "expires at 2026-10-13T12:00:00Z: mint another before then") {
+		t.Fatalf("a token near its expiry: %v\n%s", err, report.String())
 	}
 }

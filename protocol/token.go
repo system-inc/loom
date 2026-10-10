@@ -87,6 +87,24 @@ func ReadTokenSecret(path string) ([]byte, error) {
 	return secret, nil
 }
 
+// ClaimsOf is what a token says, read without its secret and so not verified: for a holder checking its own token's
+// scope and expiry before it's used (an install's preflight), never for deciding anything the token would authorize.
+func ClaimsOf(token string) (TokenClaims, error) {
+	first, _, found := strings.Cut(strings.TrimSpace(token), ".")
+	if !found {
+		return TokenClaims{}, fmt.Errorf("malformed token")
+	}
+	payload, err := encoding.DecodeString(first)
+	if err != nil {
+		return TokenClaims{}, fmt.Errorf("malformed token claims")
+	}
+	var claims TokenClaims
+	if err := Decode(bytes.NewReader(payload), &claims); err != nil {
+		return TokenClaims{}, fmt.Errorf("malformed token claims: %w", err)
+	}
+	return claims, nil
+}
+
 // VerifyToken checks the signature first, then the claims exactly as the Worker does: the keys run, scope
 // and expires spelled in lowercase and nothing else, a non-empty run, a known scope, and not expired.
 func VerifyToken(secret []byte, token string, now time.Time) (TokenClaims, error) {

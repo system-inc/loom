@@ -70,12 +70,18 @@ type machine struct {
 	fail  bool
 }
 
+// newMachine is a home with config as its push.conf and, when it has one, what a pass reads at the defaults: the token
+// secret and the lander's bare clone with an origin.
 func newMachine(t *testing.T, config string) *machine {
 	home := t.TempDir()
 	made := &machine{home: home, paths: HomePaths(home)}
 	if config != "" {
 		os.MkdirAll(filepath.Dir(made.paths.Config), 0o755)
 		os.WriteFile(made.paths.Config, []byte(config), 0o644)
+		defaults := DefaultConfig(home)
+		os.WriteFile(defaults.Secret, []byte(strings.Repeat("s", 64)+"\n"), 0o600)
+		git(t, home, "init", "-q", "--bare", defaults.Repository)
+		git(t, defaults.Repository, "remote", "add", "origin", "git@github-lander:system-inc/adamic.git")
 	}
 	return made
 }
@@ -163,5 +169,32 @@ func TestTheHookInstallsOnlyOnTheLander(t *testing.T) {
 	os.Remove(made.paths.Config)
 	if code, output := run(current); code != 0 || strings.Contains(output, "ran ") || !strings.Contains(output, "doesn't land") {
 		t.Fatalf("without push.conf: exit %d, %s", code, output)
+	}
+}
+
+// Install writes the release's units first, then preflights what a pass reads (the token secret, the lander's clone and
+// its origin) and fails naming every gap, so the updater's hook fails and the release says so (#18kj26x). Mutant:
+// Preflight's gaps ignored.
+func TestInstallPreflightsTheLandersSecretAndClone(t *testing.T) {
+	for name, each := range map[string]struct {
+		breakIt func(made *machine)
+		want    string
+	}{
+		"no secret":    {func(made *machine) { os.Remove(DefaultConfig(made.home).Secret) }, "its token secret"},
+		"an empty one": {func(made *machine) { os.WriteFile(DefaultConfig(made.home).Secret, []byte("\n"), 0o600) }, "holds no token secret"},
+		"no clone": {func(made *machine) {
+			os.Rename(DefaultConfig(made.home).Repository, DefaultConfig(made.home).Repository+".gone")
+		}, "has no origin"},
+		"no origin": {func(made *machine) { git(t, DefaultConfig(made.home).Repository, "remote", "remove", "origin") }, "has no origin"},
+	} {
+		made := newMachine(t, "branch = main\n")
+		each.breakIt(made)
+		err := made.install()
+		if err == nil || !strings.Contains(err.Error(), "a pass can't run on this machine") || !strings.Contains(err.Error(), each.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(made.paths.Units, ServiceName)); err != nil {
+			t.Errorf("%s: the units weren't written first: %v", name, err)
+		}
 	}
 }

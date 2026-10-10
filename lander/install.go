@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/serving"
 )
 
@@ -48,6 +50,9 @@ type Systemctl func(arguments ...string) (string, error)
 // their text changed, and systemd told when a unit did. Install never enables, starts or stops anything: whether the
 // timer runs is Kirk's call (`systemctl --user enable --now loom-pusher.timer`, enable so a reboot keeps it), and a
 // timer already enabled runs the release's `loom push` on its next tick, since each pass starts the binary afresh.
+//
+// Last, it preflights what a pass reads (Preflight) and fails naming every gap, so the updater's hook fails, the box's
+// report says its hooks didn't pass, and the release says so (#18kj26x), rather than a landing failing in its log.
 func Install(paths Paths, home string, systemctl Systemctl, report io.Writer) error {
 	content, err := os.ReadFile(paths.Config)
 	if err != nil {
@@ -76,5 +81,21 @@ func Install(paths Paths, home string, systemctl Systemctl, report io.Writer) er
 	} else {
 		fmt.Fprintf(report, "loom push install: %s and %s are this release's already\n", ServiceName, TimerName)
 	}
+	if gaps := Preflight(config); len(gaps) > 0 {
+		return fmt.Errorf("a pass can't run on this machine: %s", strings.Join(gaps, "; "))
+	}
 	return nil
+}
+
+// Preflight is every file a pass reads that isn't fit: the token secret each call mints from, and the lander's clone
+// with its origin (the key behind it is GitHub's to judge, on the first push).
+func Preflight(config Config) []string {
+	gaps := []string{}
+	if _, err := protocol.ReadTokenSecret(config.Secret); err != nil {
+		gaps = append(gaps, fmt.Sprintf("its token secret %s: %v", config.Secret, err))
+	}
+	if origin, stderr, err := Git(config.Repository, nil, "remote", "get-url", "origin"); err != nil || strings.TrimSpace(origin) == "" {
+		gaps = append(gaps, fmt.Sprintf("its clone %s has no origin: %v %s (git clone --bare git@github-lander:system-inc/adamic.git %s)", config.Repository, err, strings.TrimSpace(stderr), config.Repository))
+	}
+	return gaps
 }
