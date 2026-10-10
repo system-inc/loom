@@ -10,9 +10,15 @@
 # LOOM_UPLOAD_CREDENTIALS or else ~/.loom/r2-releases.conf: account_id, access_key_id and secret_access_key. The
 # key pair reaches curl on its standard input, never its command line, so ps never shows it. Releases go under
 # releases/: the bucket's blobs/ and refs/ are test products its lifecycle expires after 7 days.
+#
+# It holds <out>/.release.lock throughout (release-lock.sh), so a person's upload never interleaves with the release
+# watcher's, and refuses when the lock is held.
 set -uo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+. "${here}/release-lock.sh"
 [ $# = 2 ] && [ -f "$1/current.txt" ] || { echo "usage: updater/upload.sh <out directory with current.txt> <destination>" >&2; exit 2; }
 out=$1 destination=$2
+release_lock "${out}"
 case "${destination}" in
 r2:*/?*)
 	credentials=${LOOM_UPLOAD_CREDENTIALS:-${HOME}/.loom/r2-releases.conf}

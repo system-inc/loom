@@ -26,8 +26,9 @@ func manifestOf(version string) string {
 	return fmt.Sprintf("version %s\nloom linux/amd64 %s\nloom-runner linux/amd64 %s\nend 2\n", version, strings.Repeat("1", 64), strings.Repeat("2", 64))
 }
 
-// A world is Workshop as the watcher sees it: an out directory publish.sh writes, a branch head, the reports the
-// boxes post (through the real receiver), a clock the test moves, and counts of what was published and uploaded.
+// A world is Workshop as the watcher sees it: an out directory publish.sh writes, the current.txt upload.sh last sent
+// (remote, what the boxes read), a branch head, the reports the boxes post (through the real receiver), a clock the test
+// moves, and counts of what was published and uploaded.
 type world struct {
 	t         *testing.T
 	config    Config
@@ -40,6 +41,7 @@ type world struct {
 	publishes atomic.Int32
 	uploads   atomic.Int32
 	promoted  []string
+	remote    string
 	log       bytes.Buffer
 	mutex     sync.Mutex
 }
@@ -56,6 +58,7 @@ func newWorld(t *testing.T) *world {
 	os.MkdirAll(filepath.Join(config.Out, "manifests"), 0o755)
 	os.WriteFile(filepath.Join(config.Out, "manifests", commit("a")+".txt"), []byte(manifestOf(commit("a"))), 0o644)
 	os.WriteFile(filepath.Join(config.Out, "current.txt"), []byte(manifestOf(commit("a"))), 0o644)
+	w.remote = manifestOf(commit("a"))
 	return w
 }
 
@@ -91,7 +94,13 @@ func (w *world) steps() Steps {
 			w.promoted = append(w.promoted, version)
 			return Promote(w.config.Out, version)
 		},
-		Upload: func(context.Context) error { w.uploads.Add(1); return nil },
+		Upload: func(context.Context) error {
+			w.uploads.Add(1)
+			content, err := os.ReadFile(filepath.Join(w.config.Out, "current.txt"))
+			w.remote = string(content)
+			return err
+		},
+		Published: func(context.Context) (Manifest, error) { return ParseManifest(w.remote) },
 		PoolSeen: func(context.Context, string) (time.Time, error) {
 			if w.asked.IsZero() { // asking all along
 				return w.clock(), w.poolError
@@ -404,6 +413,40 @@ func TestAHealthyCanaryIsPromotedAndTheFleetFollows(t *testing.T) {
 	}
 }
 
+// A person who publishes by hand during the soak (a rollback copies an older manifest over current.txt and uploads it)
+// is never overwritten: the watcher reads current.txt, in its out directory and where the boxes read it, before it
+// promotes, and stops with nothing promoted when either no longer publishes its canary.
+func TestAHandPublishDuringTheSoakIsNeverPromotedOver(t *testing.T) {
+	for name, publish := range map[string]func(w *world){
+		"in the out directory": func(w *world) {
+			content, _ := os.ReadFile(filepath.Join(w.config.Out, "manifests", commit("a")+".txt"))
+			os.WriteFile(filepath.Join(w.config.Out, "current.txt"), content, 0o644)
+		},
+		"where the boxes read it": func(w *world) { w.remote = manifestOf(commit("a")) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			w.head = commit("b")
+			w.tick()
+			w.advance(time.Minute)
+			w.report("Cloud", commit("b"), commit("b"), serveUp)
+			w.tick()
+			if w.state().Phase != PhaseSoak {
+				t.Fatalf("%+v", w.state())
+			}
+			publish(w)
+			w.soakHealthy(commit("b"))
+			state := w.state()
+			if state.Phase != PhaseStopped || !strings.Contains(state.Why, "no longer publishes the canary of "+short(commit("b"))) || len(w.promoted) != 0 || w.uploads.Load() != 1 {
+				t.Fatalf("%+v, promoted %q, %d uploads\n%s", state, w.promoted, w.uploads.Load(), w.log.String())
+			}
+			if remote, _ := ParseManifest(w.remote); remote.Top() != commit("a") && remote.CanaryVersion() != commit("b") {
+				t.Fatalf("what the boxes read changed: %s", w.remote)
+			}
+		})
+	}
+}
+
 // A box that doesn't take the release in time is named as lagging, loudly, without stopping the release: an offline
 // box catches up when it returns.
 func TestABoxThatDoesntFollowIsNamedLagging(t *testing.T) {
@@ -610,11 +653,11 @@ func TestRollbackRefusesAMovingRelease(t *testing.T) {
 	if err := Rollback(context.Background(), w.config, w.steps(), &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "canary phase") {
 		t.Fatalf("rolled back a release in its canary phase: %v", err)
 	}
-	unlock, err := Lock(w.config.Out)
+	lock, err := Lock(w.config.Out)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer unlock()
+	defer lock.Close()
 	if err := Rollback(context.Background(), w.config, w.steps(), &bytes.Buffer{}); !errors.Is(err, ErrHeld) {
 		t.Fatalf("rolled back under the lock: %v", err)
 	}
