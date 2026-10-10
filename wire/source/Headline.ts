@@ -7,7 +7,8 @@
 // A build tested is a future's whole decision, green or red: the judge's decision, or a whole verdict passed or failed
 // from today's gate. A void tested nothing and is counted apart. Main's red count is the number of units main's last
 // witness held red (main.red), zero once a witness of main's tip is green (main.green). A log line it can't read (not
-// JSON, or with no seq or time) is skipped, logged and counted in the reading, so one bad line never stops the headline.
+// JSON, or with no seq or time) is skipped, logged and kept by its seq, which is the one before it plus one since the
+// Queue numbers its log without gaps, so the follow moves past it, counts it once, and never stalls on it.
 
 import { DurableObject } from 'cloudflare:workers';
 import { queueOf } from './Changes';
@@ -42,8 +43,8 @@ export interface HeadlineReading {
     // Main's red count now (null until a witness of main's tip is decided) and its points over the last day.
     mainRed: MainRedPoint | null;
     mainTrend: MainRedPoint[];
-    // Log lines the last read skipped because it couldn't read them, and the last event read before the first of them.
-    unreadable: { lines: number; afterSeq: number } | null;
+    // Log lines skipped because they couldn't be read, over the week kept, and the newest of their seqs; null when none.
+    unreadable: { lines: number; seqs: number[] } | null;
 }
 
 export function headlineOf(environment: Env): DurableObjectStub {
@@ -62,9 +63,10 @@ export function headlineFact(event: QueueEvent): { outcome: HeadlineOutcome } | 
         }
         return status === 'void' ? { outcome: 'void' } : null;
     }
+    // A main.red without its units names no count, so it adds nothing rather than reading as green.
     if (event.type === 'main.red') {
         const units = event.data.units;
-        return { red: Array.isArray(units) ? units.length : 0, main: String(event.data.main ?? '') };
+        return Array.isArray(units) ? { red: units.length, main: String(event.data.main ?? '') } : null;
     }
     if (event.type === 'main.green') {
         return { red: 0, main: String(event.data.main ?? '') };
@@ -72,7 +74,12 @@ export function headlineFact(event: QueueEvent): { outcome: HeadlineOutcome } | 
     return null;
 }
 
-// One log line as an event, or null when it isn't one the headline can place: not JSON, or with no seq or time.
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// One log line as an event, or null when it isn't one the headline can place: not JSON, or with no seq or time. Its
+// type, subject and data are what the headline can read whatever the line holds, so reading it never throws.
 export function readEvent(line: string): QueueEvent | null {
     let parsed: unknown;
     try {
@@ -81,20 +88,23 @@ export function readEvent(line: string): QueueEvent | null {
     catch {
         return null;
     }
-    if (typeof parsed !== 'object' || parsed === null) {
+    if (!isRecord(parsed)) {
         return null;
     }
-    const event = parsed as Partial<QueueEvent>;
-    if (!Number.isSafeInteger(event.seq) || typeof event.at !== 'string' || Number.isNaN(Date.parse(event.at))) {
+    if (!Number.isSafeInteger(parsed.seq) || typeof parsed.at !== 'string' || Number.isNaN(Date.parse(parsed.at))) {
         return null;
     }
-    return { subject: {}, data: {}, ...event } as QueueEvent;
+    return {
+        ...(parsed as unknown as QueueEvent),
+        type: (typeof parsed.type === 'string' ? parsed.type : '') as QueueEvent['type'],
+        subject: (isRecord(parsed.subject) ? parsed.subject : {}) as QueueEvent['subject'],
+        data: isRecord(parsed.data) ? parsed.data : {},
+    };
 }
 
 export class Headline extends DurableObject<Env> {
     private readonly sql: SqlStorage;
     private lastReadAt = 0;
-    private unreadable: { lines: number; afterSeq: number } | null = null;
     private reading: Promise<void> | null = null;
 
     constructor(context: DurableObjectState, environment: Env) {
@@ -104,6 +114,7 @@ export class Headline extends DurableObject<Env> {
             CREATE TABLE IF NOT EXISTS cursor (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS decisions (seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, outcome TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS mains (seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, red INTEGER NOT NULL, main TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS unreadable (seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, line TEXT NOT NULL);
         `);
     }
 
@@ -135,7 +146,6 @@ export class Headline extends DurableObject<Env> {
         if (queue === null) {
             throw new Error("the queue isn't on the wire");
         }
-        let unreadable: { lines: number; afterSeq: number } | null = null;
         for (let page = 0; page < maximumPagesPerRead; page++) {
             const response = await queue.fetch(new Request(`https://queue/log?after=${this.cursor()}`));
             if (!response.ok) {
@@ -153,8 +163,9 @@ export class Headline extends DurableObject<Env> {
                 for (const line of lines) {
                     const event = readEvent(line);
                     if (event === null) {
-                        unreadable = { lines: (unreadable?.lines ?? 0) + 1, afterSeq: unreadable?.afterSeq ?? seq };
-                        console.error(`headline: skipped a log line it can't read, after seq ${seq}: ${line.slice(0, 200)}`);
+                        seq++;
+                        this.sql.exec('INSERT OR REPLACE INTO unreadable (seq, at, line) VALUES (?, ?, ?)', seq, Date.now(), line.slice(0, 200));
+                        console.error(`headline: skipped log line ${seq}, which it can't read: ${line.slice(0, 200)}`);
                         continue;
                     }
                     const fact = headlineFact(event);
@@ -173,9 +184,9 @@ export class Headline extends DurableObject<Env> {
                 break;
             }
         }
-        this.unreadable = unreadable;
         const now = Date.now();
         this.sql.exec('DELETE FROM decisions WHERE at < ?', now - keptMilliseconds);
+        this.sql.exec('DELETE FROM unreadable WHERE at < ?', now - keptMilliseconds);
         // The newest main point is kept however old, since it is main's red count now.
         this.sql.exec('DELETE FROM mains WHERE at < ? AND seq < (SELECT MAX(seq) FROM mains)', now - keptMilliseconds);
         this.lastReadAt = now;
@@ -200,6 +211,14 @@ export class Headline extends DurableObject<Env> {
                 return { at: new Date(row.at).toISOString(), red: row.red, main: row.main };
             });
         const newest = this.sql.exec<{ at: number; red: number; main: string }>('SELECT at, red, main FROM mains ORDER BY seq DESC LIMIT 1').toArray()[0];
+        const unreadableLines = this.sql.exec<{ lines: number }>('SELECT COUNT(*) AS lines FROM unreadable').toArray()[0]?.lines ?? 0;
+        const unreadableSeqs = this.sql
+            .exec<{ seq: number }>('SELECT seq FROM unreadable ORDER BY seq DESC LIMIT 5')
+            .toArray()
+            .map(function (row) {
+                return row.seq;
+            })
+            .reverse();
         return {
             readAt: new Date(now).toISOString(),
             seq: this.cursor(),
@@ -210,7 +229,7 @@ export class Headline extends DurableObject<Env> {
             voidLastHour: voidLastHour,
             mainRed: newest === undefined ? null : { at: new Date(newest.at).toISOString(), red: newest.red, main: newest.main },
             mainTrend: points,
-            unreadable: this.unreadable,
+            unreadable: unreadableLines === 0 ? null : { lines: unreadableLines, seqs: unreadableSeqs },
         };
     }
 }
