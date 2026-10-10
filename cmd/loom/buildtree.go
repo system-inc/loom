@@ -176,10 +176,15 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"seconds": time.Since(started).Seconds(), "sourceBytes": len(source),
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
-	// The tree is in the store: its working directory goes, file by file. Kept when the index didn't go up, for a retry.
-	if err = builder.TreeDone(*cache, directory, indexWritten); err != nil {
-		fmt.Fprintln(stderr, "build-tree: removing the tree's directory:", err)
-		return 1
+	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten)
+}
+
+// finishTree removes the tree's working directory once its index is up (kept otherwise, for a retry) and exits. A
+// removal that fails is warned about and left for the next TreeCache to sweep, and never fails the build: the index
+// is up, and that is what runners read.
+func finishTree(stderr io.Writer, cache, directory, treeKey string, failed int, indexWritten bool) int {
+	if err := builder.TreeDone(cache, directory, indexWritten); err != nil {
+		fmt.Fprintln(stderr, "build-tree: warning: removing the tree's directory:", err)
 	}
 	return buildTreeExit(stderr, treeKey, failed, indexWritten)
 }
