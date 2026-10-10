@@ -160,3 +160,45 @@ func TestGoCacheTrimsTheLeastRecentlyUsedFirst(t *testing.T) {
 		}
 	}
 }
+
+// A removal stopped partway (here, the third file refuses to go) never leaves a tree directory TreeCache would take
+// back with products half gone, which buildcache would count as hits: the tree's directory was renamed away first,
+// and the next TreeCache gives the tree a fresh directory and finishes the removal.
+func TestAnInterruptedCleanupLeavesNoHollowTree(t *testing.T) {
+	base := t.TempDir()
+	tree := gitTree(t, map[string]string{"go.mod": "module m\n"})
+	directory, err := TreeCache(base, tree, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	product := keyOf("p")
+	for _, name := range []string{"cache/" + product + "/tool", "cache/" + product + "/data", "cache/" + product + ".inputs", "out/a.test"} {
+		os.MkdirAll(filepath.Dir(filepath.Join(directory, name)), 0o755)
+		os.WriteFile(filepath.Join(directory, name), []byte(name), 0o644)
+	}
+	removed := 0
+	remove = func(path string) error {
+		if removed++; removed == 3 {
+			return errors.New("killed")
+		}
+		return os.Remove(path)
+	}
+	t.Cleanup(func() { remove = os.Remove })
+	if err = RemoveTree(base, directory); err == nil {
+		t.Fatal("the stopped removal reported no error")
+	}
+	if _, err = os.Lstat(filepath.Join(directory, "cache", product)); !os.IsNotExist(err) {
+		t.Fatalf("a stopped removal left the tree's product directory where TreeCache finds it: %v", err)
+	}
+	remove = os.Remove
+	again, err := TreeCache(base, tree, 2)
+	if err != nil || again != directory {
+		t.Fatalf("the tree's directory again: %s %v", again, err)
+	}
+	if entries, _ := os.ReadDir(again); len(entries) != 0 {
+		t.Fatalf("the tree's directory came back holding %s", entries[0].Name())
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 1 {
+		t.Fatalf("the stopped removal wasn't finished: %d entries under the base", len(entries))
+	}
+}

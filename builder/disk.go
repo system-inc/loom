@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -49,13 +51,56 @@ func CheckFloor(paths map[string]string, floor uint64, free func(path string) (u
 	return nil
 }
 
-// RemoveTree removes one tree's working directory, base/<tree hash>, by name: every file and link it holds, one at a
-// time, then each directory once it is empty, deepest first. A link is removed as itself and never followed, and a
-// directory that isn't a tree's under base is refused, so nothing outside the tree can go.
+// removingPrefix names a tree's directory on its way out: no tree hash, so TreeCache never takes it for a tree.
+const removingPrefix = ".removing-"
+
+// remove removes one file or empty directory; a variable so a test can stop a removal partway.
+var remove = os.Remove
+
+// RemoveTree removes one tree's working directory, base/<tree hash>, by name. It first renames the directory to
+// base/.removing-<hash>, in one step, so a removal stopped partway (a kill, a full disk) never leaves a tree
+// directory with some products' files gone and their directories still there, which buildcache would count as hits
+// and PublishTree would archive hollow; TreeCache sweeps what such a removal left. Then every file and link goes, one
+// at a time, then each directory once it is empty, deepest first. A link is removed as itself and never followed, and
+// a directory that isn't a tree's under base is refused, so nothing outside the tree can go.
 func RemoveTree(base, directory string) error {
 	if filepath.Dir(filepath.Clean(directory)) != filepath.Clean(base) || !treeHashPattern.MatchString(filepath.Base(directory)) {
 		return fmt.Errorf("%s isn't a tree's directory under %s", directory, base)
 	}
+	removing := filepath.Join(base, removingPrefix+filepath.Base(directory)+"-"+strconv.Itoa(os.Getpid()))
+	if err := os.Rename(directory, removing); err != nil {
+		return err
+	}
+	return removeRenamed(base, removing)
+}
+
+// SweepRemoving finishes every removal under base that stopped partway: each .removing- directory goes.
+func SweepRemoving(base string) error {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), removingPrefix) {
+			if err = removeRenamed(base, filepath.Join(base, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// removeRenamed removes a directory RemoveTree renamed, file by file, deepest directories last.
+func removeRenamed(base, directory string) error {
+	if filepath.Dir(filepath.Clean(directory)) != filepath.Clean(base) || !strings.HasPrefix(filepath.Base(directory), removingPrefix) {
+		return fmt.Errorf("%s isn't a tree's directory being removed under %s", directory, base)
+	}
+	return removeFiles(directory)
+}
+
+// removeFiles removes directory and everything in it, each file and link by name, never following a link, then each
+// directory once it is empty, deepest first.
+func removeFiles(directory string) error {
 	files, directories := []string{}, []string{}
 	err := filepath.WalkDir(directory, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -72,12 +117,12 @@ func RemoveTree(base, directory string) error {
 		return err
 	}
 	for _, file := range files {
-		if err = os.Remove(file); err != nil {
+		if err = remove(file); err != nil {
 			return err
 		}
 	}
 	for index := len(directories) - 1; index >= 0; index-- {
-		if err = os.Remove(directories[index]); err != nil {
+		if err = remove(directories[index]); err != nil {
 			return err
 		}
 	}

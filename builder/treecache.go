@@ -35,6 +35,13 @@ func TreeCache(base, tree string, keep int) (string, error) {
 		return "", fmt.Errorf("git rev-parse HEAD^{tree} in %s: %w", tree, err)
 	}
 	directory := filepath.Join(base, strings.TrimSpace(string(hash)))
+	// A removal that stopped partway left a .removing- directory, never a tree's: finish it.
+	if err = os.MkdirAll(base, 0o755); err != nil {
+		return "", err
+	}
+	if err = SweepRemoving(base); err != nil {
+		return "", err
+	}
 	if err = os.MkdirAll(directory, 0o755); err != nil {
 		return "", err
 	}
