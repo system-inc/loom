@@ -49,6 +49,10 @@ type Options struct {
 	// Strict runs only structured test jobs (strict.go): a unit with argv, or anything a test job doesn't take, is
 	// refused before anything runs. The Codex pool's runners serve this way.
 	Strict bool
+	// PhaseJobs lets the runner take a phase job (a box fast gate phase through run.py). Only our box services pass
+	// --phase-jobs: a Codex instance consented to a runner that runs only a go test of public adamic and refuses
+	// everything else, and its prompt never passes the flag, so that promise stays true (Loom, Oct 10 02:09Z).
+	PhaseJobs bool
 	// Root is where a test job keeps what outlives a unit (its npm trees, gate inputs and setup marker) and where its
 	// preparation clears earlier units' leavings. Empty means /tmp for a strict runner, whose instance is the runner's
 	// alone, and loom-test-root under WorkspaceParent otherwise.

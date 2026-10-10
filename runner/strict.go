@@ -76,6 +76,10 @@ func goBuildArguments(testPackage protocol.TestPackage) []string {
 // the unit ran out of time. Broken: the job was refused, the instance couldn't be readied, or its disk filled.
 func (run *unitRun) runTest(runContext context.Context) string {
 	job := run.unit.Test
+	if job.Phase != "" && !run.options.PhaseJobs {
+		run.fail(protocol.PhaseStart, fmt.Errorf("refused: a phase job runs only on a runner started with --phase-jobs; this one runs only go test"))
+		return protocol.StatusBroken
+	}
 	started := time.Now()
 	deadline := started.Add(time.Duration(run.unit.TimeoutSeconds) * time.Second)
 	root, tree := run.options.Root, run.options.Tree
@@ -136,6 +140,9 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	if err := os.MkdirAll(out, 0o755); err != nil {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
+	}
+	if job.Phase != "" {
+		return run.runPhase(runContext, job, environment, tree, root, out, deadline)
 	}
 
 	testContext, cancel := context.WithDeadline(runContext, deadline)
@@ -203,6 +210,76 @@ func (run *unitRun) runTest(runContext context.Context) string {
 		status = worse(status, protocol.StatusFailed)
 	}
 	return status
+}
+
+// runPhase runs a phase job: the box fast gate's run.py from the gate tools at job.Tools, checked out beside the tree
+// from the same public repository, built here as separate arguments (--phase, and --unit when the line names one),
+// never shell text. Its output streams as the unit's, under run.stream's heartbeat, and its exit decides the unit, as
+// the box decides a stage (Judge's phase rule). Failed: run.py exited non-zero or ran out of the unit's time. Broken:
+// the tools couldn't be readied or the runner was stopped.
+func (run *unitRun) runPhase(runContext context.Context, job *protocol.TestJob, environment map[string]string, tree string, root string, out string, deadline time.Time) string {
+	tools := filepath.Join(root, "adamic-gate-tools", job.Tools)
+	if err := readyTools(runContext, tree, tools, job.Tools, packageEnvironment(environment, protocol.TestPackage{})); err != nil {
+		run.fail(protocol.PhaseStart, fmt.Errorf("readying the gate tools at %s: %w (the instance's, never the change's)", job.Tools, err))
+		return protocol.StatusBroken
+	}
+	fields := strings.Fields(job.Phase)
+	argv := []string{"python3", filepath.Join(tools, "cloud", "fast-gate", "run.py"), "--phase", fields[0]}
+	if len(fields) == 2 {
+		argv = append(argv, "--unit", fields[1])
+	}
+	argv = append(argv, "--tree", tree, "--sha", job.Sha, "--base", job.Base, "--tools", tools, "--out", filepath.Join(out, "phase"))
+	outcome, state, wall, err := run.stream(runContext, argv, packageEnvironment(environment, protocol.TestPackage{}), tree, time.Until(deadline))
+	if err != nil {
+		run.fail(protocol.PhaseStart, err)
+		return protocol.StatusBroken
+	}
+	run.emitExit(outcome, state, wall)
+	switch {
+	case outcome.interrupted:
+		run.fail(protocol.PhaseRun, fmt.Errorf("the runner was stopped before the phase finished"))
+		return protocol.StatusBroken
+	case outcome.code != nil && *outcome.code == 0 && !outcome.timedOut:
+		return protocol.StatusPassed
+	default:
+		run.say(fmt.Sprintf("phase %s: %s", job.Phase, describeOutcome(outcome)))
+		return protocol.StatusFailed
+	}
+}
+
+// toolsRepository is where a phase job's gate tools are fetched from: the public repository (a test points it at a
+// local one).
+var toolsRepository = protocol.AdamicRepository
+
+// readyTools checks out the gate tools' commit as a detached worktree of the tree's repository, fetched from the
+// public repository by sha, and keeps it for later units of the same commit; a checkout at any other commit is redone.
+func readyTools(runContext context.Context, tree string, tools string, commit string, environment []string) error {
+	git := func(directory string, arguments ...string) (string, error) {
+		command := exec.CommandContext(runContext, "git", append([]string{"-C", directory}, arguments...)...)
+		command.Env = append(environment, "GIT_TERMINAL_PROMPT=0")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
+		}
+		return strings.TrimSpace(string(output)), nil
+	}
+	if head, err := git(tools, "rev-parse", "HEAD"); err == nil && head == commit {
+		return nil
+	}
+	if err := os.RemoveAll(tools); err != nil {
+		return err
+	}
+	git(tree, "worktree", "prune")
+	if _, err := git(tree, "fetch", "--no-tags", "-q", toolsRepository, commit); err != nil {
+		return err
+	}
+	if _, err := git(tree, "worktree", "add", "--detach", "--force", tools, commit); err != nil {
+		return err
+	}
+	if head, err := git(tools, "rev-parse", "HEAD"); err != nil || head != commit {
+		return fmt.Errorf("the checkout is at %q, not %s", head, commit)
+	}
+	return nil
 }
 
 // say emits one line on the runner's own stream.

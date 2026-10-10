@@ -25,6 +25,7 @@ import (
 //	a trim reaching the host's /tmp (as a mutant, only /tmp/go-buildloom-canary-*): TestPrepareNamesNoHostPath, TestPrepareTouchesNothingOutsideItsRoot
 //	a strict runner's root anything but /tmp: TestAStrictRunnersRootIsTmpAndOthersKeepTheirOwn
 //	the unit's own GOCACHE dropped, or GOCACHEPROG kept: TestEachTestUnitBuildsOnAGoCacheOfItsOwn
+//	a phase job run without --phase-jobs: TestAPhaseJobRunsRunPyFromTheGateToolsAtItsCommit
 
 const testSha = "0123456789abcdef0123456789abcdef01234567"
 
@@ -406,5 +407,70 @@ printf 'PATH=%s\0HOME=%s\0GOCACHE=%s\0GOCACHEPROG=%s\0' "` + bin + `:/usr/bin:/b
 	}
 	if _, err := os.Stat(filepath.Join(shared, "stale-object")); err != nil {
 		t.Fatal("the instance's cache was touched")
+	}
+}
+
+// A phase job runs run.py from the gate tools at the job's commit, checked out beside the tree, with --phase and --unit
+// as separate arguments and the tree, sha, base and tools as run.py names them; its exit decides the unit.
+func TestAPhaseJobRunsRunPyFromTheGateToolsAtItsCommit(t *testing.T) {
+	fixture := newStrictFixture(t, 0)
+	public := filepath.Join(fixture.directory, "public")
+	seen := filepath.Join(fixture.directory, "run-py-argv")
+	gitIn := func(directory string, arguments ...string) string {
+		t.Helper()
+		command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+		command.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", arguments, err, output)
+		}
+		return strings.TrimSpace(string(output))
+	}
+	os.MkdirAll(filepath.Join(public, "cloud", "fast-gate"), 0o755)
+	gitIn(public, "init", "-q")
+	commitRunPy := func(exit int) string {
+		os.WriteFile(filepath.Join(public, "cloud", "fast-gate", "run.py"), []byte("import sys\nopen('"+seen+"', 'w').write('\\0'.join(sys.argv[1:]))\nprint('phase ran')\nsys.exit("+strconv.Itoa(exit)+")\n"), 0o644)
+		gitIn(public, "add", "-A")
+		gitIn(public, "commit", "-q", "-m", "tools")
+		return gitIn(public, "rev-parse", "HEAD")
+	}
+	passing := commitRunPy(0)
+	failing := commitRunPy(3)
+	original := toolsRepository
+	toolsRepository = public
+	t.Cleanup(func() { toolsRepository = original })
+	gitIn(fixture.directory, "clone", "-q", public, fixture.tree)
+	// The fixture's prepare stub writes the environment and makes the tree; here the tree is a clone, as prepare's is.
+	prepareScript = []byte("#!/bin/bash\nprintf 'PATH=%s\\0HOME=%s\\0' \"/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin\" \"${HOME}\" > \"$5\"\n")
+
+	job := protocol.TestJob{Repository: protocol.AdamicRepository, Sha: testSha, Base: strings.Repeat("b", 40), Phase: "wasi fixture-07", Tools: passing}
+	// A runner started without --phase-jobs (every Codex instance's) refuses it before anything runs.
+	result, events, _ := runUnit(t, testJobUnit(job), fixture.options(t))
+	if _, err := os.Stat(seen); result.Status != protocol.StatusBroken || err == nil || !strings.Contains(errorPhases(events), "--phase-jobs") {
+		t.Fatalf("a runner without --phase-jobs ran a phase job: %s, errors %q", result.Status, errorPhases(events))
+	}
+	options := fixture.options(t)
+	options.PhaseJobs = true
+	result, events, _ = runUnit(t, testJobUnit(job), options)
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("the phase %s; errors %q", result.Status, errorPhases(events))
+	}
+	argv, _ := os.ReadFile(seen)
+	tools := filepath.Join(options.Root, "adamic-gate-tools", passing)
+	want := []string{"--phase", "wasi", "--unit", "fixture-07", "--tree", fixture.tree, "--sha", testSha, "--base", job.Base, "--tools", tools}
+	if got := strings.Split(string(argv), "\x00"); len(got) != len(want)+2 || !reflect.DeepEqual(got[:len(want)], want) || got[len(want)] != "--out" {
+		t.Fatalf("run.py ran with %q, want %q then --out", got, want)
+	}
+	if lines := strings.Join(outputLines(events, "stdout"), "\n"); !strings.Contains(lines, "phase ran") {
+		t.Errorf("the phase's output isn't the unit's: %q", lines)
+	}
+	// The same unit at the tools' next commit runs that commit's run.py, and its non-zero exit fails the unit.
+	job.Tools, job.Phase = failing, "vet"
+	result, events, _ = runUnit(t, testJobUnit(job), options)
+	if result.Status != protocol.StatusFailed {
+		t.Fatalf("a phase that exited 3 left the unit %s; errors %q", result.Status, errorPhases(events))
+	}
+	if argv, _ = os.ReadFile(seen); strings.Contains(string(argv), "--unit") {
+		t.Errorf("a phase line with no unit passed --unit: %q", argv)
 	}
 }

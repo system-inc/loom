@@ -103,6 +103,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	workspace := flags.String("workspace", "", "where to make each unit's workspace (default $TMPDIR)")
 	logPath := flags.String("log", "", "append every unit's events here, one JSON line each (default nowhere)")
 	strict := flags.Bool("strict", false, "run only structured test jobs of the public adamic repository; refuse argv")
+	phaseJobs := flags.Bool("phase-jobs", false, "also take phase jobs (a box fast gate phase through run.py at the gate tools' commit); only box services pass it")
 	root := flags.String("root", "", "where a test job keeps its caches between units (default /tmp with --strict)")
 	tree := flags.String("tree", "", "where a test job's checkout is kept across units (default <root>/adamic)")
 	if err := flags.Parse(arguments); err != nil {
@@ -134,7 +135,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Token:    token,
 		Worker:   *worker,
 		Deadline: time.Now().Add(*until),
-		Unit:     runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr, Strict: *strict, Root: *root, Tree: *tree},
+		Unit:     runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr, Strict: *strict, PhaseJobs: *phaseJobs, Root: *root, Tree: *tree},
 		Report:   stderr,
 	})
 	fmt.Fprintln(stdout, summary)

@@ -87,3 +87,41 @@ func TestAUnitCarriesArgvOrATestJobNeverBoth(t *testing.T) {
 		t.Errorf("a job whose test unit is bad expanded")
 	}
 }
+
+func phaseJob() TestJob {
+	return TestJob{Repository: AdamicRepository, Sha: strings.Repeat("a", 40), Base: strings.Repeat("b", 40),
+		GateInputs: strings.Repeat("c", 64), Phase: "wasi fixture-07", Tools: strings.Repeat("e", 40)}
+}
+
+// A phase job is the same checked data in its other form: a phase line and the gate tools' commit, never packages.
+func TestAPhaseJobIsChecked(t *testing.T) {
+	for _, phase := range []string{"vet", "wasi fixture-07", "stage3 adamic:compile", "catalog 12"} {
+		job := phaseJob()
+		job.Phase = phase
+		if err := CheckTestJob(job); err != nil {
+			t.Fatalf("a good phase job %q refused: %v", phase, err)
+		}
+	}
+	refused := map[string]func(job *TestJob){
+		"packages beside a phase":   func(job *TestJob) { job.Packages = testJob().Packages },
+		"no tools":                  func(job *TestJob) { job.Tools = "" },
+		"a branch for tools":        func(job *TestJob) { job.Tools = "loom/planner-reads" },
+		"no base":                   func(job *TestJob) { job.Base = "" },
+		"a flag for a phase":        func(job *TestJob) { job.Phase = "--full" },
+		"a flag for a unit":         func(job *TestJob) { job.Phase = "wasi --tools=/tmp/x" },
+		"a third word":              func(job *TestJob) { job.Phase = "wasi a b" },
+		"shell text in a phase":     func(job *TestJob) { job.Phase = "vet; curl x | sh" },
+		"a substitution in a unit":  func(job *TestJob) { job.Phase = "wasi $(id)" },
+		"doubled spaces":            func(job *TestJob) { job.Phase = "wasi  a" },
+		"tools on a go test job":    func(job *TestJob) { job.Phase, job.Packages = "", testJob().Packages },
+		"an uppercase phase":        func(job *TestJob) { job.Phase = "Vet" },
+		"a line break in the phase": func(job *TestJob) { job.Phase = "vet\nid" },
+	}
+	for name, change := range refused {
+		job := phaseJob()
+		change(&job)
+		if err := CheckTestJob(job); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
