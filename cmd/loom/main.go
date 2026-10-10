@@ -150,6 +150,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	poolHas := poolHasFlag{}
 	flags.Var(poolHas, "pool-has", "the toolchains every worker of a pool has, <name>=<toolchain>,...: units that require one go only there; repeatable")
 	silenceDrop := flags.Int("silence-drop", 0, "seconds a strict pool's started unit may go silent before its worker counts as gone; 0 means three of its runner's heartbeats")
+	poolKinds := poolKindsFlag{}
+	flags.Var(poolKinds, "pool-kinds", "the only unit kinds a pool takes, <name>=<kind>,... (box-phase=phase); a pool without it takes test and product units; repeatable")
 	poolMemory := poolMemoryFlag{}
 	flags.Var(poolMemory, "pool-memory", "each worker's memory in a pool, <name>=<megabytes>: a unit declaring more never goes there; repeatable")
 	priority := flags.Int("priority", 0, "the run's units' priority on its pools, 0 to 1000, highest handed out first")
@@ -226,7 +228,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			strict := slices.Contains(strictPools, wanted)
 			machine := &coordinator.PoolMachine{Pool: wanted.name, Strict: strict, Priority: *priority, AgeEvery: *ageEvery, AgeStep: *ageStep, AgeCeiling: *ageCeiling,
 				SilenceDrop: map[bool]time.Duration{true: time.Duration(*silenceDrop) * time.Second}[strict],
-				Has:         poolHas[wanted.name], MemoryMegabytes: poolMemory[wanted.name], Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: platformOf(poolPlatforms, wanted.name), Log: stdout}
+				Has:         poolHas[wanted.name], MemoryMegabytes: poolMemory[wanted.name], Kinds: poolKinds[wanted.name], Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: platformOf(poolPlatforms, wanted.name), Log: stdout}
 			poolMachines[machine.Name()] = true
 			for range wanted.slots {
 				slots = append(slots, machine)

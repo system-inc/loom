@@ -526,6 +526,15 @@ func (coordinator *coordinator) unfit(state *unitState) string {
 			return "the record platform " + record
 		}
 	}
+	if kind := state.planned.Unit.Kind; kind != "" {
+		found := false
+		for _, machine := range coordinator.config.Slots {
+			found = found || takes(machine, kind)
+		}
+		if !found {
+			return "a pool that takes kind " + kind
+		}
+	}
 	if need := state.planned.Unit.Resources.MemoryMegabytes; need > 0 {
 		found := false
 		for _, machine := range coordinator.config.Slots {
@@ -556,7 +565,17 @@ func (coordinator *coordinator) fitsUnit(machine Machine, unit protocol.JobUnit)
 	if record := coordinator.config.RecordPlatform; record != "" && !unit.Portable && machine.Platform() != record {
 		return false
 	}
-	return holds(machine, unit.Resources.MemoryMegabytes) && fits(machine, unit.Requires)
+	return takes(machine, unit.Kind) && holds(machine, unit.Resources.MemoryMegabytes) && fits(machine, unit.Requires)
+}
+
+// takes says whether the machine takes a unit of the kind: a machine that names its kinds takes only those, and one
+// that doesn't takes everything but a phase, which runs only where a runner serves phase jobs.
+func takes(machine Machine, kind string) bool {
+	named, ok := machine.(interface{ TakesKinds() []string })
+	if !ok || named.TakesKinds() == nil {
+		return kind != "phase"
+	}
+	return slices.Contains(named.TakesKinds(), kind)
 }
 
 // holds says whether the machine has the memory a unit declares. A machine that doesn't say (a box) holds any.

@@ -84,6 +84,9 @@ type PoolMachine struct {
 	// 360 s were dropped all night, ec123b7f three times), so a strict pool's units get their ceiling instead: a worker
 	// that really died then costs more time, never a looser verdict.
 	SilenceDrop time.Duration
+	// Kinds, when set, are the only unit kinds the pool takes (box-phase: phase), since its workers' runner serves
+	// them (--phase-jobs) and their keys name that runner. A phase unit goes only to a pool whose Kinds hold phase.
+	Kinds []string
 	// Log, when set, hears each unit queued again.
 	Log io.Writer
 
@@ -140,6 +143,9 @@ func (machine *PoolMachine) TakesOnlyTestJobs() bool { return machine.Strict }
 func (machine *PoolMachine) Platform() string { return machine.GoPlatform }
 
 func (machine *PoolMachine) Toolchains() []string { return machine.Has }
+
+// TakesKinds is the unit kinds the pool takes, nil when it takes test and product units.
+func (machine *PoolMachine) TakesKinds() []string { return machine.Kinds }
 
 // MemoryCapacity is each worker's memory in megabytes, 0 when unknown.
 func (machine *PoolMachine) MemoryCapacity() int { return machine.MemoryMegabytes }

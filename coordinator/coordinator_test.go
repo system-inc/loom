@@ -1041,3 +1041,43 @@ func TestAUnitNoMachineHoldsIsNeverPlaced(t *testing.T) {
 		t.Fatalf("the unit isn't closed after its refusal: %q", why)
 	}
 }
+
+// A kindMachine names the unit kinds it takes, the way a pool given --pool-kinds does, and notes each unit it ran.
+type kindMachine struct {
+	LocalMachine
+	kinds []string
+	mutex sync.Mutex
+	ran   []string
+}
+
+func (machine *kindMachine) TakesKinds() []string { return machine.kinds }
+
+func (machine *kindMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {
+	machine.mutex.Lock()
+	machine.ran = append(machine.ran, unit.Unit)
+	machine.mutex.Unlock()
+	return machine.LocalMachine.Run(runContext, unit, events)
+}
+
+// One future's run holds test units for the Codex pool and phase units for the phase pool, each keyed on its pool's
+// runner: a phase unit goes only to a pool that takes kind phase, and a test unit never does. Mutant: takes always
+// true, and the units cross.
+func TestAPhaseUnitGoesOnlyToAPoolThatTakesPhasesAndATestUnitNeverDoes(t *testing.T) {
+	wire := newFakeWire(t)
+	tests := &kindMachine{LocalMachine: LocalMachine{Label: "codex-strict"}}
+	phases := &kindMachine{LocalMachine: LocalMachine{Label: "box-phase"}, kinds: []string{"phase"}}
+	vet, lower := shell("vet", "echo vet"), shell("lower", "echo lower")
+	vet.Kind, lower.Kind = "phase", "test"
+	result := run(t, config(wire, phases, tests, phases, tests), vet, lower, shell("plain", "echo plain"))
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	if !reflect.DeepEqual(phases.ran, []string{"vet"}) || slices.Contains(tests.ran, "vet") {
+		t.Fatalf("the phase pool ran %v and the test pool %v", phases.ran, tests.ran)
+	}
+	alone := newFakeWire(t)
+	result = run(t, config(alone, &kindMachine{LocalMachine: LocalMachine{Label: "codex-strict"}}), vet)
+	if why := closedBroken(alone.events(result.Run), result.Run, "vet"); why != "not placed: no machine of the run has a pool that takes kind phase" {
+		t.Fatalf("a phase unit with no phase pool: %q", why)
+	}
+}

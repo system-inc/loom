@@ -77,6 +77,26 @@ func (pools poolHasFlag) Set(text string) error {
 	return nil
 }
 
+// poolKindsFlag is --pool-kinds <name>=<kind>,...: the only unit kinds a pool takes, by pool (protocol.KindCeilings'
+// kinds).
+type poolKindsFlag map[string][]string
+
+func (pools poolKindsFlag) String() string { return poolHasFlag(pools).String() }
+
+func (pools poolKindsFlag) Set(text string) error {
+	name, list, found := strings.Cut(text, "=")
+	if !found || !protocol.RunIdPattern.MatchString(name) || list == "" {
+		return fmt.Errorf("%q isn't <name>=<kind>,..., such as box-phase=phase", text)
+	}
+	for _, kind := range strings.Split(list, ",") {
+		if _, known := protocol.KindCeilings[kind]; !known {
+			return fmt.Errorf("%q isn't a unit kind (test, product or phase)", kind)
+		}
+		pools[name] = append(pools[name], kind)
+	}
+	return nil
+}
+
 // poolMemoryFlag is --pool-memory <name>=<megabytes>: each worker's memory, by pool, so a unit declaring more is never
 // placed there.
 type poolMemoryFlag map[string]int
