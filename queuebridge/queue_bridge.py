@@ -17,9 +17,11 @@ take over. Each tick, from Kirk's Mac beside the gate lane:
    reported with the new main, the main it moved from, and the tree it landed, once git shows that tree on main. A
    hold (exit 3) or main's pause waits; any other refusal is reported, which parks the change.
 
-A change that touches only Markdown takes the ruled gate instead (Loom, Oct 10 00:18Z: docs and test-only changes take
-push-main --ruled-gate plus its census, not the product suite): it is posted passed under that ruling at once, and its
-landing runs push-main --ruled-gate, which runs the census and the cheap static checks on the merged tree itself.
+Docs and test-only changes take the smallest gate that can fail for them (Loom, Oct 10 00:18Z), never the product
+suite: a change that touches only Markdown is posted passed under the docs ruling and lands through push-main
+--ruled-gate (the census and cheap static checks on the merged tree), and one that touches only test paths (push-main's
+own testOnlyPattern) is posted passed under the test-only ruling and lands through push-main --test-only, whose lane
+checks (gofmt, t.Parallel, vet) refuse anything that isn't.
 
 The queue decides; this only carries. No credential that moves main lives in Cloudflare.
 
@@ -42,6 +44,16 @@ docsRuling = "docs only: Markdown no product test reads (Loom, Oct 10 00:18Z)"
 def docsOnly(paths):
     """Whether a change touches only Markdown, which the ruled gate lands with its census and no product suite."""
     return bool(paths) and all(path.endswith(".md") for path in paths)
+
+
+# push-main.sh's testOnlyPattern, the same list by ruling (Kirk, Oct 8); push-main checks it again on the merged tree.
+testOnlyPattern = re.compile(r"(_test\.go$|_test\.py$|-test\.py$|(^|/)test_[^/]*\.py$|/testdata/|^review/|(^|/)shards\.json$|^stage3/fixtures/|^stage3/meter/|^README\.md$)")
+testOnlyRule = "test-only-lane-v0"
+
+
+def testOnly(paths):
+    """Whether a change touches only test paths, which the test-only lane lands with no gate in front of it."""
+    return bool(paths) and all(testOnlyPattern.search(path) for path in paths)
 
 
 def log(text):
@@ -146,6 +158,12 @@ class Gate:
                              cwd=os.path.dirname(os.path.dirname(os.path.dirname(pushMain))))
         return ran.returncode, ran.stdout, ran.stderr
 
+    def landTestOnly(self, tree, label):
+        """push-main.sh --test-only: the test-only lane's checks, no gate."""
+        ran = subprocess.run(["bash", pushMain, "--test-only", tree, label], capture_output=True, text=True,
+                             cwd=os.path.dirname(os.path.dirname(os.path.dirname(pushMain))))
+        return ran.returncode, ran.stdout, ran.stderr
+
     def main(self):
         git("fetch", "-q", "origin", "main")
         return git("rev-parse", "origin/main")
@@ -202,12 +220,17 @@ def tick(pipeline, gate, memory):
         if future.get("parity"):
             continue
         status, read = pipeline.call("GET", "/changes/" + change)
+        lane = None
         if status == 200 and docsOnly(read["record"]["paths"]):
+            lane = ("ruled-gate:docs", docsRule)
+        elif status == 200 and testOnly(read["record"]["paths"]):
+            lane = ("test-only", testOnlyRule)
+        if lane is not None:
             if change in memory["ruled"]:
                 continue
-            verdict = {"future": tree, "run": "ruled-gate:docs", "status": "passed", "cause": None, "rule": docsRule}
+            verdict = {"future": tree, "run": lane[0], "status": "passed", "cause": None, "rule": lane[1]}
             status, answer = pipeline.call("POST", "/verdicts", {"change": change, "verdict": verdict})
-            log("verdict %s passed under the docs ruling: %d %s" % (change, status, answer))
+            log("verdict %s passed under %s: %d %s" % (change, lane[1], status, answer))
             if status in (200, 409):
                 memory["ruled"].append(change)
             continue
@@ -236,6 +259,8 @@ def tick(pipeline, gate, memory):
         change, tree = order["change"], order["future"]
         if order["run"] == "ruled-gate:docs":
             code, out, err = gate.landRuled(docsRuling, tree, "queue %s (%s)" % (change, order["owner"]))
+        elif order["run"] == "test-only":
+            code, out, err = gate.landTestOnly(tree, "queue %s (%s)" % (change, order["owner"]))
         else:
             code, out, err = gate.land(order["run"], tree, "queue %s (%s)" % (change, order["owner"]))
         reason = ([line for line in err.splitlines() if line.startswith("refused")] or err.splitlines()[-1:] or ["exit %d" % code])[0]

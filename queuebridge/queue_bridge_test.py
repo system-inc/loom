@@ -60,6 +60,10 @@ class FakeGate:
         self.landed.append((record, tree))
         return self.landing
 
+    def landTestOnly(self, tree, label):
+        self.landed.append(("test-only", tree))
+        return self.landing
+
     def landRuled(self, ruling, tree, label):
         self.landed.append(("ruled", tree))
         return self.landing
@@ -131,6 +135,17 @@ class Tick(unittest.TestCase):
         self.assertEqual(gate.landed, [("ruled", tree)])
         # Code in the change keeps it on today's fast gate.
         pipeline, gate = FakePipeline([future], paths=["docs/front-door.md", "cmd/x/main.go"]), FakeGate()
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(gate.queued, [tree])
+
+    def test_a_test_only_change_takes_the_test_only_lane(self):
+        pipeline, gate = FakePipeline([future], paths=["internal/oracle/a_test.go", "internal/oracle/testdata/x.a"]), FakeGate()
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual((gate.queued, [body["verdict"]["run"] for path, body in pipeline.posts()]), ([], ["test-only"]))
+        pipeline, gate = FakePipeline(landings=[dict(order, run="test-only")]), FakeGate(landing=(0, "Pushed main aaaaaaaa..bbbbbbbb\n", ""))
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(gate.landed, [("test-only", tree)])
+        pipeline, gate = FakePipeline([future], paths=["internal/oracle/a_test.go", "internal/oracle/a.go"]), FakeGate()
         queue_bridge.tick(pipeline, gate, memory())
         self.assertEqual(gate.queued, [tree])
 
