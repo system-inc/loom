@@ -445,3 +445,43 @@ func TestARedEarlierAttemptIsNeverCarried(t *testing.T) {
 		t.Fatalf("record %s, placements %v: a red earlier attempt must run again, not carry", post.Verdicts[0], h.fabric.Asked)
 	}
 }
+
+func TestAPhaseIsDecidedByItsExitLikeTheBoxsStage(t *testing.T) {
+	exited := func(status string, exit int) Finished {
+		return Finished{Attempt: Attempt{Status: status, Exit: exit}}
+	}
+	cases := []struct {
+		name   string
+		first  Finished
+		script []Finished
+		status string
+		cause  string
+		asked  int
+	}{
+		{"exit 0 passes with no test log", exited(Passed, 0), nil, Passed, "", 0},
+		{"a nonzero exit is the change's red, never rerun alone", exited(Failed, 1), nil, Failed, CauseChange, 0},
+		{"exit 2 is void, placed again, and its pass stands", exited(Failed, PhaseCantJudge), []Finished{exited(Passed, 0)}, Passed, "", 1},
+		{"exit 2 past its retries stays void", exited(Failed, PhaseCantJudge), []Finished{exited(Failed, 2), exited(Failed, 2)}, Void, CauseInfra, 2},
+		{"a runner kill is infra like any unit's", Finished{Attempt: Attempt{Status: Broken}, Infra: InfraKill}, []Finished{exited(Passed, 0)}, Passed, "", 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			h.runs["vet"] = c.first
+			h.script("vet", futureTree, c.script...)
+			loop := censusLoop(h)
+			loop.RequireTestLog = true
+			post, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "vet", Kind: KindPhase}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := recordOf(t, post, "vet")
+			if record.Status != c.status || record.Cause != c.cause || len(h.fabric.Asked) != c.asked {
+				t.Fatalf("%+v, placements %v; want %s %s with %d placements", record, h.fabric.Asked, c.status, c.cause, c.asked)
+			}
+			if c.status != Void && !strings.Contains(string(post.Verdicts[0]), `"rule":"judge-v1 phase"`) {
+				t.Fatalf("record %s lacks the phase rule", post.Verdicts[0])
+			}
+		})
+	}
+}

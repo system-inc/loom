@@ -31,6 +31,9 @@ import (
 // Rule is this rule set's id and version, written into every verdict's rule field.
 const Rule = "judge-v1"
 
+// PhaseCantJudge is the exit a gate phase gives when it can't judge (run.py's exit 2): the phase is void, never red.
+const PhaseCantJudge = 2
+
 // The statuses, causes and infra kinds of contract v1 §3.
 const (
 	Passed = "passed"
@@ -205,8 +208,11 @@ type Evidence struct {
 	// them proves nothing, whatever it reported: its skips aren't passes, so it's void and placed again (the
 	// wasi-family-must-run mutant).
 	MissingTools []string
-	Candidate    *Rerun // the unit rerun alone on the candidate; nil until it has run
-	Main         *Rerun // the unit rerun alone on main at the future's base; nil until it has run
+	// Phase marks a kind phase unit, one of the box fast gate's non-test stages (Loom, Oct 10 01:41Z): decided by its
+	// exit, as the box decides a stage, with no alone reruns.
+	Phase     bool
+	Candidate *Rerun // the unit rerun alone on the candidate; nil until it has run
+	Main      *Rerun // the unit rerun alone on main at the future's base; nil until it has run
 	// MainRecorded is main's latest recorded verdict for this unit at the future's base, its test outcomes; nil when
 	// main has none.
 	MainRecorded []TestOutcome
@@ -228,6 +234,21 @@ func Decide(evidence Evidence) (Decision, error) {
 	if len(evidence.MissingTools) > 0 {
 		return Decision{Status: Void, Cause: CauseInfra, Infra: InfraRefused, Next: "retry",
 			Why: "run without " + strings.Join(evidence.MissingTools, ", ") + ": its skips prove nothing; place it on a fit runner"}, nil
+	}
+	if evidence.Phase {
+		switch evidence.First.Status {
+		case Passed, Failed:
+			switch {
+			case evidence.First.Exit == PhaseCantJudge:
+				return Decision{Status: Void, Cause: CauseInfra, Infra: InfraRefused, Next: "retry",
+					Why: "the phase exited 2, the gate's own can't-judge exit: void, placed again"}, nil
+			case evidence.First.Status == Passed && evidence.First.Exit == 0:
+				return Decision{Decided: true, Status: Passed, Why: "the phase exited 0"}, nil
+			}
+			return Decision{Decided: true, Status: Failed, Cause: CauseChange,
+				Why: fmt.Sprintf("the phase exited %d: red, as the box reads a stage, with no alone rerun", evidence.First.Exit)}, nil
+		}
+		// A broken attempt falls through: a runner kill is infra like any unit's.
 	}
 	// A test that never reached a terminal action (pass, fail or skip) is red, never infra: the process ended under it
 	// without the runner observing a kill, so the code ended it.

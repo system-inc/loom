@@ -268,3 +268,20 @@ func TestAnEmptyFutureIsLeftAndOneFuturesErrorNeverStopsTheRest(t *testing.T) {
 		t.Fatal("an empty docs future was posted by judge-v1")
 	}
 }
+
+func TestThePullerReadsAUnitsKindFromItsKey(t *testing.T) {
+	tree, unit := strings.Repeat("d", 40), strings.Repeat("1", 64)
+	queue := &StubQueue{}
+	puller := NewPuller(Puller{
+		Source: listedFutures{{Future: tree, Change: PlannedChange{Change: "chg_A"}, Units: []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"kind":"phase"}`), Decision: "run"}}}},
+		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-1" },
+		Read: func(string) ([]protocol.Event, error) {
+			return []protocol.Event{{Unit: unit, Type: "started"}, {Unit: unit, Type: "exit", Code: code(1)}, {Unit: unit, Type: "finished", Status: "failed"}}, nil
+		},
+		Rerun: func(json.RawMessage, string) ([]protocol.Event, error) { t.Fatal("a phase red was rerun alone"); return nil, nil },
+		Main:  NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now, RequireTestLog: true},
+	})
+	if judged, err := puller.PullOnce(); err != nil || judged != 1 || queue.Posts[tree][0].Decision.Status != "red" {
+		t.Fatalf("judged %d (%v): want the phase red by its exit", judged, err)
+	}
+}

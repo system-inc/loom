@@ -243,12 +243,14 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 		parts[unit.UnitKey] = unit.KeyParts
 		planUnit := PlanUnit{UnitKey: unit.UnitKey}
 		var parts struct {
+			Kind   string `json:"kind"`
 			Select struct {
 				Run string `json:"run"`
 			} `json:"select"`
 		}
 		if json.Unmarshal(unit.KeyParts, &parts) == nil {
 			planUnit.Named, _ = planner.RunNames(parts.Select.Run)
+			planUnit.Kind = parts.Kind
 		}
 		if unit.Decision == "reuse" {
 			planUnit.Reused = "reused"

@@ -100,6 +100,7 @@ func (stub *StubBlobs) Put(sha256 string, content []byte) error {
 type PlanUnit struct {
 	UnitKey string
 	Reused  string // the reused verdict's id; empty when the unit runs
+	Kind    string // the unit key's kind: test, product or phase
 	// Named are the top-level tests the plan named for the unit (planner.RunNames of its select.run), each of which
 	// must reach a result in its test log; empty when the plan runs every test, or names them by a pattern the
 	// planner can't read back.
@@ -163,6 +164,9 @@ type CensusConfig struct {
 
 // RuleCensus is the rule a unit's red names when its tests passed and its skips failed the census.
 const RuleCensus = Rule + " census"
+
+// RulePhase is the rule a phase unit's verdict names: decided by its exit.
+const RulePhase = Rule + " phase"
 
 // RuleZeroRun is the rule a unit's red names when it passed on a test log with no test result in it.
 const RuleZeroRun = Rule + " zerorun"
@@ -287,7 +291,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		// A unit that never reported is placed again like any infra.
 		first = Finished{Attempt: Attempt{Status: Broken}, Infra: InfraSilent}
 	}
-	evidence := evidenceOf(first)
+	evidence := evidenceOf(first, unit)
 	verdict.Attempts = append(verdict.Attempts, first.Attempt)
 	verdict.Tests, verdict.Outputs = nonNil(first.Tests), nonNilStrings(first.Outputs)
 	source := first // the attempt whose tests the verdict carries
@@ -316,7 +320,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 				verdict.Attempts = append(verdict.Attempts, again.Attempt)
 				verdict.Tests, verdict.Outputs = nonNil(again.Tests), nonNilStrings(again.Outputs)
 				source = again
-				evidence = evidenceOf(again)
+				evidence = evidenceOf(again, unit)
 			} else {
 				// An alone rerun broke: run both again.
 				evidence.Candidate, evidence.Main = nil, nil
@@ -329,6 +333,14 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		}
 	}
 	verdict.Status, verdict.Cause, verdict.Infra = decision.Status, decision.Cause, decision.Infra
+	if unit.Kind == KindPhase {
+		// A phase has no tests: zerorun and the census are the test units' rules.
+		if verdict.RuleId == Rule {
+			verdict.RuleId = RulePhase
+		}
+		verdict.DecidedAt = loop.Now().UTC().Format(time.RFC3339)
+		return verdict, nonNil(decision.Flaky), nil
+	}
 	if loop.RequireTestLog && verdict.Status == Passed {
 		// The old path's zerorun, carried over (Loom, Oct 10 01:12Z): a passed unit is never green on a test log it
 		// doesn't have, or on one that ran no test. No log is void (the runner reported nothing to read); a log with no
@@ -380,9 +392,13 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 	return nil
 }
 
-func evidenceOf(finished Finished) Evidence {
-	return Evidence{First: finished.Attempt, FirstInfra: finished.Infra, FirstTests: finished.Tests, MissingTools: finished.MissingTools}
+func evidenceOf(finished Finished, unit PlanUnit) Evidence {
+	return Evidence{First: finished.Attempt, FirstInfra: finished.Infra, FirstTests: finished.Tests, MissingTools: finished.MissingTools,
+		Phase: unit.Kind == KindPhase}
 }
+
+// KindPhase is a unit key's kind for one of the box fast gate's non-test stages.
+const KindPhase = "phase"
 
 func nonNil(outcomes []TestOutcome) []TestOutcome {
 	if outcomes == nil {
