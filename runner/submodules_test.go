@@ -23,6 +23,9 @@ import (
 //	clearSubmoduleStubs keeping the .git file: TestSubmodulesClearAKilledClonesStub (the update still fails)
 //	the stub's gitdir kept: TestSubmodulesClearAKilledClonesStub (git refuses to clone over it)
 //	a whole submodule cleared too: TestSubmodulesClearAKilledClonesStub (the kept submodule goes)
+//	the guard failing open (an empty inside matching every path): TestSubmodulesNeverClearOutsideTheCheckout
+//	a gitdir outside the checkout's .git removed: TestSubmodulesNeverClearOutsideTheCheckout
+//	no lock around the step: TestSubmodulesWaitForAnotherPreparesLock (Linux, where flock is)
 
 // submoduleHouse serves three bare repositories over plain HTTP (git's dumb protocol, a file server): leaf, mid holding
 // leaf, and super holding mid, as adamic holds cohere and cohere holds TypeScript. block, while set, holds every request
@@ -234,4 +237,114 @@ func mustReadDirectory(t *testing.T, directory string) []os.DirEntry {
 		t.Fatal(err)
 	}
 	return entries
+}
+
+// outsideCanary is a directory beside the checkout, not a repository, holding one file: a .git file naming it must
+// never cost it.
+func outsideCanary(t *testing.T) (directory, canary string) {
+	t.Helper()
+	directory = filepath.Join(t.TempDir(), "outside")
+	canary = filepath.Join(directory, "canary")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(canary, []byte("not the checkout's"), 0o644)
+	return directory, canary
+}
+
+// The stub clearing fails closed. A checkout whose .git can't be entered clears nothing, even with a submodule's .git
+// file naming a directory outside it; and with .git readable, a .git file naming a directory outside it is removed while
+// that directory stays, and leaf is cloned again.
+func TestSubmodulesNeverClearOutsideTheCheckout(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root enters a directory of mode 000")
+	}
+	house := newSubmoduleHouse(t)
+	tree := house.checkout(t)
+	if output, err := prepareSubmodules(t, tree).CombinedOutput(); err != nil {
+		t.Fatalf("the first prepare: %v %s", err, output)
+	}
+	outside, canary := outsideCanary(t)
+	pointer := filepath.Join(tree, "mid", "leaf", ".git")
+	os.WriteFile(pointer, []byte("gitdir: "+outside+"\n"), 0o644)
+
+	gitDirectory := filepath.Join(tree, ".git")
+	if err := os.Chmod(gitDirectory, 0); err != nil {
+		t.Fatal(err)
+	}
+	output, err := prepareSubmodules(t, tree).CombinedOutput()
+	os.Chmod(gitDirectory, 0o755)
+	if err == nil {
+		t.Errorf("prepare over a .git it can't enter succeeded: %s", output)
+	}
+	if _, err := os.Stat(canary); err != nil {
+		t.Fatalf("prepare over a .git it can't enter removed %s: %s", outside, output)
+	}
+	if !strings.Contains(string(output), "no stub is cleared") {
+		t.Errorf("prepare didn't say it cleared nothing: %s", output)
+	}
+
+	output, err = prepareSubmodules(t, tree).CombinedOutput()
+	if err != nil {
+		t.Fatalf("prepare with .git readable: %v %s", err, output)
+	}
+	if _, err := os.Stat(canary); err != nil {
+		t.Fatalf("prepare removed %s, outside the checkout's .git: %s", outside, output)
+	}
+	if !strings.Contains(string(output), "cleared mid/leaf/.git") {
+		t.Errorf("prepare didn't clear the .git file naming %s: %s", outside, output)
+	}
+	leafIsWhole(t, house, tree)
+}
+
+// Runners sharing a root (the coordinator's slots on one box) take turns at the submodule step: while another prepare
+// holds <tree>/.git/loom-submodules.lock, a stub stays where it is, and once it lets go the waiting prepare clears it.
+func TestSubmodulesWaitForAnotherPreparesLock(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("no flock here; the step runs unlocked")
+	}
+	house := newSubmoduleHouse(t)
+	tree := house.checkout(t)
+	if output, err := prepareSubmodules(t, tree).CombinedOutput(); err != nil {
+		t.Fatalf("the first prepare: %v %s", err, output)
+	}
+	stub := filepath.Join(tree, ".git", "modules", "mid", "modules", "leaf")
+	os.RemoveAll(stub)
+	os.MkdirAll(filepath.Join(stub, "objects", "pack"), 0o755)
+
+	lock, err := os.OpenFile(filepath.Join(tree, ".git", "loom-submodules.lock"), os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	waiting := prepareSubmodules(t, tree)
+	var output strings.Builder
+	waiting.Stdout, waiting.Stderr = &output, &output
+	if err := waiting.Start(); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- waiting.Wait() }()
+	select {
+	case err := <-finished:
+		t.Fatalf("prepare didn't wait for the lock (%v): %s", err, output.String())
+	case <-time.After(3 * time.Second):
+	}
+	if _, err := os.Stat(stub); err != nil {
+		t.Fatalf("prepare cleared the stub while another held the lock: %s", output.String())
+	}
+	syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("prepare after the lock: %v %s", err, output.String())
+		}
+	case <-time.After(60 * time.Second):
+		syscall.Kill(-waiting.Process.Pid, syscall.SIGKILL)
+		t.Fatalf("prepare never finished after the lock let go: %s", output.String())
+	}
+	leafIsWhole(t, house, tree)
 }
