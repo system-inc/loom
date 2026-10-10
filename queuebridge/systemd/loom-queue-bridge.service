@@ -9,8 +9,8 @@
 #   systemctl --user disable --now loom-queue-bridge.timer
 #
 # Reads ~/.loom/queue-bridge.conf (queuebridge/config.go), the token secret each call mints a ten-minute coordinator
-# token from, and the adamic clone it names (~/loom-queue-bridge/adamic, a `git clone --no-checkout` of
-# git@github-lander:system-inc/adamic.git). One pass at a time: <state>/lock.
+# token from, and the adamic clone it names (~/loom-queue-bridge/adamic.git, a `git clone --bare` of the public
+# https://github.com/system-inc/adamic.git; the bridge holds no key). One pass at a time: <state>/lock.
 [Unit]
 Description=Loom queue bridge: git's facts for every submitted change
 

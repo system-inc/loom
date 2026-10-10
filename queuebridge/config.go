@@ -17,12 +17,12 @@ type Config struct {
 	Secret     string
 }
 
-// DefaultConfig is Workshop's: loom.system.inc, ~/loom-queue-bridge/adamic (git clone --no-checkout of
-// git@github-lander:system-inc/adamic.git), ~/loom-queue-bridge/state and ~/.loom/token-secret.
+// DefaultConfig is Workshop's: loom.system.inc, ~/loom-queue-bridge/adamic.git (git clone --bare of the public
+// https://github.com/system-inc/adamic.git: the bridge holds no key), ~/loom-queue-bridge/state and ~/.loom/token-secret.
 func DefaultConfig(home string) Config {
 	return Config{
 		Queue:      "https://loom.system.inc",
-		Repository: filepath.Join(home, "loom-queue-bridge", "adamic"),
+		Repository: filepath.Join(home, "loom-queue-bridge", "adamic.git"),
 		State:      filepath.Join(home, "loom-queue-bridge", "state"),
 		Secret:     filepath.Join(home, ".loom", "token-secret"),
 	}
