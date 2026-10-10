@@ -52,7 +52,44 @@ export interface ChangeRecord {
     // A parity run (Release's proofs 1 and 2, #6c3xkws): its future is exactly merge(base, sha), the tree the box
     // record tested, it never joins a block with real changes, and no landing order is ever written for it.
     parity?: true;
+    // A parity run's selection, the box record's own (Release's proof 1): exactly these packages run, uncached, and
+    // within a package run.py split, exactly these tests.
+    select?: ParitySelect;
     submittedAt: string;
+}
+
+export interface ParitySelect {
+    packages: string[];
+    tests: Record<string, string[]>;
+}
+
+// {packages, tests?}: the packages a parity run plans, each once, and for any package run.py split, its test names.
+export function checkParitySelect(value: unknown): ParitySelect | string {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+        return 'select is {packages, tests}';
+    }
+    const fields = value as Record<string, unknown>;
+    const packages = fields.packages;
+    if (
+        !Array.isArray(packages) ||
+        packages.length === 0 ||
+        new Set(packages).size !== packages.length ||
+        !packages.every(function (name) {
+            return typeof name === 'string' && name !== '';
+        })
+    ) {
+        return 'select.packages is a non-empty list of import paths, each once';
+    }
+    const tests = fields.tests ?? {};
+    if (typeof tests !== 'object' || tests === null || Array.isArray(tests)) {
+        return 'select.tests maps a package to its test names';
+    }
+    for (const [name, list] of Object.entries(tests as Record<string, unknown>)) {
+        if (!packages.includes(name) || !Array.isArray(list) || list.length === 0 || !list.every((test) => typeof test === 'string' && test !== '')) {
+            return `select.tests[${JSON.stringify(name)}] names tests of a selected package`;
+        }
+    }
+    return { packages: [...(packages as string[])].sort(), tests: tests as Record<string, string[]> };
 }
 
 export interface QueueEvent {
@@ -250,8 +287,8 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
         return 'the change is a JSON object';
     }
     for (const key of Object.keys(parsed)) {
-        if (!['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity'].includes(key)) {
-            return `unknown field ${JSON.stringify(key)}; a change is sha, base, owner, paths, and optionally parent, fixesRed and parity`;
+        if (!['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity', 'select'].includes(key)) {
+            return `unknown field ${JSON.stringify(key)}; a change is sha, base, owner, paths, and optionally parent, fixesRed, parity and select`;
         }
     }
     if (typeof parsed.sha !== 'string' || !shaPattern.test(parsed.sha)) {
@@ -286,6 +323,13 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
     if (parsed.parity === true && parent !== null) {
         return 'a parity run tests one tree alone, so it has no parent';
     }
+    if (parsed.select !== undefined && parsed.parity !== true) {
+        return "select is a parity run's: a real change runs what the planner selects";
+    }
+    const select = parsed.select === undefined ? null : checkParitySelect(parsed.select);
+    if (typeof select === 'string') {
+        return select;
+    }
     return {
         sha: parsed.sha,
         base: parsed.base,
@@ -294,6 +338,7 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
         parent: parent,
         fixesRed: fixesRed,
         ...(parsed.parity === true ? { parity: true as const } : {}),
+        ...(select === null ? {} : { select: select }),
     };
 }
 
@@ -1179,6 +1224,16 @@ export class Queue extends DurableObject<Env> {
             if (future.decided !== null) {
                 return jsonResponse(409, { error: `future ${tree} was decided ${future.decided.status} by today's gate, run ${future.decided.run}` });
             }
+            // A parity run with the box record's selection runs exactly those packages, uncached.
+            const select = state.changes.get(future.changes[0] ?? '')?.record.select;
+            if (select !== undefined) {
+                const planned = units.map(function (unit) {
+                    return String(unit.keyParts.package);
+                });
+                if (!sortedEqual([...new Set(planned)], select.packages) || units.some((unit) => unit.decision !== 'run')) {
+                    return jsonResponse(422, { error: `a parity plan runs exactly the ${select.packages.length} selected packages, every unit run, none reused` });
+                }
+            }
             for (const unit of units) {
                 const indexed = state.verdicts.get(unit.unitKey)?.record;
                 if (unit.decision === 'reuse' && (indexed === undefined || indexed.status !== 'passed' || (unit.reused !== null && indexed.run !== unit.reused))) {
@@ -1363,7 +1418,15 @@ export class Queue extends DurableObject<Env> {
                     return future.units === null && future.decided === null;
                 })
                 .map(function (future) {
-                    return { future: future.tree, tree: future.tree, base: future.base, changes: future.changes, parity: parityOf(state, future) };
+                    const select = state.changes.get(future.changes[0] ?? '')?.record.select;
+                    return {
+                        future: future.tree,
+                        tree: future.tree,
+                        base: future.base,
+                        changes: future.changes,
+                        parity: parityOf(state, future),
+                        ...(select === undefined ? {} : { select: select }),
+                    };
                 });
             return jsonResponse(200, { futures: futures });
         }

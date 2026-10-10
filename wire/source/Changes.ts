@@ -6,6 +6,7 @@
 
 import { canonicalJson } from './Events';
 import { jsonResponse, readBodyText } from './Http';
+import { checkParitySelect, type ParitySelect } from './Queue';
 import type { TokenClaims } from './Token';
 
 export const MaximumChangeBodyBytes = 1024 * 1024;
@@ -27,6 +28,7 @@ export interface ChangeRequest {
     fixesRed: string | null;
     // Release's parity runs only (Queue, #6c3xkws): tested on exactly merge(base, sha), never landed.
     parity?: true;
+    select?: ParitySelect;
 }
 
 // The three calls Web makes, as internal requests; Queue's object and the stand-in both answer them.
@@ -58,7 +60,7 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
         return 'the change is a JSON object';
     }
     const fields = parsed as Record<string, unknown>;
-    const allowed = ['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity'];
+    const allowed = ['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity', 'select'];
     const unknown = Object.keys(fields).filter(function (key) {
         return !allowed.includes(key);
     });
@@ -101,6 +103,13 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
     if (fields.parity !== undefined && typeof fields.parity !== 'boolean') {
         return 'parity is true for a parity run, or absent';
     }
+    if (fields.select !== undefined && fields.parity !== true) {
+        return "select is a parity run's only";
+    }
+    const select = fields.select === undefined ? null : checkParitySelect(fields.select);
+    if (typeof select === 'string') {
+        return select;
+    }
     return {
         sha: fields.sha,
         base: fields.base,
@@ -109,6 +118,7 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
         parent: parent,
         fixesRed: fixesRed,
         ...(fields.parity === true ? { parity: true as const } : {}),
+        ...(select === null ? {} : { select: select }),
     };
 }
 

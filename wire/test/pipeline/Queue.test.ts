@@ -521,6 +521,22 @@ describe('a stack', function () {
 });
 
 describe('a parity run', function () {
+    it("plans exactly the box record's selection when it carries one, uncached", async function () {
+        const queue = await freshQueue();
+        expect((await submit(queue, change(8, { select: { packages: ['x'] } }))).status).toBe(422);
+        expect((await submit(queue, change(8, { parity: true, select: { packages: [] } }))).status).toBe(422);
+        const select = { packages: ['github.com/system-inc/adamic/internal/a', 'github.com/system-inc/adamic/internal/b'], tests: { 'github.com/system-inc/adamic/internal/b': ['TestB1'] } };
+        const id = ((await (await submit(queue, change(8, { parity: true, select: select }))).json()) as { change: string }).change;
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: unknown[] }).futures).toMatchObject([{ future: sha(8), parity: true, select: select }]);
+        const units = await planOf(['a', 'b', 'c']);
+        // A plan of other packages, or one that reuses a verdict, is refused.
+        expect((await postPlan(queue, sha(8), units)).status).toBe(422);
+        expect((await postPlan(queue, sha(8), units.slice(0, 1))).status).toBe(422);
+        expect((await postPlan(queue, sha(8), [units[0], { ...units[1], decision: 'reuse' }])).status).toBe(422);
+        expect((await postPlan(queue, sha(8), units.slice(0, 2))).status).toBe(200);
+        expect(id).toMatch(/^chg_/);
+    });
+
     it("is tested on exactly merge(base, sha), its records logged whole, and never gets a landing order", async function () {
         const queue = await freshQueue();
         const id = ((await (await submit(queue, change(1, { parity: true }))).json()) as { change: string }).change;
