@@ -139,19 +139,23 @@ func mustGzip(t *testing.T, content []byte) []byte {
 // stays inside, and writes nothing outside it whatever the archive holds.
 func TestUnpackRefusesAnEntryThatWouldLandOutsideItsDirectory(t *testing.T) {
 	cases := map[string][]entry{
-		"climbing out":                {{name: "../escaped", body: "x"}},
-		"climbing out from inside":    {{name: "a/../../escaped", body: "x"}},
-		"absolute":                    {{name: "/tmp/escaped", body: "x"}},
-		"unclean":                     {{name: "./a", body: "x"}},
-		"a link out":                  {{name: "link", link: "../escaped"}},
-		"a link out from deeper":      {{name: "a/b/link", link: "../../../escaped"}},
-		"an absolute link":            {{name: "link", link: "/etc/passwd"}},
-		"a link climbing after names": {{name: "a/link", link: "here/../../../escaped"}},
-		"a file through a link":       {{name: "a/real", body: "x"}, {name: "inside", link: "a"}, {name: "inside/written", body: "x"}},
-		"a hard link":                 {{name: "a", body: "x"}, {name: "hard", link: "a", typeflag: tar.TypeLink}},
-		"a device":                    {{name: "device", typeflag: tar.TypeChar}},
-		"a directory entry":           {{name: "a", typeflag: tar.TypeDir}},
-		"one name twice":              {{name: "a", body: "x"}, {name: "a", body: "y"}},
+		"climbing out":                     {{name: "../escaped", body: "x"}},
+		"climbing out from inside":         {{name: "a/../../escaped", body: "x"}},
+		"absolute":                         {{name: "/tmp/escaped", body: "x"}},
+		"unclean":                          {{name: "./a", body: "x"}},
+		"a link out":                       {{name: "link", link: "../escaped"}},
+		"a link out from deeper":           {{name: "a/b/link", link: "../../../escaped"}},
+		"an absolute link":                 {{name: "link", link: "/etc/passwd"}},
+		"a link climbing after names":      {{name: "a/link", link: "here/../../../escaped"}},
+		"a file through a link":            {{name: "a/real", body: "x"}, {name: "inside", link: "a"}, {name: "inside/written", body: "x"}},
+		"a hard link":                      {{name: "a", body: "x"}, {name: "hard", link: "a", typeflag: tar.TypeLink}},
+		"a device":                         {{name: "device", typeflag: tar.TypeChar}},
+		"a directory entry":                {{name: "a", typeflag: tar.TypeDir}},
+		"a link to its own directory":      {{name: "link", link: "."}},
+		"a link to a directory it is in":   {{name: "a/b/up", link: ".."}},
+		"a link to itself":                 {{name: "a/self", link: "self"}},
+		"the review's case-folding escape": {{name: "L", link: "."}, {name: "l/M", link: "."}, {name: "l/m/x", link: "../.."}},
+		"one name twice":                   {{name: "a", body: "x"}, {name: "a", body: "y"}},
 	}
 	for name, entries := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -230,5 +234,43 @@ func TestTheSourceArchiveKeepsLinksAndRefusesOneThatLeaves(t *testing.T) {
 	gitCommit(t, tree)
 	if _, err = SourceArchive(tree); err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("a link out of the tree: %v", err)
+	}
+}
+
+// folds reports whether the filesystem under a test's temporary directories takes spelling for the same name as written.
+func folds(t *testing.T, written, spelling string) bool {
+	t.Helper()
+	probe := t.TempDir()
+	if err := os.WriteFile(filepath.Join(probe, written), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Lstat(filepath.Join(probe, spelling))
+	return err == nil
+}
+
+// An entry's parents are looked up on disk, so a link reached by another spelling the filesystem folds to its name
+// (case on APFS and most macOS volumes, normalization on APFS) is refused as surely as the link's own name. The
+// review's archive is refused everywhere by its first link; these need no link to an ancestor at all.
+func TestUnpackLooksUpParentsOnDiskWhereTheFilesystemFoldsNames(t *testing.T) {
+	cases := []struct {
+		name, written, spelling string
+	}{
+		{"case", "Link", "link"},
+		{"normalization", "é", "é"},
+	}
+	for _, folded := range cases {
+		t.Run(folded.name, func(t *testing.T) {
+			directory := t.TempDir()
+			if !folds(t, folded.written, folded.spelling) {
+				t.Skipf("this filesystem keeps %q and %q apart", folded.written, folded.spelling)
+			}
+			archive := tarGzip(t, entry{name: "sub/kept", body: "x"}, entry{name: folded.written, link: "sub"}, entry{name: folded.spelling + "/through", body: "x"})
+			if err := Unpack(archive, directory, nil); err == nil || !strings.Contains(err.Error(), "under the link") {
+				t.Fatalf("an entry under %q spelled %q: %v", folded.written, folded.spelling, err)
+			}
+			if _, err := os.Lstat(filepath.Join(directory, "sub", "through")); err == nil {
+				t.Fatal("an entry was written through the link")
+			}
+		})
 	}
 }

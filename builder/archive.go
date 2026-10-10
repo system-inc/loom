@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -158,7 +159,11 @@ func SourceArchive(tree string) ([]byte, error) {
 
 // checkLink refuses a symbolic link at name whose target could lead out of the directory it is unpacked into: an
 // absolute or unclean target, one that climbs above the top, or a .. after a name, which could climb out of a
-// directory another link leads into. Every other link stays inside, however links chain.
+// directory another link leads into. Nor may a link lead to itself or to a directory it sits in (`.`, `..` from
+// one level down): a name another entry spells differently, which a filesystem that folds case or normalization takes
+// for the same one, could then reach the link's own directory again a level deeper than its name says, and climb
+// out from there (an adversarial review, Oct 10: L -> ., l/M -> ., l/m/x -> ../.. on APFS). Every other link stays
+// inside, however links chain.
 func checkLink(name, target string) error {
 	if target == "" || path.IsAbs(target) || path.Clean(target) != target {
 		return fmt.Errorf("%s links to %q, not a clean relative path", name, target)
@@ -171,8 +176,35 @@ func checkLink(name, target string) error {
 			return fmt.Errorf("%s links to %q, which climbs after a name", name, target)
 		}
 	}
-	if !filepath.IsLocal(filepath.FromSlash(path.Join(path.Dir(name), target))) {
+	resolved := path.Join(path.Dir(name), target)
+	if !filepath.IsLocal(filepath.FromSlash(resolved)) {
 		return fmt.Errorf("%s links to %q, outside the directory", name, target)
+	}
+	if resolved == "." || resolved == name || strings.HasPrefix(name, resolved+"/") {
+		return fmt.Errorf("%s links to %q, itself or a directory it is in", name, target)
+	}
+	return nil
+}
+
+// checkParents refuses an entry whose parent directories, as the filesystem resolves them (case and normalization
+// folded where it folds them), pass through a link: each one is looked up on disk through root, never by name.
+func checkParents(root *os.Root, name string) error {
+	parts := strings.Split(path.Dir(name), "/")
+	for index := range parts {
+		if parts[0] == "." {
+			return nil
+		}
+		parent := path.Join(parts[:index+1]...)
+		info, err := root.Lstat(filepath.FromSlash(parent))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("entry %q is under the link %s: %w", name, parent, errOutside)
+		}
 	}
 	return nil
 }
@@ -182,7 +214,7 @@ var errOutside = errors.New("outside its directory")
 
 // Unpack gunzips and untars archive into directory, which it creates, writing through an os.Root on it. It refuses
 // (with nothing promised about what it already wrote, so a caller unpacks into scratch) an entry whose name isn't
-// a clean local path, one written through a link the archive made, one named twice, a link checkLink refuses, any
+// a clean local path, one whose parents on disk pass through a link, one named twice, a link checkLink refuses, any
 // entry but a file or a link, and one allowed rejects (nil allows every name).
 func Unpack(archive []byte, directory string, allowed func(name string) bool) error {
 	reader, err := gzip.NewReader(bytes.NewReader(archive))
@@ -199,7 +231,7 @@ func Unpack(archive []byte, directory string, allowed func(name string) bool) er
 	}
 	defer root.Close()
 	entries := tar.NewReader(reader)
-	seen, links := map[string]bool{}, map[string]bool{}
+	seen := map[string]bool{}
 	for {
 		header, err := entries.Next()
 		if err == io.EOF {
@@ -212,10 +244,8 @@ func Unpack(archive []byte, directory string, allowed func(name string) bool) er
 		if !filepath.IsLocal(filepath.FromSlash(name)) || path.Clean(name) != name {
 			return fmt.Errorf("entry %q: %w", name, errOutside)
 		}
-		for parent := path.Dir(name); parent != "." && parent != "/"; parent = path.Dir(parent) {
-			if links[parent] {
-				return fmt.Errorf("entry %q is under the link %s: %w", name, parent, errOutside)
-			}
+		if err = checkParents(root, name); err != nil {
+			return err
 		}
 		if seen[name] {
 			return fmt.Errorf("entry %q is in the archive twice", name)
@@ -257,7 +287,6 @@ func Unpack(archive []byte, directory string, allowed func(name string) bool) er
 			if err = root.Symlink(header.Linkname, file); err != nil {
 				return err
 			}
-			links[name] = true
 		default:
 			return fmt.Errorf("entry %q is neither a file nor a link (type %q)", name, header.Typeflag)
 		}
