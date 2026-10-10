@@ -232,6 +232,13 @@ class Tick(unittest.TestCase):
         queue_bridge.tick(pipeline, gate, held)
         verdict = pipeline.posts()[0][1]["verdict"]
         self.assertEqual((verdict["status"], verdict["cause"]), ("failed", "change"))
+        # Decided once per tree: the same tree again posts nothing, and the change resubmitted on a new tree is decided.
+        gate.checkResult = (0, "checked", "")
+        queue_bridge.tick(pipeline, gate, held)
+        self.assertEqual(len(pipeline.posts()), 1)
+        pipeline.futures = [dict(future, future=other, tree=other)]
+        queue_bridge.tick(pipeline, gate, held)
+        self.assertEqual([body["verdict"]["future"] for path, body in pipeline.posts()], [tree, other])
 
     def test_the_mac_lands_nothing_once_the_pusher_holds_main(self):
         queue_bridge.landsHere = False

@@ -309,7 +309,8 @@ def decide(pipeline, gate, memory):
         elif status == 200 and testOnly(read["record"]["paths"]):
             lane = ("test-only", testOnlyRule)
         if lane is not None:
-            if change in memory["ruled"]:
+            # Keyed by the tree too: a resubmitted change is a new tree, decided again.
+            if "%s %s" % (change, tree) in memory["ruled"]:
                 continue
             verdict = {"future": tree, "run": lane[0], "status": "passed", "cause": None, "rule": lane[1]}
             # The pusher only fast-forwards, so push-main's own checks for the lane (the ruled gate's census on the
@@ -328,7 +329,7 @@ def decide(pipeline, gate, memory):
             status, answer = pipeline.call("POST", "/verdicts", {"change": change, "verdict": verdict})
             log("verdict %s %s under %s: %d %s" % (change, verdict["status"], lane[1], status, answer))
             if status in (200, 409):
-                memory["ruled"].append(change)
+                memory["ruled"].append("%s %s" % (change, tree))
             continue
         record = gate.record(tree)
         if record is None:
