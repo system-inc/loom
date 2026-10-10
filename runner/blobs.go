@@ -25,15 +25,18 @@ import (
 // unit reads from the action store (a test binary, a tree's source, a product's archive) in one content-addressed
 // cache under its root, <root>/loom-blobs/<sha256>, and nothing else there is ever trusted:
 //
-//   - A fetch writes a partial file (.partial-<sha256>-<random>), hashing as it goes, and only a whole file that
-//     hashes to its name is renamed to it, atomically, so a runner killed mid-fetch, a disk that filled mid-fetch,
-//     or two runners fetching the same blob at once never leave a blob's name on anything but its whole bytes. A
-//     partial no one has written for partialStale is a dead fetch's, and goes before the next unit.
+//   - A fetch writes a partial file (.partial-<sha256>-<random>), holding an exclusive lock on it, hashing as it goes,
+//     and only a whole file that hashes to its name is made read-only (0444) and renamed to it, atomically, so a
+//     runner killed mid-fetch, a disk that filled mid-fetch, or two runners fetching the same blob at once never leave
+//     a blob's name on anything but its whole bytes. A partial whose lock no one holds is a dead fetch's and goes
+//     before the next unit; a live one counts toward the cache's size.
 //   - A blob read from the cache is hashed again before it is used: a copy corrupted on disk is removed and fetched
 //     again, never run.
 //   - Every use touches the blob's time, and the cache is trimmed to its bound least recently used first; before
-//     every unit it is also trimmed until the disks the unit writes have the floor free. A disk still under the floor
-//     with the cache empty is unfit, and the unit is refused as Loom's, never failed.
+//     every unit, while the cache's own disk has under the floor free, it is trimmed further. A disk still under the
+//     floor with the cache empty, or a short disk the cache isn't on, is unfit, and the unit is refused as Loom's.
+//     Removing a blob another unit holds open takes only its name: that unit reads its whole bytes, and the room comes
+//     back when it closes it.
 
 // DefaultBlobCacheBytes bounds a runner's blob cache. Measured Oct 10: adamic's source archive is 449 MB gzipped
 // (98,381 files, 1.06 GB unpacked), a test binary about 8 MB gzipped (26 MB as built), and adamic has 74 test
@@ -50,11 +53,14 @@ const blobDirectoryName = "loom-blobs"
 // partialPrefix names a fetch in progress: never a sha256, so nothing reads it as a blob.
 const partialPrefix = ".partial-"
 
-// partialStale is how long a partial fetch may go unwritten before it is taken for a dead fetch's.
-var partialStale = 15 * time.Minute
-
 // errUnfit is a disk under the floor with nothing left to evict: the instance's, never the change's.
 var errUnfit = errors.New("unfit")
+
+// errUnfitElsewhere is a short disk the cache isn't on, which nothing the runner keeps can free.
+var errUnfitElsewhere = fmt.Errorf("%w on a disk the runner's caches aren't on", errUnfit)
+
+// copyBlob copies a fetch's body into its partial file; a test plants a full disk through it.
+var copyBlob = io.Copy
 
 // A blobCache is a runner's one cache of the action store's blobs. Watched are the paths whose filesystems a unit
 // writes (the cache's own and the workspace's), each kept at floor free.
@@ -75,6 +81,20 @@ func newBlobCache(options Options, root string) blobCache {
 		watched: []string{root, options.WorkspaceParent}, free: options.free, store: strings.TrimSuffix(options.Store, "/"), client: options.Client}
 }
 
+// readyRoot readies a runner's root for a prebuilt unit: dead unpackings swept, the blob cache readied, and when its
+// disk is still short, every unpacked source no unit holds removed before the unit is refused as unfit.
+func readyRoot(options Options, root string) error {
+	sources := newSourceCache(root)
+	sources.sweep()
+	cache := newBlobCache(options, root)
+	err := cache.ready()
+	if errors.Is(err, errUnfit) && !errors.Is(err, errUnfitElsewhere) {
+		sources.trim(0)
+		err = cache.ready()
+	}
+	return err
+}
+
 // A blobFetch is how one blob was had, for the unit's record.
 type blobFetch struct {
 	bytes   int64
@@ -87,20 +107,30 @@ type blobFetch struct {
 // sharing a root each fetch their own partial, and the rename keeps the name whole either way.
 var blobLocks sync.Map
 
-func (cache blobCache) lock(sum string) func() {
-	value, _ := blobLocks.LoadOrStore(cache.directory+"/"+sum, &sync.Mutex{})
-	mutex := value.(*sync.Mutex)
-	mutex.Lock()
-	return mutex.Unlock
+// lock waits for blob sum's lock until waitContext ends, so a fetch stalled in another unit holds no unit past its
+// own time.
+func (cache blobCache) lock(waitContext context.Context, sum string) (func(), error) {
+	value, _ := blobLocks.LoadOrStore(cache.directory+"/"+sum, make(chan struct{}, 1))
+	slot := value.(chan struct{})
+	select {
+	case slot <- struct{}{}:
+		return func() { <-slot }, nil
+	case <-waitContext.Done():
+		return nil, fmt.Errorf("blobs/%s: waiting for another unit's fetch of it: %w", sum, waitContext.Err())
+	}
 }
 
 // open returns blob sum open at its start, checked against its hash: the cache's copy when it holds it whole,
-// otherwise fetched from the store. A blob the store doesn't hold is ErrNotStored.
+// otherwise fetched from the store. A blob the store doesn't hold is ErrNotStored. fetchContext bounds the wait and
+// the fetch.
 func (cache blobCache) open(fetchContext context.Context, sum string) (*os.File, blobFetch, error) {
 	if !protocol.Sha256Pattern.MatchString(sum) {
 		return nil, blobFetch{}, fmt.Errorf("%q isn't a blob's sha256: the store is poisoned", sum)
 	}
-	unlock := cache.lock(sum)
+	unlock, err := cache.lock(fetchContext, sum)
+	if err != nil {
+		return nil, blobFetch{}, err
+	}
 	defer unlock()
 	started := time.Now()
 	path := filepath.Join(cache.directory, sum)
@@ -128,8 +158,8 @@ func (cache blobCache) open(fetchContext context.Context, sum string) (*os.File,
 	return file, fetch, nil
 }
 
-// fetch reads blob sum from the store into a partial file, hashing it as it comes, and renames it to the blob's
-// name only when it is whole and hashes to it. It returns the file open at its start.
+// fetch reads blob sum from the store into a partial file it holds locked, hashing it as it comes, and renames it to
+// the blob's name, read-only, only when it is whole and hashes to it. It returns the file open at its start.
 func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File, int64, error) {
 	if err := os.MkdirAll(cache.directory, 0o755); err != nil {
 		return nil, 0, err
@@ -156,12 +186,16 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File
 	keep := false
 	defer func() {
 		if !keep {
-			partial.Close()
 			os.Remove(partial.Name())
+			partial.Close()
 		}
 	}()
+	// Held for as long as this fetch lives: a partial whose lock is free is a dead fetch's.
+	if err = syscall.Flock(int(partial.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return nil, 0, err
+	}
 	hash := sha256.New()
-	size, err := io.Copy(io.MultiWriter(partial, hash), response.Body)
+	size, err := copyBlob(io.MultiWriter(partial, hash), response.Body)
 	if errors.Is(err, syscall.ENOSPC) {
 		return nil, 0, fmt.Errorf("blobs/%s: the disk filled while it was fetched (%d bytes in): %w", sum, size, err)
 	}
@@ -170,6 +204,9 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File
 	}
 	if actual := hex.EncodeToString(hash.Sum(nil)); actual != sum {
 		return nil, 0, fmt.Errorf("blob %s hashes to %s: the store is poisoned", sum, actual)
+	}
+	if err = partial.Chmod(0o444); err != nil {
+		return nil, 0, err
 	}
 	if err = partial.Sync(); err != nil {
 		return nil, 0, fmt.Errorf("blobs/%s: %w", sum, err)
@@ -191,17 +228,18 @@ type cachedBlob struct {
 	used time.Time
 }
 
-// blobs lists the cache's blobs, least recently used first, and removes each partial fetch no one has written for
-// partialStale.
-func (cache blobCache) blobs() ([]cachedBlob, error) {
+// blobs lists the cache's blobs, least recently used first, and the bytes of fetches in flight; each partial whose
+// lock no one holds, a dead fetch's, is removed.
+func (cache blobCache) blobs() ([]cachedBlob, int64, error) {
 	entries, err := os.ReadDir(cache.directory)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	blobs := []cachedBlob{}
+	inFlight := int64(0)
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil {
@@ -209,24 +247,38 @@ func (cache blobCache) blobs() ([]cachedBlob, error) {
 		}
 		switch {
 		case strings.HasPrefix(entry.Name(), partialPrefix):
-			if time.Since(info.ModTime()) >= partialStale {
-				os.Remove(filepath.Join(cache.directory, entry.Name()))
+			path := filepath.Join(cache.directory, entry.Name())
+			if lockFree(path) {
+				os.Remove(path)
+			} else {
+				inFlight += info.Size()
 			}
 		case protocol.Sha256Pattern.MatchString(entry.Name()) && info.Mode().IsRegular():
 			blobs = append(blobs, cachedBlob{sum: entry.Name(), size: info.Size(), used: info.ModTime()})
 		}
 	}
 	sort.Slice(blobs, func(left, right int) bool { return blobs[left].used.Before(blobs[right].used) })
-	return blobs, nil
+	return blobs, inFlight, nil
 }
 
-// trim removes blobs, least recently used first, until the cache holds at most its limit, leaving those in keep.
+// lockFree reports whether no one holds a lock on the file or directory at path.
+func lockFree(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	return syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil
+}
+
+// trim removes blobs, least recently used first, until the cache, fetches in flight counted, holds at most its limit,
+// leaving those in keep.
 func (cache blobCache) trim(keep map[string]bool) error {
-	blobs, err := cache.blobs()
+	blobs, inFlight, err := cache.blobs()
 	if err != nil {
 		return err
 	}
-	total := int64(0)
+	total := inFlight
 	for _, blob := range blobs {
 		total += blob.size
 	}
@@ -246,35 +298,29 @@ func (cache blobCache) trim(keep map[string]bool) error {
 }
 
 // ready readies the cache for a unit: dead partial fetches gone, the cache trimmed to its limit, and then, while a
-// watched disk has under the floor free, blobs removed least recently used first. A disk still under the floor with
-// the cache empty is errUnfit, named.
+// watched disk has under the floor free, blobs removed least recently used first, but only when that disk is the
+// cache's own, since removing them frees nothing elsewhere. A disk still short is errUnfit, named.
 func (cache blobCache) ready() error {
 	if err := cache.trim(nil); err != nil {
 		return err
 	}
-	short := func() (string, uint64, error) {
-		for _, path := range cache.watched {
-			available, err := cache.free(nearestDirectory(path))
-			if err != nil {
-				return path, 0, err
-			}
-			if available < cache.floor {
-				return path, available, nil
-			}
-		}
-		return "", 0, nil
-	}
-	blobs, err := cache.blobs()
+	own, ownErr := deviceOf(nearestDirectory(cache.directory))
+	blobs, _, err := cache.blobs()
 	if err != nil {
 		return err
 	}
 	for {
-		path, available, err := short()
+		path, available, err := cache.short()
 		if err != nil {
 			return fmt.Errorf("reading the free room on %s: %w", path, err)
 		}
 		if path == "" {
 			return nil
+		}
+		device, deviceErr := deviceOf(nearestDirectory(path))
+		if ownErr != nil || deviceErr != nil || device != own {
+			return fmt.Errorf("%w: %s has %.2f GB free, under the runner's %.2f GB floor: the instance's, never the change's",
+				errUnfitElsewhere, path, float64(available)/float64(builder.GB), float64(cache.floor)/float64(builder.GB))
 		}
 		if len(blobs) == 0 {
 			return fmt.Errorf("%w: %s has %.2f GB free with the blob cache empty, under the runner's %.2f GB floor: the instance's, never the change's",
@@ -285,6 +331,33 @@ func (cache blobCache) ready() error {
 		}
 		blobs = blobs[1:]
 	}
+}
+
+// short is the first watched path whose disk has under the floor free, and how much it has; "" when none.
+func (cache blobCache) short() (string, uint64, error) {
+	for _, path := range cache.watched {
+		available, err := cache.free(nearestDirectory(path))
+		if err != nil {
+			return path, 0, err
+		}
+		if available < cache.floor {
+			return path, available, nil
+		}
+	}
+	return "", 0, nil
+}
+
+// deviceOf is the filesystem holding path.
+func deviceOf(path string) (uint64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("%s: no device", path)
+	}
+	return uint64(stat.Dev), nil
 }
 
 // nearestDirectory is path, or its nearest existing parent: a fresh instance makes its root and workspace only with

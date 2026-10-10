@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // productKey is the buildcache key of the product TestProduct reads, as the fixture's tree index names it.
@@ -43,4 +44,28 @@ func TestProduct(t *testing.T) {
 // TestFail is the change's red.
 func TestFail(t *testing.T) {
 	t.Fatal("the change broke this")
+}
+
+// TestToolKey asks go for its version and environment, as buildcache.Tool and GoInputs do to key a product, and
+// passes whatever go says.
+func TestToolKey(t *testing.T) {
+	output, err := exec.Command("go", "version").CombinedOutput()
+	t.Logf("go version: %q %v", output, err)
+	output, err = exec.Command("go", "env", "GOVERSION").CombinedOutput()
+	t.Logf("go env GOVERSION: %q %v", output, err)
+}
+
+// TestSleep runs past any unit's time.
+func TestSleep(t *testing.T) {
+	time.Sleep(time.Hour)
+}
+
+// TestPanic panics.
+func TestPanic(t *testing.T) {
+	panic("the change panics")
+}
+
+// TestExit exits 0 in the middle of the tests, which -test.paniconexit0 turns into a failure.
+func TestExit(t *testing.T) {
+	os.Exit(0)
 }

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -31,14 +33,19 @@ import (
 // stream the Judge reads. Whatever the store can't give whole (an index, a binary, the source, a product: never built,
 // past the 7-day lifecycle, or poisoned) is named and the unit is broken, Loom's to place again, never red.
 //
-// The runner never runs go. A go its tests run (a product missing from the cache that buildcache would build, a test
-// that runs go build itself) meets a stand-in first on PATH, which refuses and records it, and a unit that then fails
-// is Loom's, never the change's.
+// The runner never builds. The tests find a stand-in go first on PATH (standInGo): a read-only query (go version, go
+// env, go list without a flag that builds), which adamic's buildcache asks to key a product, goes to the runner's own
+// go under GOTOOLCHAIN set to the tree's Go release, checked before the tests run; every build is refused and recorded,
+// and a unit that then fails is Loom's, never the change's. A runner with no go answers no query, and a unit whose
+// tests asked one is unfit, a placement fact.
+//
+// Everything before the tests is held to the unit's time, so a store that stalls breaks a unit, never wedges it.
 
 // blobFetchJobs is how many blobs a unit fetches at once.
 const blobFetchJobs = 4
 
-// A prebuiltPackage is one of the job's packages and what its tree's build holds for it.
+// A prebuiltPackage is one of the job's packages and what its tree's build holds for it. One whose test binary
+// didn't compile on Workshop for the change's reasons (built.Error, builder.ChangeFailure) is the change's red.
 type prebuiltPackage struct {
 	test  protocol.TestPackage
 	built builder.TreePackage
@@ -60,18 +67,14 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 			run.say(fmt.Sprintf("trimming %s: %v", root, err))
 		}
 	}
-	cache, sources := newBlobCache(run.options, root), newSourceCache(root)
-	err := cache.ready()
-	if errors.Is(err, errUnfit) {
-		// Then the sources no unit holds, before the unit is refused.
-		sources.trim(0)
-		err = cache.ready()
-	}
-	if err != nil {
+	prepareContext, cancelPrepare := context.WithDeadline(runContext, deadline)
+	defer cancelPrepare()
+	if err := readyRoot(run.options, root); err != nil {
 		run.fail(protocol.PhaseStart, fmt.Errorf("refused as unfit: %w", err))
 		return protocol.StatusBroken
 	}
-	index, err := run.treeIndex(runContext, job.Tree)
+	cache, sources := newBlobCache(run.options, root), newSourceCache(root)
+	index, err := run.treeIndex(prepareContext, job.Tree)
 	if err != nil {
 		run.fail(protocol.PhaseFetch, fmt.Errorf("%w: Loom's, never the change's", err))
 		return protocol.StatusBroken
@@ -99,7 +102,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		needed = append([]neededBlob{{sum: index.Source, what: "the tree's source"}}, needed...)
 	}
 	fetchStarted := time.Now()
-	files, err := run.fetchBlobs(runContext, cache, needed)
+	files, err := run.fetchBlobs(prepareContext, cache, needed)
 	defer func() {
 		for _, file := range files {
 			file.Close()
@@ -120,7 +123,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	}
 	unpackStarted := time.Now()
 	if !held.ready {
-		if err := sources.unpack(held, files[index.Source]); err != nil {
+		if err := sources.unpack(prepareContext, held, files[index.Source]); err != nil {
 			run.fail(protocol.PhaseStart, fmt.Errorf("unpacking the tree's source: %w (Loom's, never the change's)", err))
 			return protocol.StatusBroken
 		}
@@ -129,7 +132,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	source := held.directory
 	products := filepath.Join(run.directory, "adamic-build")
 	binaries := filepath.Join(run.directory, "binaries")
-	if err := unpackPrebuilt(index, packages, files, products, binaries); err != nil {
+	if err := unpackPrebuilt(prepareContext, index, packages, files, products, binaries); err != nil {
 		run.fail(protocol.PhaseStart, fmt.Errorf("unpacking the tree's build: %w (the instance's, never the change's)", err))
 		return protocol.StatusBroken
 	}
@@ -176,8 +179,8 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 			break
 		}
 	}
-	attempts := filepath.Join(run.directory, "go-attempts")
-	if err := run.refuseGo(environment, attempts); err != nil {
+	standIn, err := run.standInGo(prepareContext, environment, index.Go, source)
+	if err != nil {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
@@ -187,22 +190,13 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		return protocol.StatusBroken
 	}
 	status := run.runPackages(runContext, job, out, started, deadline, func(testContext context.Context, index int, part string) packageResult {
+		if packages[index].built.Error != "" {
+			return buildFailedPackage(packages[index], part)
+		}
 		return run.runBinary(testContext, packages[index], filepath.Join(binaries, fmt.Sprintf("%d.test", index)),
 			packageEnvironment(environment, packages[index].test), source, part)
 	})
-	content, _ := os.ReadFile(attempts)
-	tried := strings.Split(strings.TrimSpace(string(content)), "\n")
-	if len(content) == 0 {
-		return status
-	}
-	for _, attempt := range tried {
-		run.say("a test ran " + attempt + ", and this runner runs no go")
-	}
-	if status == protocol.StatusFailed {
-		run.fail(protocol.PhaseRun, fmt.Errorf("a test tried to build (%d go commands, the first %q), and this runner never builds: Loom's, never the change's", len(tried), tried[0]))
-		return protocol.StatusBroken
-	}
-	return status
+	return run.settleGo(standIn, status)
 }
 
 // treeIndex reads trees/<treeKey>.json from the store, as builder.ParseTree checks it, and holds it to its key: the
@@ -257,8 +251,12 @@ func prebuiltPackages(job *protocol.TestJob, index builder.TreeIndex) ([]prebuil
 		switch {
 		case !found:
 			return nil, nil, fmt.Errorf("the tree's build has no package %s", testPackage.Package)
+		case built.Error != "" && built.Failure == builder.ChangeFailure:
+			// The change's red: no binary to fetch, only its diagnostics to say.
+			packages[position] = prebuiltPackage{test: testPackage, built: built}
+			continue
 		case built.Error != "":
-			return nil, nil, fmt.Errorf("package %s didn't build on Workshop: %s", testPackage.Package, strings.TrimSpace(built.Error))
+			return nil, nil, fmt.Errorf("package %s didn't build on Workshop, for Workshop's reasons: %s", testPackage.Package, strings.TrimSpace(built.Error))
 		}
 		packages[position] = prebuiltPackage{test: testPackage, built: built}
 		add(built.Binary, testPackage.Package+"'s test binary")
@@ -326,10 +324,13 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 
 // unpackPrebuilt unpacks each package's products into products (the unit's ADAMIC_BUILD_CACHE_DIR), each holding
 // only its own entries, and each package's binary, gunzipped, into binaries as <index>.test. Both are the unit's own
-// directory, so a runner killed partway leaves nothing a later unit reads.
-func unpackPrebuilt(index builder.TreeIndex, packages []prebuiltPackage, files map[string]*os.File, products, binaries string) error {
+// directory, so a runner killed partway leaves nothing a later unit reads. unpackContext bounds it.
+func unpackPrebuilt(unpackContext context.Context, index builder.TreeIndex, packages []prebuiltPackage, files map[string]*os.File, products, binaries string) error {
 	unpacked := map[string]bool{}
 	for _, prebuilt := range packages {
+		if prebuilt.built.Error != "" {
+			continue
+		}
 		for _, product := range prebuilt.built.Products {
 			if unpacked[product] {
 				continue
@@ -339,7 +340,7 @@ func unpackPrebuilt(index builder.TreeIndex, packages []prebuiltPackage, files m
 			if _, err := file.Seek(0, io.SeekStart); err != nil {
 				return err
 			}
-			if err := builder.Unpack(file, products, builder.ProductEntries(product)); err != nil {
+			if err := builder.Unpack(contextReader{unpackContext, file}, products, builder.ProductEntries(product)); err != nil {
 				return fmt.Errorf("product %s: %w", product, err)
 			}
 		}
@@ -351,11 +352,14 @@ func unpackPrebuilt(index builder.TreeIndex, packages []prebuiltPackage, files m
 		return err
 	}
 	for position, prebuilt := range packages {
+		if prebuilt.built.Error != "" {
+			continue
+		}
 		file := files[prebuilt.built.Binary]
 		if _, err := file.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
-		if err := gunzipTo(file, filepath.Join(binaries, fmt.Sprintf("%d.test", position))); err != nil {
+		if err := gunzipTo(contextReader{unpackContext, file}, filepath.Join(binaries, fmt.Sprintf("%d.test", position))); err != nil {
 			return fmt.Errorf("%s's test binary: %w", prebuilt.test.Package, err)
 		}
 	}
@@ -380,25 +384,82 @@ func gunzipTo(blob io.Reader, path string) error {
 	return err
 }
 
-// refuseGo puts a stand-in go first on the tests' PATH: it records each command a test ran it with in attempts and
-// fails, so no test builds here and one that tried is named. It says on the record whether the tests' PATH held a
-// go of its own behind it.
-func (run *unitRun) refuseGo(environment map[string]string, attempts string) error {
-	if found, err := lookPath("go", environment["PATH"]); err == nil {
-		run.say("the tests' PATH holds go at " + found + ", behind the runner's refusal: no test builds here")
+// A goStandIn is the go a prebuilt unit's tests find first on PATH, and the files it writes what they asked of it in:
+// each build it refused, each read-only query the runner's go answered (with its exit), each one no go here could.
+type goStandIn struct {
+	refused, answered, unanswered string
+}
+
+// standInScript is the stand-in go. A read-only query (version, env, list, each with only the flags on its allow list)
+// goes to the runner's go under GOTOOLCHAIN set to the tree's release; anything else, a build among it, is refused.
+const standInScript = `#!/bin/sh
+# loom-runner's stand-in go (prebuilt.go): the runner never builds.
+allowed=no
+case "$1" in
+version)
+	allowed=yes
+	for argument in "$@"; do case "$argument" in version | -m | -v | -json) ;; -*) allowed=no ;; esac; done ;;
+env)
+	allowed=yes
+	for argument in "$@"; do case "$argument" in -json | -changed) ;; -*) allowed=no ;; esac; done ;;
+list)
+	allowed=yes
+	for argument in "$@"; do case "$argument" in -deps | -json | -json=* | -e | -f | -f=* | -find | -m | -u | -versions | -retracted | -mod=readonly | -mod=vendor | -tags | -tags=*) ;; -*) allowed=no ;; esac; done ;;
+esac
+if [ "$allowed" = no ]; then
+	printf 'go %s\n' "$*" >> REFUSED
+	echo "loom-runner: go $*: this runner runs Workshop's prebuilt tests and never builds; a test that needs a build is Loom's to fix, never the change's" >&2
+	exit 1
+fi
+real=REAL
+if [ -z "$real" ]; then
+	printf 'go %s\n' "$*" >> UNANSWERED
+	echo "loom-runner: go $*: this runner has no Go to answer it" >&2
+	exit 1
+fi
+GOTOOLCHAIN=RELEASE
+export GOTOOLCHAIN
+"$real" "$@"
+status=$?
+printf '%s go %s\n' "$status" "$*" >> ANSWERED
+exit "$status"
+`
+
+// standInGo puts the stand-in go first on the tests' PATH. The runner's own go, found on the tests' PATH behind it or
+// else on the runner's, answers read-only queries, and must say it is the tree's Go release under GOTOOLCHAIN set to
+// it, or the unit is unfit, named. With no go, it says so on the record.
+func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, goVersion, directory string) (goStandIn, error) {
+	release := strings.Fields(goVersion)
+	if len(release) == 0 {
+		return goStandIn{}, fmt.Errorf("the tree's index names no Go release: the store is poisoned")
+	}
+	real, err := lookPath("go", environment["PATH"])
+	if err != nil {
+		real, err = lookPath("go", os.Getenv("PATH"))
+	}
+	if err != nil {
+		real = ""
+		run.say("no go here: a test's read-only go query goes unanswered, and a unit that asks one is unfit; no test builds here")
 	} else {
-		run.say("the tests' PATH holds no go: this runner has no Go toolchain, and no test builds here")
+		command := exec.CommandContext(checkContext, real, "env", "GOVERSION")
+		command.Env, command.Dir = append(packageEnvironment(environment, protocol.TestPackage{}), "GOTOOLCHAIN="+release[0]), directory
+		output, err := command.Output()
+		if says := strings.TrimSpace(string(output)); err != nil || says != release[0] {
+			return goStandIn{}, fmt.Errorf("refused as unfit: the runner's go at %s says %q under GOTOOLCHAIN=%s (%v), and the tree was built with %s: Loom's, never the change's",
+				real, says, release[0], err, release[0])
+		}
+		run.say("go at " + real + " answers the tests' read-only go queries as " + release[0] + "; no test builds here")
 	}
-	bin := filepath.Join(run.directory, "no-go")
+	bin := filepath.Join(run.directory, "stand-in")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
-		return err
+		return goStandIn{}, err
 	}
-	stand := "#!/bin/sh\n" +
-		"printf 'go %s\\n' \"$*\" >> " + shellQuote(attempts) + "\n" +
-		"echo \"loom-runner: go $*: this runner runs Workshop's prebuilt tests and never builds; a test that needs go is Loom's to fix, never the change's\" >&2\n" +
-		"exit 1\n"
-	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(stand), 0o755); err != nil {
-		return err
+	standIn := goStandIn{refused: filepath.Join(run.directory, "go-refused"), answered: filepath.Join(run.directory, "go-answered"),
+		unanswered: filepath.Join(run.directory, "go-unanswered")}
+	script := strings.NewReplacer("REFUSED", shellQuote(standIn.refused), "UNANSWERED", shellQuote(standIn.unanswered),
+		"ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release[0])).Replace(standInScript)
+	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
+		return goStandIn{}, err
 	}
 	if environment["PATH"] == "" {
 		// An empty entry would be the working directory.
@@ -406,7 +467,95 @@ func (run *unitRun) refuseGo(environment map[string]string, attempts string) err
 	} else {
 		environment["PATH"] = bin + string(os.PathListSeparator) + environment["PATH"]
 	}
-	return nil
+	return standIn, nil
+}
+
+// fileLines is a file's lines, none when it is missing or empty.
+func fileLines(path string) []string {
+	content, err := os.ReadFile(path)
+	if err != nil || len(bytes.TrimSpace(content)) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSpace(string(content)), "\n")
+}
+
+// settleGo says on the record what the tests asked of go, and decides what it means for the unit: a query no go here
+// could answer makes it unfit; a build refused, or a query that failed here, makes a red Loom's, never the change's.
+func (run *unitRun) settleGo(standIn goStandIn, status string) string {
+	counts, order := map[string]int{}, []string{}
+	failed := []string{}
+	for _, line := range fileLines(standIn.answered) {
+		code, query, _ := strings.Cut(line, " ")
+		if code != "0" {
+			failed = append(failed, query+" (exit "+code+")")
+		}
+		if counts[line] == 0 {
+			order = append(order, line)
+		}
+		counts[line]++
+	}
+	for _, line := range order {
+		code, query, _ := strings.Cut(line, " ")
+		run.say(fmt.Sprintf("answered for the tests, %d times: %s (exit %s)", counts[line], query, code))
+	}
+	refused := fileLines(standIn.refused)
+	for _, line := range refused {
+		run.say("a test ran " + line + ", and this runner never builds")
+	}
+	if unanswered := fileLines(standIn.unanswered); len(unanswered) > 0 {
+		run.fail(protocol.PhaseRun, fmt.Errorf("refused as unfit: the tests need Go for %q (%d queries), and this runner has none: a placement fact, never the change's",
+			unanswered[0], len(unanswered)))
+		return protocol.StatusBroken
+	}
+	if status != protocol.StatusFailed {
+		return status
+	}
+	if len(refused) > 0 {
+		run.fail(protocol.PhaseRun, fmt.Errorf("a test tried to build (%d go commands, the first %q), and this runner never builds: Loom's, never the change's", len(refused), refused[0]))
+		return protocol.StatusBroken
+	}
+	if len(failed) > 0 {
+		run.fail(protocol.PhaseRun, fmt.Errorf("a read-only go query failed here (%s): Loom's, never the change's", failed[0]))
+		return protocol.StatusBroken
+	}
+	return status
+}
+
+// buildFailedPackage writes what go test -json writes for a package whose test binary doesn't compile or vet, with
+// Workshop's diagnostics as its build output, and fails the package: the change's red, as go test said it.
+func buildFailedPackage(prebuilt prebuiltPackage, part string) packageResult {
+	result := packageResult{log: ".output", code: 1}
+	_, diagnostics, _ := strings.Cut(prebuilt.built.Error, "\n")
+	if err := os.WriteFile(part+".output", []byte(diagnostics), 0o644); err != nil {
+		result.err = err
+		return result
+	}
+	jsonl, err := os.Create(part + ".jsonl")
+	if err != nil {
+		result.err = err
+		return result
+	}
+	defer jsonl.Close()
+	importPath := prebuilt.test.Package + " [" + prebuilt.test.Package + ".test]"
+	encoder := json.NewEncoder(jsonl)
+	encoder.SetEscapeHTML(false)
+	type buildEvent struct {
+		ImportPath string
+		Action     string
+		Output     string `json:",omitempty"`
+	}
+	for _, line := range strings.SplitAfter(diagnostics, "\n") {
+		if line != "" {
+			encoder.Encode(buildEvent{ImportPath: importPath, Action: "build-output", Output: line})
+		}
+	}
+	encoder.Encode(buildEvent{ImportPath: importPath, Action: "build-fail"})
+	converter := test2json.NewConverter(jsonl, prebuilt.test.Package, test2json.Timestamp)
+	converter.SetFailedBuild(importPath)
+	converter.Write([]byte("FAIL\t" + prebuilt.test.Package + " [build failed]\n"))
+	converter.Exited(errors.New("build failed"))
+	converter.Close()
+	return result
 }
 
 // shellQuote is text as one single-quoted shell word.

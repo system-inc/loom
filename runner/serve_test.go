@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -276,7 +275,7 @@ func TestServeFullToItsDeadlineTakesNothingAndSaysUnfit(t *testing.T) {
 	pool.mutex.Lock()
 	asks := len(pool.askers)
 	pool.mutex.Unlock()
-	if asks != 0 || summary.Units != 0 || !strings.HasSuffix(summary.String(), "; stopped at the deadline; unfit: 12 MB free on "+options.Unit.WorkspaceParent+", under "+strconv.FormatUint(DefaultFreeFloorBytes>>20, 10)) {
+	if asks != 0 || summary.Units != 0 || !strings.HasSuffix(summary.String(), "; stopped at the deadline; unfit: 12 MB free on "+options.Unit.WorkspaceParent+", under 1500") {
 		t.Fatalf("asks %d, summary %q", asks, summary.String())
 	}
 }

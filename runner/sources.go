@@ -1,13 +1,12 @@
 package runner
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,9 +20,11 @@ import (
 // unit has to be ready, so it isn't unpacked once a unit. A runner keeps each tree's source unpacked under its root,
 // <root>/loom-sources/<source sha256>, for every unit of that tree, as the go test path keeps its checkout:
 //
-//   - A source is unpacked into .unpacking-<sha256>-<pid>-<random> and renamed to its name only once it is whole, so a
-//     runner killed mid-unpack, a disk that filled, or an archive refused partway never leaves anything at a source's
-//     name; a .unpacking- or .removing- directory whose process is gone is removed before the next unit.
+//   - A source is unpacked into .unpacking-<sha256>-<random>, which its unpacker holds locked, gets its completion
+//     marker (sourceMarker, holding its sha256), is synced once, and only then is renamed to its name. A directory at a
+//     source's name without its marker (a crash that lost what wasn't on disk) is never trusted: it is removed and
+//     unpacked again. A .unpacking- or .removing- directory whose lock no one holds is a dead runner's, swept before
+//     the next unit.
 //   - A unit holds its source with a shared lock on <sha256>.lock for as long as it runs; only a source no unit holds
 //     is removed, renamed away first, so a removal stopped partway never leaves half a tree at its name.
 //   - At most keepSources are kept, least recently used going first, and under the free floor every source no unit
@@ -39,6 +40,9 @@ var keepSources = 2
 
 const unpackingPrefix = ".unpacking-"
 const sourceRemovingPrefix = ".removing-"
+
+// sourceMarker is the file a whole unpacked source holds at its top, naming its sha256.
+const sourceMarker = ".loom-source"
 
 // A sourceCache is a runner's unpacked sources, under its root.
 type sourceCache struct {
@@ -62,7 +66,7 @@ func newSourceCache(root string) sourceCache {
 var sourceLocks sync.Map
 
 // hold takes a shared hold on source sum, which keeps it from removal until release, and says whether it is already
-// unpacked. A used source becomes the most recently used.
+// unpacked whole. A used source becomes the most recently used.
 func (cache sourceCache) hold(sum string) (*heldSource, error) {
 	if !protocol.Sha256Pattern.MatchString(sum) {
 		return nil, fmt.Errorf("%q isn't a source's sha256", sum)
@@ -70,18 +74,23 @@ func (cache sourceCache) hold(sum string) (*heldSource, error) {
 	if err := os.MkdirAll(cache.directory, 0o755); err != nil {
 		return nil, err
 	}
-	cache.sweep()
 	lock, err := cache.lockFile(sum)
 	if err != nil {
 		return nil, err
 	}
 	held := &heldSource{sum: sum, directory: filepath.Join(cache.directory, sum), lock: lock}
-	if info, err := os.Lstat(held.directory); err == nil && info.IsDir() {
+	if held.whole() {
 		held.ready = true
 		now := time.Now()
 		os.Chtimes(held.directory, now, now)
 	}
 	return held, nil
+}
+
+// whole reports whether the source's directory holds its completion marker, naming it.
+func (held *heldSource) whole() bool {
+	content, err := os.ReadFile(filepath.Join(held.directory, sourceMarker))
+	return err == nil && strings.TrimSpace(string(content)) == held.sum
 }
 
 // lockFile holds a shared lock on source sum's lock file, the one at its path once the lock is held: a removal unlinks
@@ -117,28 +126,67 @@ func (held *heldSource) release() {
 	}
 }
 
-// unpack unpacks archive into a directory of its own beside the source's name and renames it there only when the
-// whole archive is in. A source another unit unpacked meanwhile is taken as it is.
-func (cache sourceCache) unpack(held *heldSource, archive io.Reader) error {
-	value, _ := sourceLocks.LoadOrStore(held.directory, &sync.Mutex{})
-	mutex := value.(*sync.Mutex)
-	mutex.Lock()
-	defer mutex.Unlock()
-	if info, err := os.Lstat(held.directory); err == nil && info.IsDir() {
+// A contextReader stops reading once its context ends, so an unpack is held to the unit's time.
+type contextReader struct {
+	readContext context.Context
+	reader      io.Reader
+}
+
+func (reader contextReader) Read(buffer []byte) (int, error) {
+	if err := reader.readContext.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
+}
+
+// unpack unpacks archive into a locked directory of its own beside the source's name, marks it whole, syncs once, and
+// renames it there. A source another unit unpacked meanwhile is taken as it is; a directory at the name without its
+// marker is removed first. unpackContext bounds the wait for another unit's unpack and the unpack itself.
+func (cache sourceCache) unpack(unpackContext context.Context, held *heldSource, archive io.Reader) error {
+	value, _ := sourceLocks.LoadOrStore(held.directory, make(chan struct{}, 1))
+	slot := value.(chan struct{})
+	select {
+	case slot <- struct{}{}:
+		defer func() { <-slot }()
+	case <-unpackContext.Done():
+		return fmt.Errorf("waiting for another unit's unpack of it: %w", unpackContext.Err())
+	}
+	if held.whole() {
 		held.ready = true
 		return nil
 	}
-	scratch, err := os.MkdirTemp(cache.directory, unpackingPrefix+held.sum+"-"+strconv.Itoa(os.Getpid())+"-")
+	if _, err := os.Lstat(held.directory); err == nil {
+		if err := cache.moveAway(held.directory); err != nil {
+			return fmt.Errorf("removing an unmarked source at %s: %w", held.directory, err)
+		}
+	}
+	scratch, err := os.MkdirTemp(cache.directory, unpackingPrefix+held.sum+"-")
 	if err != nil {
 		return err
 	}
-	if err = builder.Unpack(archive, scratch, nil); err != nil {
+	// Held while it unpacks: an unpacking whose lock is free is a dead runner's.
+	lock, err := os.Open(scratch)
+	if err != nil {
 		os.RemoveAll(scratch)
 		return err
 	}
+	defer lock.Close()
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		os.RemoveAll(scratch)
+		return err
+	}
+	if err = builder.Unpack(contextReader{unpackContext, archive}, scratch, nil); err == nil {
+		err = os.WriteFile(filepath.Join(scratch, sourceMarker), []byte(held.sum+"\n"), 0o444)
+	}
+	if err != nil {
+		os.RemoveAll(scratch)
+		return err
+	}
+	// Everything under the name is on disk before the name is.
+	syscall.Sync()
 	if err = os.Rename(scratch, held.directory); err != nil {
 		os.RemoveAll(scratch)
-		if info, statErr := os.Lstat(held.directory); statErr == nil && info.IsDir() {
+		if held.whole() {
 			held.ready = true
 			return nil
 		}
@@ -148,7 +196,28 @@ func (cache sourceCache) unpack(held *heldSource, archive io.Reader) error {
 	return nil
 }
 
-// sweep removes each .unpacking- and .removing- directory whose process is gone: what a killed runner left.
+// moveAway renames directory to a locked .removing- directory and removes it.
+func (cache sourceCache) moveAway(directory string) error {
+	away, err := os.MkdirTemp(cache.directory, sourceRemovingPrefix+filepath.Base(directory)+"-")
+	if err != nil {
+		return err
+	}
+	lock, err := os.Open(away)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return err
+	}
+	if err = os.Rename(directory, filepath.Join(away, "tree")); err != nil {
+		os.Remove(away)
+		return err
+	}
+	return os.RemoveAll(away)
+}
+
+// sweep removes each .unpacking- and .removing- directory whose lock no one holds: what a killed runner left.
 func (cache sourceCache) sweep() {
 	entries, err := os.ReadDir(cache.directory)
 	if err != nil {
@@ -156,30 +225,14 @@ func (cache sourceCache) sweep() {
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		rest, unpacking := strings.CutPrefix(name, unpackingPrefix)
-		if !unpacking {
-			if rest, _ = strings.CutPrefix(name, sourceRemovingPrefix); rest == name {
-				continue
-			}
-		}
-		// <sha256>-<pid>-<random>
-		fields := strings.Split(rest, "-")
-		if len(fields) < 3 {
+		if !entry.IsDir() || !strings.HasPrefix(name, unpackingPrefix) && !strings.HasPrefix(name, sourceRemovingPrefix) {
 			continue
 		}
-		if pid, err := strconv.Atoi(fields[1]); err == nil && !processRunning(pid) {
-			os.RemoveAll(filepath.Join(cache.directory, name))
+		path := filepath.Join(cache.directory, name)
+		if lockFree(path) {
+			os.RemoveAll(path)
 		}
 	}
-}
-
-// processRunning reports whether a process with this pid exists.
-func processRunning(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 // trim removes sources no unit holds, least recently used first, until at most keep remain.
@@ -226,14 +279,7 @@ func (cache sourceCache) remove(sum string) {
 	} else if named, err := os.Stat(lockPath); err != nil || !os.SameFile(locked, named) {
 		return
 	}
-	away, err := os.MkdirTemp(cache.directory, sourceRemovingPrefix+sum+"-"+strconv.Itoa(os.Getpid())+"-")
-	if err != nil {
-		return
+	if cache.moveAway(filepath.Join(cache.directory, sum)) == nil {
+		os.Remove(lockPath)
 	}
-	if err = os.Rename(filepath.Join(cache.directory, sum), filepath.Join(away, sum)); err != nil {
-		os.Remove(away)
-		return
-	}
-	os.RemoveAll(away)
-	os.Remove(lockPath)
 }

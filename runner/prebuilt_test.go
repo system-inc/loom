@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -40,6 +42,21 @@ import (
 //	a source a unit holds removed, or sources kept oldest first: TestSourcesAreBoundedAndAHeldOneStays
 //	prepare.sh's environment mode reaching the checkout, or taking an instance with no toolchain:
 //	TestPrepareEnvironmentNeedsNoGitAndNoGo
+//	the platform check dropped: TestATreeForAnotherPlatformIsRefusedAsUnfit
+//	the stand-in delegating a build: TestABuildIsRefusedWithAGoHere
+//	the stand-in refusing go version: TestARedBesideAReadOnlyGoQueryStaysRed
+//	the runner's go not held to the tree's release: TestAGoOfAnotherReleaseIsUnfit
+//	a query no go here answered not unfit: TestAGoQueryWithNoGoHereIsUnfit
+//	the change's build failure broken, or no build-fail event: TestABuildErrorIsTheChangesRed
+//	fetches not held to the unit's time: TestAStalledStoreBreaksTheUnitInItsTime
+//	a wait for another fetch unbounded: TestAWaitForAnotherFetchIsBounded
+//	cached blobs writable: TestACorruptedBlobIsNeverRun
+//	eviction on a disk the cache isn't on: TestEvictionFreesOnlyTheCachesOwnDisk
+//	a source trusted without its marker: TestAnUnmarkedSourceIsUnpackedAgain
+//	partials swept by age, not by lock: TestALeftoverPartialFetchIsNeverTrusted
+//	a live unpacking swept: TestASourceUnpackedPartwayIsNeverTrusted
+//	a partial left when the disk filled: TestAFullDiskMidFetchLeavesNothing
+//	-test.paniconexit0 dropped: TestAPanicAndAnExitMidRunAreRed
 
 const lowerPackage = protocol.AdamicModule + "/internal/lower"
 
@@ -52,6 +69,10 @@ var fixtureBinary struct {
 	once    sync.Once
 	content []byte
 	err     error
+	// goVersion and goBinary are the Go that compiled it: the release its tree's index names, and a real go a
+	// runner may have.
+	goVersion string
+	goBinary  string
 }
 
 func prebuiltBinary(t *testing.T) []byte {
@@ -72,6 +93,12 @@ func prebuiltBinary(t *testing.T) []byte {
 			return
 		}
 		fixtureBinary.content, fixtureBinary.err = os.ReadFile(binary)
+		version, err := exec.Command("go", "env", "GOVERSION", "GOROOT").Output()
+		if fields := strings.Fields(string(version)); err == nil && len(fields) == 2 {
+			fixtureBinary.goVersion, fixtureBinary.goBinary = fields[0], filepath.Join(fields[1], "bin", "go")
+		} else if fixtureBinary.err == nil {
+			fixtureBinary.err = fmt.Errorf("go env GOVERSION GOROOT: %q %v", version, err)
+		}
 	})
 	if fixtureBinary.err != nil {
 		t.Fatalf("compiling the fixture: %v", fixtureBinary.err)
@@ -172,7 +199,7 @@ func newPrebuiltTree(t *testing.T, store *prebuiltStore) *prebuiltTree {
 		{name: fixtureProductKey + ".inputs", kind: tar.TypeReg, content: "{}\n"},
 		{name: fixtureProductKey + "/tool", kind: tar.TypeReg, content: "the product\n", mode: 0o755},
 	}, true))
-	tree.index = builder.TreeIndex{Tree: strings.Repeat("7", 40), Go: "go1.27.1", Goos: runtime.GOOS, Goarch: runtime.GOARCH, Source: tree.source,
+	tree.index = builder.TreeIndex{Tree: strings.Repeat("7", 40), Go: fixtureBinary.goVersion, Goos: runtime.GOOS, Goarch: runtime.GOARCH, Source: tree.source,
 		Products: map[string]string{fixtureProductKey: product},
 		Packages: map[string]builder.TreePackage{lowerPackage: {Package: lowerPackage, Directory: "internal/lower", Binary: tree.binary, Products: []string{fixtureProductKey}}}}
 	tree.rekey(t)
@@ -234,6 +261,20 @@ esac
 `)
 	fixture.tree = newPrebuiltTree(t, fixture.store)
 	return fixture
+}
+
+// withGo gives the fixture's runner a go of its own, on its PATH and not on its tests': the Go that compiled the
+// fixture, or, when one is given, a script standing in for another.
+func (fixture *prebuiltFixture) withGo(t *testing.T, script string) {
+	t.Helper()
+	directory := filepath.Join(fixture.directory, "real-go")
+	os.MkdirAll(directory, 0o755)
+	if script != "" {
+		os.WriteFile(filepath.Join(directory, "go"), []byte(script), 0o755)
+	} else if err := os.Symlink(fixtureBinary.goBinary, filepath.Join(directory, "go")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fixture.bin+string(os.PathListSeparator)+directory)
 }
 
 func (fixture *prebuiltFixture) options(t *testing.T) Options {
@@ -304,7 +345,7 @@ func TestAPrebuiltUnitRunsGreenWithNoGo(t *testing.T) {
 		t.Errorf("the package's own start and pass, and only the selected tests, as go test -json says them:\n%s", lines)
 	}
 	// It never built: nothing ran go, the checkout was never made, and the record says the tests had no go.
-	if !strings.Contains(runner, "the tests' PATH holds no go") || strings.Contains(runner, "a test ran go") {
+	if !strings.Contains(runner, "no go here") || strings.Contains(runner, "a test ran go") {
 		t.Errorf("the record doesn't say the runner had no go:\n%s", runner)
 	}
 	if _, err := os.Stat(filepath.Join(fixture.directory, "checkout")); err == nil {
@@ -386,7 +427,7 @@ func TestWhatTheStoreLacksIsLoomsAndNamed(t *testing.T) {
 		"the package's build": {func(t *testing.T, tree *prebuiltTree) {
 			tree.index.Packages[lowerPackage] = builder.TreePackage{Package: lowerPackage, Products: []string{}, Error: "go test -c: undefined: x"}
 			tree.publish(t)
-		}, "didn't build on Workshop: go test -c: undefined: x"},
+		}, "didn't build on Workshop, for Workshop's reasons: go test -c: undefined: x"},
 		"an index under another tree's key": {func(t *testing.T, tree *prebuiltTree) {
 			tree.index.Tree = strings.Repeat("8", 40)
 			tree.publish(t)
@@ -426,7 +467,12 @@ func TestACorruptedBlobIsNeverRun(t *testing.T) {
 	if result, events, _ = runUnit(t, fixture.unit("^TestA$"), fixture.options(t)); result.Status != protocol.StatusPassed {
 		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
 	}
-	if err := os.WriteFile(filepath.Join(fixture.blobs(), fixture.tree.binary), honest[:len(honest)/2], 0o644); err != nil {
+	cached := filepath.Join(fixture.blobs(), fixture.tree.binary)
+	if info, err := os.Stat(cached); err != nil || info.Mode().Perm() != 0o444 {
+		t.Fatalf("a cached blob isn't read-only: %v %v", info.Mode(), err)
+	}
+	os.Chmod(cached, 0o644)
+	if err := os.WriteFile(cached, honest[:len(honest)/2], 0o644); err != nil {
 		t.Fatal(err)
 	}
 	result, events, _ = runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
@@ -642,7 +688,8 @@ func TestTwoFetchesOfOneBlob(t *testing.T) {
 }
 
 // What a killed fetch left (a partial, or a blob's name on bytes that never finished) is never read as the blob: the
-// blob is fetched again, a dead partial goes before the next unit, and a live one, another runner's fetch, stays.
+// blob is fetched again, a partial whose lock no one holds goes before the next unit, however new, and a live one,
+// another runner's fetch holding its lock, stays, however old.
 func TestALeftoverPartialFetchIsNeverTrusted(t *testing.T) {
 	content := bytes.Repeat([]byte("whole"), 1000)
 	served, sums := newBlobServer(t, content)
@@ -653,7 +700,15 @@ func TestALeftoverPartialFetchIsNeverTrusted(t *testing.T) {
 	os.WriteFile(dead, content[:100], 0o644)
 	os.WriteFile(live, content[:100], 0o644)
 	old := time.Now().Add(-time.Hour)
-	os.Chtimes(dead, old, old)
+	os.Chtimes(live, old, old)
+	holder, err := os.Open(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err = syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
 	os.WriteFile(filepath.Join(cache.directory, sums[0]), content[:len(content)/2], 0o644)
 	got, fetch := readBlob(t, cache, sums[0])
 	if !bytes.Equal(got, content) || fetch.cached || !fetch.corrupt {
@@ -720,10 +775,19 @@ func TestASourceUnpackedPartwayIsNeverTrusted(t *testing.T) {
 	fixture.tree.index.Source = fixture.store.putBlob(makeTar(t, files, true))
 	fixture.tree.publish(t)
 	sources := filepath.Join(fixture.directory, "root", sourceDirectoryName)
-	dead := exec.Command(filepath.Join(fixture.bin, "bash"), "-c", "exit 0")
-	dead.Run()
-	leftover := filepath.Join(sources, unpackingPrefix+fixture.tree.index.Source+"-"+fmt.Sprint(dead.Process.Pid)+"-x")
+	// A dead runner's unpacking, whose lock is free, and a live one's, holding it.
+	leftover := filepath.Join(sources, unpackingPrefix+fixture.tree.index.Source+"-dead")
 	os.MkdirAll(leftover, 0o755)
+	live := filepath.Join(sources, unpackingPrefix+fixture.tree.index.Source+"-live")
+	os.MkdirAll(live, 0o755)
+	holder, err := os.Open(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	if err = syscall.Flock(int(holder.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
 	for range 2 {
 		result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
 		if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "unpacking the tree's source") {
@@ -735,9 +799,12 @@ func TestASourceUnpackedPartwayIsNeverTrusted(t *testing.T) {
 	}
 	entries, _ := os.ReadDir(sources)
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), unpackingPrefix) {
+		if strings.HasPrefix(entry.Name(), unpackingPrefix) && filepath.Join(sources, entry.Name()) != live {
 			t.Errorf("%s is left", entry.Name())
 		}
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Error("a live runner's unpacking was removed")
 	}
 }
 
@@ -751,7 +818,7 @@ func TestSourcesAreBoundedAndAHeldOneStays(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = cache.unpack(source, bytes.NewReader(archive)); err != nil || !source.ready {
+		if err = cache.unpack(context.Background(), source, bytes.NewReader(archive)); err != nil || !source.ready {
 			t.Fatalf("unpacking: %v", err)
 		}
 		at := time.Now().Add(time.Duration(index-10) * time.Minute)
@@ -791,5 +858,230 @@ func TestATreeForAnotherPlatformIsRefusedAsUnfit(t *testing.T) {
 	}
 	if gets := fixture.store.blobGets(); gets != 0 {
 		t.Fatalf("fetched %d blobs for another platform", gets)
+	}
+}
+
+// buildcache asks go for its version and environment to key a product, and a runner with a go answers, as the tree's
+// release: a real red beside such a test stays red, and the record says what was answered.
+func TestARedBesideAReadOnlyGoQueryStaysRed(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^(TestToolKey|TestFail)$"), fixture.options(t))
+	runner := strings.Join(outputLines(events, "runner"), "\n")
+	if result.Status != protocol.StatusFailed {
+		t.Fatalf("a red beside a go query read as %s; errors %q\n%s", result.Status, errorPhases(events), runner)
+	}
+	for _, query := range []string{"go version (exit 0)", "go env GOVERSION (exit 0)"} {
+		if !strings.Contains(runner, "answered for the tests, 1 times: "+query) {
+			t.Errorf("%q isn't on the record:\n%s", query, runner)
+		}
+	}
+	if !strings.Contains(runner, "answers the tests' read-only go queries as "+fixtureBinary.goVersion) {
+		t.Errorf("the record doesn't name the go that answers:\n%s", runner)
+	}
+}
+
+// With no go here, a query goes unanswered, and the unit is unfit, whatever its tests said.
+func TestAGoQueryWithNoGoHereIsUnfit(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	result, events, _ := runUnit(t, fixture.unit("^TestToolKey$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `refused as unfit: the tests need Go for "go version"`) {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+}
+
+// A go that isn't the tree's release can't answer for it: the unit is unfit before its tests run.
+func TestAGoOfAnotherReleaseIsUnfit(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "#!/bin/sh\necho go1.0.0\n")
+	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `says "go1.0.0" under GOTOOLCHAIN=`+fixtureBinary.goVersion) {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+	if _, err := os.Stat(filepath.Join(result.Workspace, "loom-out", "part-0.jsonl")); err == nil {
+		t.Error("a test ran")
+	}
+}
+
+// A runner with a go still builds nothing: a test's go build is refused, and its red is Loom's.
+func TestABuildIsRefusedWithAGoHere(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	built := fixture.tree.index.Packages[lowerPackage]
+	built.Products = []string{}
+	fixture.tree.index.Packages[lowerPackage] = built
+	fixture.tree.publish(t)
+	result, events, _ := runUnit(t, fixture.unit("^TestProduct$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `a test tried to build (1 go commands, the first "go build -o `) {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+}
+
+// A package whose test code didn't compile on Workshop is the change's red, said as go test -json says it.
+func TestABuildErrorIsTheChangesRed(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	built := fixture.tree.index.Packages[lowerPackage]
+	built.Error, built.Failure = "go test -c: exit status 1\n# "+lowerPackage+" ["+lowerPackage+".test]\n./lower_test.go:3:2: undefined: foo\n", builder.ChangeFailure
+	fixture.tree.index.Packages[lowerPackage] = built
+	fixture.tree.publish(t)
+	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+	if result.Status != protocol.StatusFailed {
+		t.Fatalf("a change that doesn't compile read as %s; errors %q", result.Status, errorPhases(events))
+	}
+	lines := testLog(t, result)
+	importPath := lowerPackage + " [" + lowerPackage + ".test]"
+	for _, want := range []string{`{"ImportPath":"` + importPath + `","Action":"build-output","Output":"./lower_test.go:3:2: undefined: foo\n"}`,
+		`{"ImportPath":"` + importPath + `","Action":"build-fail"}`, `"Output":"FAIL\t` + lowerPackage + ` [build failed]\n"`, `"FailedBuild":"` + importPath + `"`} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("no %s in\n%s", want, lines)
+		}
+	}
+	if !hasEvent(t, lines, "fail", "") {
+		t.Errorf("the package doesn't fail:\n%s", lines)
+	}
+}
+
+// A store that answers and then stalls breaks the unit within its time, never wedges it.
+func TestAStalledStoreBreaksTheUnitInItsTime(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	stall := make(chan struct{})
+	defer close(stall)
+	inner := fixture.store.server.Config.Handler
+	fixture.store.server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasPrefix(request.URL.Path, "/blobs/") {
+			inner.ServeHTTP(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Length", "1000000")
+		writer.WriteHeader(http.StatusOK)
+		writer.Write([]byte("x"))
+		writer.(http.Flusher).Flush()
+		select {
+		case <-stall:
+		case <-time.After(20 * time.Second):
+		}
+	})
+	unit := fixture.unit("^TestA$")
+	unit.TimeoutSeconds = 2
+	started := time.Now()
+	result, events, _ := runUnit(t, unit, fixture.options(t))
+	if result.Status != protocol.StatusBroken || time.Since(started) > 8*time.Second || !strings.Contains(errorPhases(events), "deadline exceeded") {
+		t.Fatalf("a 2 s unit on a stalled store: %s after %.1f s; errors %q", result.Status, time.Since(started).Seconds(), errorPhases(events))
+	}
+}
+
+// A binary still running at the unit's deadline is killed, and the unit is red, timed out, as go test's was.
+func TestABinaryPastTheDeadlineIsKilled(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	unit := fixture.unit("^TestSleep$")
+	unit.TimeoutSeconds = 3
+	options := fixture.options(t)
+	options.KillGrace = time.Second
+	started := time.Now()
+	result, events, _ := runUnit(t, unit, options)
+	exits := eventsOfType(events, "exit")
+	if result.Status != protocol.StatusFailed || len(exits) != 1 || !exits[0].TimedOut || time.Since(started) > 15*time.Second {
+		t.Fatalf("%s after %.1f s, exits %+v; errors %q", result.Status, time.Since(started).Seconds(), exits, errorPhases(events))
+	}
+}
+
+// A test that panics, and one that exits 0 mid-run (-test.paniconexit0), are each the change's red.
+func TestAPanicAndAnExitMidRunAreRed(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	for _, test := range []string{"TestPanic", "TestExit"} {
+		result, events, _ := runUnit(t, fixture.unit("^"+test+"$"), fixture.options(t))
+		lines := testLog(t, result)
+		if result.Status != protocol.StatusFailed || !hasEvent(t, lines, "fail", test) || !hasEvent(t, lines, "fail", "") {
+			t.Errorf("%s: %s; errors %q\n%s", test, result.Status, errorPhases(events), lines)
+		}
+	}
+}
+
+// A disk that fills mid-fetch breaks the unit, named, and leaves no partial and no blob at its name.
+func TestAFullDiskMidFetchLeavesNothing(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	original := copyBlob
+	t.Cleanup(func() { copyBlob = original })
+	copyBlob = func(destination io.Writer, source io.Reader) (int64, error) {
+		written, _ := io.CopyN(destination, source, 10)
+		return written, &os.PathError{Op: "write", Path: "partial", Err: syscall.ENOSPC}
+	}
+	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "the disk filled while it was fetched") {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+	if entries, _ := os.ReadDir(fixture.blobs()); len(entries) != 0 {
+		t.Fatalf("a full disk left %v", entries)
+	}
+}
+
+// Removing blobs frees only the cache's own disk: a short disk elsewhere is unfit, and the cache keeps its blobs.
+func TestEvictionFreesOnlyTheCachesOwnDisk(t *testing.T) {
+	served, sums := newBlobServer(t, []byte("a blob"))
+	cache := testCache(t, served, 1<<30)
+	readBlob(t, cache, sums[0])
+	other := "/dev"
+	own, _ := deviceOf(cache.directory)
+	if device, err := deviceOf(other); err != nil || device == own {
+		t.Skipf("%s isn't another filesystem here", other)
+	}
+	cache.watched, cache.floor = []string{cache.directory, other}, 1000
+	cache.free = func(path string) (uint64, error) {
+		if path == other {
+			return 0, nil
+		}
+		return 1 << 40, nil
+	}
+	if err := cache.ready(); !errors.Is(err, errUnfitElsewhere) {
+		t.Fatalf("a short disk elsewhere: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cache.directory, sums[0])); err != nil {
+		t.Fatal("the cache gave up a blob that frees nothing on the short disk")
+	}
+}
+
+// A directory at a source's name without its completion marker (a crash that lost part of it) is never trusted: it
+// is unpacked again, whole.
+func TestAnUnmarkedSourceIsUnpackedAgain(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	hollow := filepath.Join(fixture.directory, "root", sourceDirectoryName, fixture.tree.source)
+	os.MkdirAll(filepath.Join(hollow, "internal", "lower"), 0o755)
+	os.WriteFile(filepath.Join(hollow, "junk"), []byte("x"), 0o644)
+	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+	runner := strings.Join(outputLines(events, "runner"), "\n")
+	if result.Status != protocol.StatusPassed || strings.Contains(runner, "already unpacked") {
+		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), runner)
+	}
+	if _, err := os.Stat(filepath.Join(hollow, "junk")); err == nil {
+		t.Error("the unmarked source was trusted")
+	}
+	if marker, err := os.ReadFile(filepath.Join(hollow, sourceMarker)); err != nil || strings.TrimSpace(string(marker)) != fixture.tree.source {
+		t.Errorf("the source's marker: %q %v", marker, err)
+	}
+}
+
+// A unit waiting on another unit's fetch of the same blob waits only as long as its own time.
+func TestAWaitForAnotherFetchIsBounded(t *testing.T) {
+	served, sums := newBlobServer(t, []byte("a blob"))
+	cache := testCache(t, served, 1<<30)
+	unlock, err := cache.lock(context.Background(), sums[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	waitContext, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := cache.open(waitContext, sums[0])
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "waiting for another unit's fetch") {
+			t.Fatalf("the wait ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a wait for another unit's fetch outlived the unit's time")
 	}
 }
