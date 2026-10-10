@@ -270,12 +270,17 @@ func TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy(t *testing.T) {
 		script string
 		want   string
 	}{
-		"a compile error":   {"echo 'a.go:1: undefined: x'; exit 1", ChangeFailure},
-		"a full disk":       {"echo 'write /tmp/go-build1/x: no space left on device'; exit 1", WorkshopFailure},
-		"a killed compiler": {"echo 'compile: signal: killed'; exit 1", WorkshopFailure},
-		"a killed go":       {"kill -9 $$", WorkshopFailure},
-		"no diagnostics":    {"exit 1", WorkshopFailure},
-		"another exit":      {"echo usage; exit 2", WorkshopFailure},
+		"a compile error":                        {"printf '# example.com/p [example.com/p.test]\\n./a_test.go:3:2: undefined: x\\n'; exit 1", ChangeFailure},
+		"a type error quoting a network failure": {`printf '# example.com/p\n./a.go:3:9: cannot use "connection reset" (untyped string constant) as int value\n\thave string\n'; exit 1`, ChangeFailure},
+		"a proxy's 502":                          {"printf 'go: example.com/m@v1.0.0: reading https://proxy.golang.org/example.com/m/@v/v1.0.0.zip: 502 Bad Gateway\\n'; exit 1", WorkshopFailure},
+		"a killed clang":                         {"printf '# example.com/p\\nclang: error: unable to execute command: Killed\\n'; exit 1", WorkshopFailure},
+		"a diagnostic beside a killed compiler":  {"printf '# example.com/p\\n./a.go:1:1: x\\ncompile: signal: killed\\n'; exit 1", WorkshopFailure},
+		"a full disk":                            {"echo 'write /tmp/go-build1/x: no space left on device'; exit 1", WorkshopFailure},
+		"a killed compiler":                      {"echo 'compile: signal: killed'; exit 1", WorkshopFailure},
+		"only a header":                          {"echo '# example.com/p'; exit 1", WorkshopFailure},
+		"a killed go":                            {"kill -9 $$", WorkshopFailure},
+		"no diagnostics":                         {"exit 1", WorkshopFailure},
+		"another exit":                           {"echo usage; exit 2", WorkshopFailure},
 	} {
 		output, err := shell(test.script)
 		if got := BuildFailure(err, output); got != test.want {

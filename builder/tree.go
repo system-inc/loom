@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -50,20 +51,29 @@ const (
 	WorkshopFailure = "workshop"
 )
 
-// machineFailures are what go's output says when the machine, not the code, failed a build.
-var machineFailures = []string{"no space left on device", "signal: killed", "signal: terminated", "out of memory", "cannot allocate memory",
-	"resource temporarily unavailable", "too many open files", "dial tcp", "i/o timeout", "TLS handshake", "connection reset"}
+// diagnosticLine is a line of a compile or vet failure as go prints it: a package's header (# <package>), a
+// file:line:col: message diagnostic, or a diagnostic's tab-indented continuation (a type error's have and want).
+var diagnosticLine = regexp.MustCompile(`^(# \S.*|\S+:[0-9]+:[0-9]+: \S.*|\t.*)$`)
 
-// BuildFailure says whose a failed go test -c is, from its error and output.
+// BuildFailure says whose a failed go test -c is, from its error and output: the change's only when go exited 1 and
+// said nothing but package headers and diagnostics, whatever their words; anything else (a proxy's 502, a killed
+// compiler or clang, memory, a full disk) is Workshop's.
 func BuildFailure(err error, output []byte) string {
 	var exit *exec.ExitError
-	if !errors.As(err, &exit) || !exit.Exited() || exit.ExitCode() != 1 || len(bytes.TrimSpace(output)) == 0 {
+	if !errors.As(err, &exit) || !exit.Exited() || exit.ExitCode() != 1 {
 		return WorkshopFailure
 	}
-	for _, failure := range machineFailures {
-		if bytes.Contains(output, []byte(failure)) {
+	diagnostics := 0
+	for _, line := range strings.Split(strings.TrimRight(string(output), "\n"), "\n") {
+		if !diagnosticLine.MatchString(line) {
 			return WorkshopFailure
 		}
+		if !strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "\t") {
+			diagnostics++
+		}
+	}
+	if diagnostics == 0 {
+		return WorkshopFailure
 	}
 	return ChangeFailure
 }
