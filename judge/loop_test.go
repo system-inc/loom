@@ -217,7 +217,7 @@ func TestAVoidedRunPostsEveryRunUnitVoidAndRerunsNothing(t *testing.T) {
 	h.runs["u"], h.runs["v"] = passed(), failedWith("TestB")
 	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: func() time.Time { return time.Date(2026, 10, 10, 1, 0, 0, 0, time.UTC) }}
 	post, err := loop.VoidFuture(Job{Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1",
-		Plan: []PlanUnit{{UnitKey: "u"}, {UnitKey: "v"}, {UnitKey: "w"}, {UnitKey: "x", Reused: "verdict-3"}}}, "an operator stopped the run")
+		Plan: []PlanUnit{{UnitKey: "u"}, {UnitKey: "v"}, {UnitKey: "w"}, {UnitKey: "x", Reused: "verdict-3"}}}, InfraKill, "an operator stopped the run")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestAVoidedRunPostsEveryRunUnitVoidAndRerunsNothing(t *testing.T) {
 func TestAVoidNamesItsCause(t *testing.T) {
 	h := newHarness()
 	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: time.Now}
-	if _, err := loop.VoidFuture(Job{Run: "run-1"}, " "); err == nil {
+	if _, err := loop.VoidFuture(Job{Run: "run-1"}, InfraKill, " "); err == nil {
 		t.Fatal("a void with no cause was posted")
 	}
 }

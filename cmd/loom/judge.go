@@ -87,7 +87,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	defer stop()
 	config := coordinator.Config{Wire: *wire, Secret: secret, Slots: slots, Uncached: true, Log: stdout}
 	client := strings.TrimSpace(string(token))
-	puller := judge.Puller{
+	puller := judge.NewPuller(judge.Puller{
 		Source: judge.HTTPFutures{Base: *queue, Token: client},
 		RunOf:  coordinator.FutureRun,
 		Read: func(run string) ([]protocol.Event, error) {
@@ -111,7 +111,8 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Main:  judge.NoMainRecords{},
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
 		Loop:  judge.Loop{Now: time.Now, RequireTestLog: true},
-	}
+		Stale: judge.StaleAfter,
+	})
 	if *censusRows != "" {
 		census, err := censusConfig(strings.Split(*censusRows, ","), *censusGit)
 		if err != nil {

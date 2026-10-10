@@ -86,7 +86,9 @@ func TestABadLogIsAnErrorNeverEmptyTests(t *testing.T) {
 		t.Fatalf("an unreadable log gave %v, want the error", err)
 	}
 	fabric := EventFabric{Rerun: func(string, string) ([]protocol.Event, error) { return uploadedStream("job", "passed", "x"), nil },
-		Log: func(run, sha string) ([]byte, error) { return gzipped(`{"Action":"pass","Package":"p","Test":"TestR"}` + "\n"), nil }}
+		Log: func(run, sha string) ([]byte, error) {
+			return gzipped(`{"Action":"pass","Package":"p","Test":"TestR"}` + "\n"), nil
+		}}
 	if rerun, err := fabric.RerunAlone("u", futureTree); err != nil || len(rerun.Tests) != 1 || rerun.Tests[0].Test != "TestR" {
 		t.Fatalf("rerun %+v (%v): want its tests from its log", rerun.Tests, err)
 	}

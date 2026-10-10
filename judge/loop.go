@@ -154,12 +154,16 @@ func (loop Loop) JudgeFuture(job Job) (FuturePost, error) {
 // VoidFuture posts a future's run as void without judging it: the run ended and will never finish every unit, so
 // none of its readings is a verdict, and Queue counts the void and lists the next attempt (Loom's ruling, Oct 10
 // 00:58Z, on run -1 of 4beacfbb and 21287d58, whose loom run processes an operator's stop killed). Every unit the
-// plan runs is void as killed, its attempt kept as evidence when it reported; reused units stay as they were
+// plan runs is void with the given infra kind (kill for an operator's stop, silent for a run that went quiet), its
+// attempt kept as evidence when it reported; reused units stay as they were
 // reused, so a plan that ran nothing reads as Green says, as Queue recomputes it. cause leads the decision's problems
 // (Queue logs its own recomputed problems, so the cause also goes on the run's task). Nothing is rerun.
-func (loop Loop) VoidFuture(job Job, cause string) (FuturePost, error) {
+func (loop Loop) VoidFuture(job Job, infra, cause string) (FuturePost, error) {
 	if strings.TrimSpace(cause) == "" {
 		return FuturePost{}, fmt.Errorf("a voided run names its cause")
+	}
+	if !infraKinds[infra] {
+		return FuturePost{}, fmt.Errorf("a voided run names its infra kind, not %q", infra)
 	}
 	post := FuturePost{Change: job.Change, Run: job.Run, Rule: Rule, Plan: []string{}, Verdicts: []json.RawMessage{}, Quarantine: []TestOutcome{}}
 	verdicts := []Verdict{}
@@ -178,7 +182,7 @@ func (loop Loop) VoidFuture(job Job, cause string) (FuturePost, error) {
 				verdict.Attempts = append(verdict.Attempts, finished.Attempt)
 				verdict.Tests, verdict.Outputs = nonNil(finished.Tests), nonNilStrings(finished.Outputs)
 			}
-			verdict.Status, verdict.Cause, verdict.Infra = Void, CauseInfra, InfraKill
+			verdict.Status, verdict.Cause, verdict.Infra = Void, CauseInfra, infra
 		}
 		verdicts = append(verdicts, verdict)
 		encoded, err := verdict.Canonical()

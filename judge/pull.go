@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
@@ -104,6 +105,51 @@ type Puller struct {
 	Main   MainRecords
 	Queue  Queue
 	Loop   Loop // its Now is used; its collaborators are set per future
+	// Stale is the backstop (Loom, Oct 10 01:10Z): a run with a unit still open and no event for this long is posted
+	// void as silent, so no future waits on a hand when a coordinator dies. Zero turns it off. The coordinator's own
+	// finished events for the units it gives up on are the real fix; this only moves a stuck run toward void.
+	Stale time.Duration
+	// emptySince is when this process first saw each run with no events at all, the age of a run that never started;
+	// a restart starts it over, which errs toward waiting.
+	emptySince map[string]time.Time
+}
+
+// NewPuller is a Puller with its backstop's memory made.
+func NewPuller(puller Puller) Puller {
+	puller.emptySince = map[string]time.Time{}
+	return puller
+}
+
+// StaleAfter is the backstop's line: over the 1800 s unit ceiling, with room for a slot to free.
+const StaleAfter = 45 * time.Minute
+
+// stale says why a run that hasn't finished every unit is stuck, or "" while it may still move: its newest event,
+// never its first, is Stale old.
+func (puller Puller) stale(run string, events []protocol.Event, open int) string {
+	if puller.Stale <= 0 {
+		return ""
+	}
+	now := puller.Loop.Now()
+	var newest time.Time
+	for _, event := range events {
+		if at, err := time.Parse(time.RFC3339Nano, event.Time); err == nil && at.After(newest) {
+			newest = at
+		}
+	}
+	what := "no event"
+	if newest.IsZero() {
+		if puller.emptySince == nil {
+			return ""
+		}
+		if _, seen := puller.emptySince[run]; !seen {
+			puller.emptySince[run] = now
+		}
+		newest, what = puller.emptySince[run], "no event since the judge first read it"
+	}
+	if age := now.Sub(newest); age >= puller.Stale {
+		return fmt.Sprintf("silent: %s for %d min with %d units open (the judge's %d-minute backstop)", what, int(age.Minutes()), open, int(puller.Stale.Minutes()))
+	}
+	return ""
 }
 
 // PullOnce judges every listed future whose run has a finished event for each unit it runs, and returns how many it
@@ -124,7 +170,14 @@ func (puller Puller) PullOnce() (int, error) {
 		if err != nil {
 			return judged, fmt.Errorf("future %s: reading run %s: %w", future.Future, run, err)
 		}
-		if !finishedAll(future, events) {
+		if open := openUnits(future, events); open > 0 {
+			if why := puller.stale(run, events, open); why != "" {
+				loop, job := puller.jobOf(future, run, events)
+				if _, err := loop.VoidFuture(job, InfraSilent, why); err != nil {
+					return judged, fmt.Errorf("future %s: %w", future.Future, err)
+				}
+				judged++
+			}
 			continue
 		}
 		loop, job := puller.jobOf(future, run, events)
@@ -156,7 +209,7 @@ func (puller Puller) VoidOne(tree string, attempt int, cause string) (FuturePost
 			return FuturePost{}, fmt.Errorf("future %s: reading run %s: %w", tree, run, err)
 		}
 		loop, job := puller.jobOf(future, run, events)
-		return loop.VoidFuture(job, cause)
+		return loop.VoidFuture(job, InfraKill, cause)
 	}
 	return FuturePost{}, fmt.Errorf("future %s isn't listed planned and undecided", tree)
 }
@@ -194,18 +247,19 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	return loop, Job{Record: record, Change: record.Change, Future: future.Future, Base: future.Base, Run: run, Plan: plan}
 }
 
-// finishedAll says whether every unit the future runs has a finished event in its run.
-func finishedAll(future PlannedFuture, events []protocol.Event) bool {
+// openUnits is how many units the future runs that have no finished event in its run.
+func openUnits(future PlannedFuture, events []protocol.Event) int {
 	finished := map[string]bool{}
 	for _, event := range events {
 		if event.Type == "finished" {
 			finished[event.Unit] = true
 		}
 	}
+	open := 0
 	for _, unit := range future.Units {
 		if unit.Decision != "reuse" && !finished[unit.UnitKey] {
-			return false
+			open++
 		}
 	}
-	return true
+	return open
 }
