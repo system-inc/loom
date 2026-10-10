@@ -580,7 +580,8 @@ type goStandIn struct {
 
 // standInScript is the stand-in go. A read-only query (version, env, list, each with only the flags on its allow list:
 // none that builds, none that asks a proxy) goes to the runner's go under delegatedEnvironment; anything else, a build
-// among it, is refused.
+// among it, is refused. go list's -buildmode only says which packages a build in that mode would compile (a c-archive's
+// runtime/cgo): adamic's GoInputs lists the checker archive's with -buildmode=c-archive to key it (#nee3cfe).
 const standInScript = `#!/bin/sh
 # loom-runner's stand-in go (prebuilt.go): the runner never builds.
 allowed=no
@@ -593,7 +594,7 @@ env)
 	for argument in "$@"; do case "$argument" in -json | -changed) ;; -*) allowed=no ;; esac; done ;;
 list)
 	allowed=yes
-	for argument in "$@"; do case "$argument" in -deps | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=*) ;; -*) allowed=no ;; esac; done ;;
+	for argument in "$@"; do case "$argument" in -deps | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=* | -buildmode=*) ;; -*) allowed=no ;; esac; done ;;
 esac
 # The test's own GOFLAGS and GOTOOLCHAIN pass through, each flag one that neither compiles, nor runs or reads anything
 # of the test's choosing, and the toolchain the tree's or the runner's own.

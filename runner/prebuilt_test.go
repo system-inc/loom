@@ -66,6 +66,7 @@ import (
 //	either cache swept without its sweep lock: TestASweepNeverTakesANameBeforeItsMakerLocksIt
 //	the test's GOFLAGS passed to the runner's go: TestAnAllowedGoListNeverCompiles
 //	a proxy query allowed: TestAProxyQueryIsRefused
+//	go list's -buildmode refused: TestAListInAnotherBuildModeIsAnswered
 //	modules read elsewhere than the tree's module cache, or no GOMODCACHE of the tree's own:
 //	TestATestsModulesComeFromTheTreesModuleCache
 //	the module cache not readied before the tests: TestAModuleTheCacheLacksIsLooms
@@ -1264,6 +1265,17 @@ func TestAnAllowedGoListNeverCompiles(t *testing.T) {
 	result, events, _ := runUnit(t, fixture.unit("^TestListExport$"), fixture.options(t))
 	if result.Status != protocol.StatusPassed {
 		t.Fatalf("the stand-in let go list compile: %s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+}
+
+// adamic keys the checker archive on go list -deps -json -buildmode=c-archive (#nee3cfe): the mode changes which
+// packages are listed, and nothing compiles, so the stand-in answers it.
+func TestAListInAnotherBuildModeIsAnswered(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestListBuildMode$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("go list -buildmode=c-archive: %s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
 	}
 }
 
