@@ -5,7 +5,7 @@
 //
 // The key pair comes from a key = value file, ~/.loom/r2-releases.conf by default, the same file updater/upload.sh
 // reads: account_id, access_key_id and secret_access_key. That key can write anywhere in loom-artifacts, releases/
-// included, so Put writes only the action store's prefixes (Writable).
+// included, so Put writes only the action store's prefixes and the gate inputs' (Writable).
 package r2
 
 import (
@@ -111,10 +111,11 @@ var ErrExists = errors.New("already written")
 // ErrChanged is a put with IfMatch refused because the key no longer holds that ETag.
 var ErrChanged = errors.New("changed since it was read")
 
-// Writable are the only key prefixes Put writes: the action store's (builder/store.go). The key pair can write the
-// whole bucket, releases/ included, whose current.txt every machine installs from, so a writer of the action store
-// never touches anything else even through a bug.
-var Writable = []string{"blobs/", "refs/action/", "trees/"}
+// Writable are the only key prefixes Put writes: the action store's (builder/store.go), and gate-inputs/, where the
+// gate inputs' chunks and manifests live by sha256 (gateinputs/gateinputs.go) under no lifecycle rule. The key pair can
+// write the whole bucket, releases/ included, whose current.txt every machine installs from, so a writer of the action
+// store never touches anything else even through a bug.
+var Writable = []string{"blobs/", "refs/action/", "trees/", "gate-inputs/"}
 
 // An Object is one key the bucket holds: its size, its ETag, and when it was last written, which is when R2's
 // lifecycle starts counting its days.
@@ -355,6 +356,78 @@ func (bucket Bucket) List(prefix string) ([]Object, error) {
 		}
 		token = page.NextContinuationToken
 	}
+}
+
+// A LifecycleRule is one rule of the bucket's lifecycle that deletes objects: the key prefix it applies to (empty is
+// every key) and after how many days, or on what date.
+type LifecycleRule struct {
+	Id     string
+	Prefix string
+	Days   int
+	Date   string
+}
+
+// lifecycleConfiguration is a GetBucketLifecycleConfiguration answer: a rule's prefix is its Filter's, its Filter's And's,
+// or the older form's own.
+type lifecycleConfiguration struct {
+	Rules []struct {
+		Id     string `xml:"ID"`
+		Status string `xml:"Status"`
+		Prefix string `xml:"Prefix"`
+		Filter struct {
+			Prefix string `xml:"Prefix"`
+			And    struct {
+				Prefix string `xml:"Prefix"`
+			} `xml:"And"`
+		} `xml:"Filter"`
+		Expiration *struct {
+			Days int    `xml:"Days"`
+			Date string `xml:"Date"`
+		} `xml:"Expiration"`
+	} `xml:"Rule"`
+}
+
+// ErrLifecycleUnreadable is a lifecycle this key may not read (R2 answers 403 to a key scoped to objects).
+var ErrLifecycleUnreadable = errors.New("the bucket's lifecycle isn't readable with this key")
+
+// Lifecycle is every enabled rule of the bucket's lifecycle that deletes objects (GetBucketLifecycleConfiguration):
+// none when the bucket has no lifecycle, and ErrLifecycleUnreadable when the key may not read it.
+func (bucket Bucket) Lifecycle() ([]LifecycleRule, error) {
+	response, answer, err := bucket.do(http.MethodGet, "", url.Values{"lifecycle": {""}}, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		if strings.Contains(string(answer), "NoSuchLifecycleConfiguration") {
+			return []LifecycleRule{}, nil
+		}
+		return nil, fmt.Errorf("the bucket's lifecycle: %s: %s", response.Status, snippet(answer))
+	case http.StatusForbidden, http.StatusUnauthorized:
+		return nil, fmt.Errorf("%w: %s", ErrLifecycleUnreadable, snippet(answer))
+	default:
+		return nil, fmt.Errorf("the bucket's lifecycle: %s: %s", response.Status, snippet(answer))
+	}
+	var configuration lifecycleConfiguration
+	if err = xml.Unmarshal(answer, &configuration); err != nil {
+		return nil, fmt.Errorf("the bucket's lifecycle: %w", err)
+	}
+	rules := []LifecycleRule{}
+	for _, rule := range configuration.Rules {
+		if !strings.EqualFold(rule.Status, "Enabled") || rule.Expiration == nil {
+			continue
+		}
+		prefix := rule.Filter.Prefix
+		if prefix == "" {
+			prefix = rule.Filter.And.Prefix
+		}
+		if prefix == "" {
+			prefix = rule.Prefix
+		}
+		rules = append(rules, LifecycleRule{Id: rule.Id, Prefix: prefix, Days: rule.Expiration.Days, Date: rule.Expiration.Date})
+	}
+	return rules, nil
 }
 
 // Sign signs request for R2 (AWS Signature Version 4, region auto, service s3): it sets X-Amz-Date and

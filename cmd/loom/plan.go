@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/gateinputs"
 	"github.com/system-inc/loom/planner"
 )
 
@@ -30,7 +32,8 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	interval := flags.Duration("interval", 10*time.Second, "time between pulls")
 	once := flags.Bool("once", false, "pull once and exit")
 	only := flags.String("future", "", "plan only this future (its tree sha) and leave every other unplanned")
-	gateInputsFile := flags.String("gate-inputs-file", "", "the file holding the gate inputs' manifest sha256 a parity run's box record ran with")
+	gateInputsFile := flags.String("gate-inputs-file", "", "the file holding the gate inputs' manifest sha256 (loom gate-inputs publish writes it), reread before every pull")
+	read := flags.String("read", builder.PublicRead, "the public store, where a runner reads the gate inputs")
 	poolsFile := flags.String("pools", planner.PoolsFile, "the pool table, for declared needs' plan-time check")
 	noReuseFile := flags.String("no-reuse", planner.NoReuseFile, "unit keys whose passed verdicts may not be reused, one per line with why")
 	if err := flags.Parse(arguments); err != nil {
@@ -52,15 +55,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	planner.PoolsFile = *poolsFile
 	planner.NoReuseFile = *noReuseFile
-	gateInputs := ""
-	if *gateInputsFile != "" {
-		content, err := os.ReadFile(*gateInputsFile)
-		if err != nil {
-			fmt.Fprintln(stderr, "plan: gate inputs:", err)
-			return 1
-		}
-		gateInputs = strings.TrimSpace(string(content))
-	}
+	gateInputsPin := &gateinputs.Pin{File: *gateInputsFile, Read: strings.TrimSuffix(*read, "/")}
 	client := planner.QueueClient{Base: *queue, Token: strings.TrimSpace(string(token))}
 	for {
 		if *gateToolsRef != "" {
@@ -75,6 +70,15 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			}
 		}
 		if err := repin(&tools, *runnerShaFile, stdout); err != nil {
+			fmt.Fprintln(stderr, "plan:", err)
+			if *once {
+				return 1
+			}
+			time.Sleep(*interval)
+			continue
+		}
+		gateInputs, err := currentGateInputs(gateInputsPin, stdout)
+		if err != nil {
 			fmt.Fprintln(stderr, "plan:", err)
 			if *once {
 				return 1
@@ -113,6 +117,24 @@ func repin(tools *planner.Tools, runnerShaFile string, stdout io.Writer) error {
 	return nil
 }
 
+// currentGateInputs rereads the gate inputs' manifest before a pull, as repin rereads the runner pin: a publish moves
+// every key from the next pull, said once, and a file that names no manifest the public store holds whole refuses the
+// pull, since every unit keyed on it would void at its preparation. No file configured is no gate inputs.
+func currentGateInputs(pin *gateinputs.Pin, stdout io.Writer) (string, error) {
+	if pin.File == "" {
+		return "", nil
+	}
+	previous := pin.Last()
+	hash, moved, err := pin.Current()
+	if err != nil {
+		return "", fmt.Errorf("gate inputs: %w", err)
+	}
+	if moved {
+		fmt.Fprintf(stdout, "gate inputs moved: %.12s to %.12s, every unit key moves with them\n", previous, hash)
+	}
+	return hash, nil
+}
+
 // refreshGateTools moves the gate tools checkout to its origin's branch tip.
 func refreshGateTools(directory, branch string) error {
 	for _, arguments := range [][]string{{"fetch", "--quiet", "origin", branch}, {"checkout", "--quiet", "--force", "--detach", "FETCH_HEAD"}} {
@@ -136,6 +158,7 @@ func planByKey(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	gateInputsFile := flags.String("gate-inputs-file", "", "the file holding the gate inputs' manifest sha256")
 	future := flags.String("future", "", "the parity future (its tree sha)")
 	out := flags.String("out", "", "where to write the plan, a JSON list of planned units")
+	read := flags.String("read", builder.PublicRead, "the public store, where a runner reads the gate inputs")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -148,9 +171,9 @@ func planByKey(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "plan by-key:", err)
 		return 1
 	}
-	gateInputs, err := os.ReadFile(*gateInputsFile)
+	gateInputs, _, err := (&gateinputs.Pin{File: *gateInputsFile, Read: strings.TrimSuffix(*read, "/")}).Current()
 	if err != nil {
-		fmt.Fprintln(stderr, "plan by-key:", err)
+		fmt.Fprintln(stderr, "plan by-key: gate inputs:", err)
 		return 1
 	}
 	tools, err := planner.ProbeTools(*runnerShaFile)
@@ -164,7 +187,7 @@ func planByKey(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "plan by-key:", err)
 		return 1
 	}
-	inputs, err := client.ParityInputs(planned, strings.TrimSpace(string(gateInputs)))
+	inputs, err := client.ParityInputs(planned, gateInputs)
 	if err != nil {
 		fmt.Fprintln(stderr, "plan by-key:", err)
 		return 1

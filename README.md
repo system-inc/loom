@@ -56,8 +56,9 @@ text. It:
    adamic's toolchain into HOME from the sources that script names; without it, uses the machine's own toolchain, and
    a machine with none is unfit for the unit; then loads its `env.sh`;
 8. runs `npm ci --ignore-scripts` for `stage3/api` from https://registry.npmjs.org, once per lockfile;
-9. fetches the gate inputs named by the job's hash from Loom's public store (https://artifacts.loom.system.inc),
-   checking every chunk and the total by sha256;
+9. fetches the gate inputs named by the job's hash from Loom's public store
+   (https://artifacts.loom.system.inc/gate-inputs/, where `loom gate-inputs publish` writes them), checking every chunk
+   and the total by sha256;
 10. runs `go mod download` for every Go module in the checkout, from Go's module proxy;
 11. writes the resulting environment for the tests.
 

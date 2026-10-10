@@ -1,8 +1,8 @@
 // Package r2test is R2 in memory for tests, never the real one: its S3 interface at /<bucket>/<key> honors HEAD,
-// GET (each with an ETag, the body's MD5 quoted), PUT with If-None-Match: * or If-Match: <ETag>, and ListObjectsV2,
-// stamps every write's Last-Modified from its own clock, and refuses
+// GET (each with an ETag, the body's MD5 quoted), PUT with If-None-Match: * or If-Match: <ETag>, ListObjectsV2
+// and GetBucketLifecycleConfiguration, stamps every write's Last-Modified from its own clock, and refuses
 // (and fails the test on) any request whose Signature Version 4 Authorization isn't well formed, for the right key
-// id, over the body it carries. The bucket's public domain is /public/<key>, read with no signature.
+// id, over the body it carries. The bucket's public domain is /public/<key>, read (GET or HEAD) with no signature.
 package r2test
 
 import (
@@ -28,7 +28,9 @@ import (
 // A Fake is one bucket. Now is its clock (nil means time.Now), PageSize how many keys a listing page holds,
 // Refused hears each badly signed request (nil means the test fails), and Before, when set, runs before each signed
 // request on a key is answered, so a test can race another writer in. Answer, when set and it returns a status, is
-// what the fake answers instead, for a test that needs the service to fail or slow it down.
+// what the fake answers instead, for a test that needs the service to fail or slow it down. Lifecycle, when set, is the
+// bucket's lifecycle configuration as GetBucketLifecycleConfiguration answers it (empty: the bucket has none), and
+// LifecycleStatus, when set, the status that call answers instead (a key that may not read it gets 403).
 type Fake struct {
 	Server      *httptest.Server
 	Credentials r2.Credentials
@@ -38,6 +40,9 @@ type Fake struct {
 	Refused     func(problem string)
 	Before      func(method, key string)
 	Answer      func(method, key string) int
+
+	Lifecycle       string
+	LifecycleStatus int
 
 	t        testing.TB
 	mutex    sync.Mutex
@@ -208,11 +213,14 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		fake.requests = append(fake.requests, "PUBLIC "+key)
 		held, found := fake.objects[key]
 		fake.mutex.Unlock()
-		if request.Method != http.MethodGet || !found {
+		if (request.Method != http.MethodGet && request.Method != http.MethodHead) || !found {
 			http.NotFound(writer, request)
 			return
 		}
-		writer.Write(held.body)
+		writer.Header().Set("Content-Length", strconv.Itoa(len(held.body)))
+		if request.Method == http.MethodGet {
+			writer.Write(held.body)
+		}
 		return
 	}
 	if problem := fake.check(request, body); problem != "" {
@@ -227,6 +235,21 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	path := strings.TrimPrefix(request.URL.Path, "/")
 	if path == fake.Name && request.Method == http.MethodGet && request.URL.Query().Get("list-type") == "2" {
 		fake.list(writer, request)
+		return
+	}
+	if path == fake.Name && request.Method == http.MethodGet && request.URL.Query().Has("lifecycle") {
+		fake.mutex.Lock()
+		fake.requests = append(fake.requests, "LIFECYCLE")
+		fake.mutex.Unlock()
+		switch {
+		case fake.LifecycleStatus != 0:
+			fail(writer, fake.LifecycleStatus, "AccessDenied", "lifecycle")
+		case fake.Lifecycle == "":
+			fail(writer, http.StatusNotFound, "NoSuchLifecycleConfiguration", "lifecycle")
+		default:
+			writer.Header().Set("Content-Type", "application/xml")
+			io.WriteString(writer, fake.Lifecycle)
+		}
 		return
 	}
 	key, inBucket := strings.CutPrefix(path, fake.Name+"/")

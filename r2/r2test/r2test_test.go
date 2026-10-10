@@ -110,3 +110,38 @@ func TestTheFakeRefusesWhatIsntSignedForItsKey(t *testing.T) {
 		t.Fatalf("refused %v", refused)
 	}
 }
+
+// Lifecycle reads every enabled rule that expires keys, with its prefix in each of the forms S3 writes it: none for a
+// bucket with no lifecycle, and ErrLifecycleUnreadable for a key that may not read it. A gate inputs publisher refuses
+// a bucket on its answer (gateinputs.HomeExpires), so a rule read wrong is a home that silently expires.
+func TestLifecycleReadsEveryExpiringRuleAndItsPrefix(t *testing.T) {
+	fake := New(t)
+	bucket := fake.Bucket()
+	if rules, err := bucket.Lifecycle(); err != nil || len(rules) != 0 {
+		t.Fatalf("no lifecycle: %v, %v", rules, err)
+	}
+	fake.Lifecycle = `<LifecycleConfiguration>` +
+		`<Rule><ID>blobs</ID><Status>Enabled</Status><Filter><Prefix>blobs/</Prefix></Filter><Expiration><Days>7</Days></Expiration></Rule>` +
+		`<Rule><ID>trees</ID><Status>Enabled</Status><Filter><And><Prefix>trees/</Prefix></And></Filter><Expiration><Days>7</Days></Expiration></Rule>` +
+		`<Rule><ID>refs</ID><Status>Enabled</Status><Prefix>refs/</Prefix><Expiration><Days>7</Days></Expiration></Rule>` +
+		`<Rule><ID>everything</ID><Status>Enabled</Status><Filter></Filter><Expiration><Date>2027-01-01T00:00:00Z</Date></Expiration></Rule>` +
+		`<Rule><ID>off</ID><Status>Disabled</Status><Filter><Prefix>gate-inputs/</Prefix></Filter><Expiration><Days>1</Days></Expiration></Rule>` +
+		`<Rule><ID>uploads</ID><Status>Enabled</Status><Filter><Prefix>gate-inputs/</Prefix></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule>` +
+		`</LifecycleConfiguration>`
+	rules, err := bucket.Lifecycle()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := []string{}
+	for _, rule := range rules {
+		read = append(read, fmt.Sprintf("%s:%q:%d:%s", rule.Id, rule.Prefix, rule.Days, rule.Date))
+	}
+	want := `blobs:"blobs/":7: trees:"trees/":7: refs:"refs/":7: everything:"":0:2027-01-01T00:00:00Z`
+	if strings.Join(read, " ") != want {
+		t.Fatalf("read %s, want %s", strings.Join(read, " "), want)
+	}
+	fake.LifecycleStatus = http.StatusForbidden
+	if _, err := bucket.Lifecycle(); !errors.Is(err, r2.ErrLifecycleUnreadable) {
+		t.Fatalf("a key that may not read it: %v", err)
+	}
+}
