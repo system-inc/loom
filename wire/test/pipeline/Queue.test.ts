@@ -728,14 +728,20 @@ describe("loom-pipeline's queue seams", function () {
             ['GET', '/head'],
             ['POST', `/submissions/chg_${'q'.repeat(26)}/facts`],
         ];
+        const board = await token('system_adamic_loom_release', 'board');
         for (const [method, path] of routes) {
             const body = method === 'POST' ? '{}' : undefined;
             expect((await call(path, { method: method, body: body })).status, path).toBe(401);
-            for (const scope of ['submit', 'board', 'runner', 'pool', 'build'] as const) {
+            // A board token reads the log and its head, and nothing else.
+            const readsLog = method === 'GET' && (path.startsWith('/log') || path === '/head');
+            expect((await call(path, { method: method, body: body, bearer: board })).status === 403, `board ${path}`).toBe(!readsLog);
+            for (const scope of ['submit', 'runner', 'pool', 'build'] as const) {
                 expect((await call(path, { method: method, body: body, bearer: await token('system_adamic_loom', scope) })).status, `${scope} ${path}`).toBe(403);
             }
         }
         expect(await (await call('/landings', { bearer: coordinator })).json()).toEqual({ landings: [] });
+        expect((await call('/head', { bearer: board })).status).toBe(200);
+        expect((await call('/log?after=0', { bearer: board })).status).toBe(200);
         expect((await call(`/verdicts/${'a'.repeat(64)}`, { bearer: coordinator })).status).toBe(404);
         expect(await (await call('/futures?state=unplanned', { bearer: coordinator })).json()).toEqual({ futures: [] });
         const plan = await call(`/futures/${sha(1)}/plan`, { method: 'POST', bearer: coordinator, body: JSON.stringify(await planOf(['a'])) });

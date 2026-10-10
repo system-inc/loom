@@ -38,7 +38,10 @@ export default {
         // judge's verdicts, the landing orders the pusher pulls and answers, and git's facts for each submitted change
         // (no GitHub credential lives here). The Queue object checks the rest.
         if (queueSeamPattern.test(path)) {
-            const claims = await authorize(request, environment, null, { scopes: ['coordinator'], queryScopes: [] });
+            // The log and its head are read-only, so the board scope reads them too (Release audits the replay with it,
+            // holding no coordinator token); every other seam is the coordinator's.
+            const readsLog = request.method === 'GET' && (path === '/log' || path === '/head');
+            const claims = await authorize(request, environment, null, { scopes: readsLog ? ['coordinator', 'board'] : ['coordinator'], queryScopes: [] });
             if (claims instanceof Response) {
                 await request.body?.cancel();
                 return claims;
