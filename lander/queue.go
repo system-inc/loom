@@ -1,15 +1,20 @@
 // Package lander is the lander's hands on Workshop (#83m6zw8, #nvq0tc8): the only thing that moves adamic's target
 // branch (main, unless push.conf names another), with the lander's deploy key (Host github-lander, ~/.ssh/loom_lander),
 // never from Kirk's Mac. Each pass, `loom push` builds any block the queue opened (blocks.go), then pulls the landing
-// orders and, in line order, fast-forwards the branch to each order's exact tested sha:
+// orders and, in line order, fast-forwards the branch from the tip it just read to each order's exact tested sha:
 //
-//	git push origin <sha>:refs/heads/<branch>     (no force: git and GitHub refuse anything that isn't a fast-forward)
+//	git fetch origin +<sha>:refs/loom/land/<sha> <tip>      (the sha in a ref of its own, checked to be a commit)
+//	git merge-base --is-ancestor <tip> <sha>                (or the branch moved: the change parks)
+//	git push --force-with-lease=refs/heads/<branch>:<tip> origin refs/loom/land/<sha>:refs/heads/<branch>
 //
-// A push that lands is reported as {main, from, landed} (main is then the sha itself). A push git refuses because the
-// branch moved (not a fast-forward) is reported as {refused, main}, which parks the change. Anything else is held,
-// never reported: a refusal by GitHub's rules or the key's permission (GH013, a protected branch, a read-only or
-// deleted key) holds every order and stops the pass, and any other failure (the network, a sha GitHub lacks) holds that
-// order and goes on to the next. The queue decided the sha; this only moves the branch to it.
+// The lease is the only force, and it only ever fast-forwards: GitHub takes the push only while the branch is still at
+// the tip the sha contains, so a branch that moved or was deleted since the read is refused and never created. A push
+// that lands, once the branch reads back as the sha, is reported as {main, from, landed}; a branch already at the sha
+// (a landing whose report was lost) is reported again with from the sha itself, which Queue takes as the same landing.
+// A branch that moved is reported as {refused, main}, which parks the change. Anything else is held, never reported: a
+// refusal by GitHub's rules or the key's permission (GH013, a protected branch, a read-only or deleted key) holds every
+// order and stops the pass, and any other failure (the network, a sha GitHub lacks, a report the queue refused) holds
+// that order and goes on to the next. The queue decided the sha; this only moves the branch to it.
 package lander
 
 import (

@@ -239,6 +239,26 @@ describe('the queue', function () {
         expect((await replay(await logOf(queue))).changes.get(id)?.state).toBe('landed');
     });
 
+    it('takes a landing reported again after its report was lost, from the future itself, and only that one from equal to main', async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
+        expect((await postWhole(queue, id, sha(1), 'passed', null)).status).toBe(200);
+        // from equal to main is no landing unless main is the future itself: the pusher's report of a branch already there.
+        expect((await report(queue, id, { main: sha(50), from: sha(50), landed: sha(1) })).status).toBe(400);
+        expect(await landings(queue)).toHaveLength(1);
+        const again = await report(queue, id, { main: sha(1), from: sha(1), landed: sha(1) });
+        expect(again.status, await again.clone().text()).toBe(200);
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'landed', landed: sha(1), future: sha(1) });
+        expect(await landings(queue)).toEqual([]);
+        // And once more is an answer, not a second event.
+        expect((await report(queue, id, { main: sha(1), from: sha(1), landed: sha(1) })).status).toBe(200);
+        expect(
+            (await logOf(queue)).map(function (event) {
+                return event.type;
+            }),
+        ).toEqual(['change.submitted', 'future.built', 'verdict.decided', 'change.landed']);
+    });
+
     it('gives a failed or void verdict no landing order, sends only the change-caused red to the owner, and parks a refused push', async function () {
         const queue = await freshQueue();
         const ids: string[] = [];

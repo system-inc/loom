@@ -2056,7 +2056,11 @@ export class Queue extends DurableObject<Env> {
             if (parsed.landed !== entry.future) {
                 return jsonResponse(409, { error: `the push landed ${String(parsed.landed)}, not ${entry.future}, the tree that was tested` });
             }
-            if (typeof parsed.from !== 'string' || !shaPattern.test(parsed.from) || parsed.from === parsed.main) {
+            // A landing reported again after its first report was lost: the pusher finds the branch already at the future
+            // and can no longer read the main it moved from, so it reports from as the future itself. That is the same
+            // landing, and taking it is what keeps the change from waiting forever on a report the queue refuses.
+            const reported = parsed.from === parsed.main && parsed.main === entry.future;
+            if (typeof parsed.from !== 'string' || !shaPattern.test(parsed.from) || (parsed.from === parsed.main && !reported)) {
                 return jsonResponse(400, { error: 'from is the main the push moved from, 40 lowercase hex digits, not the new main' });
             }
             // A block's prefix carries every change ahead of it: they land together, the landing change last.

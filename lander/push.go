@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,11 +57,13 @@ type Kind string
 const (
 	// Landed: the branch is now exactly the sha.
 	Landed Kind = "Landed"
-	// Moved: git refused the push as not a fast-forward, since the branch moved past the sha's base. The change parks.
+	// Moved: the branch moved past the sha's base (the sha doesn't contain its tip, or it moved while the push was on
+	// its way), so landing the sha would not be a fast-forward. The change parks.
 	Moved Kind = "Moved"
 	// Ruled: GitHub's rules or the key's permission refused it. The order holds, and so does every order after it.
 	Ruled Kind = "Ruled"
-	// Failed: anything else (the network, a sha GitHub lacks, a refusal nobody named). The order holds.
+	// Failed: anything else (the network, a sha GitHub lacks or that isn't a commit, a refusal nobody named). The order
+	// holds.
 	Failed Kind = "Failed"
 )
 
@@ -70,16 +73,40 @@ type Result struct {
 	Detail string
 }
 
-// Push fetches sha into the lander's clone and pushes exactly it to the branch, without force.
-func (hands Hands) Push(sha string) Result {
-	if _, stderr, err := Git(hands.Repository, nil, "fetch", "-q", "--no-tags", "origin", sha); err != nil {
+// Push moves the branch from from, its tip as just read, to exactly sha, as a fast-forward or not at all. The sha is
+// fetched into a ref of its own, refs/loom/land/<sha>, and that ref is what is pushed, so no local name that reads like
+// the sha (a branch called <sha>) can stand in for it. The sha must be a commit that contains from, which makes the push
+// a fast-forward; it then goes with --force-with-lease=<branch>:<from>, so GitHub takes it only while the branch is still
+// at from, which refuses a branch that moved or was deleted since the read and never creates one. A push GitHub accepted
+// has landed only when the branch reads back as the sha.
+func (hands Hands) Push(sha, from string) Result {
+	local := "refs/loom/land/" + sha
+	defer Git(hands.Repository, nil, "update-ref", "-d", local)
+	if _, stderr, err := Git(hands.Repository, nil, "fetch", "-q", "--no-tags", "origin", "+"+sha+":"+local, from); err != nil {
 		return Result{Failed, fmt.Sprintf("fetching %.12s: %s", sha, said("", stderr, err))}
 	}
-	stdout, stderr, err := Git(hands.Repository, nil, "push", "--porcelain", "origin", sha+":"+hands.Ref())
-	if err == nil {
-		return Result{Kind: Landed}
+	if held, _, err := Git(hands.Repository, nil, "rev-parse", "--verify", "-q", local); err != nil || strings.TrimSpace(held) != sha {
+		return Result{Failed, fmt.Sprintf("%s doesn't hold %s after the fetch", local, sha)}
 	}
-	return Result{Classify(stdout, stderr), said(stdout, stderr, err)}
+	if kind, _, _ := Git(hands.Repository, nil, "cat-file", "-t", local); strings.TrimSpace(kind) != "commit" {
+		return Result{Failed, fmt.Sprintf("%s is a %s, not a commit", sha, strings.TrimSpace(kind))}
+	}
+	_, stderr, err := Git(hands.Repository, nil, "merge-base", "--is-ancestor", from, local)
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+		return Result{Moved, fmt.Sprintf("%s is at %.12s, which %.12s doesn't contain", hands.Branch, from, sha)}
+	}
+	if err != nil {
+		return Result{Failed, fmt.Sprintf("is %.12s in %.12s: %s", from, sha, said("", stderr, err))}
+	}
+	stdout, stderr, err := Git(hands.Repository, nil, "push", "--porcelain", "--force-with-lease="+hands.Ref()+":"+from, "origin", local+":"+hands.Ref())
+	if err != nil {
+		return Result{Classify(stdout, stderr, hands.Ref()), said(stdout, stderr, err)}
+	}
+	if tip := hands.Tip(); tip != sha {
+		return Result{Failed, fmt.Sprintf("the push was answered, but %s reads as %q, not %s", hands.Ref(), tip, sha)}
+	}
+	return Result{Kind: Landed}
 }
 
 // said is what a refused push said, as one line of at most 300 bytes: git's refused ref lines, then what the remote and
@@ -106,25 +133,43 @@ func said(stdout, stderr string, err error) string {
 	return text
 }
 
-// A ref line of `git push --porcelain` that git itself refused because the remote moved: "!", the refspec, then
-// "[rejected] (non-fast-forward)", or "(fetch first)" when the clone hasn't seen the remote's new tip.
-var movedLine = regexp.MustCompile(`(?m)^!\t\S+\t\[rejected\] \((non-fast-forward|fetch first)\)$`)
+// A ref line of `git push --porcelain` that git itself refused because the branch isn't where the push expected it:
+// "!", the refspec, then "[rejected]" and "(stale info)" when the lease no longer holds (the branch moved or is gone),
+// "(non-fast-forward)" or "(fetch first)".
+var movedLine = regexp.MustCompile(`(?m)^!\t\S+\t\[rejected\] \((stale info|non-fast-forward|fetch first)\)$`)
 
-// The lines of a push's output that name the remote, which say nothing of why it refused.
-var remoteLine = regexp.MustCompile(`(?m)^To .*$|failed to push some refs to .*$`)
+// The reason on a ref line GitHub refused: "!", the refspec, "[remote rejected]" and the reason in parentheses.
+var remoteRejected = regexp.MustCompile(`(?m)^!\t\S+\t\[remote rejected\] \((.*)\)$`)
 
 // What GitHub, or ssh in front of it, says when a rule or a permission refuses a push: a ruleset (GH013), a protected
 // branch (GH006), a hook that declined, a key that is read-only, deleted or not allowed.
 var ruledText = regexp.MustCompile(`(?i)\bGH0\d\d\b|repository rule|rule violation|protected branch|declined|read[- ]only|permission|denied|not allowed|unauthori[sz]ed|forbidden|deploy key`)
 
-// Classify reads a refused push. It is Moved only when git's own ref line says not a fast-forward and nothing in the
-// output names a rule or a permission; a "[remote rejected]" line is GitHub's answer, never main moving, so a ruleset
-// that misfires holds every change instead of parking it. Failed is everything nobody named, and it holds too.
-func Classify(stdout, stderr string) Kind {
-	// The remote's address is no answer of GitHub's, so a word in it (a path, a host alias) never reads as a refusal.
-	output := remoteLine.ReplaceAllString(stdout+"\n"+stderr, "")
+// remoteSaid is what the far side said of a refused push, and nothing git wrote of its own: the "remote:" lines, the
+// reason on a "[remote rejected]" ref line, GitHub's "ERROR:" lines over ssh, and ssh's own "Permission denied". The
+// branch's name is taken out of it, so a branch called denied-x never reads as a refusal by permission.
+func remoteSaid(stdout, stderr, ref string) string {
+	kept := []string{}
+	for _, match := range remoteRejected.FindAllStringSubmatch(stdout, -1) {
+		kept = append(kept, match[1])
+	}
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "remote:") || strings.HasPrefix(line, "ERROR:") || strings.Contains(line, ": Permission denied (") {
+			kept = append(kept, line)
+		}
+	}
+	text := strings.Join(kept, "\n")
+	return strings.ReplaceAll(strings.ReplaceAll(text, ref, "<branch>"), strings.TrimPrefix(ref, "refs/heads/"), "<branch>")
+}
+
+// Classify reads a refused push of ref. It is Ruled when the far side named a rule or a permission. It is Moved only
+// when git's own ref line says the branch wasn't where the push expected it and GitHub refused nothing itself; a
+// "[remote rejected]" line is GitHub's answer, never the branch moving, so a ruleset that misfires holds every change
+// instead of parking it. Failed is everything nobody named, and it holds too.
+func Classify(stdout, stderr, ref string) Kind {
 	switch {
-	case ruledText.MatchString(output):
+	case ruledText.MatchString(remoteSaid(stdout, stderr, ref)):
 		return Ruled
 	case movedLine.MatchString(stdout) && !strings.Contains(stdout, "[remote rejected]"):
 		return Moved
@@ -153,7 +198,9 @@ type Pass struct {
 
 // Land is one pass over the landing orders. Each is checked to be a change and a sha before git sees it, so an order
 // can never name a ref, an option or a forced refspec; the branch's tip is read before each push and reported as the
-// main it moved from, or the main a refusal found.
+// main it moved from, or the main a refusal found. A branch already at the order's sha is a landing whose report was
+// lost: it is reported again, from that sha, which Queue takes as the same landing. A report the queue doesn't take
+// holds the order, so the pass says so.
 func Land(queue Queue, hands Hands, log func(string)) Pass {
 	pass := Pass{}
 	status, answer := call(queue, "GET", "/landings", nil)
@@ -164,6 +211,16 @@ func Land(queue Queue, hands Hands, log func(string)) Pass {
 		log(fmt.Sprintf("landings: %d %s", status, answerText(answer)))
 		pass.Unread = true
 		return pass
+	}
+	report := func(order Order, body map[string]string, done string) bool {
+		status, answer := call(queue, "POST", "/landings/"+order.Change, body)
+		if status != 200 {
+			log(fmt.Sprintf("holding %s: %s, and the queue didn't take the report: %d %s", order.Change, done, status, answerText(answer)))
+			pass.Held++
+			return false
+		}
+		log(fmt.Sprintf("%s; %d %s", done, status, answerText(answer)))
+		return true
 	}
 	for _, order := range listed.Landings {
 		if !changePattern.MatchString(order.Change) || !shaPattern.MatchString(order.Future) {
@@ -177,17 +234,29 @@ func Land(queue Queue, hands Hands, log func(string)) Pass {
 			pass.Held++
 			return pass
 		}
-		result := hands.Push(order.Future)
+		if from == order.Future {
+			if report(order, map[string]string{"main": order.Future, "from": from, "landed": order.Future},
+				fmt.Sprintf("landed %s: %s is already at %.12s, a landing whose report was lost", order.Change, hands.Branch, from)) {
+				pass.Landed++
+			}
+			continue
+		}
+		result := hands.Push(order.Future, from)
+		if result.Kind == Moved && hands.Tip() == "" {
+			result = Result{Failed, fmt.Sprintf("%s is gone: %s", hands.Ref(), result.Detail)}
+		}
 		switch result.Kind {
 		case Landed:
-			status, answer := call(queue, "POST", "/landings/"+order.Change, map[string]string{"main": order.Future, "from": from, "landed": order.Future})
-			log(fmt.Sprintf("landed %s: %s %.12s..%.12s, %d %s", order.Change, hands.Branch, from, order.Future, status, answerText(answer)))
-			pass.Landed++
+			if report(order, map[string]string{"main": order.Future, "from": from, "landed": order.Future},
+				fmt.Sprintf("landed %s: %s %.12s..%.12s", order.Change, hands.Branch, from, order.Future)) {
+				pass.Landed++
+			}
 		case Moved:
 			refused := "not a fast-forward of " + hands.Branch + ": " + result.Detail
-			status, answer := call(queue, "POST", "/landings/"+order.Change, map[string]string{"refused": refused, "main": from})
-			log(fmt.Sprintf("refused %s on %s %.12s: %s; %d %s", order.Change, hands.Branch, from, refused, status, answerText(answer)))
-			pass.Parked++
+			if report(order, map[string]string{"refused": refused, "main": from},
+				fmt.Sprintf("refused %s on %s %.12s: %s", order.Change, hands.Branch, from, refused)) {
+				pass.Parked++
+			}
 		case Ruled:
 			log(fmt.Sprintf("HELD %s and every order after it: GitHub refused the push to %s by a rule or the key's permission, which is no change's fault, so nothing parks: %s", order.Change, hands.Ref(), result.Detail))
 			pass.Held++

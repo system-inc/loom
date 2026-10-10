@@ -17,9 +17,21 @@ import (
 //	a ruled refusal going on to the next order: TestARulesetRefusalHoldsEveryOrderAndParksNothing
 //	a failure that isn't a refusal stopping the pass: TestAShaGitHubDoesntHaveIsHeldAndTheNextOrderStillLands
 //	refs/heads/main pushed whatever the branch: TestAnotherBranchLandsAndMainNeverMoves
-//	the push forced (`--force`): TestTheBranchMovesOnlyByFastForwardToTheExactTestedSha
-//	the order's future not checked to be a sha (so a + refspec forces): TestAFutureThatIsntAShaIsNeverPushed
-//	the landing posted with from and main swapped, or the tip read after the push: TestTheBranchMovesOnlyByFastForwardToTheExactTestedSha
+//	the sha pushed by its name, not its own ref (a branch named like it goes instead): TestARefNamedLikeTheShaIsNeverPushedInItsPlace
+//	the ancestry check dropped, or always passing (the lease then rewinds the branch): TestMainMovedPastTheShaParks,
+//	TestTheBranchMovesOnlyByFastForwardToTheExactTestedSha, TestABranchNamedForARefusalStillParksWhenItMoved
+//	the lease dropped (a branch deleted mid-pass is created again): TestABranchDeletedMidPassIsNeverCreatedAgain
+//	a lease refusal on a branch now gone parking the change: TestABranchDeletedMidPassIsNeverCreatedAgain
+//	"stale info" not read as the branch moving: TestABranchMovedMidPassParksAndKeepsItsTip, TestRefusalsAreReadByWhatGitAndGitHubSaid
+//	the branch not read back after the push: TestAPushThatDidntStickIsHeld
+//	the future not checked to be a commit: TestATagObjectAsTheFutureIsHeld
+//	a report the queue refused counted landed: TestALandingWhoseReportWasLostIsReportedAgain
+//	rule words matched against all of git's output, or the branch's name left in: TestRefusalsAreReadByWhatGitAndGitHubSaid
+//	Queue refusing from equal to main for the future itself, or taking it for any main: wire/test/pipeline/Queue.test.ts ('takes a
+//	landing reported again')
+//	the push forced (`--force`, no lease): TestABranchDeletedMidPassIsNeverCreatedAgain, TestABranchMovedMidPassParksAndKeepsItsTip
+//	the order's future not checked to be a sha: TestAFutureThatIsntAShaIsNeverPushed
+//	the landing posted with from and main swapped: TestTheBranchMovesOnlyByFastForwardToTheExactTestedSha
 //	a missing branch pushed to (created): TestAnotherBranchLandsAndMainNeverMoves
 //	the block pass's panic reaching the landing pass: TestAFailingBlockBuilderNeverStopsALanding
 //	the chain built on main whatever the branch: TestABlockIsAMergeChainOnTheBranchAndAConflictIsLeftOutWithItsPaths
@@ -53,11 +65,12 @@ func git(t *testing.T, where string, arguments ...string) string {
 }
 
 // A fakeQueue answers GET /landings and GET /blocks?state=unbuilt from its lists and records every POST, its body as the
-// JSON the wire would read.
+// JSON the wire would read, and answers each POST with postStatus (200 unless set).
 type fakeQueue struct {
-	landings []Order
-	blocks   []map[string]any
-	posts    []post
+	landings   []Order
+	blocks     []map[string]any
+	posts      []post
+	postStatus int
 }
 
 type post struct {
@@ -78,6 +91,9 @@ func (queue *fakeQueue) Call(method, path string, body any) (int, []byte, error)
 		decoded := map[string]any{}
 		json.Unmarshal(encoded, &decoded)
 		queue.posts = append(queue.posts, post{path, decoded})
+		if queue.postStatus != 0 && queue.postStatus != 200 {
+			return queue.postStatus, []byte(`{"error":"refused"}`), nil
+		}
 		return 200, []byte(`{"ok":true}`), nil
 	}
 	return 404, []byte(`{"error":"no route"}`), nil
@@ -161,7 +177,7 @@ func TestTheBranchMovesOnlyByFastForwardToTheExactTestedSha(t *testing.T) {
 	}
 	body := queue.posts[0].Body
 	if queue.posts[0].Path != "/landings/"+change || body["main"] != tested || len(body) != 2 ||
-		!strings.HasPrefix(body["refused"].(string), "not a fast-forward of main: ") || !strings.Contains(body["refused"].(string), "[rejected] (non-fast-forward)") {
+		!strings.HasPrefix(body["refused"].(string), "not a fast-forward of main: ") || !strings.Contains(body["refused"].(string), "doesn't contain") {
 		t.Fatalf("the refusal posted %+v", queue.posts[0])
 	}
 }
@@ -233,9 +249,11 @@ func TestAnotherBranchLandsAndMainNeverMoves(t *testing.T) {
 		!strings.HasPrefix(queue.posts[0].Body["refused"].(string), "not a fast-forward of loom-rehearsal: ") {
 		t.Fatalf("pass %+v, posts %+v", pass, queue.posts)
 	}
-	queue = &fakeQueue{landings: []Order{orderOf(change, sibling, made.main)}}
-	if pass := Land(queue, made.hands("loom-nowhere"), made.log); pass != (Pass{Held: 1}) || len(queue.posts) != 0 {
-		t.Fatalf("a missing branch: pass %+v, posts %+v", pass, queue.posts)
+	queue = &fakeQueue{landings: []Order{orderOf(change, sibling, made.main), orderOf(other, tested, made.main)}}
+	made.logged = nil
+	if pass := Land(queue, made.hands("loom-nowhere"), made.log); pass != (Pass{Held: 1}) || len(queue.posts) != 0 ||
+		len(made.logged) != 1 || !strings.HasPrefix(made.logged[0], "can't read refs/heads/loom-nowhere") {
+		t.Fatalf("a missing branch: pass %+v, posts %+v, %q", pass, queue.posts, made.logged)
 	}
 	if _, _, err := Git(made.origin, nil, "rev-parse", "--verify", "-q", "refs/heads/loom-nowhere"); err == nil {
 		t.Fatal("the lander created a branch")
@@ -257,8 +275,10 @@ func TestAFutureThatIsntAShaIsNeverPushed(t *testing.T) {
 	made.publish(t, tested, "main")
 	for _, future := range []string{"+" + sibling, "+refs/heads/b", "b", "--force", strings.ToUpper(sibling)} {
 		queue := &fakeQueue{landings: []Order{orderOf(change, future, made.main)}}
-		if pass := Land(queue, made.hands("main"), made.log); pass != (Pass{Held: 1}) || len(queue.posts) != 0 {
-			t.Errorf("%q: pass %+v, posts %+v", future, pass, queue.posts)
+		made.logged = nil
+		if pass := Land(queue, made.hands("main"), made.log); pass != (Pass{Held: 1}) || len(queue.posts) != 0 ||
+			len(made.logged) != 1 || !strings.Contains(made.logged[0], "isn't a 40-hex sha") {
+			t.Errorf("%q: pass %+v, posts %+v, %q", future, pass, queue.posts, made.logged)
 		}
 	}
 	queue := &fakeQueue{landings: []Order{orderOf("chg_x --force", tested, made.main)}}
@@ -302,15 +322,24 @@ func TestAFailingBlockBuilderNeverStopsALanding(t *testing.T) {
 	}
 }
 
-// What git and GitHub say, as the lander reads it. Only git's own non-fast-forward line, with nothing naming a rule or a
-// permission, is the branch moving.
+// What git and GitHub say, as the lander reads it. Only git's own line saying the branch isn't where the push expected
+// it, with nothing from the far side naming a rule or a permission, is the branch moving; and a rule word in the
+// branch's own name, or in what git itself wrote, never reads as one.
 func TestRefusalsAreReadByWhatGitAndGitHubSaid(t *testing.T) {
 	to := "To git@github-lander:system-inc/adamic.git\n"
 	failed := "error: failed to push some refs to 'github-lander:system-inc/adamic.git'\n"
+	denied := "denied-rehearsal"
 	for name, test := range map[string]struct {
 		stdout, stderr string
 		kind           Kind
 	}{
+		"stale info": {to + "!\tabc:refs/heads/main\t[rejected] (stale info)\nDone\n", failed, Moved},
+		"a branch named for a refusal": {"To /tmp/permission-denied/origin.git\n!\trefs/loom/land/abc:refs/heads/" + denied + "\t[rejected] (stale info)\nDone\n",
+			"error: failed to push some refs to '/tmp/permission-denied/origin.git'\nhint: Updates were rejected because the tip of the remote-tracking branch has been updated since the last checkout. You may want to integrate those changes locally (e.g., 'git pull ...') before forcing an update. denied\n", Moved},
+		"a branch named for a refusal, refused by a rule": {"!\tabc:refs/heads/" + denied + "\t[remote rejected] (push declined due to repository rule violations)\n",
+			"remote: error: GH013: Repository rule violations found for refs/heads/" + denied + ".\n", Ruled},
+		"a branch named for a refusal, refused for no rule": {"!\tabc:refs/heads/" + denied + "\t[remote rejected] (cannot lock ref 'refs/heads/" + denied + "')\n",
+			"remote: error: cannot lock ref 'refs/heads/" + denied + "'\n", Failed},
 		"non-fast-forward": {to + "!\tabc:refs/heads/main\t[rejected] (non-fast-forward)\nDone\n",
 			failed + "hint: Updates were rejected because a pushed branch tip is behind its remote\n", Moved},
 		"fetch first": {to + "!\tabc:refs/heads/main\t[rejected] (fetch first)\nDone\n",
@@ -329,7 +358,11 @@ func TestRefusalsAreReadByWhatGitAndGitHubSaid(t *testing.T) {
 		"nothing at all":   {"", "", Failed},
 		"rejected, named?": {to + "!\tabc:refs/heads/main\t[remote rejected] (internal server error)\nDone\n", failed, Failed},
 	} {
-		if kind := Classify(test.stdout, test.stderr); kind != test.kind {
+		ref := "refs/heads/main"
+		if strings.Contains(test.stdout, denied) {
+			ref = "refs/heads/" + denied
+		}
+		if kind := Classify(test.stdout, test.stderr, ref); kind != test.kind {
 			t.Errorf("%s: read as %s, not %s", name, kind, test.kind)
 		}
 	}
