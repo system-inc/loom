@@ -220,3 +220,41 @@ func TestAWarmRunnersRerunGoesOnlyToColdPools(t *testing.T) {
 		t.Fatalf("fit %v, want only the cold box", fit)
 	}
 }
+
+// One warm rule for the steady loop and the placer's carried list: the same runners, list and pool table give the
+// same reading, and no rule at all leaves both as today.
+func TestTheWarmRuleIsOneForTheLoopAndTheCarriedList(t *testing.T) {
+	directory := t.TempDir()
+	pools, attempts := directory+"/pools.json", directory+"/warm.txt"
+	table := `{"pools":[{"name":"box","tier":"box-strict","runner":"8a70","memoryMegabytes":16384,"cpus":4,"cold":true,"machines":["Cloud"],"coldSince":"2026-10-10T02:44:07Z"}]}`
+	if err := os.WriteFile(pools, []byte(table), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attempts, []byte("run-1 listed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if warmRule(map[string]bool{}, "", pools) != nil {
+		t.Fatal("a rule with no runners and no list")
+	}
+	if runners := warmRunnerSet("8a70, ed74\n"); len(runners) != 2 || !runners["8a70"] || !runners["ed74"] {
+		t.Fatalf("runners %v", runners)
+	}
+	rule := warmRule(warmRunnerSet("8a70"), attempts, pools)
+	test := judge.PlanUnit{UnitKey: "u", Kind: "test", Runner: "8a70"}
+	for _, c := range []struct {
+		name    string
+		run     string
+		unit    judge.PlanUnit
+		attempt judge.Attempt
+		warm    bool
+	}{
+		{"listed", "run-1", judge.PlanUnit{UnitKey: "listed", Kind: "phase"}, judge.Attempt{}, true},
+		{"cold Cloud", "run-2", test, judge.Attempt{Machine: "Cloud", StartedAt: "2026-10-10T02:50:00Z"}, false},
+		{"a Codex hash", "run-2", test, judge.Attempt{Machine: "cb2a", StartedAt: "2026-10-10T02:50:00Z"}, true},
+		{"another runner", "run-2", judge.PlanUnit{UnitKey: "u", Kind: "test", Runner: "ed74"}, judge.Attempt{Machine: "cb2a"}, false},
+	} {
+		if warm, err := rule(c.run, c.unit, c.attempt); err != nil || warm != c.warm {
+			t.Errorf("%s: warm %v (%v), want %v", c.name, warm, err, c.warm)
+		}
+	}
+}

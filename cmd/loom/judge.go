@@ -92,12 +92,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return 1
 		}
 	}
-	warmRunner := map[string]bool{}
-	for _, runner := range strings.Split(*warmRunners, ",") {
-		if runner = strings.TrimSpace(runner); runner != "" {
-			warmRunner[runner] = true
-		}
-	}
+	warmRunner := warmRunnerSet(*warmRunners)
 	if len(warmRunner) > 0 && *poolsPath == "" {
 		fmt.Fprintln(stderr, "judge: --warm-runner needs --pools, whose cold pools are the only place its units count")
 		return 1
@@ -195,24 +190,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Stale: judge.StaleAfter,
 	})
 	puller.Loop.RequireRunner = *requireRunner
-	if *warmAttempts != "" || len(warmRunner) > 0 {
-		puller.Loop.Warm = func(run string, unit judge.PlanUnit, attempt judge.Attempt) (bool, error) {
-			if *warmAttempts != "" {
-				listed, err := readWarmAttempts(*warmAttempts)
-				if err != nil || listed[run+" "+unit.UnitKey] {
-					return true, err
-				}
-			}
-			if len(warmRunner) == 0 {
-				return false, nil
-			}
-			table, err := readPools(*poolsPath)
-			if err != nil {
-				return true, err
-			}
-			return judge.WarmUnit(table, warmRunner, unit, attempt) != "", nil
-		}
-	}
+	puller.Loop.Warm = warmRule(warmRunner, *warmAttempts, *poolsPath)
 	if *poolsPath != "" {
 		// A failure is rerun with the need NeedOf reads now; when that's more than its attempt was placed with, it's
 		// void, need changed, never judged by reruns placed with more (Release, Oct 10 02:26Z).
@@ -414,8 +392,24 @@ func judgeCarried(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin, where runs' events live")
 	tree := flags.String("tree", "", "the future's tested tree sha")
 	attempt := flags.Int("attempt", 0, "the attempt being placed")
+	// The placer calls this with only the flags above, so the warm rule defaults to the steady judge's files: one
+	// rule for the carried list and the verdict, or a warm pass is left out by the placer and voided by the judge.
+	home, _ := os.UserHomeDir()
+	warmRunnersFile := flags.String("warm-runners-file", filepath.Join(home, "loom-judge", "warm-runners.txt"), "the runner sha256s whose workers keep a shared Go cache, as the steady judge's --warm-runner; a missing file means none")
+	warmAttempts := flags.String("warm-attempts", filepath.Join(home, "loom-judge", "warm-attempts.txt"), "the steady judge's warm-attempts file; a missing file means none")
+	poolsPath := flags.String("pools", filepath.Join(home, ".loom", "pools.json"), "the pool table the warm rule reads")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
+	}
+	warmRunner := map[string]bool{}
+	if content, err := os.ReadFile(*warmRunnersFile); err == nil {
+		warmRunner = warmRunnerSet(string(content))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(stderr, "judge carried:", err)
+		return 1
+	}
+	if _, err := os.Stat(*warmAttempts); errors.Is(err, os.ErrNotExist) {
+		*warmAttempts = ""
 	}
 	if *queue == "" || *tokenFile == "" || *tree == "" || *attempt < 1 {
 		fmt.Fprintln(stderr, "usage: loom judge carried --queue <url> --token-file <path> --tree <tree> --attempt <N> [--wire <url>]")
@@ -426,13 +420,13 @@ func judgeCarried(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "judge carried:", err)
 		return 1
 	}
-	home, _ := os.UserHomeDir()
 	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
 	if err != nil {
 		fmt.Fprintln(stderr, "judge carried:", err)
 		return 1
 	}
 	puller := judge.Puller{
+		Loop:   judge.Loop{Warm: warmRule(warmRunner, *warmAttempts, *poolsPath)},
 		Source: judge.HTTPFutures{Base: *queue, Token: strings.TrimSpace(string(token))},
 		RunOf:  coordinator.FutureRun,
 		Read: func(run string) ([]protocol.Event, error) {
@@ -592,6 +586,40 @@ func gateReport(suiteText string, events []judge.LogEvent, canaryTree string) ([
 // strictSilence is how long a strict rerun may go silent before its worker counts as gone: the unit's 1800 s ceiling,
 // since a strict runner says nothing while a package's go test runs (Loom, Oct 10 01:57Z).
 const strictSilence = 1800 * time.Second
+
+// warmRule is the judge's warm-cache rule, the one the steady loop and `loom judge carried` both apply, so the
+// placer's carried list and the verdict agree: an attempt on the warm-attempts list is warm, and a test attempt keyed
+// on a warm runner is warm unless the pool table says its machine ran cold (judge.WarmUnit). nil when there's no rule.
+func warmRule(warmRunner map[string]bool, warmAttempts, poolsPath string) func(string, judge.PlanUnit, judge.Attempt) (bool, error) {
+	if warmAttempts == "" && len(warmRunner) == 0 {
+		return nil
+	}
+	return func(run string, unit judge.PlanUnit, attempt judge.Attempt) (bool, error) {
+		if warmAttempts != "" {
+			listed, err := readWarmAttempts(warmAttempts)
+			if err != nil || listed[run+" "+unit.UnitKey] {
+				return true, err
+			}
+		}
+		if len(warmRunner) == 0 {
+			return false, nil
+		}
+		table, err := readPools(poolsPath)
+		if err != nil {
+			return true, err
+		}
+		return judge.WarmUnit(table, warmRunner, unit, attempt) != "", nil
+	}
+}
+
+// warmRunnerSet reads a comma- or whitespace-separated list of runner sha256s.
+func warmRunnerSet(list string) map[string]bool {
+	set := map[string]bool{}
+	for _, runner := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\t' }) {
+		set[runner] = true
+	}
+	return set
+}
 
 // readWarmAttempts reads the warm-attempts file: each line's first two fields, a run and a unit key, name one attempt
 // that ran on a warm shared cache; blank lines and lines starting with # are skipped.
