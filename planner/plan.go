@@ -35,8 +35,36 @@ func PlanTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 
 // PlanSelected plans a parity run: exactly the selection's packages, every unit run and none reused, and for a package
 // whose tests the selection names, a unit that runs exactly those tests (its run pattern ^(A|B)$).
-func PlanSelected(tree, gateTools string, tools Tools, selection ParitySelect) ([]PlannedResult, error) {
+//
+// Its units carry what the box record ran with, as keyed parts (Loom, Oct 10 00:27Z): the gate inputs' manifest, the
+// change's paths as ADAMIC_GATE_CHANGED (the file the strict runner writes, sorted and newline-joined), and the sample.
+func PlanSelected(tree, gateTools string, tools Tools, selection ParitySelect, inputs ParityInputs) ([]PlannedResult, error) {
+	selection.inputs = &inputs
 	return planTree(tree, gateTools, tools, MemoryIndex{}, true, KeyFor, &selection)
+}
+
+// ParityInputs are what a parity run's box record ran with: the gate inputs' manifest sha256, the change's paths and
+// the sample commit (empty: unset).
+type ParityInputs struct {
+	GateInputs   string
+	ChangedPaths []string
+	Sample       string
+}
+
+// ChangedPathsFile is the changed-paths file a test job's changedPaths become on the strict runner: sorted here, then
+// newline-joined with a trailing newline, as runner/strict.go writes it, so the key hashes what the tests read.
+func ChangedPathsFile(directory string, paths []string) (string, error) {
+	sorted := append([]string{}, paths...)
+	sort.Strings(sorted)
+	file, err := os.CreateTemp(directory, "changed-paths-*.txt")
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	if _, err := file.WriteString(strings.Join(sorted, "\n") + "\n"); err != nil {
+		return "", err
+	}
+	return file.Name(), nil
 }
 
 // exactRun is the run pattern that selects exactly the named top-level tests. A subtest's name can't be one, since go
@@ -98,6 +126,26 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	if err != nil {
 		return nil, err
 	}
+	environment := GateEnvironment
+	if selection != nil && selection.inputs != nil {
+		environment = map[string]string{}
+		for name, value := range GateEnvironment {
+			environment[name] = value
+		}
+		if len(selection.inputs.ChangedPaths) > 0 {
+			directory, err := os.MkdirTemp("", "loom-plan-changed-")
+			if err != nil {
+				return nil, err
+			}
+			defer os.RemoveAll(directory)
+			if environment["ADAMIC_GATE_CHANGED"], err = ChangedPathsFile(directory, selection.inputs.ChangedPaths); err != nil {
+				return nil, err
+			}
+		}
+		if selection.inputs.Sample != "" {
+			environment["ADAMIC_GATE_SAMPLE"] = selection.inputs.Sample
+		}
+	}
 	results := []PlannedResult{}
 	planned := []PlannedUnit{}
 	parts := map[string]KeyParts{}
@@ -109,6 +157,9 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 		}
 		unit := Unit{Kind: "test", Package: listed.ImportPath, Directory: directory, Environment: GateEnvironment,
 			Products: UnitProducts(productKeys, listed.ImportPath, compilers)}
+		if selection != nil && selection.inputs != nil {
+			unit.GateInputs, unit.Environment = selection.inputs.GateInputs, environment
+		}
 		if selection != nil && len(selection.Tests[listed.ImportPath]) > 0 {
 			if unit.Run, err = exactRun(selection.Tests[listed.ImportPath]); err != nil {
 				return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)

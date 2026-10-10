@@ -37,7 +37,9 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 		switch {
 		case request.Method == "GET" && request.URL.Path == "/futures" && request.URL.Query().Get("state") == "unplanned":
 			json.NewEncoder(writer).Encode(map[string][]Future{"futures": {{Future: "fut-1", Tree: "tree-sha"}, {Future: "fut-2", Tree: "tree-sha", Uncached: true},
-				{Future: "fut-3", Tree: "tree-sha", Parity: true, Select: &ParitySelect{Packages: []string{"example.com/plan/a"}}}}})
+				{Future: "fut-3", Tree: "tree-sha", Changes: []string{"chg-3"}, Parity: true, Select: &ParitySelect{Packages: []string{"example.com/plan/a"}}}}})
+		case request.Method == "GET" && request.URL.Path == "/changes/chg-3":
+			json.NewEncoder(writer).Encode(map[string]any{"record": map[string]any{"paths": []string{"a/a.go"}}})
 		case request.Method == "GET" && strings.HasPrefix(request.URL.Path, "/verdicts/"):
 			verdict, found := passed[strings.TrimPrefix(request.URL.Path, "/verdicts/")]
 			if !found {
@@ -75,11 +77,11 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	defer queue.Close()
 	client := QueueClient{Base: queue.URL, Token: "coordinator-token"}
 	checkout := func(sha string) (string, func(), error) { return tree, func() {}, nil }
-	if count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "fut-2"); err != nil || count != 1 || len(posted) != 1 || posted["fut-2"] == nil {
+	if count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "fut-2", ""); err != nil || count != 1 || len(posted) != 1 || posted["fut-2"] == nil {
 		t.Fatalf("planning fut-2 alone planned %d futures (%v), posted %d", count, err, len(posted))
 	}
 	delete(posted, "fut-2")
-	count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "")
+	count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "", strings.Repeat("4", 64))
 	if err != nil || count != 3 {
 		t.Fatalf("planned %d futures (%v), want 3", count, err)
 	}

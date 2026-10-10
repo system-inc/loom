@@ -30,6 +30,7 @@ type Future struct {
 type ParitySelect struct {
 	Packages []string            `json:"packages"`
 	Tests    map[string][]string `json:"tests,omitempty"`
+	inputs   *ParityInputs       // what the box record ran with, set by PlanSelected
 }
 
 // A QueueClient talks to loom-pipeline's planning routes with the coordinator token.
@@ -91,6 +92,34 @@ func (client QueueClient) PostPlan(future string, results []PlannedResult) error
 		return fmt.Errorf("POST /futures/%s/plan: %s: %s", future, response.Status, strings.TrimSpace(string(detail)))
 	}
 	return nil
+}
+
+// ParityInputs is what a parity future's box record ran with: the gate inputs given, and its one change's paths and
+// sample from the change record (GET /changes/<change>). Box gates aren't sampled, so the sample is empty.
+func (client QueueClient) ParityInputs(future Future, gateInputs string) (ParityInputs, error) {
+	if len(future.Changes) != 1 {
+		return ParityInputs{}, fmt.Errorf("parity future %s holds %d changes, not one", future.Future, len(future.Changes))
+	}
+	if !Sha256Hex(gateInputs) {
+		return ParityInputs{}, fmt.Errorf("a parity plan needs the gate inputs' manifest sha256, not %q", gateInputs)
+	}
+	response, err := client.do("GET", "/changes/"+url.PathEscape(future.Changes[0]), nil)
+	if err != nil {
+		return ParityInputs{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return ParityInputs{}, fmt.Errorf("GET /changes/%s: %s", future.Changes[0], response.Status)
+	}
+	var change struct {
+		Record struct {
+			Paths []string `json:"paths"`
+		} `json:"record"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&change); err != nil {
+		return ParityInputs{}, fmt.Errorf("GET /changes/%s: %w", future.Changes[0], err)
+	}
+	return ParityInputs{GateInputs: gateInputs, ChangedPaths: change.Record.Paths}, nil
 }
 
 // HTTPIndex reads Queue's verdict index, GET /verdicts/<unitKey>; a 404 is no decided verdict.
@@ -155,7 +184,9 @@ func GitCheckout(repository string) Checkout {
 // future that fails to plan is reported and left unplanned, never posted half-made.
 // With only set, it plans that future alone (a tree sha) and leaves every other to today's gate (Queue's rule until
 // the judge's first live batch, 23:58Z).
-func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Tools, index VerdictIndex, only string) (int, error) {
+//
+// gateInputs is the gate inputs' manifest sha256 a parity run's box record ran with.
+func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Tools, index VerdictIndex, only, gateInputs string) (int, error) {
 	futures, err := client.Unplanned()
 	if err != nil {
 		return 0, err
@@ -174,7 +205,10 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 		var results []PlannedResult
 		if future.Select != nil {
 			// A parity plan reruns the box record's selection as it was, so nothing is reused.
-			results, err = PlanSelected(tree, gateTools, tools, *future.Select)
+			var inputs ParityInputs
+			if inputs, err = client.ParityInputs(future, gateInputs); err == nil {
+				results, err = PlanSelected(tree, gateTools, tools, *future.Select, inputs)
+			}
 		} else {
 			results, err = PlanTree(tree, gateTools, tools, index, future.Uncached || future.Parity)
 		}

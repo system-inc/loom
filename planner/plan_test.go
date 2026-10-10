@@ -1,6 +1,8 @@
 package planner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,7 +79,7 @@ func TestPlanSelectedRunsExactlyTheSelection(t *testing.T) {
 	tree, gateTools := planFixture(t)
 	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
 	selection := ParitySelect{Packages: []string{"example.com/plan/a", "example.com/plan/compiler"}, Tests: map[string][]string{"example.com/plan/a": {"TestZ.1", "TestA"}}}
-	results, err := PlanSelected(tree, gateTools, tools, selection)
+	results, err := PlanSelected(tree, gateTools, tools, selection, ParityInputs{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,8 +94,42 @@ func TestPlanSelectedRunsExactlyTheSelection(t *testing.T) {
 		{Packages: []string{"example.com/plan/missing"}},
 		{Packages: []string{"example.com/plan/a"}, Tests: map[string][]string{"example.com/plan/a": {"TestA/sub"}}},
 	} {
-		if _, err := PlanSelected(tree, gateTools, tools, wrong); err == nil {
+		if _, err := PlanSelected(tree, gateTools, tools, wrong, ParityInputs{}); err == nil {
 			t.Errorf("the selection %+v was planned instead of refused", wrong)
 		}
+	}
+}
+
+// A parity unit carries what the box record ran with as keyed parts: the gate inputs, ADAMIC_GATE_CHANGED as the
+// sha256 of the changed-paths file the strict runner writes (sorted, newline-joined), and the sample. Each moves the key.
+func TestAParityUnitKeysWhatTheBoxRanWith(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := planFixture(t)
+	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
+	selection := ParitySelect{Packages: []string{"example.com/plan/a"}}
+	inputs := ParityInputs{GateInputs: strings.Repeat("4", 64), ChangedPaths: []string{"b/b.go", "a/a.go"}}
+	keyOf := func(inputs ParityInputs) PlannedResult {
+		results, err := PlanSelected(tree, gateTools, tools, selection, inputs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return results[0]
+	}
+	planned := keyOf(inputs)
+	sum := sha256.Sum256([]byte("a/a.go\nb/b.go\n"))
+	if planned.KeyParts.GateInputs != inputs.GateInputs || planned.KeyParts.Env["ADAMIC_GATE_CHANGED"] != hex.EncodeToString(sum[:]) || planned.KeyParts.Env["ADAMIC_GATE_UNCACHED"] != "1" {
+		t.Fatalf("the parity unit's parts %+v don't hold the gate inputs, the runner's changed-paths file and the switches", planned.KeyParts)
+	}
+	for name, moved := range map[string]ParityInputs{
+		"gate inputs": {GateInputs: strings.Repeat("5", 64), ChangedPaths: inputs.ChangedPaths},
+		"paths":       {GateInputs: inputs.GateInputs, ChangedPaths: []string{"a/a.go"}},
+		"sample":      {GateInputs: inputs.GateInputs, ChangedPaths: inputs.ChangedPaths, Sample: strings.Repeat("c", 40)},
+	} {
+		if keyOf(moved).UnitKey == planned.UnitKey {
+			t.Errorf("another %s kept the key", name)
+		}
+	}
+	if same := keyOf(ParityInputs{GateInputs: inputs.GateInputs, ChangedPaths: []string{"a/a.go", "b/b.go"}}); same.UnitKey != planned.UnitKey {
+		t.Error("the same paths in another order moved the key")
 	}
 }

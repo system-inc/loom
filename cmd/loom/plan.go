@@ -26,11 +26,12 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	interval := flags.Duration("interval", 10*time.Second, "time between pulls")
 	once := flags.Bool("once", false, "pull once and exit")
 	only := flags.String("future", "", "plan only this future (its tree sha) and leave every other unplanned")
+	gateInputsFile := flags.String("gate-inputs-file", "", "the file holding the gate inputs' manifest sha256 a parity run's box record ran with")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || *repository == "" || *gateTools == "" || *runnerShaFile == "" {
-		fmt.Fprintln(stderr, "usage: loom plan --queue <url> --token-file <path> --repository <clone> --gate-tools <dir> [--gate-tools-ref <branch>] --runner-sha-file <path> [--interval 10s] [--once] [--future <tree sha>]")
+		fmt.Fprintln(stderr, "usage: loom plan --queue <url> --token-file <path> --repository <clone> --gate-tools <dir> [--gate-tools-ref <branch>] --runner-sha-file <path> [--interval 10s] [--once] [--future <tree sha>] [--gate-inputs-file <path>]")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -42,6 +43,15 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "plan: tools:", err)
 		return 1
+	}
+	gateInputs := ""
+	if *gateInputsFile != "" {
+		content, err := os.ReadFile(*gateInputsFile)
+		if err != nil {
+			fmt.Fprintln(stderr, "plan: gate inputs:", err)
+			return 1
+		}
+		gateInputs = strings.TrimSpace(string(content))
 	}
 	client := planner.QueueClient{Base: *queue, Token: strings.TrimSpace(string(token))}
 	for {
@@ -56,7 +66,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				continue
 			}
 		}
-		count, err := planner.PullOnce(client, planner.GitCheckout(*repository), *gateTools, tools, planner.HTTPIndex{Client: client}, *only)
+		count, err := planner.PullOnce(client, planner.GitCheckout(*repository), *gateTools, tools, planner.HTTPIndex{Client: client}, *only, gateInputs)
 		if count > 0 {
 			fmt.Fprintf(stdout, "planned %d futures\n", count)
 		}
