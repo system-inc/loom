@@ -14,8 +14,10 @@
 # symlink to that version's file, each replaced by renaming a new symlink over it; ~/.loom/version names the version
 # once every link is in place, and ~/.loom/previous the one before, kept for a one-step rollback. A file whose sha256
 # an installed version already holds is linked from there, not downloaded. A downloaded blob that doesn't hash to its
-# name is refused and nothing is switched. After a switch every executable in ~/.loom/updated.d/ runs, in name order,
-# which is how a machine restarts its own services. Exit 0 when current (or another run holds the lock), 1 otherwise.
+# name is refused and nothing is switched, as is a manifest cut short. After a switch every executable in
+# ~/.loom/updated.d/ runs, in name order, which is how a machine restarts its own services; until they all pass, every
+# later run runs them again. This machine never builds: it holds at most two versions. Exit 0 when current (or another
+# run holds the lock), 1 otherwise.
 set -u
 root=${HOME}/.loom
 versions=${root}/versions
@@ -114,6 +116,10 @@ if ! locked; then
 fi
 trap release EXIT
 echo $$ > "${lock}/pid.$$" && mv -f "${lock}/pid.$$" "${lock}/pid" || refuse "writing ${lock}/pid"
+# update.log keeps its last 2000 lines once it passes 1 MB: an unreachable base logs every minute, and hooks write here.
+if [ -f "${log}" ] && [ "$(wc -c < "${log}")" -gt 1048576 ]; then
+	tail -n 2000 "${log}" > "${log}.$$" && mv -f "${log}.$$" "${log}"
+fi
 
 current() { cat "${root}/$1" 2> /dev/null; } # current <version | previous>: that version, or nothing.
 # post <version> <previous>: reports the version once; a failed report is retried by the next run, never fatal.
@@ -135,38 +141,51 @@ platform=${system}/${architecture}
 
 manifest=${root}/current.txt.$$
 curl -fsS -m 60 -o "${manifest}" "${base}/current.txt" || refuse "fetching ${base}/current.txt"
-# The entry for this host: the top section, or the canary section when its canary line names this host. Printed as
-# "version <v>" then one "<sha256> <name>" line per file built for this platform.
+# The entry for this host: the top section, or the canary section when the canary line names this host. Each section
+# is a version line, its file lines and an end line counting them, and a canary line comes first and promises a second
+# section, so a manifest cut short at any line is refused rather than read as a smaller one. Printed as "version <v>"
+# then one "<sha256> <name>" line per file built for this platform.
 awk -v host="${host}" -v platform="${platform}" '
-BEGIN { section = 0 }
+BEGIN { sections = 0 }
 function fail(message) { print message; bad = 1; exit 1 }
 function plain(name) { return name ~ /^[0-9A-Za-z][0-9A-Za-z._-]*$/ && length(name) <= 128 }
 NF == 0 { next }
-$1 == "version" && NF == 2 {
-	if (section in version) fail("line " NR ": a second version line in one section")
-	if (!plain($2)) fail("line " NR ": version " $2 " is not a plain name")
-	version[section] = $2
-	next
-}
 $1 == "canary" && NF >= 2 {
-	if (section) fail("line " NR ": a second canary line")
-	section = 1
+	if (sections || canary) fail("line " NR ": a canary line not first")
+	canary = 1
 	for (i = 2; i <= NF; i++) if (tolower($i) == tolower(host)) mine = 1
 	next
 }
+$1 == "version" && NF == 2 {
+	if (sections && !ended[sections - 1]) fail("line " NR ": a version line before the last section ended")
+	if (sections == 1 + canary) fail("line " NR ": a section more than the manifest names")
+	if (!plain($2)) fail("line " NR ": version " $2 " is not a plain name")
+	version[sections] = $2
+	sections++
+	next
+}
+$1 == "end" && NF == 2 {
+	s = sections - 1
+	if (s < 0 || ended[s]) fail("line " NR ": an end line outside a section")
+	if ($2 !~ /^[0-9]+$/ || $2 + 0 != count[s] + 0) fail("line " NR ": the end line counts " $2 " files, the section holds " count[s] + 0)
+	ended[s] = 1
+	next
+}
 NF == 3 {
-	if (!(section in version)) fail("line " NR ": a file before its version line")
+	s = sections - 1
+	if (s < 0 || ended[s]) fail("line " NR ": a file outside a section")
 	if (!plain($1) || $1 == "SHA256SUMS") fail("line " NR ": file name " $1 " is not a plain name")
 	if (length($3) != 64 || $3 ~ /[^0-9a-f]/) fail("line " NR ": " $3 " is not a sha256")
-	if (seen[section, $1, $2]++) fail("line " NR ": " $1 " for " $2 " twice")
-	if ($2 == platform) files[section] = files[section] $3 " " $1 "\n"
+	if (seen[s, $1, $2]++) fail("line " NR ": " $1 " for " $2 " twice")
+	count[s]++
+	if ($2 == platform) files[s] = files[s] $3 " " $1 "\n"
 	next
 }
 { fail("line " NR " is not a manifest line: " $0) }
 END {
 	if (bad) exit 1
+	if (sections < 1 + canary || !ended[sections - 1]) fail("it ends before its last end line: cut short")
 	entry = mine ? 1 : 0
-	if (!(entry in version)) fail("no version line")
 	if (files[entry] == "") fail("version " version[entry] " has no file for " platform)
 	printf "version %s\n%s", version[entry], files[entry]
 }' "${manifest}" > "${manifest}.wanted" || refuse "${base}/current.txt: $(cat "${manifest}.wanted")"
@@ -180,9 +199,28 @@ pointed() { # pointed: every file of the version has its bin link.
 		[ "$(readlink "${bin}/${name}")" = "../versions/${version}/${name}" ] || return 1
 	done < "${manifest}"
 }
+# hooks <previous>: runs every hook in updated.d; only when each exits 0 is the version recorded in hooked, so hooks
+# that failed run again on every later run until they pass, and a service never stays on old code unnoticed.
+hooks() {
+	local hook code failed=0
+	for hook in "${root}/updated.d"/*; do
+		[ -f "${hook}" ] && [ -x "${hook}" ] || continue
+		LOOM_UPDATE_VERSION=${version} LOOM_UPDATE_PREVIOUS=$1 LOOM_UPDATE_BIN=${bin} \
+			"${hook}" < /dev/null >> "${log}" 2>&1
+		code=$?
+		if [ "${code}" != 0 ]; then
+			say "hook $(basename "${hook}") exited ${code} for ${version}; the next run runs the hooks again"
+			failed=1
+		fi
+	done
+	[ "${failed}" = 0 ] || return 1
+	place "${root}/hooked" - "${version}"
+}
 if [ "${installed}" = "${version}" ] && cmp -s "${manifest}" "${versions}/${version}/SHA256SUMS" && pointed; then
+	status=0
+	[ "$(current hooked)" = "${version}" ] || { hooks "$(current previous)"; status=$?; }
 	post "${version}" "$(current previous)"
-	exit 0
+	exit "${status}"
 fi
 
 target=${versions}/${version}
@@ -241,16 +279,7 @@ for directory in "${versions}"/* "${versions}"/.[!.]*; do
 	clear "${directory}"
 done
 
-failed=0
-for hook in "${root}/updated.d"/*; do
-	[ -f "${hook}" ] && [ -x "${hook}" ] || continue
-	LOOM_UPDATE_VERSION=${version} LOOM_UPDATE_PREVIOUS=${installed} LOOM_UPDATE_BIN=${bin} \
-		"${hook}" < /dev/null >> "${log}" 2>&1
-	code=$?
-	if [ "${code}" != 0 ]; then
-		say "hook $(basename "${hook}") exited ${code} after installing ${version}"
-		failed=1
-	fi
-done
+hooks "${installed}"
+status=$?
 post "${version}" "${installed}"
-exit "${failed}"
+exit "${status}"
