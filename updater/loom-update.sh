@@ -139,7 +139,7 @@ alive() {
 	kill -0 "$1" 2> /dev/null && ps -p "$1" -o command= 2> /dev/null | grep -qF "${self}"
 }
 release() {
-	rm -f "${manifest:-}" "${manifest:-}.wanted" "${root}/report.$$" "${root}/report.$$.answer" "${root}/report.$$.answer.err"
+	rm -f "${manifest:-}" "${manifest:-}.wanted" "${root}/report.$$" "${root}/report.$$.answer" "${root}/report.$$.answer.err" "${root}/probe.$$"
 	[ "$(cat "${lock}/pid" 2> /dev/null)" = "$$" ] || return 0
 	rm -f "${lock}/pid" "${lock}"/pid.*
 	for directory in "${lock}"/takeover-*; do [ -d "${directory}" ] && rmdir "${directory}"; done
@@ -170,15 +170,39 @@ fi
 
 current() { cat "${root}/$1" 2> /dev/null; } # current <version | previous | hooked | updated | held>: its line, or nothing.
 quoted() { LC_ALL=C tr -cd ' -~' | sed 's/[\\"]/\\&/g'; } # quoted: stdin as the inside of a JSON string, printable ASCII
+# bounded <seconds> <command...>: runs the command, ended with every process it started once the seconds pass:
+# timeout(1), which signals the command's whole process group, then kills it 2 s later; perl the same way where there
+# is no timeout (a stock macOS). Exits 124 (or 137, killed) when it timed out, else as the command did.
+bounded() {
+	if command -v timeout > /dev/null 2>&1; then
+		timeout -k 2 "$@"
+	else
+		perl -e 'my $seconds = shift; my $pid = fork; defined $pid or exit 125;
+			if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127 }
+			$SIG{ALRM} = sub { kill "TERM", -$pid; sleep 2; kill "KILL", -$pid; waitpid($pid, 0); exit 124 };
+			alarm $seconds; waitpid($pid, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$@"
+	fi
+}
 # services: each health.d probe's lines, "<service> <state> [<key>=<value>...]", as JSON strings joined by commas. A
-# probe that exits non-zero adds "<probe> probe-failed"; a line of any other shape is dropped, and at most 32 are kept.
+# probe runs for at most 10 s, with everything it started, since the run holds update.lock meanwhile and a hung probe
+# would hold off every later update; its output goes to a file, so nothing it left behind holds the report open. A
+# probe that exits non-zero adds "<probe> probe-failed", one that ran out of time "<probe> probe-timed-out"; a line of
+# any other shape is dropped, and at most 32 are kept.
 services() {
-	local probe line
+	local probe line code output=${root}/probe.$$
 	for probe in "${root}/health.d"/*; do
 		[ -f "${probe}" ] && [ -x "${probe}" ] || continue
-		"${probe}" < /dev/null 2> /dev/null || echo "$(basename "${probe}") probe-failed"
+		bounded 10 "${probe}" < /dev/null > "${output}" 2> /dev/null
+		code=$?
+		cat "${output}"
+		case "${code}" in
+		0) ;;
+		124 | 137) echo "$(basename "${probe}") probe-timed-out" ;;
+		*) echo "$(basename "${probe}") probe-failed" ;;
+		esac
 	done | LC_ALL=C grep -E '^[A-Za-z0-9][A-Za-z0-9._@-]* [a-z][a-z-]*( [ -~]*)?$' | head -n 32 | cut -c1-200 |
 		while IFS= read -r line; do printf '"%s"\n' "$(printf '%s' "${line}" | quoted)"; done | paste -sd, -
+	rm -f "${output}"
 }
 # post [refusal]: reports this machine's state: the version it runs, the one before, when it last switched, the version
 # whose hooks all passed, its hold, this run's refusal if any, and its services. Sent when that differs from what the
