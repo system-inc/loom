@@ -40,7 +40,11 @@ func Boxes(config Config, published Manifest, asked map[string]time.Time, now ti
 			boxes = append(boxes, status)
 			continue
 		}
+		silent := now.Sub(report.Received)
 		switch {
+		case report.Held != "" && silent > Silence:
+			// A hold is known only while the box reports: unheard, it is silent, not held.
+			status.Problems = append(status.Problems, fmt.Sprintf("SILENT for %s, held at %s when last heard: its updater reports every 5m", silent.Round(time.Minute), short(report.Held)))
 		case report.Held != "":
 			status.Notes = append(status.Notes, fmt.Sprintf("HELD at %s by its update.conf (the release for it is %s)", short(report.Held), short(status.Wants)))
 		case report.Version != status.Wants:
@@ -52,7 +56,7 @@ func Boxes(config Config, published Manifest, asked map[string]time.Time, now ti
 		if report.Refused != "" {
 			status.Problems = append(status.Problems, "REFUSED: "+report.Refused)
 		}
-		if silent := now.Sub(report.Received); silent > Silence {
+		if silent > Silence && report.Held == "" {
 			status.Problems = append(status.Problems, fmt.Sprintf("SILENT for %s: its updater reports every 5m", silent.Round(time.Minute)))
 		}
 		if unhealthy := report.Unhealthy(nil); len(unhealthy) > 0 {

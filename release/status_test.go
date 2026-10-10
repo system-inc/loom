@@ -227,6 +227,10 @@ func TestStatusFlagsALaggingBox(t *testing.T) {
 			t.Errorf("%s: %q", box.Box, box.Problems)
 		}
 	}
+	// A hold is known only while its box reports: Home, last heard held, is silent, not held.
+	if home := later[3]; len(home.Notes) != 0 || !strings.Contains(strings.Join(home.Problems, " "), "SILENT for 13m0s, held at cccccccccccc when last heard") {
+		t.Errorf("Home: %q, %q", home.Problems, home.Notes)
+	}
 	os.Remove(reportPath(filepath.Join(w.config.State, "reports"), "Server"))
 	never, _ := Boxes(w.config, published, nil, now)
 	if !strings.Contains(strings.Join(never[2].Problems, " "), "NEVER REPORTED") {

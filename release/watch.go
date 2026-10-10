@@ -474,10 +474,11 @@ func (watcher *Watcher) soak(callContext context.Context, state *State) error {
 }
 
 // fleet waits for every box but the canary to report the release with its hooks passed. A held box is skipped and
-// named. A box that doesn't report in time is named loudly as lagging, but doesn't stop the release: a box that was
-// off catches up when it returns, and status says it lags until then.
+// named, while its reports are fresh: a hold is known only from them, so a box last heard held longer ago than Silence
+// is named silent and waited on like any other. A box that doesn't report in time is named loudly as lagging, but
+// doesn't stop the release: a box that was off catches up when it returns, and status says it lags until then.
 func (watcher *Watcher) fleet(callContext context.Context, state *State) error {
-	var waiting, held []string
+	var waiting, silent, held []string
 	for _, box := range watcher.Config.Boxes {
 		if strings.EqualFold(box, watcher.Config.Canary) {
 			continue
@@ -487,23 +488,29 @@ func (watcher *Watcher) fleet(callContext context.Context, state *State) error {
 			return err
 		}
 		switch {
-		case report != nil && report.Held != "":
-			held = append(held, fmt.Sprintf("%s (held at %s)", box, report.Held))
 		case report != nil && report.Received.After(state.Since) && report.Version == state.Commit && report.Hooked == state.Commit:
+		case report != nil && report.Held != "" && watcher.Now().Sub(report.Received) <= Silence:
+			held = append(held, fmt.Sprintf("%s (held at %s)", box, report.Held))
+		case report != nil && report.Held != "":
+			silent = append(silent, fmt.Sprintf("%s (silent for %s, held at %s when last heard)", box, watcher.Now().Sub(report.Received).Round(time.Minute), report.Held))
 		default:
 			waiting = append(waiting, box)
 		}
 	}
-	if len(waiting) > 0 && watcher.Now().Sub(state.Since) <= watcher.Config.FleetWithin {
+	if len(waiting)+len(silent) > 0 && watcher.Now().Sub(state.Since) <= watcher.Config.FleetWithin {
 		return nil
 	}
-	state.Held, state.Lagging = held, waiting
+	state.Held, state.Lagging = held, append(waiting, silent...)
 	if len(held) > 0 {
 		watcher.say("HELD: %s stay where their hold keeps them, off %s", strings.Join(held, ", "), short(state.Commit))
 	}
+	if len(silent) > 0 {
+		watcher.say("SILENT: %s; a hold counts only while its box reports, so they lag %s", strings.Join(silent, ", "), short(state.Commit))
+	}
 	if len(waiting) > 0 {
 		watcher.say("LAGGING: %s didn't report %s installed within %s; `loom release status` names what each last said", strings.Join(waiting, ", "), short(state.Commit), watcher.Config.FleetWithin)
-	} else {
+	}
+	if len(waiting)+len(silent) == 0 {
 		watcher.say("every box runs %s", short(state.Commit))
 	}
 	state.Phase, state.Since = PhaseAfter, watcher.Now().UTC()
