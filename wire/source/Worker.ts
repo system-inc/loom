@@ -4,7 +4,7 @@
 // whether a token may reach a blob is the run object's call, since it holds the plan's inputs and the run's uploads.
 
 import { BoardName, BoardSubprotocol } from './Board';
-import { getBlob, headBlob, putBlob, Sha256Pattern } from './Blobs';
+import { fresh, getBlob, headBlob, holdBlob, putBlob, Sha256Pattern } from './Blobs';
 import { getCacheEntry, putCacheEntry } from './Cache';
 import { RunIdPattern } from './Events';
 import { jsonResponse } from './Http';
@@ -411,7 +411,8 @@ async function handlePublicBlob(request: Request, environment: Env, sha256: stri
 // manifest under its cache key this way (@system_adamic, Oct 9). A ref is written only through here, by a
 // coordinator or publish token, and only to a blob the store already holds, so a ref never dangles. A cache key
 // is honest, so the same key always names the same product: a write that would change a ref is refused (409),
-// which also surfaces a key that isn't honest.
+// which also surfaces a key that isn't honest. refs/ expires 7 days after its upload, as blobs/ does, so a ref written
+// again with what it holds is refreshed when stale, and so is its blob first, so the ref never outlives what it names.
 export const RefNamespacePattern = /^[a-z][a-z0-9-]{0,31}$/;
 export const RefNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 
@@ -438,17 +439,25 @@ async function handlePublicRef(request: Request, environment: Env, namespace: st
     if (!Sha256Pattern.test(target)) {
         return jsonResponse(400, { error: 'a ref holds one blob sha256, 64 lowercase hex digits' });
     }
-    if ((await environment.PublicStore.head(`blobs/${target}`)) === null) {
+    if (!(await holdBlob(environment.PublicStore, target))) {
         return jsonResponse(409, { error: `blob ${target} isn't in the store; put it before its ref` });
     }
     const key = `refs/${namespace}/${name}`;
     const existing = await environment.PublicStore.get(key);
     if (existing !== null) {
         const held = (await existing.text()).trim();
-        if (held === target) {
-            return jsonResponse(200, { ref: key, sha256: target, created: false });
+        if (held !== target) {
+            return jsonResponse(409, { error: `${key} already names ${held}; a ref never changes`, held });
         }
-        return jsonResponse(409, { error: `${key} already names ${held}; a ref never changes`, held });
+        if (fresh(existing)) {
+            return jsonResponse(200, { ref: key, sha256: target, created: false, refreshed: false });
+        }
+        // Only over the very object read: a ref never changes, so one another writer replaced meanwhile is fresh too.
+        await environment.PublicStore.put(key, target, {
+            onlyIf: { etagMatches: existing.etag },
+            httpMetadata: { contentType: 'text/plain' },
+        });
+        return jsonResponse(200, { ref: key, sha256: target, created: false, refreshed: true });
     }
     await environment.PublicStore.put(key, target, { httpMetadata: { contentType: 'text/plain' } });
     return jsonResponse(201, { ref: key, sha256: target, created: true });
