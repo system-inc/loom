@@ -46,7 +46,7 @@ func TestTheShippedTreeBuilderUnitBuildsUnderAdamicsToolchain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loom build-trees %v: %v", arguments, err)
 	}
-	if *settings.ledgerPath != "/home/loom/loom-trees/trees.jsonl" || *settings.clone != "/home/loom/loom-trees/adamic" || *settings.floorGB != 200 || *settings.once {
+	if *settings.ledgerPath != "/home/loom/loom-trees/trees.jsonl" || *settings.clone != "/home/loom/loom-trees/adamic" || *settings.floorGB != 100 || *settings.goCacheGB != 500 || *settings.once {
 		t.Fatalf("the unit's builder is %v", arguments)
 	}
 }
