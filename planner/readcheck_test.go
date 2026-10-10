@@ -206,6 +206,45 @@ func TestTraceAccessesReadsLookupsAndListings(t *testing.T) {
 	}
 }
 
+// A call that names a relative path without a directory descriptor resolves against its own process's working
+// directory (unit-reads review, finding 4): one a child was born with, its parent's when the fork started, though
+// strace prints the child's calls before its parent's fork returns; one chdir or fchdir moved; one its latest decoded
+// AT_FDCWD shows. A call by a numbered descriptor strace didn't decode is refused. Mutants that each fail it: a child
+// born in the traced process's starting directory; chdir not followed; fchdir not followed; a fork placed where it
+// returned rather than where it started; execveat not read.
+func TestTraceAccessesFollowEachProcesssWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	trace := strings.Join([]string{
+		`100 openat(AT_FDCWD</work/p>, "x.txt", O_RDONLY) = 3`,
+		`100 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|SIGCHLD <unfinished ...>`,
+		`101 chdir("../sub") = 0`,
+		`101 execve("./script.sh", ["./script.sh"], 0x7ffd /* 3 vars */) = 0`,
+		`100 <... clone resumed>, child_tidptr=0x7f00) = 101`,
+		`101 stat("data.txt", {st_mode=S_IFREG|0644, ...}) = 0`,
+		`101 clone3({flags=CLONE_VM|CLONE_VFORK, exit_signal=SIGCHLD, stack=0x7f, stack_size=0x9000}, 88) = 102`,
+		`102 open("dir/a.txt", O_RDONLY) = 3`,
+		`101 fchdir(4</work/sub/dir>) = 0`,
+		`101 access("b.txt", R_OK) = -1 ENOENT (No such file or directory)`,
+		`100 execveat(AT_FDCWD</work/p>, "tool", ["tool"], 0x7ffd /* 3 vars */, 0) = 0`,
+		`103 stat("orphan.txt", 0x7ffd) = -1 ENOENT (No such file or directory)`,
+	}, "\n")
+	accesses, err := TraceAccesses(strings.NewReader(trace), "/work/default/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TracedAccesses{
+		Reads:    []string{"/work/p/tool", "/work/p/x.txt", "/work/sub/dir/a.txt", "/work/sub/script.sh"},
+		Lookups:  []string{"/work/default/x/orphan.txt", "/work/sub", "/work/sub/data.txt", "/work/sub/dir/b.txt"},
+		Listings: []string{},
+	}
+	if !reflect.DeepEqual(accesses, want) {
+		t.Fatalf("accesses\n%q\nwant\n%q", accesses, want)
+	}
+	if _, err := TraceAccesses(strings.NewReader(`7 openat(5, "x", O_RDONLY) = 3`), "/work"); err == nil {
+		t.Fatal("a call by a numbered descriptor with no decoded directory was read")
+	}
+}
+
 // subTrace is a trace of p's run reading each of the submodule paths given from the package's directory, a name
 // ending in / listed.
 func subTrace(fixture readSetFixture, paths ...string) string {
