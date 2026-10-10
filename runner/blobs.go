@@ -179,7 +179,7 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File
 	case response.StatusCode != http.StatusOK:
 		return nil, 0, fmt.Errorf("%s/blobs/%s answered %s", cache.store, sum, response.Status)
 	}
-	partial, err := os.CreateTemp(cache.directory, partialPrefix+sum+"-")
+	partial, err := lockedTemporary(cache.directory, partialPrefix+sum+"-", false)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -190,10 +190,6 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File
 			partial.Close()
 		}
 	}()
-	// Held for as long as this fetch lives: a partial whose lock is free is a dead fetch's.
-	if err = syscall.Flock(int(partial.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return nil, 0, err
-	}
 	hash := sha256.New()
 	size, err := copyBlob(io.MultiWriter(partial, hash), response.Body)
 	if errors.Is(err, syscall.ENOSPC) {
@@ -231,10 +227,15 @@ type cachedBlob struct {
 // blobs lists the cache's blobs, least recently used first, and the bytes of fetches in flight; each partial whose
 // lock no one holds, a dead fetch's, is removed.
 func (cache blobCache) blobs() ([]cachedBlob, int64, error) {
-	entries, err := os.ReadDir(cache.directory)
-	if errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(cache.directory); errors.Is(err, os.ErrNotExist) {
 		return nil, 0, nil
 	}
+	sweep, err := lockDirectory(cache.directory, syscall.LOCK_EX)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer sweep.Close()
+	entries, err := os.ReadDir(cache.directory)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -259,6 +260,53 @@ func (cache blobCache) blobs() ([]cachedBlob, int64, error) {
 	}
 	sort.Slice(blobs, func(left, right int) bool { return blobs[left].used.Before(blobs[right].used) })
 	return blobs, inFlight, nil
+}
+
+// sweepLockName is a directory's sweep lock: its sweeper holds it exclusively, and whoever makes an in-progress name
+// there holds it shared until that name's own lock is held, so a sweep never sees a name before its lock.
+const sweepLockName = ".sweep.lock"
+
+// lockDirectory holds directory's sweep lock, shared or exclusive (syscall.LOCK_SH or LOCK_EX), until Close.
+func lockDirectory(directory string, how int) (*os.File, error) {
+	lock, err := os.OpenFile(filepath.Join(directory, sweepLockName), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(lock.Fd()), how); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	return lock, nil
+}
+
+// lockedTemporary makes an in-progress file (or, with isDirectory, a directory) in directory named pattern plus a
+// random suffix, and returns it open with an exclusive lock held for as long as it stays open: a fetch's partial, a
+// source's unpacking, a removal. Its name appears only under the directory's shared sweep lock.
+func lockedTemporary(directory, pattern string, isDirectory bool) (*os.File, error) {
+	sweep, err := lockDirectory(directory, syscall.LOCK_SH)
+	if err != nil {
+		return nil, err
+	}
+	defer sweep.Close()
+	var made *os.File
+	if isDirectory {
+		name, err := os.MkdirTemp(directory, pattern)
+		if err != nil {
+			return nil, err
+		}
+		if made, err = os.Open(name); err != nil {
+			os.Remove(name)
+			return nil, err
+		}
+	} else if made, err = os.CreateTemp(directory, pattern); err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(made.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		os.Remove(made.Name())
+		made.Close()
+		return nil, err
+	}
+	return made, nil
 }
 
 // lockFree reports whether no one holds a lock on the file or directory at path.

@@ -156,25 +156,22 @@ func (cache sourceCache) unpack(unpackContext context.Context, held *heldSource,
 		return nil
 	}
 	if _, err := os.Lstat(held.directory); err == nil {
+		// Again, at the last moment: another runner may have just put a whole one there.
+		if held.whole() {
+			held.ready = true
+			return nil
+		}
 		if err := cache.moveAway(held.directory); err != nil {
 			return fmt.Errorf("removing an unmarked source at %s: %w", held.directory, err)
 		}
 	}
-	scratch, err := os.MkdirTemp(cache.directory, unpackingPrefix+held.sum+"-")
-	if err != nil {
-		return err
-	}
 	// Held while it unpacks: an unpacking whose lock is free is a dead runner's.
-	lock, err := os.Open(scratch)
+	lock, err := lockedTemporary(cache.directory, unpackingPrefix+held.sum+"-", true)
 	if err != nil {
-		os.RemoveAll(scratch)
 		return err
 	}
 	defer lock.Close()
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		os.RemoveAll(scratch)
-		return err
-	}
+	scratch := lock.Name()
 	if err = builder.Unpack(contextReader{unpackContext, archive}, scratch, nil); err == nil {
 		err = os.WriteFile(filepath.Join(scratch, sourceMarker), []byte(held.sum+"\n"), 0o444)
 	}
@@ -198,18 +195,12 @@ func (cache sourceCache) unpack(unpackContext context.Context, held *heldSource,
 
 // moveAway renames directory to a locked .removing- directory and removes it.
 func (cache sourceCache) moveAway(directory string) error {
-	away, err := os.MkdirTemp(cache.directory, sourceRemovingPrefix+filepath.Base(directory)+"-")
-	if err != nil {
-		return err
-	}
-	lock, err := os.Open(away)
+	lock, err := lockedTemporary(cache.directory, sourceRemovingPrefix+filepath.Base(directory)+"-", true)
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		return err
-	}
+	away := lock.Name()
 	if err = os.Rename(directory, filepath.Join(away, "tree")); err != nil {
 		os.Remove(away)
 		return err
@@ -219,6 +210,14 @@ func (cache sourceCache) moveAway(directory string) error {
 
 // sweep removes each .unpacking- and .removing- directory whose lock no one holds: what a killed runner left.
 func (cache sourceCache) sweep() {
+	if _, err := os.Stat(cache.directory); err != nil {
+		return
+	}
+	sweep, err := lockDirectory(cache.directory, syscall.LOCK_EX)
+	if err != nil {
+		return
+	}
+	defer sweep.Close()
 	entries, err := os.ReadDir(cache.directory)
 	if err != nil {
 		return

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -668,7 +669,9 @@ func TestTwoFetchesOfOneBlob(t *testing.T) {
 	// Half the body is sent; wait for the fetch to have written it.
 	var entries []os.DirEntry
 	for waited := time.Duration(0); waited < 5*time.Second; waited += 10 * time.Millisecond {
-		if entries, _ = os.ReadDir(other.directory); len(entries) > 0 {
+		listed, _ := os.ReadDir(other.directory)
+		entries = slices.DeleteFunc(listed, func(entry os.DirEntry) bool { return entry.Name() == sweepLockName })
+		if len(entries) > 0 {
 			if info, err := entries[0].Info(); err == nil && info.Size() >= int64(len(content)/2) {
 				break
 			}
@@ -1010,7 +1013,8 @@ func TestAFullDiskMidFetchLeavesNothing(t *testing.T) {
 	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "the disk filled while it was fetched") {
 		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
 	}
-	if entries, _ := os.ReadDir(fixture.blobs()); len(entries) != 0 {
+	entries, _ := os.ReadDir(fixture.blobs())
+	if entries = slices.DeleteFunc(entries, func(entry os.DirEntry) bool { return entry.Name() == sweepLockName }); len(entries) != 0 {
 		t.Fatalf("a full disk left %v", entries)
 	}
 }
@@ -1083,5 +1087,44 @@ func TestAWaitForAnotherFetchIsBounded(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("a wait for another unit's fetch outlived the unit's time")
+	}
+}
+
+// A fetch or an unpack makes its in-progress name under its directory's shared sweep lock and holds that name's own
+// lock before letting go, so a sweep waits for it and never takes a name whose maker hasn't locked it yet.
+func TestASweepNeverTakesANameBeforeItsMakerLocksIt(t *testing.T) {
+	root := t.TempDir()
+	cache, sources := blobCache{directory: filepath.Join(root, blobDirectoryName), limit: 1 << 30}, newSourceCache(root)
+	for _, made := range []struct {
+		directory string
+		name      string
+		sweep     func()
+	}{
+		{cache.directory, partialPrefix + strings.Repeat("a", 64) + "-making", func() { cache.blobs() }},
+		{sources.directory, unpackingPrefix + strings.Repeat("a", 64) + "-making", sources.sweep},
+	} {
+		os.MkdirAll(made.directory, 0o755)
+		// A maker between making its name and locking it, holding the sweep lock shared.
+		maker, err := lockDirectory(made.directory, syscall.LOCK_SH)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(made.directory, made.name)
+		os.Mkdir(path, 0o755)
+		swept := make(chan struct{})
+		go func() {
+			made.sweep()
+			close(swept)
+		}()
+		select {
+		case <-swept:
+			t.Fatalf("%s was swept while its maker held the sweep lock", made.name)
+		case <-time.After(200 * time.Millisecond):
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("%s was taken before its maker locked it", made.name)
+		}
+		maker.Close()
+		<-swept
 	}
 }
