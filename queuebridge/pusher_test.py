@@ -78,6 +78,25 @@ class Pusher(unittest.TestCase):
         self.assertEqual((path, body["main"]), ("/landings/" + change, tested))
         self.assertIn("not a fast-forward", body["refused"])
 
+    def test_a_failing_block_builder_never_stops_a_landing(self):
+        tested = self.commit("tested", on=self.main)
+        self.publish(tested, "a")
+
+        class Broken:
+            def main(self):
+                raise RuntimeError("git timed out")
+
+        class Both(FakePipeline):
+            def call(self, method, path, body=None):
+                if path.startswith("/blocks"):
+                    return 200, {"blocks": [{"block": 1, "changes": []}]}
+                return FakePipeline.call(self, method, path, body)
+
+        pipeline = Both([{"change": change, "future": tested, "base": self.main, "owner": "o", "run": "r"}])
+        pusher.passOnce(pipeline, self.hands, Broken())
+        self.assertEqual(self.mainNow(), tested)
+        self.assertEqual(pipeline.posts, [("/landings/" + change, {"main": tested, "from": self.main, "landed": tested})])
+
     def test_a_tree_github_doesnt_have_is_held_not_refused(self):
         pipeline = FakePipeline([{"change": change, "future": "f" * 40, "base": self.main, "owner": "o", "run": "r"}])
         pusher.tick(pipeline, self.hands)

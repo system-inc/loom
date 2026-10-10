@@ -73,6 +73,16 @@ def tick(pipeline, hands):
             log("holding %s: %s" % (change, failure))
 
 
+def passOnce(pipeline, hands, chain):
+    """One pass: blocks, then the landing orders. Whatever the block code does (an answer it can't read, a git timeout),
+    main still lands: its failure is logged and the landing tick always runs (Loom, 01:11Z)."""
+    try:
+        blocks.tick(pipeline, chain, log)
+    except Exception as error:
+        log("blocks failed, landing anyway: %r" % (error,))
+    tick(pipeline, hands)
+
+
 def main():
     os.makedirs(state, exist_ok=True)
     lock = open(os.path.join(state, "lock"), "w")
@@ -80,10 +90,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return
-    pipeline = queue_bridge.Pipeline(queue_bridge.pipeline, queue_bridge.token())
-    # Blocks first (a no-op while their switch is off), then the landing orders.
-    blocks.tick(pipeline, blocks.Chain(lander), log)
-    tick(pipeline, Hands(lander))
+    passOnce(queue_bridge.Pipeline(queue_bridge.pipeline, queue_bridge.token()), Hands(lander), blocks.Chain(lander))
 
 
 if __name__ == "__main__":
