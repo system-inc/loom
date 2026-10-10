@@ -1,0 +1,396 @@
+// Package r2 is Cloudflare R2's S3 interface, the one way loom writes the public store (loom-artifacts): every
+// request goes to https://<account id>.r2.cloudflarestorage.com/<bucket>/<key>, signed with AWS Signature Version 4
+// (service s3, region auto) from Go's standard library alone, so a builder needs no SDK and no Worker in its path.
+// Reads by anyone go direct to the bucket's public domain instead, artifacts.loom.system.inc, never through here.
+//
+// The key pair comes from a key = value file, ~/.loom/r2-releases.conf by default, the same file updater/upload.sh
+// reads: account_id, access_key_id and secret_access_key. That key writes loom-artifacts and nothing else.
+package r2
+
+import (
+	"bufio"
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Credentials are an R2 key pair and the account it belongs to.
+type Credentials struct {
+	AccountId       string
+	AccessKeyId     string
+	SecretAccessKey string
+}
+
+// DefaultCredentialsPath is where a machine keeps its R2 key pair, as upload.sh reads it.
+func DefaultCredentialsPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".loom", "r2-releases.conf")
+}
+
+// ReadCredentials reads a key = value file as upload.sh does: a key's last line wins, blank lines and # comments are
+// skipped, and all three of account_id, access_key_id and secret_access_key must be there.
+func ReadCredentials(path string) (Credentials, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return Credentials{}, err
+	}
+	defer file.Close()
+	values := map[string]string{}
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, found := strings.Cut(line, "=")
+		if found {
+			values[strings.TrimSpace(name)] = strings.TrimSpace(value)
+		}
+	}
+	if err = scanner.Err(); err != nil {
+		return Credentials{}, err
+	}
+	credentials := Credentials{AccountId: values["account_id"], AccessKeyId: values["access_key_id"], SecretAccessKey: values["secret_access_key"]}
+	if credentials.AccountId == "" || credentials.AccessKeyId == "" || credentials.SecretAccessKey == "" {
+		return Credentials{}, fmt.Errorf("%s needs account_id, access_key_id and secret_access_key", path)
+	}
+	return credentials, nil
+}
+
+// A Bucket is one R2 bucket through the S3 interface. Endpoint is https://<account id>.r2.cloudflarestorage.com
+// (a test's fake otherwise), and Now signs each request (nil means time.Now).
+type Bucket struct {
+	Endpoint    string
+	Name        string
+	Credentials Credentials
+	Client      *http.Client
+	Now         func() time.Time
+}
+
+// Open is the bucket named name on credentials' account.
+func Open(credentials Credentials, name string) Bucket {
+	return Bucket{Endpoint: "https://" + credentials.AccountId + ".r2.cloudflarestorage.com", Name: name, Credentials: credentials}
+}
+
+// ErrNotFound is a key the bucket doesn't hold.
+var ErrNotFound = errors.New("not in the bucket")
+
+// ErrExists is a conditional put refused because the key is already written.
+var ErrExists = errors.New("already written")
+
+// An Object is one key the bucket holds: its size and when it was last written, which is when R2's lifecycle starts
+// counting its days.
+type Object struct {
+	Key      string
+	Size     int64
+	Modified time.Time
+}
+
+// PutOptions are a put's headers: IfNoneMatch writes only when the key holds nothing (If-None-Match: *).
+type PutOptions struct {
+	ContentType  string
+	CacheControl string
+	IfNoneMatch  bool
+}
+
+// emptySha256 is the payload hash of a request with no body.
+const emptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+func (bucket Bucket) client() *http.Client {
+	if bucket.Client != nil {
+		return bucket.Client
+	}
+	return &http.Client{Timeout: 10 * time.Minute}
+}
+
+func (bucket Bucket) now() time.Time {
+	if bucket.Now != nil {
+		return bucket.Now()
+	}
+	return time.Now()
+}
+
+// address is the request's url for key (empty for the bucket itself) and query, escaped exactly as it is signed.
+func (bucket Bucket) address(key string, query url.Values) (*url.URL, error) {
+	address, err := url.Parse(strings.TrimSuffix(bucket.Endpoint, "/"))
+	if err != nil {
+		return nil, err
+	}
+	address.Path = "/" + bucket.Name
+	if key != "" {
+		address.Path += "/" + key
+	}
+	address.RawPath = escape(address.Path, false)
+	address.RawQuery = canonicalQuery(query)
+	return address, nil
+}
+
+// do sends one signed request, again after a network error or a 5xx, three tries in all, and returns the answer
+// with its body read. Each try is signed afresh, so a retry never carries a stale date.
+func (bucket Bucket) do(method, key string, query url.Values, body []byte, headers map[string]string) (*http.Response, []byte, error) {
+	address, err := bucket.address(key, query)
+	if err != nil {
+		return nil, nil, err
+	}
+	payload := emptySha256
+	if body != nil {
+		sum := sha256.Sum256(body)
+		payload = hex.EncodeToString(sum[:])
+	}
+	var lastError error
+	for attempt := range 3 {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+		request, err := http.NewRequest(method, address.String(), bytes.NewReader(body))
+		if err != nil {
+			return nil, nil, err
+		}
+		request.ContentLength = int64(len(body))
+		if body == nil {
+			request.Body, request.ContentLength = nil, 0
+		}
+		for name, value := range headers {
+			request.Header.Set(name, value)
+		}
+		Sign(request, payload, bucket.Credentials, bucket.now())
+		response, err := bucket.client().Do(request)
+		if err != nil {
+			lastError = err
+			continue
+		}
+		answer, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil {
+			lastError = err
+			continue
+		}
+		if response.StatusCode >= 500 {
+			lastError = fmt.Errorf("%s %s: %s: %s", method, key, response.Status, snippet(answer))
+			continue
+		}
+		return response, answer, nil
+	}
+	return nil, nil, lastError
+}
+
+func snippet(answer []byte) string {
+	return strings.TrimSpace(string(answer[:min(len(answer), 512)]))
+}
+
+// Head is what the bucket holds at key, or ErrNotFound.
+func (bucket Bucket) Head(key string) (Object, error) {
+	response, answer, err := bucket.do(http.MethodHead, key, nil, nil, nil)
+	if err != nil {
+		return Object{}, err
+	}
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return Object{}, ErrNotFound
+	default:
+		return Object{}, fmt.Errorf("HEAD %s: %s: %s", key, response.Status, snippet(answer))
+	}
+	modified, err := http.ParseTime(response.Header.Get("Last-Modified"))
+	if err != nil {
+		return Object{}, fmt.Errorf("HEAD %s: Last-Modified %q: %w", key, response.Header.Get("Last-Modified"), err)
+	}
+	return Object{Key: key, Size: response.ContentLength, Modified: modified}, nil
+}
+
+// Get reads key's bytes, or ErrNotFound.
+func (bucket Bucket) Get(key string) ([]byte, error) {
+	response, answer, err := bucket.do(http.MethodGet, key, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	switch response.StatusCode {
+	case http.StatusOK:
+		return answer, nil
+	case http.StatusNotFound:
+		return nil, ErrNotFound
+	}
+	return nil, fmt.Errorf("GET %s: %s: %s", key, response.Status, snippet(answer))
+}
+
+// Put writes body at key. With IfNoneMatch, a key that already holds anything is ErrExists and is left as it is.
+func (bucket Bucket) Put(key string, body []byte, options PutOptions) error {
+	headers := map[string]string{}
+	if options.ContentType != "" {
+		headers["Content-Type"] = options.ContentType
+	}
+	if options.CacheControl != "" {
+		headers["Cache-Control"] = options.CacheControl
+	}
+	if options.IfNoneMatch {
+		headers["If-None-Match"] = "*"
+	}
+	if body == nil {
+		body = []byte{}
+	}
+	response, answer, err := bucket.do(http.MethodPut, key, nil, body, headers)
+	if err != nil {
+		return err
+	}
+	switch {
+	case response.StatusCode == http.StatusOK || response.StatusCode == http.StatusCreated:
+		return nil
+	case response.StatusCode == http.StatusPreconditionFailed && options.IfNoneMatch:
+		return ErrExists
+	}
+	return fmt.Errorf("PUT %s: %s: %s", key, response.Status, snippet(answer))
+}
+
+// listPage is one ListObjectsV2 answer.
+type listPage struct {
+	Contents []struct {
+		Key          string    `xml:"Key"`
+		Size         int64     `xml:"Size"`
+		LastModified time.Time `xml:"LastModified"`
+	} `xml:"Contents"`
+	IsTruncated           bool   `xml:"IsTruncated"`
+	NextContinuationToken string `xml:"NextContinuationToken"`
+}
+
+// List is every key under prefix, page by page (ListObjectsV2), in the bucket's order.
+func (bucket Bucket) List(prefix string) ([]Object, error) {
+	objects := []Object{}
+	token := ""
+	for {
+		query := url.Values{"list-type": {"2"}, "prefix": {prefix}}
+		if token != "" {
+			query.Set("continuation-token", token)
+		}
+		response, answer, err := bucket.do(http.MethodGet, "", query, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if response.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("listing %s: %s: %s", prefix, response.Status, snippet(answer))
+		}
+		var page listPage
+		if err = xml.Unmarshal(answer, &page); err != nil {
+			return nil, fmt.Errorf("listing %s: %w", prefix, err)
+		}
+		for _, content := range page.Contents {
+			objects = append(objects, Object{Key: content.Key, Size: content.Size, Modified: content.LastModified})
+		}
+		if !page.IsTruncated {
+			return objects, nil
+		}
+		if page.NextContinuationToken == "" {
+			return nil, fmt.Errorf("listing %s: a truncated page with no continuation token", prefix)
+		}
+		token = page.NextContinuationToken
+	}
+}
+
+// Sign signs request for R2 (AWS Signature Version 4, region auto, service s3): it sets X-Amz-Date and
+// X-Amz-Content-Sha256 (payload, the body's sha256 in hex) and then Authorization over the host and every header
+// the request carries, so nothing it sends goes unsigned.
+func Sign(request *http.Request, payload string, credentials Credentials, at time.Time) {
+	sign(request, payload, credentials, at, "auto")
+}
+
+func sign(request *http.Request, payload string, credentials Credentials, at time.Time, region string) {
+	stamp := at.UTC().Format("20060102T150405Z")
+	day := stamp[:8]
+	request.Header.Del("Authorization")
+	request.Header.Set("X-Amz-Date", stamp)
+	request.Header.Set("X-Amz-Content-Sha256", payload)
+	host := request.Host
+	if host == "" {
+		host = request.URL.Host
+	}
+	headers := map[string]string{"host": host}
+	for name, values := range request.Header {
+		trimmed := make([]string, len(values))
+		for index, value := range values {
+			trimmed[index] = strings.Join(strings.Fields(value), " ")
+		}
+		headers[strings.ToLower(name)] = strings.Join(trimmed, ",")
+	}
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var canonicalHeaders strings.Builder
+	for _, name := range names {
+		canonicalHeaders.WriteString(name + ":" + headers[name] + "\n")
+	}
+	signedHeaders := strings.Join(names, ";")
+	canonicalRequest := strings.Join([]string{
+		request.Method,
+		escape(request.URL.Path, false),
+		canonicalQuery(request.URL.Query()),
+		canonicalHeaders.String(),
+		signedHeaders,
+		payload,
+	}, "\n")
+	scope := day + "/" + region + "/s3/aws4_request"
+	requestSum := sha256.Sum256([]byte(canonicalRequest))
+	stringToSign := "AWS4-HMAC-SHA256\n" + stamp + "\n" + scope + "\n" + hex.EncodeToString(requestSum[:])
+	key := []byte("AWS4" + credentials.SecretAccessKey)
+	for _, part := range []string{day, region, "s3", "aws4_request"} {
+		key = mac(key, part)
+	}
+	signature := hex.EncodeToString(mac(key, stringToSign))
+	request.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+credentials.AccessKeyId+"/"+scope+", SignedHeaders="+signedHeaders+", Signature="+signature)
+}
+
+func mac(key []byte, text string) []byte {
+	hash := hmac.New(sha256.New, key)
+	hash.Write([]byte(text))
+	return hash.Sum(nil)
+}
+
+// escape is Signature Version 4's encoding: every byte but A-Z, a-z, 0-9, -, ., _ and ~ as %XX, and / kept in a
+// path (slash false) or encoded in a query (slash true).
+func escape(text string, slash bool) string {
+	var escaped strings.Builder
+	for index := 0; index < len(text); index++ {
+		character := text[index]
+		switch {
+		case 'A' <= character && character <= 'Z', 'a' <= character && character <= 'z', '0' <= character && character <= '9',
+			character == '-', character == '.', character == '_', character == '~', character == '/' && !slash:
+			escaped.WriteByte(character)
+		default:
+			fmt.Fprintf(&escaped, "%%%02X", character)
+		}
+	}
+	return escaped.String()
+}
+
+// canonicalQuery is the query sorted by name, then value, each escaped, as both signed and sent.
+func canonicalQuery(query url.Values) string {
+	pairs := [][2]string{}
+	for name, values := range query {
+		for _, value := range values {
+			pairs = append(pairs, [2]string{escape(name, true), escape(value, true)})
+		}
+	}
+	sort.Slice(pairs, func(left, right int) bool {
+		if pairs[left][0] != pairs[right][0] {
+			return pairs[left][0] < pairs[right][0]
+		}
+		return pairs[left][1] < pairs[right][1]
+	})
+	joined := make([]string, len(pairs))
+	for index, pair := range pairs {
+		joined[index] = pair[0] + "=" + pair[1]
+	}
+	return strings.Join(joined, "&")
+}
