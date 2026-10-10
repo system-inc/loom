@@ -63,6 +63,10 @@ func (loop Loop) post(future string, post FuturePost, verdicts []Verdict) error 
 		return fmt.Errorf("no blob store: a record's tests go by reference, so nothing can post without one")
 	}
 	for _, verdict := range verdicts {
+		if verdict.reusedTests != nil {
+			// Its list went to the store when the verdict it reuses was posted.
+			continue
+		}
 		content, ref := TestsList(verdict.Tests)
 		if err := loop.Blobs.Put(ref.Sha256, content); err != nil {
 			return fmt.Errorf("unit %s's tests list %s: %w", verdict.UnitKey, ref.Sha256, err)
@@ -137,6 +141,8 @@ type Loop struct {
 	Main   MainRecords
 	Queue  Queue
 	Blobs  Blobs // where each record's tests list goes before its post
+	// Reused reads the tests object a reused unit's record carries.
+	Reused ReusedRecords
 	Now    func() time.Time
 	// Census, when set, holds every unit whose tests passed to the skip census (#esdkm67); nil skips the step.
 	Census *CensusConfig
@@ -214,7 +220,9 @@ func (loop Loop) VoidFuture(job Job, infra, cause string) (FuturePost, error) {
 		verdict := Verdict{UnitKey: unit.UnitKey, Change: job.Change, Future: job.Future, Run: job.Run, RuleId: Rule,
 			Attempts: []Attempt{}, Tests: []TestOutcome{}, Outputs: []string{}, DecidedAt: loop.Now().UTC().Format(time.RFC3339)}
 		if unit.Reused != "" {
-			verdict.Status, verdict.RuleId = Passed, Rule+" reused "+unit.Reused
+			if err := loop.reuse(&verdict, unit); err != nil {
+				return FuturePost{}, err
+			}
 		} else {
 			finished, found, err := loop.Runs.Finished(job.Run, unit.UnitKey)
 			if err != nil {
@@ -247,7 +255,9 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		Attempts: []Attempt{}, Tests: []TestOutcome{}, Outputs: []string{}}
 	if unit.Reused != "" {
 		// Planner reuses only an exact key that passed, never uncached (planner/select.go).
-		verdict.Status, verdict.RuleId = Passed, Rule+" reused "+unit.Reused
+		if err := loop.reuse(&verdict, unit); err != nil {
+			return Verdict{}, nil, err
+		}
 		verdict.DecidedAt = loop.Now().UTC().Format(time.RFC3339)
 		return verdict, []TestOutcome{}, nil
 	}
@@ -416,4 +426,24 @@ func unrun(named []string, tests []TestOutcome) []string {
 		}
 	}
 	return missing
+}
+
+// reuse makes a reused unit's record: passed, naming the verdict it reuses, and carrying that verdict's tests object
+// whole (Loom, Oct 10 01:19Z): the same key is the same verdict, so parity on a reused unit still compares its tests.
+func (loop Loop) reuse(verdict *Verdict, unit PlanUnit) error {
+	if loop.Reused == nil {
+		return fmt.Errorf("unit %s is reused, and nothing reads the verdict it reuses", unit.UnitKey)
+	}
+	tests, err := loop.Reused.Tests(unit.UnitKey, unit.Reused)
+	if err != nil {
+		return fmt.Errorf("unit %s reuses %s: %w", unit.UnitKey, unit.Reused, err)
+	}
+	verdict.Status, verdict.RuleId, verdict.reusedTests = Passed, Rule+" reused "+unit.Reused, tests
+	return nil
+}
+
+// ReusedRecords reads the tests object of the verdict a reused unit reuses: the index's passed verdict for its key, from
+// run reused (PlanUnit.Reused; "reused" when the listing named no run).
+type ReusedRecords interface {
+	Tests(unitKey, reused string) (json.RawMessage, error)
 }

@@ -110,7 +110,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		},
 		Main:  judge.NoMainRecords{},
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
-		Loop: judge.Loop{Now: time.Now, RequireTestLog: true, Blobs: judge.HTTPBlobs{Base: *queue, Token: func() (string, error) {
+		Loop: judge.Loop{Now: time.Now, RequireTestLog: true, Reused: judge.HTTPReused{Base: *queue, Token: client}, Blobs: judge.HTTPBlobs{Base: *queue, Token: func() (string, error) {
 			// Each record's tests list goes to the action store, which takes a build token only (Loom, Oct 10 01:17Z).
 			return protocol.MintToken(secret, protocol.TokenClaims{Run: "judge", Scope: protocol.ScopeBuild, Expires: time.Now().Add(time.Hour).Unix()})
 		}}},

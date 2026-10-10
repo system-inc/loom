@@ -125,3 +125,29 @@ func TestHTTPBlobsPutsTheListWithABuildToken(t *testing.T) {
 		t.Fatal("a refused put read as stored")
 	}
 }
+
+func TestHTTPReusedHoldsTheIndexToWhatQueueChecked(t *testing.T) {
+	sha := strings.Repeat("a", 64)
+	body := `{"status":"passed","run":"run-2","tests":{"failed":0,"inline":[],"passed":3,"sha256":"` + sha + `","skipped":0}}`
+	var path string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		path = request.URL.Path
+		writer.Write([]byte(body))
+	}))
+	defer server.Close()
+	reused := HTTPReused{Base: server.URL, Token: "t"}
+	tests, err := reused.Tests("u", "run-2")
+	if err != nil || path != "/verdicts/u" || !strings.Contains(string(tests), `"passed":3`) {
+		t.Fatalf("%s (%v) from %s", tests, err, path)
+	}
+	for _, bad := range []string{
+		`{"status":"failed","run":"run-2","tests":{"sha256":"` + sha + `"}}`,
+		`{"status":"passed","run":"run-1","tests":{"sha256":"` + sha + `"}}`,
+		`{"status":"passed","run":"run-2","tests":[]}`,
+	} {
+		body = bad
+		if _, err := reused.Tests("u", "run-2"); err == nil {
+			t.Fatalf("read %s as the reused verdict", bad)
+		}
+	}
+}

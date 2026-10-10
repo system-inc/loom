@@ -22,6 +22,13 @@ func (runs stubRuns) Finished(run, unitKey string) (Finished, bool, error) {
 	return finished, found, nil
 }
 
+// stubReused answers every reused unit with one tests object, naming the run it reuses.
+type stubReused struct{}
+
+func (stubReused) Tests(unitKey, reused string) (json.RawMessage, error) {
+	return json.RawMessage(`{"failed":0,"inline":[],"passed":7,"sha256":"` + strings.Repeat("7", 64) + `","skipped":0}`), nil
+}
+
 type stubMain map[string][]TestOutcome
 
 func (records stubMain) Latest(base, unitKey string) ([]TestOutcome, bool, error) {
@@ -58,7 +65,7 @@ func (h harness) script(unit, tree string, answers ...Finished) {
 }
 
 func (h harness) judge(t *testing.T, plan ...PlanUnit) FuturePost {
-	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 9, 23, 45, 0, 0, time.UTC) }}
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: func() time.Time { return time.Date(2026, 10, 9, 23, 45, 0, 0, time.UTC) }}
 	post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: baseTree, Owner: "system_adamic_library"}, Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1", Plan: plan})
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +226,7 @@ func TestAVoidedRunPostsEveryRunUnitVoidAndRerunsNothing(t *testing.T) {
 	h := newHarness()
 	// u finished passed and v failed before the stop; w never started; x was reused.
 	h.runs["u"], h.runs["v"] = passed(), failedWith("TestB")
-	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 10, 1, 0, 0, 0, time.UTC) }}
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: func() time.Time { return time.Date(2026, 10, 10, 1, 0, 0, 0, time.UTC) }}
 	post, err := loop.VoidFuture(Job{Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1",
 		Plan: []PlanUnit{{UnitKey: "u"}, {UnitKey: "v"}, {UnitKey: "w"}, {UnitKey: "x", Reused: "verdict-3"}}}, InfraKill, "an operator stopped the run")
 	if err != nil {
@@ -249,7 +256,7 @@ func TestAVoidedRunPostsEveryRunUnitVoidAndRerunsNothing(t *testing.T) {
 
 func TestAVoidNamesItsCause(t *testing.T) {
 	h := newHarness()
-	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: time.Now}
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now}
 	if _, err := loop.VoidFuture(Job{Run: "run-1"}, InfraKill, " "); err == nil {
 		t.Fatal("a void with no cause was posted")
 	}
@@ -263,7 +270,7 @@ func skippedUnit(test, why string) Finished {
 
 func censusLoop(h harness) Loop {
 	rows := []CensusRow{{File: "internal/native/a_test.go", ID: "m", Callers: []string{"TestMeasured"}, Message: `"a measurement"`, Class: "measurement", Provides: "timing"}}
-	return Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: time.Now, Census: &CensusConfig{Rows: rows, Platform: "linux"}}
+	return Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now, Census: &CensusConfig{Rows: rows, Platform: "linux"}}
 }
 
 func censusJob(plan ...PlanUnit) Job {
@@ -392,12 +399,25 @@ func TestEveryListIsInTheStoreBeforeThePostNamesIt(t *testing.T) {
 	refused := newHarness()
 	refused.runs["u"] = passed()
 	refused.blobs.Fail = errors.New("store down")
-	loop := Loop{Runs: refused.runs, Fabric: refused.fabric, Main: refused.main, Queue: refused.queue, Blobs: refused.blobs, Now: time.Now}
+	loop := Loop{Runs: refused.runs, Fabric: refused.fabric, Main: refused.main, Queue: refused.queue, Blobs: refused.blobs, Reused: stubReused{}, Now: time.Now}
 	if _, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "u"})); err == nil || len(refused.queue.Posts) != 0 {
 		t.Fatalf("posted %v (%v) past a refused list", refused.queue.Posts, err)
 	}
 	loop.Blobs = nil
 	if _, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "u"})); err == nil || len(refused.queue.Posts) != 0 {
 		t.Fatal("posted with no store")
+	}
+}
+
+func TestAReusedRecordCarriesTheTestsOfTheVerdictItReuses(t *testing.T) {
+	h := newHarness()
+	post := h.judge(t, PlanUnit{UnitKey: "w", Reused: "run-0"})
+	want := `"tests":{"failed":0,"inline":[],"passed":7,"sha256":"` + strings.Repeat("7", 64) + `","skipped":0}`
+	if !strings.Contains(string(post.Verdicts[0]), want) || !strings.Contains(string(post.Verdicts[0]), `"rule":"judge-v1 reused run-0"`) || len(h.blobs.Held) != 0 {
+		t.Fatalf("record %s, store %v: want the reused tests object, its run named, nothing put", post.Verdicts[0], h.blobs.Held)
+	}
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: time.Now}
+	if _, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "w", Reused: "run-0"})); err == nil {
+		t.Fatal("a reused unit posted with nothing to read the verdict it reuses")
 	}
 }

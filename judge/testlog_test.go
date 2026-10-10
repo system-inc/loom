@@ -121,7 +121,7 @@ func TestZeroRun(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness()
 			h.runs["u"] = c.finished
-			loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: time.Now, RequireTestLog: true}
+			loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now, RequireTestLog: true}
 			post, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "u", Named: c.named}))
 			if err != nil {
 				t.Fatal(err)

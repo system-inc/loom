@@ -41,7 +41,7 @@ func TestThePullerJudgesOnlyFinishedFuturesAndRerunsByKeyParts(t *testing.T) {
 		},
 		Main:  NoMainRecords{},
 		Queue: queue,
-		Loop:  Loop{Blobs: &StubBlobs{}, Now: func() time.Time { return time.Date(2026, 10, 9, 23, 58, 0, 0, time.UTC) }},
+		Loop:  Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: func() time.Time { return time.Date(2026, 10, 9, 23, 58, 0, 0, time.UTC) }},
 	}
 	judged, err := puller.PullOnce()
 	if err != nil || judged != 1 {
@@ -79,7 +79,7 @@ func TestVoidOnePostsTheListedAttemptOnlyAndNeverReruns(t *testing.T) {
 			t.Fatal("a void reran a unit")
 			return nil, nil
 		},
-		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Now: time.Now},
+		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now},
 	}
 	if _, err := puller.VoidOne(stopped, 2, "stopped"); err == nil {
 		t.Fatal("voided attempt 2 while Queue lists attempt 1")
@@ -125,7 +125,7 @@ func TestTheBackstopVoidsOnlyARunQuietForFortyFiveMinutes(t *testing.T) {
 					t.Fatal("the backstop placed a unit")
 					return nil, nil
 				},
-				Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Now: func() time.Time { return now }}, Stale: StaleAfter,
+				Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: func() time.Time { return now }}, Stale: StaleAfter,
 			})
 			judged, err := puller.PullOnce()
 			if err != nil {
@@ -155,7 +155,7 @@ func TestARunWithNoEventsIsAgedFromTheFirstPassThatSawIt(t *testing.T) {
 		Source: listedFutures{{Future: tree, Change: PlannedChange{Change: "chg_A"}, Units: []PlannedUnitWire{{UnitKey: strings.Repeat("1", 64), Decision: "run"}}}},
 		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-1" },
 		Read:   func(string) ([]protocol.Event, error) { return nil, nil },
-		Main:   NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Now: func() time.Time { return now }}, Stale: StaleAfter,
+		Main:   NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: func() time.Time { return now }}, Stale: StaleAfter,
 	})
 	for _, minutes := range []int{0, 44, 45} {
 		now = time.Date(2026, 10, 10, 2, minutes, 0, 0, time.UTC)

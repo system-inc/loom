@@ -87,6 +87,8 @@ type Verdict struct {
 	// censusFailing names the skips that failed the census when RuleId is RuleCensus ("<class> <package> <test>"),
 	// for the kick; the record carries them as its tests' skip outcomes.
 	censusFailing []string
+	// reusedTests is the tests object of the verdict a reused unit reuses, written as the record's tests in its place.
+	reusedTests json.RawMessage
 }
 
 // TestsRef is a record's tests field, by reference (Loom's ruling, Oct 10 01:16Z): a Durable Object's SQLite value caps
@@ -162,6 +164,9 @@ func (verdict Verdict) Canonical() ([]byte, error) {
 	encodedRef, err := json.Marshal(ref)
 	if err != nil {
 		return nil, err
+	}
+	if verdict.reusedTests != nil {
+		encodedRef = verdict.reusedTests
 	}
 	var tests map[string]any
 	if err := json.Unmarshal(encodedRef, &tests); err != nil {
