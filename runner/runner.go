@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/housecache"
 	"github.com/system-inc/loom/poster"
 	"github.com/system-inc/loom/protocol"
 )
@@ -77,6 +78,12 @@ type Options struct {
 	// FreeFloorBytes is the free room a prebuilt test job needs on its root's and its workspace's disks before it
 	// starts, after the blob cache gives up what it must. Zero means DefaultFreeFloorBytes.
 	FreeFloorBytes uint64
+	// HouseCache is the house cache's address, http://<host>:<port> (docs/house-cache.md): every blob, product archive
+	// and runner wanted by its sha256 is asked of it first, and read from the store when it can't give it whole. Every
+	// hash is checked either way. Empty means none.
+	HouseCache string
+	// houseClient asks the house cache; nil means housecache.Client.
+	houseClient *http.Client
 	// free reads a filesystem's free bytes; nil means builder.Free. Tests plant a full disk through it.
 	free func(path string) (uint64, error)
 }
@@ -122,6 +129,9 @@ func (options Options) withDefaults() Options {
 	}
 	if options.free == nil {
 		options.free = builder.Free
+	}
+	if options.houseClient == nil && options.HouseCache != "" {
+		options.houseClient = housecache.Client()
 	}
 	return options
 }

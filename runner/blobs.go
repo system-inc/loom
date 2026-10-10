@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/housecache"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -73,13 +74,18 @@ type blobCache struct {
 	free      func(path string) (uint64, error)
 	store     string
 	client    *http.Client
+	// house is the house cache's address (docs/house-cache.md), asked first for every blob through houseClient; empty
+	// when there is none.
+	house       string
+	houseClient *http.Client
 }
 
 // newBlobCache is the runner's blob cache under root, watching root's disk and the workspace's. options have their
 // defaults.
 func newBlobCache(options Options, root string) blobCache {
 	return blobCache{directory: filepath.Join(root, blobDirectoryName), limit: options.BlobCacheBytes, floor: options.FreeFloorBytes,
-		watched: []string{root, options.WorkspaceParent}, free: options.free, store: strings.TrimSuffix(options.Store, "/"), client: options.Client}
+		watched: []string{root, options.WorkspaceParent}, free: options.free, store: strings.TrimSuffix(options.Store, "/"), client: options.Client,
+		house: options.HouseCache, houseClient: options.houseClient}
 }
 
 // readyRoot readies a runner's root for a prebuilt unit: dead unpackings swept, the blob cache readied, and when its
@@ -102,6 +108,10 @@ type blobFetch struct {
 	seconds float64
 	cached  bool // read from the cache, not the store
 	corrupt bool // the cache held a copy that didn't hash to its name, removed and fetched again
+	house   bool // fetched from the house cache
+	// unhoused is why the house cache didn't give the blob, which then came from the store; empty when it did, or
+	// when there is none.
+	unhoused string
 }
 
 // blobLocks holds one lock per blob, so two units of one runner wanting the same blob fetch it once; two runners
@@ -151,7 +161,7 @@ func (cache blobCache) open(fetchContext context.Context, sum string) (*os.File,
 		os.Remove(path)
 		fetch.corrupt = true
 	}
-	file, size, err := cache.fetch(fetchContext, sum)
+	file, size, err := cache.fetch(fetchContext, sum, &fetch)
 	if err != nil {
 		return nil, blobFetch{}, err
 	}
@@ -159,17 +169,35 @@ func (cache blobCache) open(fetchContext context.Context, sum string) (*os.File,
 	return file, fetch, nil
 }
 
-// fetch reads blob sum from the store into a partial file it holds locked, hashing it as it comes, and renames it to
-// the blob's name, read-only, only when it is whole and hashes to it. It returns the file open at its start.
-func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File, int64, error) {
+// fetch has blob sum from the house cache when there is one, and otherwise, or when the house cache can't give it
+// whole and hashing to its name (down, slow, missing it, corrupt), from the store. Either way it is checked the same.
+func (cache blobCache) fetch(fetchContext context.Context, sum string, fetch *blobFetch) (*os.File, int64, error) {
+	if through := housecache.Through(cache.house, cache.store+"/blobs/"+sum); through != "" {
+		file, size, err := cache.fetchFrom(fetchContext, cache.houseClient, through, sum)
+		if err == nil {
+			fetch.house = true
+			return file, size, nil
+		}
+		// A unit out of time, or a disk that filled, is no better from the store.
+		if fetchContext.Err() != nil || errors.Is(err, syscall.ENOSPC) {
+			return nil, 0, err
+		}
+		fetch.unhoused = err.Error()
+	}
+	return cache.fetchFrom(fetchContext, cache.client, cache.store+"/blobs/"+sum, sum)
+}
+
+// fetchFrom reads blob sum from url into a partial file it holds locked, hashing it as it comes, and renames it to the
+// blob's name, read-only, only when it is whole and hashes to it. It returns the file open at its start.
+func (cache blobCache) fetchFrom(fetchContext context.Context, client *http.Client, url, sum string) (*os.File, int64, error) {
 	if err := os.MkdirAll(cache.directory, 0o755); err != nil {
 		return nil, 0, err
 	}
-	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, cache.store+"/blobs/"+sum, nil)
+	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, 0, err
 	}
-	response, err := cache.client.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, 0, fmt.Errorf("blobs/%s: %w", sum, err)
 	}
@@ -178,7 +206,7 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File
 	case response.StatusCode == http.StatusNotFound:
 		return nil, 0, fmt.Errorf("blobs/%s: %w", sum, builder.ErrNotStored)
 	case response.StatusCode != http.StatusOK:
-		return nil, 0, fmt.Errorf("%s/blobs/%s answered %s", cache.store, sum, response.Status)
+		return nil, 0, fmt.Errorf("%s answered %s", url, response.Status)
 	}
 	partial, err := lockedTemporary(fetchContext, cache.directory, partialPrefix+sum+"-", false)
 	if err != nil {

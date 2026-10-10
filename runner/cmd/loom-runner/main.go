@@ -1,8 +1,8 @@
 // Command loom-runner runs one Loom unit on this machine and streams its events to stdout, one JSON line
 // each. It exits 0 when the unit passed, 1 when it failed and 2 when it is broken or couldn't be read.
 //
-//	loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] <unit.json | https URL | ->
-//	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
+//	loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] [--house-cache <url>] <unit.json | https URL | ->
+//	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>]
 //	loom-runner install-serve
 //	loom-runner version
 //
@@ -13,8 +13,12 @@
 // all a Codex turn should show. It exits 0 at the deadline, on SIGHUP once the unit in hand finishes (a drain), or on
 // SIGTERM, which breaks the unit in hand, and 2 when the pool refuses it.
 //
-// install-serve readies this Linux box's loom-serve.service from ~/.loom/serve.conf and ~/.loom/serve-token and
-// reloads it (package serving, docs/serving.md); the updater's hook runs it after every release.
+// --house-cache is the house cache's address, http://<host>:<port> (docs/house-cache.md), asked first for every blob
+// and runner by its sha256; without it, LOOM_HOUSE_CACHE, and with neither, none.
+//
+// install-serve readies this Linux box's loom-serve.service from ~/.loom/serve.conf, ~/.loom/serve-token and the
+// house-cache line of ~/.loom/update.conf, and reloads it (package serving, docs/serving.md); the updater's hook runs
+// it after every release.
 package main
 
 import (
@@ -23,21 +27,20 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/system-inc/loom/housecache"
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/runner"
 	"github.com/system-inc/loom/serving"
 )
 
 const usage = `usage:
-  loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] <unit.json | https URL | ->
-  loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
+  loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] [--house-cache <url>] <unit.json | https URL | ->
+  loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>]
   loom-runner install-serve
   loom-runner version
 `
@@ -75,12 +78,19 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	root := flags.String("root", "", "where a test job keeps its caches between units")
 	tree := flags.String("tree", "", "where a test job's checkout is kept across units")
 	machine := flags.String("machine", "", "the name started events give this machine (default the host's)")
+	houseCache := flags.String("house-cache", os.Getenv(housecache.Variable), "the house cache, http://<host>:<port>, asked first for every blob by its sha256 (default $"+housecache.Variable+")")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return 2
 	}
 	if flags.NArg() != 1 {
 		fmt.Fprint(stderr, usage)
 		return 2
+	}
+	if *houseCache != "" {
+		if err := housecache.CheckURL(*houseCache); err != nil {
+			fmt.Fprintf(stderr, "loom-runner: %v\n", err)
+			return 2
+		}
 	}
 
 	runContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -101,6 +111,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Root:            *root,
 		Tree:            *tree,
 		Machine:         *machine,
+		HouseCache:      *houseCache,
 	})
 	if *keep && result.Workspace != "" {
 		fmt.Fprintf(stderr, "loom-runner: workspace kept at %s\n", result.Workspace)
@@ -135,12 +146,19 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	root := flags.String("root", "", "where a test job keeps its caches between units (default /tmp with --exclusive)")
 	tree := flags.String("tree", "", "where a test job's checkout is kept across units (default <root>/adamic)")
 	releases := flags.String("releases", runner.DefaultReleases, "where a unit's runner is fetched by its sha256 when it names another than this one")
+	houseCache := flags.String("house-cache", os.Getenv(housecache.Variable), "the house cache, http://<host>:<port>, asked first for every blob and runner by its sha256 (default $"+housecache.Variable+")")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 || *pool == "" || *tokenFile == "" || *worker == "" || *until <= 0 {
 		fmt.Fprint(stderr, usage)
 		return 2
+	}
+	if *houseCache != "" {
+		if err := housecache.CheckURL(*houseCache); err != nil {
+			fmt.Fprintf(stderr, "loom-runner: %v\n", err)
+			return 2
+		}
 	}
 	token, err := runner.ReadTokenFile(*tokenFile)
 	if err != nil {
@@ -173,7 +191,8 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Token:    token,
 		Worker:   *worker,
 		Deadline: time.Now().Add(*until),
-		Unit:     runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr, Strict: *strict, PhaseJobs: *phaseJobs, Exclusive: *exclusive, Root: *root, Tree: *tree},
+		Unit: runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr, Strict: *strict, PhaseJobs: *phaseJobs, Exclusive: *exclusive, Root: *root, Tree: *tree,
+			HouseCache: *houseCache},
 		Report:   stderr,
 		Drain:    drain,
 		Releases: *releases,
@@ -202,16 +221,7 @@ func installServe(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loom-runner: %v\n", err)
 		return 2
 	}
-	systemctl := func(arguments ...string) (string, error) {
-		command := exec.Command("systemctl", append([]string{"--user"}, arguments...)...)
-		command.Stderr = stderr
-		output, err := command.Output()
-		if err != nil {
-			return "", fmt.Errorf("systemctl --user %s: %w", strings.Join(arguments, " "), err)
-		}
-		return string(output), nil
-	}
-	if err := serving.Install(serving.HomePaths(home), systemctl, stdout); err != nil {
+	if err := serving.Install(serving.HomePaths(home), serving.UserSystemctl(stderr), stdout); err != nil {
 		fmt.Fprintf(stderr, "loom-runner: %v\n", err)
 		return 2
 	}

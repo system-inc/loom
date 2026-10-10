@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"syscall"
 
+	"github.com/system-inc/loom/housecache"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -72,12 +74,15 @@ func ReadConfig(content string) (Config, error) {
 	return config, nil
 }
 
-// Unit is loom-serve.service for this config and worker name: the template with its ExecStart line's POOL, FLAGS and
-// WORKER filled in, and nothing else changed.
-func Unit(config Config, worker string) string {
+// Unit is loom-serve.service for this config, worker name and house cache (empty for none): the template with its
+// ExecStart line's POOL, FLAGS and WORKER filled in, and nothing else changed.
+func Unit(config Config, worker, houseCache string) string {
 	flags := "--strict"
 	if config.PhaseJobs {
 		flags += " --phase-jobs"
+	}
+	if houseCache != "" {
+		flags += " --house-cache " + houseCache
 	}
 	lines := strings.Split(unitTemplate, "\n")
 	for index, line := range lines {
@@ -107,25 +112,27 @@ func WorkerName(host, machineId string) (string, error) {
 	return host + "-" + machineId[:6], nil
 }
 
-// Paths are what Install reads and writes: the box's serve.conf and pool token, the systemd user unit directory, the
-// updater's hook, the serving binary the updater installed, and the host's name, machine id, user and /proc.
+// Paths are what Install reads and writes: the box's serve.conf and pool token, the updater's update.conf (for its
+// house-cache line), the systemd user unit directory, the updater's hook, the serving binary the updater installed,
+// and the host's name, machine id, user and /proc.
 type Paths struct {
-	Config    string
-	Token     string
-	Units     string
-	Hook      string
-	Binary    string
-	Host      string
-	MachineId string
-	User      int
-	Proc      string
+	Config       string
+	UpdateConfig string
+	Token        string
+	Units        string
+	Hook         string
+	Binary       string
+	Host         string
+	MachineId    string
+	User         int
+	Proc         string
 }
 
 // HomePaths are a box's: ~/.loom/serve.conf, ~/.loom/serve-token, ~/.config/systemd/user, ~/.loom/updated.d/50-serve
 // and ~/.loom/bin/loom-runner, this host, /etc/machine-id, this user and /proc.
 func HomePaths(home string) Paths {
 	host, _ := os.Hostname()
-	return Paths{Config: filepath.Join(home, ".loom", "serve.conf"), Token: filepath.Join(home, ".loom", "serve-token"),
+	return Paths{Config: filepath.Join(home, ".loom", "serve.conf"), UpdateConfig: filepath.Join(home, ".loom", "update.conf"), Token: filepath.Join(home, ".loom", "serve-token"),
 		Units: filepath.Join(home, ".config", "systemd", "user"), Hook: filepath.Join(home, ".loom", "updated.d", HookName),
 		Binary: filepath.Join(home, ".loom", "bin", "loom-runner"), Host: host, MachineId: "/etc/machine-id", User: os.Getuid(), Proc: "/proc"}
 }
@@ -138,6 +145,19 @@ const HookName = "50-serve"
 
 // A Systemctl runs `systemctl --user <arguments>` and gives back what it printed.
 type Systemctl func(arguments ...string) (string, error)
+
+// UserSystemctl is the user's own systemd: systemctl --user, its complaints to stderr.
+func UserSystemctl(stderr io.Writer) Systemctl {
+	return func(arguments ...string) (string, error) {
+		command := exec.Command("systemctl", append([]string{"--user"}, arguments...)...)
+		command.Stderr = stderr
+		output, err := command.Output()
+		if err != nil {
+			return "", fmt.Errorf("systemctl --user %s: %w", strings.Join(arguments, " "), err)
+		}
+		return string(output), nil
+	}
+}
 
 // Install readies loom-serve on this box and leaves it running the release now installed. First everything that can
 // be refused: serve.conf, the token (a file holding one, owned by this user and readable by no one else), the worker's
@@ -175,10 +195,14 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 	if err != nil {
 		return err
 	}
+	houseCache, err := houseCacheSetting(paths.UpdateConfig)
+	if err != nil {
+		return err
+	}
 	if _, err := WriteChanged(paths.Hook, hookText, 0o755); err != nil {
 		return fmt.Errorf("the updater's hook: %w", err)
 	}
-	unit := Unit(config, worker)
+	unit := Unit(config, worker, houseCache)
 	changed, err := WriteChanged(filepath.Join(paths.Units, UnitName), unit, 0o644)
 	if err != nil {
 		return err
@@ -212,6 +236,23 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 		fmt.Fprintf(report, "loom-runner install-serve: %s already runs this unit and this release\n", UnitName)
 	}
 	return nil
+}
+
+// houseCacheSetting is the house cache update.conf names (housecache.Setting), empty when it names none or there is no
+// update.conf.
+func houseCacheSetting(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("this box's update settings: %w", err)
+	}
+	houseCache, err := housecache.Setting(string(content))
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", path, err)
+	}
+	return houseCache, nil
 }
 
 // WriteChanged writes content to path, beside it first and renamed over it so nothing reads half of it, unless path

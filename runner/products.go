@@ -26,7 +26,7 @@ func (run *unitRun) fetchProducts(runContext context.Context) error {
 		return err
 	}
 	defer workspace.Close()
-	store := builder.Store{Read: strings.TrimSuffix(run.unit.ProductStore, "/"), Client: run.options.Client}
+	store := builder.Store{Read: strings.TrimSuffix(run.unit.ProductStore, "/"), Client: run.options.Client, House: run.options.HouseCache, HouseClient: run.options.houseClient}
 	for index, product := range run.unit.Products {
 		if runContext.Err() != nil {
 			return runContext.Err()

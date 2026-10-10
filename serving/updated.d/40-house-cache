@@ -1,0 +1,10 @@
+#!/bin/sh
+# The updater's hook for the house cache (docs/house-cache.md), written by `loom house-cache install` on the box that
+# hosts it: after every release it readies loom-house-cache on the loom the release installed. A release from before
+# the house cache (a rollback past it) has nothing to ready, so the cache is left as it runs and the hook passes.
+loom=${LOOM_UPDATE_BIN:-${HOME}/.loom/bin}/loom
+if ! "${loom}" 2>&1 | grep -q '^  loom house-cache install$'; then
+	echo "40-house-cache: ${loom} has no house-cache install (a release from before it?); loom-house-cache is left as it runs"
+	exit 0
+fi
+exec "${loom}" house-cache install

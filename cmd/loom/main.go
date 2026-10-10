@@ -65,7 +65,7 @@ const usage = `usage:
   loom unit-needs --gate-tools <dir> --package <directory> [--run <pattern>]
   loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>] [--key-parts <file> [--read-sets <dir>] [--no-reuse <file>]]
   loom build-actions --tree <dir> --gate-tools <dir> [--r2 <key file>] [--packages a,b] [--list]
-  loom fetch-actions --cache <dir> [--read <url>] [--skip-native] <productKey>...
+  loom fetch-actions --cache <dir> [--read <url>] [--skip-native] [--house-cache <url>] <productKey>...
   loom store-audit [--r2 <key file>]
   loom build-tree --tree <dir> [--r2 <key file>] [--future <sha>] [--tree-key <key>] [--jobs N]
   loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--r2 <key file>] [--once]
@@ -73,6 +73,8 @@ const usage = `usage:
   loom gate-inputs check [--manifest-file <path>] [<name>]
   loom push [--config <push.conf>]
   loom push install
+  loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--public]
+  loom house-cache install
 `
 
 func main() {
@@ -139,6 +141,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "push" {
 		return push(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "house-cache" {
+		return houseCache(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "publish-token" {
 		return publishToken(arguments[1:], stdout, stderr)

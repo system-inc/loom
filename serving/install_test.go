@@ -60,7 +60,7 @@ func TestAWorkersNameIsItsHostAndItsMachine(t *testing.T) {
 // The unit is the template with the pool, the flags and the worker filled into ExecStart alone: its comments keep their
 // words.
 func TestTheUnitServesTheConfiguredPoolStrictAndDrainsOnReload(t *testing.T) {
-	unit := Unit(Config{Pool: "box-strict"}, "cloud-4f1d2c")
+	unit := Unit(Config{Pool: "box-strict"}, "cloud-4f1d2c", "")
 	var execStart []string
 	for _, line := range strings.Split(unit, "\n") {
 		if strings.HasPrefix(line, "ExecStart=") {
@@ -71,7 +71,7 @@ func TestTheUnitServesTheConfiguredPoolStrictAndDrainsOnReload(t *testing.T) {
 	if len(execStart) != 1 || execStart[0] != want {
 		t.Fatalf("ExecStart lines %q", execStart)
 	}
-	if phase := Unit(Config{Pool: "box-phase", PhaseJobs: true}, "cloud-4f1d2c"); !strings.Contains(phase, "serve --strict --phase-jobs --pool https://runs.loom.system.inc/pools/box-phase ") {
+	if phase := Unit(Config{Pool: "box-phase", PhaseJobs: true}, "cloud-4f1d2c", ""); !strings.Contains(phase, "serve --strict --phase-jobs --pool https://runs.loom.system.inc/pools/box-phase ") {
 		t.Fatalf("a phase box's unit:\n%s", phase)
 	}
 	for _, line := range []string{
@@ -163,7 +163,7 @@ func TestInstallReloadsServeOnlyWhenItsUnitOrItsRunnerChanged(t *testing.T) {
 	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{reloadCall, enableCall, showCall, startCall}) {
 		t.Fatalf("first install: %q, %v", served.calls, err)
 	}
-	if served.unit(t) != Unit(Config{Pool: "box-strict"}, "cloud-4f1d2c") {
+	if served.unit(t) != Unit(Config{Pool: "box-strict"}, "cloud-4f1d2c", "") {
 		t.Fatalf("the unit written:\n%s", served.unit(t))
 	}
 	if _, err := os.Stat(filepath.Join(served.paths.Units, UnitName+".partial")); !os.IsNotExist(err) {
@@ -187,7 +187,7 @@ func TestInstallReloadsServeOnlyWhenItsUnitOrItsRunnerChanged(t *testing.T) {
 	served.running(t, served.paths.Binary)
 	os.WriteFile(served.paths.Config, []byte("pool = box-phase\nphase-jobs = yes\n"), 0o644)
 	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{reloadCall, enableCall, showCall, reloadUnit}) ||
-		served.unit(t) != Unit(Config{Pool: "box-phase", PhaseJobs: true}, "cloud-4f1d2c") {
+		served.unit(t) != Unit(Config{Pool: "box-phase", PhaseJobs: true}, "cloud-4f1d2c", "") {
 		t.Fatalf("after a pool change: %q, %v", served.calls, err)
 	}
 	// A failing systemctl fails the hook, which the updater runs again next minute.
@@ -195,6 +195,43 @@ func TestInstallReloadsServeOnlyWhenItsUnitOrItsRunnerChanged(t *testing.T) {
 	served.fail = "reload"
 	if err := served.install(); err == nil {
 		t.Fatal("a failed reload passed")
+	}
+}
+
+// The house cache is update.conf's house-cache line: serve is given it, and when the line changes (a new host, or none)
+// the unit is rewritten and serve reloaded onto it. A line that isn't a plain address refuses the install before serve
+// is touched.
+func TestServeAsksTheHouseCacheUpdateConfNames(t *testing.T) {
+	served := newBox(t, "pool = box-strict\n", 0o600)
+	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\nhouse-cache = http://192.168.1.20:7380\n"), 0o644)
+	if err := served.install(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(served.unit(t), "serve --strict --house-cache http://192.168.1.20:7380 --pool ") {
+		t.Fatalf("the unit asks no house cache:\n%s", served.unit(t))
+	}
+	// The house cache moves to Server: one line on this box, and serve is reloaded onto it.
+	served.running(t, served.paths.Binary)
+	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\nhouse-cache = http://192.168.1.21:7380\n"), 0o644)
+	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{reloadCall, enableCall, showCall, reloadUnit}) ||
+		!strings.Contains(served.unit(t), " --house-cache http://192.168.1.21:7380 ") {
+		t.Fatalf("after the house cache moved: %q, %v", served.calls, err)
+	}
+	// A line that isn't an address refuses the install, and serve keeps running as it is.
+	for _, bad := range []string{"house-cache = 192.168.1.21:7380\n", "house-cache = http://192.168.1.21:7380/blobs\n", "house-cache = http://x:1 --exclusive\n"} {
+		os.WriteFile(served.paths.UpdateConfig, []byte(bad), 0o644)
+		if err := served.install(); err == nil || len(served.calls) != 0 {
+			t.Errorf("%q: installed (%v), calls %q", bad, err, served.calls)
+		}
+	}
+	// No line, or no update.conf at all, is no house cache.
+	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\n# house-cache = http://192.168.1.21:7380\n"), 0o644)
+	if err := served.install(); err != nil || strings.Contains(served.unit(t), "house-cache") {
+		t.Fatalf("with the line gone: %v\n%s", err, served.unit(t))
+	}
+	os.Remove(served.paths.UpdateConfig)
+	if err := served.install(); err != nil || strings.Contains(served.unit(t), "house-cache") {
+		t.Fatalf("with no update.conf: %v", err)
 	}
 }
 

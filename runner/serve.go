@@ -142,7 +142,8 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	}()
 	summary := ServeSummary{}
 	failures := 0
-	runners := runnerCache{directory: filepath.Join(unitOptions.testRoot(), runnerDirectoryName), releases: options.Releases, client: unitOptions.Client, check: options.checkRunner}
+	runners := runnerCache{directory: filepath.Join(unitOptions.testRoot(), runnerDirectoryName), releases: options.Releases, client: unitOptions.Client,
+		house: unitOptions.HouseCache, houseClient: unitOptions.houseClient, check: options.checkRunner}
 	// unhad counts the units in a row whose runner couldn't be had: past two, serve waits a little before it asks again,
 	// so a store that is down doesn't void a whole queue in seconds. Any unit whose runner was had starts it over.
 	unhad := 0

@@ -11,9 +11,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/system-inc/loom/housecache"
 	"github.com/system-inc/loom/r2"
 )
 
@@ -45,14 +47,18 @@ const PublicRead = "https://artifacts.loom.system.inc"
 const ImmutableBlob = "public, max-age=31536000, immutable"
 
 // A Store is the action store: Read is the public domain, read with no credentials; Bucket the S3 interface a
-// builder writes (nil for a runner); Blobs, when set, a runner's local cache of blobs by sha256; and Now the clock a
-// blob's age is read by (nil means time.Now).
+// builder writes (nil for a runner); Blobs, when set, a runner's local cache of blobs by sha256; House, when set, the
+// house cache (docs/house-cache.md), asked first for every blob; and Now the clock a blob's age is read by (nil means
+// time.Now).
 type Store struct {
 	Read   string
 	Bucket *r2.Bucket
 	Client *http.Client
 	Blobs  string
-	Now    func() time.Time
+	House  string
+	// HouseClient asks the house cache; nil means one housecache.Client bounded by houseBound.
+	HouseClient *http.Client
+	Now         func() time.Time
 	// SkipNative leaves out of a fetch every product its buildcache description says clang built, so the runner
 	// builds those itself (Judge's ruling until native products are reproducible, #tsn1wp8): Go products serve.
 	SkipNative bool
@@ -145,12 +151,15 @@ func (store Store) blob(sum string) ([]byte, error) {
 			os.Remove(local)
 		}
 	}
-	content, err := store.get("blobs/" + sum)
-	if err != nil {
-		return nil, err
-	}
-	if actual := digest(content); actual != sum {
-		return nil, fmt.Errorf("blob %s hashes to %s: the store is poisoned", sum, actual)
+	// The house cache's copy is used only when it hashes to its name; anything else it gives costs a read of the store.
+	content, err := store.housed(sum)
+	if err != nil || digest(content) != sum {
+		if content, err = store.get("blobs/" + sum); err != nil {
+			return nil, err
+		}
+		if actual := digest(content); actual != sum {
+			return nil, fmt.Errorf("blob %s hashes to %s: the store is poisoned", sum, actual)
+		}
 	}
 	if store.Blobs != "" {
 		if err = os.MkdirAll(store.Blobs, 0o755); err != nil {
@@ -173,6 +182,37 @@ func (store Store) blob(sum string) ([]byte, error) {
 		}
 	}
 	return content, nil
+}
+
+// houseBound bounds one read of the house cache whole.
+const houseBound = 10 * time.Minute
+
+// houseClient asks the house cache when a Store sets no HouseClient.
+var houseClient = sync.OnceValue(func() *http.Client {
+	client := housecache.Client()
+	client.Timeout = houseBound
+	return client
+})
+
+// housed reads blob sum from the house cache, unchecked; an error when there is none, or it doesn't answer whole.
+func (store Store) housed(sum string) ([]byte, error) {
+	through := housecache.Through(store.House, store.Read+"/blobs/"+sum)
+	if through == "" {
+		return nil, errors.New("no house cache")
+	}
+	client := store.HouseClient
+	if client == nil {
+		client = houseClient()
+	}
+	response, err := client.Get(through)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s answered %s", through, response.Status)
+	}
+	return io.ReadAll(response.Body)
 }
 
 // Ref is the archive refs/action/<key> names, read from the public domain.

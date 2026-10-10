@@ -1,0 +1,22 @@
+# Loom's house cache on the one box of a house that hosts it (docs/house-cache.md): `loom house-cache serve` keeps the
+# store's blobs, each named by its sha256, on this box's disk and serves them to the house's other boxes, so each blob
+# crosses the house's internet link once. Nobody copies this file: `loom house-cache install`, which the updater's hook
+# ~/.loom/updated.d/40-house-cache runs after every release, renders it from ~/.loom/house-cache.conf (the settings
+# its ExecStart line ends with) into ~/.config/systemd/user/loom-house-cache.service, enables it, and starts it, or
+# restarts it when it runs an older release. A box without house-cache.conf has the unit stopped and removed.
+#
+# It listens on one address on the house's network, never every address and never a public one unless the settings
+# say public = yes. A restart or a stop costs its clients only a read of the store for what they ask meanwhile: every
+# client checks every hash and reads the store when the cache can't answer.
+[Unit]
+Description=Loom house cache: the store's blobs, by sha256, served to this house's boxes
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.loom/bin/loom house-cache serve SETTINGS
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

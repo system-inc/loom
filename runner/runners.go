@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/system-inc/loom/housecache"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -44,6 +45,9 @@ type runnerCache struct {
 	directory string
 	releases  string
 	client    *http.Client
+	// house is the house cache's address, asked first through houseClient; empty when there is none.
+	house       string
+	houseClient *http.Client
 	// check says whether a binary is a loom-runner for this platform; nil means checkRunnerBinary.
 	check func(path string) error
 }
@@ -200,6 +204,11 @@ func runOn(runContext context.Context, binary string, unit protocol.Unit, option
 		arguments = append(arguments, "--machine", options.Machine)
 	}
 	command := exec.CommandContext(runContext, binary, append(arguments, "-")...)
+	if options.HouseCache != "" {
+		// By the environment, not a flag: a pinned runner from before the house cache refuses a flag it doesn't know,
+		// and ignores a variable.
+		command.Env = append(os.Environ(), housecache.Variable+"="+options.HouseCache)
+	}
 	command.Stdin = bytes.NewReader(encoded)
 	watcher := &startWatcher{writer: options.Events}
 	command.Stdout, command.Stderr = watcher, options.Diagnostics
@@ -221,8 +230,9 @@ func runOn(runContext context.Context, binary string, unit protocol.Unit, option
 	}
 }
 
-// path is the runner with this sha256, ready to run: kept here and checked again, or fetched from the release store,
-// checked as it arrives, and made read-only and executable before it takes its name. The oldest beyond runnersKept go.
+// path is the runner with this sha256, ready to run: kept here and checked again, or fetched (from the house cache when
+// there is one and it gives it whole, otherwise from the release store), checked as it arrives, and made read-only and
+// executable before it takes its name. The oldest beyond runnersKept go.
 func (cache runnerCache) path(fetchContext context.Context, sum string) (string, error) {
 	if !protocol.Sha256Pattern.MatchString(sum) {
 		return "", fmt.Errorf("%q isn't a sha256", sum)
@@ -243,21 +253,38 @@ func (cache runnerCache) path(fetchContext context.Context, sum string) (string,
 		return "", err
 	}
 	url := strings.TrimSuffix(cache.releases, "/") + "/" + sum
-	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, url, nil)
+	err := errors.New("no house cache")
+	if through := housecache.Through(cache.house, url); through != "" {
+		err = cache.download(fetchContext, cache.houseClient, through, sum, path)
+	}
+	if err != nil && fetchContext.Err() == nil {
+		err = cache.download(fetchContext, cache.client, url, sum, path)
+	}
 	if err != nil {
 		return "", err
 	}
-	response, err := cache.client.Do(request)
+	cache.evict(sum)
+	return path, nil
+}
+
+// download reads runner sum from url into a partial file, and renames it to path, read-only and executable, only when
+// it is whole and hashes to sum.
+func (cache runnerCache) download(fetchContext context.Context, client *http.Client, url, sum, path string) error {
+	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, url, nil)
 	if err != nil {
-		return "", err
+		return err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GET %s: %s", url, response.Status)
+		return fmt.Errorf("GET %s: %s", url, response.Status)
 	}
 	partial, err := os.CreateTemp(cache.directory, ".partial-"+sum+"-")
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer os.Remove(partial.Name())
 	hash := sha256.New()
@@ -267,20 +294,16 @@ func (cache runnerCache) path(fetchContext context.Context, sum string) (string,
 	}
 	switch {
 	case err != nil:
-		return "", fmt.Errorf("GET %s: %w", url, err)
+		return fmt.Errorf("GET %s: %w", url, err)
 	case written > runnerBytesLimit:
-		return "", fmt.Errorf("GET %s: over %d bytes", url, runnerBytesLimit)
+		return fmt.Errorf("GET %s: over %d bytes", url, runnerBytesLimit)
 	case hex.EncodeToString(hash.Sum(nil)) != sum:
-		return "", fmt.Errorf("GET %s: its bytes hash to %s", url, hex.EncodeToString(hash.Sum(nil)))
+		return fmt.Errorf("GET %s: its bytes hash to %s", url, hex.EncodeToString(hash.Sum(nil)))
 	}
 	if err := os.Chmod(partial.Name(), 0o555); err != nil {
-		return "", err
+		return err
 	}
-	if err := os.Rename(partial.Name(), path); err != nil {
-		return "", err
-	}
-	cache.evict(sum)
-	return path, nil
+	return os.Rename(partial.Name(), path)
 }
 
 // evict removes the least recently used runners beyond runnersKept, never the one just readied. A runner that is

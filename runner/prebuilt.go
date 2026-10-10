@@ -346,8 +346,8 @@ func prebuiltPackages(job *protocol.TestJob, index builder.TreeIndex) ([]prebuil
 func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, needed []neededBlob) (map[string]*os.File, error) {
 	files := map[string]*os.File{}
 	var mutex sync.Mutex
-	var fetched, cached, chunksFetched, chunksCached int64
-	var cachedCount, chunksFetchedCount, chunksCachedCount, chunksCorrupt int
+	var fetched, housed, cached, chunksFetched, chunksHoused, chunksCached int64
+	var cachedCount, chunksFetchedCount, chunksHousedCount, chunksCachedCount, chunksCorrupt, chunksUnhoused int
 	errs := make([]error, len(needed))
 	next := make(chan int)
 	var group sync.WaitGroup
@@ -377,22 +377,34 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 					// Assembly opens it again through the cache, hashed again, fetched again if it went meanwhile.
 					file.Close()
 					mutex.Lock()
-					if fetch.cached {
+					switch {
+					case fetch.cached:
 						chunksCached += fetch.bytes
 						chunksCachedCount++
-					} else {
+					case fetch.house:
+						chunksHoused += fetch.bytes
+						chunksHousedCount++
+					default:
 						chunksFetched += fetch.bytes
 						chunksFetchedCount++
 					}
 					if fetch.corrupt {
 						chunksCorrupt++
 					}
+					if fetch.unhoused != "" {
+						chunksUnhoused++
+					}
 					mutex.Unlock()
 					continue
 				}
 				from := "the store"
-				if fetch.cached {
+				switch {
+				case fetch.cached:
 					from = "the cache"
+				case fetch.house:
+					from = "the house cache"
+				case fetch.unhoused != "":
+					from = "the store, the house cache having failed (" + fetch.unhoused + ")"
 				}
 				if fetch.corrupt {
 					from += ", in place of a cached copy that didn't hash to its name"
@@ -400,10 +412,13 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 				run.say(fmt.Sprintf("fetched %s, blob %s, %d bytes in %.2f s from %s", blob.what, blob.sum, fetch.bytes, fetch.seconds, from))
 				mutex.Lock()
 				files[blob.sum] = file
-				if fetch.cached {
+				switch {
+				case fetch.cached:
 					cached += fetch.bytes
 					cachedCount++
-				} else {
+				case fetch.house:
+					housed += fetch.bytes
+				default:
 					fetched += fetch.bytes
 				}
 				mutex.Unlock()
@@ -415,15 +430,20 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 	}
 	close(next)
 	group.Wait()
-	if chunks := chunksFetchedCount + chunksCachedCount; chunks > 0 {
+	if chunks := chunksFetchedCount + chunksHousedCount + chunksCachedCount; chunks > 0 {
 		corrupt := ""
 		if chunksCorrupt > 0 {
 			corrupt = fmt.Sprintf(", %d of them in place of a cached copy that didn't hash to its name", chunksCorrupt)
 		}
-		run.say(fmt.Sprintf("the tree's source chunks: %d bytes in %d chunks from the store%s, %d bytes in %d chunks from the cache",
-			chunksFetched, chunksFetchedCount, corrupt, chunksCached, chunksCachedCount))
+		unhoused := ""
+		if chunksUnhoused > 0 {
+			unhoused = fmt.Sprintf(", %d of them the house cache failed to give", chunksUnhoused)
+		}
+		run.say(fmt.Sprintf("the tree's source chunks: %d bytes in %d chunks from the store%s%s, %d bytes in %d chunks from the cache, %d bytes in %d chunks from the house cache",
+			chunksFetched, chunksFetchedCount, corrupt, unhoused, chunksCached, chunksCachedCount, chunksHoused, chunksHousedCount))
 	}
-	run.say(fmt.Sprintf("%d blobs: %d bytes from the store, %d bytes in %d blobs from the cache", len(needed), fetched+chunksFetched, cached+chunksCached, cachedCount+chunksCachedCount))
+	run.say(fmt.Sprintf("%d blobs: %d bytes from the store, %d bytes in %d blobs from the cache, %d bytes from the house cache", len(needed),
+		fetched+chunksFetched, cached+chunksCached, cachedCount+chunksCachedCount, housed+chunksHoused))
 	return files, errors.Join(errs...)
 }
 
