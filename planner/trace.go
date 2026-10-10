@@ -153,7 +153,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 				}
 				arguments = nextArgument(rest)
 			}
-			first, rest, err := pathArgument(arguments, workingOf(event.pid), change.descriptors)
+			first, rest, _, err := pathArgument(arguments, workingOf(event.pid), change.descriptors)
 			if err != nil {
 				return failed(err)
 			}
@@ -171,7 +171,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 				}
 				continue
 			}
-			second, _, err := pathArgument(nextArgument(rest), workingOf(event.pid), change.descriptors)
+			second, _, _, err := pathArgument(nextArgument(rest), workingOf(event.pid), change.descriptors)
 			if err != nil {
 				return failed(err)
 			}
@@ -183,7 +183,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 				made[second] = true
 			}
 		case pathCalls[event.call] || directoryCalls[event.call]:
-			path, flags, err := pathArgument(event.arguments, workingOf(event.pid), directoryCalls[event.call])
+			path, flags, dotted, err := pathArgument(event.arguments, workingOf(event.pid), directoryCalls[event.call])
 			if err != nil {
 				return failed(err)
 			}
@@ -211,11 +211,12 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 					lookup(path, false)
 				}
 			case (opened || executed) && event.result >= 0 && !strings.Contains(flags, "O_PATH"):
-				if !madeByRun(path) {
+				// The descriptor's decoded path is the file the kernel opened, every symlink resolved: that read is
+				// the run's too, wherever the name it opened by led, a link the run made itself included. A name with a
+				// .. in it is cleaned as text, which past a symlink names another path, so the decoded one stands alone.
+				if !madeByRun(path) && !(dotted && decoded != "") {
 					reads[path] = true
 				}
-				// The descriptor's decoded path is the file the kernel opened, every symlink resolved: that read is
-				// the run's too, wherever the name it opened by led, a link the run made itself included.
 				if decoded != "" && !madeByRun(decoded) {
 					reads[decoded] = true
 				}
@@ -311,27 +312,40 @@ var openedPath = regexp.MustCompile(`\)\s+=\s+\d+<(.+)>$`)
 // descriptor is a decoded directory argument: AT_FDCWD</dir> or 5</dir>.
 var descriptor = regexp.MustCompile(`^(?:AT_FDCWD|\d+)(?:<(.*?)>)?,\s*`)
 
-// pathArgument reads a call's next path argument, absolute, and what follows it. With descriptor, a directory
-// descriptor comes first and a relative path resolves against it, decoded, or against the process's working directory
-// for AT_FDCWD; without, against the working directory. An empty path after a descriptor (AT_EMPTY_PATH) is the
-// descriptor's own.
-func pathArgument(arguments, working string, withDescriptor bool) (string, string, error) {
+// pathArgument reads a call's next path argument, absolute, what follows it, and whether the name held a .. after a
+// name. With descriptor, a directory descriptor comes first and a relative path resolves against it, decoded, or
+// against the process's working directory for AT_FDCWD; without, against the working directory. An empty path after
+// a descriptor (AT_EMPTY_PATH) is the descriptor's own. The path is cleaned as text, so a .. after a symlink may name
+// another path than the kernel reached, which resolves .. from where the link led.
+func pathArgument(arguments, working string, withDescriptor bool) (string, string, bool, error) {
 	base := working
 	if withDescriptor {
 		match := descriptor.FindStringSubmatch(arguments)
 		if match == nil {
-			return "", "", fmt.Errorf("no directory argument")
+			return "", "", false, fmt.Errorf("no directory argument")
 		}
 		if match[1] != "" {
 			base = match[1]
 		} else if !strings.HasPrefix(match[0], "AT_FDCWD") {
-			return "", "", fmt.Errorf("a directory descriptor that wasn't decoded (--decode-fds=path)")
+			return "", "", false, fmt.Errorf("a directory descriptor that wasn't decoded (--decode-fds=path)")
 		}
 		arguments = arguments[len(match[0]):]
 	}
 	name, rest, err := quoted(arguments)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
+	}
+	// A leading .. climbs from the base, which strace decodes as the kernel's own path; a .. after a name in the path
+	// climbs from wherever that name led, which cleaning as text can't know.
+	dotted, named := false, false
+	for _, component := range strings.Split(name, "/") {
+		switch component {
+		case "", ".":
+		case "..":
+			dotted = dotted || named
+		default:
+			named = true
+		}
 	}
 	if name == "" {
 		name = base
@@ -339,7 +353,7 @@ func pathArgument(arguments, working string, withDescriptor bool) (string, strin
 	if !filepath.IsAbs(name) {
 		name = filepath.Join(base, name)
 	}
-	return filepath.Clean(name), rest, nil
+	return filepath.Clean(name), rest, dotted, nil
 }
 
 // quoted reads strace's leading C string argument and returns it with what follows.

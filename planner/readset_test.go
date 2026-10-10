@@ -334,6 +334,11 @@ func TestAReadThroughASymlinkKeysWhereItLeads(t *testing.T) {
 			if keyed.ReadSet == "" {
 				t.Fatalf("no read set keyed the unit; measured %+v", first.Measured)
 			}
+			// Keyed on what it reached, not on the submodule's commit: a bump of a file it never reached keeps the key.
+			fixture.bump(t, map[string]string{"other.txt": "unrelated\n"})
+			if _, unrelated := fixture.key(t); unrelated != before {
+				t.Fatalf("a bump of a file the run never reached moved the key (measured %+v)", first.Measured)
+			}
 			fixture.bump(t, map[string]string{check.changed: "changed\n"})
 			if _, after := fixture.key(t); after == before {
 				t.Fatalf("sub/%s, read through %s, changed and the key stayed (measured %+v)", check.changed, check.link, first.Measured)
