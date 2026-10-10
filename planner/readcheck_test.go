@@ -391,3 +391,15 @@ func TestCheckTraceNamesReadsBeyondTheKeysReadSet(t *testing.T) {
 		t.Fatal("parts this tree doesn't key were checked")
 	}
 }
+
+// A read by a name with `..` after a name stays uncleaned, and the declared-reads check reads it where the index
+// resolves it: an undeclared file reached that way is a finding, a declared one isn't. Mutant that fails it: the
+// uncleaned name checked as it stands.
+func TestADottedReadIsCheckedWhereItResolves(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := readCheckFixture(t, "reads p q/declared.txt\n")
+	traced := []string{tree + "/p/testdata/../../q/undeclared.txt", tree + "/p/testdata/../../q/declared.txt"}
+	if got := findingPaths(t, tree, gateTools, nil, traced); !reflect.DeepEqual(got, []string{"q/undeclared.txt"}) {
+		t.Fatalf("findings %v, want the undeclared file the dotted name reached", got)
+	}
+}

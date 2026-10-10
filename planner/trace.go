@@ -350,10 +350,41 @@ func pathArgument(arguments, working string, withDescriptor bool) (string, strin
 	if name == "" {
 		name = base
 	}
+	if dotted {
+		return uncleanedPath(base, name), rest, dotted, nil
+	}
 	if !filepath.IsAbs(name) {
 		name = filepath.Join(base, name)
 	}
 	return filepath.Clean(name), rest, dotted, nil
+}
+
+// uncleanedPath is a name with a .. after a name, absolute, as the kernel will walk it: a leading .. climbs from the
+// base (strace decodes the kernel's own path), and every .. after a name stays, for the index to resolve from wherever
+// that name led (submoduleIndex.resolve).
+func uncleanedPath(base, name string) string {
+	components := []string{}
+	if !filepath.IsAbs(name) {
+		for _, component := range strings.Split(filepath.ToSlash(filepath.Clean(base)), "/") {
+			if component != "" {
+				components = append(components, component)
+			}
+		}
+	}
+	named := false
+	for _, component := range strings.Split(name, "/") {
+		switch {
+		case component == "" || component == ".":
+		case component == ".." && !named:
+			if len(components) > 0 {
+				components = components[:len(components)-1]
+			}
+		default:
+			named = named || component != ".."
+			components = append(components, component)
+		}
+	}
+	return "/" + strings.Join(components, "/")
 }
 
 // quoted reads strace's leading C string argument and returns it with what follows.

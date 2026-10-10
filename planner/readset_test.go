@@ -497,3 +497,32 @@ func TestAVerdictOnAReadSetIsReusedOnlyAfterACleanTrace(t *testing.T) {
 		t.Fatalf("a key whose clean trace was taken back still reuses: %s", forgotten.Decision)
 	}
 }
+
+// The second review's proof (finding 1): a stat that misses through `sub/dl/../x`, dl a link to dir/inner, probed
+// sub/dir/x, as the kernel walks `..` from where the link led. The name stays uncleaned for the index to resolve the
+// same way, so when sub/dir/x appears the key moves, and a stat of the same name on that tree reads it present. Mutant
+// that fails it: a name with `..` after a name cleaned as text.
+func TestAMissThroughDotDotPastALinkKeysThePathTheKernelProbed(t *testing.T) {
+	useReadSets(t)
+	fixture := newReadSetFixture(t)
+	fixture.bump(t, map[string]string{"dir/inner/keep.txt": "k\n"})
+	fixture.symlink(t, "sub/dl", "dir/inner")
+	coarse, _ := fixture.key(t)
+	trace := `9 newfstatat(AT_FDCWD<` + filepath.Join(fixture.tree, "p") + `>, "../sub/dl/../x", 0x7ffd, 0) = -1 ENOENT (No such file or directory)` + "\n"
+	first, err := CheckTrace(fixture.tree, fixture.gateTools, coarse, strings.NewReader(trace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordReadSet(ReadSetsDirectory, first.CodeKey, coarse, first.Measured); err != nil {
+		t.Fatal(err)
+	}
+	_, before := fixture.key(t)
+	fixture.bump(t, map[string]string{"x": "where text cleaning would look\n"})
+	if _, unrelated := fixture.key(t); unrelated != before {
+		t.Fatalf("sub/x, which the kernel never probed, moved the key (measured %+v)", first.Measured)
+	}
+	fixture.bump(t, map[string]string{"dir/x": "now here\n"})
+	if _, after := fixture.key(t); after == before {
+		t.Fatalf("sub/dir/x, the path the kernel probed, appeared and the key stayed (measured %+v)", first.Measured)
+	}
+}

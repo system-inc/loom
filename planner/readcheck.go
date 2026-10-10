@@ -5,6 +5,7 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -118,6 +119,10 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 	}{{accesses.Reads, true, false}, {accesses.Lookups, false, false}, {accesses.Listings, false, true}} {
 		for _, path := range group.paths {
 			relative, ok := inTree(root, tree, path)
+			if uncleaned, dotted := uncleanedRelative(root, tree, path); dotted {
+				// A .. after a name stays for the index to resolve as the kernel did.
+				relative, ok = uncleaned, true
+			}
 			if !ok || declared[relative] {
 				continue
 			}
@@ -160,6 +165,13 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 				// A lookup or listing outside the submodules is the declared reads' to hold, as today: only reads are.
 				continue
 			}
+			if _, dotted := uncleanedRelative(root, tree, path); dotted {
+				// The declared reads name the file the kernel reached.
+				if resolved.outside || declared[resolved.resolved] {
+					continue
+				}
+				relative = resolved.resolved
+			}
 			// A read inside a submodule that no closure holds, on a key with no read set, reads the gitlink: the
 			// submodule at its recorded commit is what a reads line can declare.
 			for gitlink := range index.gitlinks {
@@ -193,6 +205,20 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 		measured = keyed.Union(measured)
 	}
 	return findings, measured.normal(), nil
+}
+
+// uncleanedRelative is an uncleaned path's (uncleanedPath's) repo-relative name, and whether it is one: a path that
+// sits in the tree and still holds a .. component.
+func uncleanedRelative(root, tree, path string) (string, bool) {
+	if !slices.Contains(strings.Split(path, "/"), "..") {
+		return "", false
+	}
+	for _, base := range []string{tree, root} {
+		if relative, found := strings.CutPrefix(path, strings.TrimSuffix(filepath.ToSlash(base), "/")+"/"); found {
+			return relative, true
+		}
+	}
+	return "", false
 }
 
 // inTree is path's repo-relative name when it sits in the tree, under the tree's own spelling or its resolved one.
