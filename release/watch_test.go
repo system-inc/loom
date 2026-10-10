@@ -42,8 +42,11 @@ type world struct {
 	uploads   atomic.Int32
 	promoted  []string
 	remote    string
-	log       bytes.Buffer
-	mutex     sync.Mutex
+	// uploadError fails the next uploads, and lost has them succeed with nothing reaching the boxes.
+	uploadError error
+	lost        bool
+	log         bytes.Buffer
+	mutex       sync.Mutex
 }
 
 func newWorld(t *testing.T) *world {
@@ -94,10 +97,18 @@ func (w *world) steps() Steps {
 			w.promoted = append(w.promoted, version)
 			return Promote(w.config.Out, version)
 		},
-		Upload: func(context.Context) error {
+		Upload: func(_ context.Context, current string) error {
 			w.uploads.Add(1)
-			content, err := os.ReadFile(filepath.Join(w.config.Out, "current.txt"))
-			w.remote = string(content)
+			if w.uploadError != nil {
+				return w.uploadError
+			}
+			if current == "" {
+				current = filepath.Join(w.config.Out, "current.txt")
+			}
+			content, err := os.ReadFile(current)
+			if !w.lost {
+				w.remote = string(content)
+			}
 			return err
 		},
 		Published: func(context.Context) (Manifest, error) { return ParseManifest(w.remote) },
@@ -445,6 +456,78 @@ func TestAHandPublishDuringTheSoakIsNeverPromotedOver(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The out directory's current.txt says the promotion only once the boxes read it: an upload that fails, or that
+// succeeds with something else read back, stops the release with the canary still published in out, so `loom release
+// rollback` ends it; a read back that fails is tried again by the next pass, which finds its own promotion there.
+func TestAPromotionIsKeptOnlyOnceTheBoxesReadIt(t *testing.T) {
+	soaked := func(t *testing.T) *world {
+		w := newWorld(t)
+		w.head = commit("b")
+		w.tick()
+		w.advance(time.Minute)
+		w.report("Cloud", commit("b"), commit("b"), serveUp)
+		w.tick()
+		return w
+	}
+	for name, fail := range map[string]func(w *world){
+		"the upload fails":                   func(w *world) { w.uploadError = errors.New("upload: current.txt failed") },
+		"the upload never reaches the boxes": func(w *world) { w.lost = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := soaked(t)
+			fail(w)
+			w.soakHealthy(commit("b"))
+			if state := w.state(); state.Phase != PhaseStopped || !strings.Contains(state.Why, "promotion") && !strings.Contains(state.Why, "still publishes the canary") {
+				t.Fatalf("%+v\n%s", state, w.log.String())
+			}
+			if len(w.promoted) != 0 || w.published().CanaryVersion() != commit("b") {
+				t.Fatalf("out promoted ahead of the boxes: promoted %q, out %+v", w.promoted, w.published())
+			}
+			// A rollback is kept the same way: one the boxes never read leaves the canary in out, to roll back again.
+			w.uploadError, w.lost = nil, true
+			if err := Rollback(context.Background(), w.config, w.steps(), &bytes.Buffer{}); err == nil || w.published().CanaryVersion() != commit("b") {
+				t.Fatalf("a rollback the boxes never read: %v, out %+v", err, w.published())
+			}
+			w.lost = false
+			if err := Rollback(context.Background(), w.config, w.steps(), &bytes.Buffer{}); err != nil {
+				t.Fatalf("the canary couldn't be ended: %v", err)
+			}
+			if remote, _ := ParseManifest(w.remote); !Alone(remote, commit("a")) || !Alone(w.published(), commit("a")) {
+				t.Fatalf("after the rollback: the boxes read %s, out %+v", w.remote, w.published())
+			}
+		})
+	}
+	t.Run("the read back fails", func(t *testing.T) {
+		w := soaked(t)
+		w.advance(5 * time.Minute)
+		w.report("Cloud", commit("b"), commit("b"), serveUp)
+		w.tick()
+		w.advance(5*time.Minute + 30*time.Second)
+		w.report("Cloud", commit("b"), commit("b"), serveUp)
+		watcher := w.watcher()
+		published := watcher.Steps.Published
+		reads := 0
+		watcher.Steps.Published = func(callContext context.Context) (Manifest, error) {
+			if reads++; reads == 2 {
+				return Manifest{}, errors.New("GET current.txt: 503")
+			}
+			return published(callContext)
+		}
+		if err := watcher.Tick(context.Background()); err == nil || !strings.Contains(err.Error(), "reading back the promotion") {
+			t.Fatalf("a failed read back: %v", err)
+		}
+		if state := w.state(); state.Phase != PhaseSoak || len(w.promoted) != 0 || w.published().CanaryVersion() != commit("b") {
+			t.Fatalf("after a failed read back: %+v, promoted %q", state, w.promoted)
+		}
+		uploads := w.uploads.Load()
+		w.advance(30 * time.Second)
+		w.tick()
+		if state := w.state(); state.Phase != PhaseFleet || len(w.promoted) != 1 || !Alone(w.published(), commit("b")) || w.uploads.Load() != uploads {
+			t.Fatalf("the next pass: %+v, promoted %q, %d uploads (was %d)\n%s", state, w.promoted, w.uploads.Load(), uploads, w.log.String())
+		}
+	})
 }
 
 // A box that doesn't take the release in time is named as lagging, loudly, without stopping the release: an offline

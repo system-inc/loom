@@ -48,7 +48,8 @@ type Steps struct {
 	Order    func(context.Context, string) (string, error)       // the commit's release-order file, empty when it has none
 	Publish  func(context.Context, string, string) error         // publish.sh, with --canary <host> when one is given
 	Promote  func(string) error                                  // the commit's own manifest becomes current.txt
-	Upload   func(context.Context) error                         // upload.sh, blobs first and current.txt last
+	// Upload is upload.sh, blobs first and current.txt last: <out>/current.txt, or the manifest file given.
+	Upload func(context.Context, string) error
 	// Published is the current.txt the boxes read (<base>/current.txt), fetched past any cache.
 	Published func(context.Context) (Manifest, error)
 	// PoolSeen is when the host's serve last asked any pool it serves; nil leaves the pools unread.
@@ -301,7 +302,7 @@ func (watcher *Watcher) publishCanary(callContext context.Context, state *State)
 		watcher.stop(state, "publishing the canary: "+err.Error())
 		return nil
 	}
-	if err := watcher.Steps.Upload(callContext); err != nil {
+	if err := watcher.Steps.Upload(callContext, ""); err != nil {
 		watcher.stop(state, "uploading the canary: "+err.Error())
 		return nil
 	}
@@ -329,6 +330,19 @@ func describe(report *Report) string {
 		text += ", refused: " + report.Refused
 	}
 	return text
+}
+
+// Alone is whether the manifest gives every box the commit, with no canary: a promotion, or a rollback's end.
+func Alone(manifest Manifest, commit string) bool {
+	return manifest.Top() == commit && manifest.CanaryVersion() == ""
+}
+
+// upload sends the commit's own manifest as current.txt, leaving the out directory's current.txt as it is.
+func (watcher *Watcher) upload(callContext context.Context, commit string) error {
+	if _, err := OwnManifest(watcher.Config.Out, commit); err != nil {
+		return err
+	}
+	return watcher.Steps.Upload(callContext, ManifestPath(watcher.Config.Out, commit))
 }
 
 // describeManifest is a manifest in a few words: the version every box follows, and the canary's.
@@ -425,17 +439,30 @@ func (watcher *Watcher) soak(callContext context.Context, state *State) error {
 	if err != nil {
 		return fmt.Errorf("reading what the boxes read before promoting %s: %w", short(state.Commit), err)
 	}
-	if remote.CanaryVersion() != state.Commit {
-		watcher.stop(state, fmt.Sprintf("%s/current.txt, what the boxes read, no longer publishes the canary of %s (it reads %s); someone published by hand during the soak, and nothing is promoted over it",
-			watcher.Config.Base, short(state.Commit), describeManifest(remote)))
-		return nil
+	// The commit alone there is this release's own promotion, uploaded by a pass that couldn't read it back.
+	if !Alone(remote, state.Commit) {
+		if remote.CanaryVersion() != state.Commit {
+			watcher.stop(state, fmt.Sprintf("%s/current.txt, what the boxes read, no longer publishes the canary of %s (it reads %s); someone published by hand during the soak, and nothing is promoted over it",
+				watcher.Config.Base, short(state.Commit), describeManifest(remote)))
+			return nil
+		}
+		if err := watcher.upload(callContext, state.Commit); err != nil {
+			watcher.stop(state, "uploading the promotion: "+err.Error())
+			return nil
+		}
+		if remote, err = watcher.Steps.Published(callContext); err != nil {
+			return fmt.Errorf("reading back the promotion of %s: %w", short(state.Commit), err)
+		}
+		if !Alone(remote, state.Commit) {
+			watcher.stop(state, fmt.Sprintf("uploaded %s's manifest as current.txt, but %s/current.txt reads %s; %s/current.txt still publishes the canary",
+				short(state.Commit), watcher.Config.Base, describeManifest(remote), watcher.Config.Out))
+			return nil
+		}
 	}
+	// Only once the boxes read the promotion does the out directory: until then it still says what they read, so a
+	// failed upload leaves the canary for `loom release rollback` to end.
 	if err := watcher.Steps.Promote(state.Commit); err != nil {
 		watcher.stop(state, "promoting: "+err.Error())
-		return nil
-	}
-	if err := watcher.Steps.Upload(callContext); err != nil {
-		watcher.stop(state, "uploading the promotion: "+err.Error())
 		return nil
 	}
 	state.Phase, state.Since = PhaseFleet, watcher.Now().UTC()
@@ -509,8 +536,8 @@ func (watcher *Watcher) Watch(callContext context.Context) {
 	}
 }
 
-// Rollback ends a canary: the fleet's own release becomes current.txt again, alone, and is uploaded, so the canary
-// host returns to it (its previous version, still on disk). It refuses while a release is moving, and when there is no
+// Rollback ends a canary: the fleet's own release becomes current.txt again, alone, uploaded and read back where the
+// boxes read it before the out directory says so, and the canary host returns to it (its previous version, still on disk). It refuses while a release is moving, and when there is no
 // canary to end; rolling the whole fleet back is publishing an older manifest by hand (docs/updater.md).
 func Rollback(callContext context.Context, config Config, steps Steps, log io.Writer) error {
 	lock, err := Lock(config.Out)
@@ -534,10 +561,21 @@ func Rollback(callContext context.Context, config Config, steps Steps, log io.Wr
 	if published.CanaryVersion() == "" {
 		return fmt.Errorf("no canary is published: every box follows %s (rolling the fleet back is publishing an older manifest, docs/updater.md)", short(published.Top()))
 	}
-	if err := steps.Promote(published.Top()); err != nil {
+	// As a promotion: uploaded and read back where the boxes read it before the out directory says so.
+	if _, err := OwnManifest(config.Out, published.Top()); err != nil {
 		return err
 	}
-	if err := steps.Upload(callContext); err != nil {
+	if err := steps.Upload(callContext, ManifestPath(config.Out, published.Top())); err != nil {
+		return err
+	}
+	remote, err := steps.Published(callContext)
+	if err != nil {
+		return fmt.Errorf("uploaded %s's manifest, but reading it back: %w; %s/current.txt still publishes the canary, so rollback again", short(published.Top()), err, config.Out)
+	}
+	if !Alone(remote, published.Top()) {
+		return fmt.Errorf("uploaded %s's manifest, but %s/current.txt reads %s; %s/current.txt still publishes the canary", short(published.Top()), config.Base, describeManifest(remote), config.Out)
+	}
+	if err := steps.Promote(published.Top()); err != nil {
 		return err
 	}
 	fmt.Fprintf(log, "loom release: the canary of %s is ended: %s returns to %s\n", short(published.CanaryVersion()), strings.Join(published.Canary, ", "), short(published.Top()))

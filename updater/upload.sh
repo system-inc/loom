@@ -4,6 +4,11 @@
 #
 #	updater/upload.sh <out directory> <destination directory>   # a directory a web server serves, as the tests do
 #	updater/upload.sh <out directory> r2:<bucket>/<prefix>       # R2: r2:loom-artifacts/releases
+#	updater/upload.sh --current <manifest> <out directory> <destination>
+#
+# With --current, that manifest (a manifests/<commit>.txt) is sent as current.txt in place of <out>/current.txt, which
+# is left as it is: the release watcher promotes a canary, or ends one, this way, and changes <out>/current.txt only
+# once the boxes read the new one.
 #
 # The r2: path PUTs each object to R2's S3 endpoint with curl's own request signing (curl 7.75 or later), blobs as
 # immutable and current.txt as no-cache, since every machine polls it. Its keys come from a key=value file,
@@ -16,8 +21,15 @@
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 . "${here}/release-lock.sh"
-[ $# = 2 ] && [ -f "$1/current.txt" ] || { echo "usage: updater/upload.sh <out directory with current.txt> <destination>" >&2; exit 2; }
+current=
+if [ "${1:-}" = --current ]; then
+	current=${2:-}
+	[ -f "${current}" ] || { echo "upload: --current ${current} isn't a manifest file" >&2; exit 2; }
+	shift 2
+fi
+[ $# = 2 ] && [ -f "$1/current.txt" ] || { echo "usage: updater/upload.sh [--current <manifest>] <out directory with current.txt> <destination>" >&2; exit 2; }
 out=$1 destination=$2
+current=${current:-${out}/current.txt}
 release_lock "${out}"
 case "${destination}" in
 r2:*/?*)
@@ -32,8 +44,8 @@ r2:*/?*)
 r2:*) echo "upload: ${destination} names no prefix, and a bucket's own blobs/ may expire; use r2:<bucket>/releases" >&2; exit 2 ;;
 esac
 # Every blob the published manifest names, top section and canary, then the versions it names.
-named=$(awk 'NF == 3 && $1 != "canary" { print $3 }' "${out}/current.txt" | sort -u)
-versions=$(awk '$1 == "version" { print $2 }' "${out}/current.txt")
+named=$(awk 'NF == 3 && $1 != "canary" { print $3 }' "${current}" | sort -u)
+versions=$(awk '$1 == "version" { print $2 }' "${current}")
 
 put() { # put <file> <key> <cache control>
 	case "${destination}" in
@@ -55,5 +67,5 @@ for version in ${versions}; do
 	[ -f "${out}/manifests/${version}.txt" ] || continue
 	put "${out}/manifests/${version}.txt" "manifests/${version}.txt" "no-cache" || { echo "upload: manifests/${version}.txt failed" >&2; exit 1; }
 done
-put "${out}/current.txt" current.txt "no-cache" || { echo "upload: current.txt failed" >&2; exit 1; }
+put "${current}" current.txt "no-cache" || { echo "upload: current.txt failed" >&2; exit 1; }
 echo "uploaded $(echo "${named}" | wc -l | tr -d ' ') blobs and current.txt to ${destination}"

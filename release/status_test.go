@@ -375,7 +375,7 @@ func TestTheStepsOnWorkshop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(config.Destination, "current.txt")); err == nil {
 		t.Fatal("upload.sh beside a held lock sent current.txt")
 	}
-	if err := steps.Upload(Holding(context.Background(), lock)); err != nil {
+	if err := steps.Upload(Holding(context.Background(), lock), ""); err != nil {
 		t.Fatalf("upload.sh under the pass's own hold: %v\n%s", err, uploaded.String())
 	}
 	if content, _ := os.ReadFile(filepath.Join(config.Destination, "current.txt")); string(content) != manifestOf(commit("b")) {
