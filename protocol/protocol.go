@@ -171,8 +171,37 @@ type Event struct {
 	Key      string `json:"key,omitempty"`
 	FromRun  string `json:"fromRun,omitempty"`
 	EventLog string `json:"events,omitempty"`
+	// timing
+	Timing *Timing `json:"timing,omitempty"`
 	// finished
 	Status string `json:"status,omitempty"`
+}
+
+// A Timing is what only the runner knows of a unit's time and size, as fields: one timing event, just before finished
+// (#g1jvdbq). The judge gathers it with the unit's started, exit and finished events and its placement into one row
+// a day's table keeps (units/<day>.jsonl), so a unit's time is read across runs without parsing streams. Every field
+// is left off at zero: a phase the unit didn't have, a source it read nothing from, a peak no cgroup measured.
+type Timing struct {
+	// The unit's phases, in seconds: fetching what it reads (blobs from the store, or the checkout's commit), unpacking
+	// them, readying the environment, and its tests.
+	FetchSeconds   float64 `json:"fetchSeconds,omitempty"`
+	UnpackSeconds  float64 `json:"unpackSeconds,omitempty"`
+	PrepareSeconds float64 `json:"prepareSeconds,omitempty"`
+	TestSeconds    float64 `json:"testSeconds,omitempty"`
+	// The bytes it read, by where they came from: the action store, the runner's own blob cache, the house cache.
+	StoreBytes int64 `json:"storeBytes,omitempty"`
+	CacheBytes int64 `json:"cacheBytes,omitempty"`
+	HouseBytes int64 `json:"houseBytes,omitempty"`
+	// PeakMegabytes is the most memory the unit's processes held at once, its cgroup's memory.peak.
+	PeakMegabytes int64 `json:"peakMegabytes,omitempty"`
+	// ShareCpus and ShareMemoryMegabytes are the part of the machine the unit held (a box serve's share), the whole
+	// machine's when it held all of it.
+	ShareCpus            int `json:"shareCpus,omitempty"`
+	ShareMemoryMegabytes int `json:"shareMemoryMegabytes,omitempty"`
+	// UnitsInHand is how many units its serve held when it started, itself among them, and Load the machine's
+	// one-minute load average then.
+	UnitsInHand int     `json:"unitsInHand,omitempty"`
+	Load        float64 `json:"load,omitempty"`
 }
 
 // A unit's finished status. passed: exit 0 and every output uploaded. failed: the command's doing (a nonzero

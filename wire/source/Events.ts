@@ -82,6 +82,32 @@ export function isUtcTime(value: unknown): boolean {
     return new Date(milliseconds).toISOString().slice(0, 19) === value.slice(0, 19);
 }
 
+// The fields of a timing event's timing, protocol.Timing's: each a number of seconds, bytes, megabytes, cpus, units or
+// load, none negative, and nothing else.
+const timingFields: Record<string, FieldCheck> = {
+    fetchSeconds: isSeconds,
+    unpackSeconds: isSeconds,
+    prepareSeconds: isSeconds,
+    testSeconds: isSeconds,
+    storeBytes: isCount,
+    cacheBytes: isCount,
+    houseBytes: isCount,
+    peakMegabytes: isCount,
+    shareCpus: isCount,
+    shareMemoryMegabytes: isCount,
+    unitsInHand: isCount,
+    load: isSeconds,
+};
+
+function isTiming(value: unknown): boolean {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+        return false;
+    }
+    return Object.entries(value).every(function ([key, field]) {
+        return Object.hasOwn(timingFields, key) && timingFields[key]!(field);
+    });
+}
+
 // Per type: each field it may carry, and whether it must be present.
 const typeFields: Record<string, Record<string, { check: FieldCheck; required: boolean }>> = {
     started: {
@@ -122,6 +148,10 @@ const typeFields: Record<string, Record<string, { check: FieldCheck; required: b
         key: { check: isSha256, required: true },
         fromRun: { check: isNonEmptyString, required: true },
         events: { check: isSha256, required: true },
+    },
+    // What only the runner knows of the unit's time and size, just before finished (#g1jvdbq).
+    timing: {
+        timing: { check: isTiming, required: true },
     },
     finished: {
         status: { check: isOneOf('passed', 'failed', 'broken'), required: true },
