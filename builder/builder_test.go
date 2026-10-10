@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +57,30 @@ func (store *fakeStore) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		io.WriteString(writer, target)
+	case request.Method == http.MethodGet && path == "/actions/list":
+		if !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer build:") {
+			reply(403, map[string]string{"error": "a build token only"})
+			return
+		}
+		// Pages of two, so a test walks the cursor.
+		keys := []string{}
+		if request.URL.Query().Get("prefix") == "refs" {
+			for key := range store.refs {
+				keys = append(keys, key)
+			}
+		} else {
+			for sum := range store.blobs {
+				keys = append(keys, sum)
+			}
+		}
+		sort.Strings(keys)
+		start, _ := strconv.Atoi(request.URL.Query().Get("cursor"))
+		end := min(start+2, len(keys))
+		var cursor any
+		if end < len(keys) {
+			cursor = strconv.Itoa(end)
+		}
+		reply(200, map[string]any{"keys": keys[start:end], "cursor": cursor})
 	case request.Method == http.MethodPut && strings.HasPrefix(path, "/actions/"):
 		builder, ok := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer build:")
 		if !ok {
