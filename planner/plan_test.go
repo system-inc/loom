@@ -265,9 +265,17 @@ func TestPhaseUnitsAreRunPysListPlusGofmtKeyedOnTheWholeTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	names, keys := []string{}, map[string]string{}
+	toolsCommit, err := gitOutput(gateTools, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, phase := range phases {
 		names = append(names, phase.Name)
 		keys[phase.Name] = phase.UnitKey
+		// A phase keys on the phase pool's runner, never the test units', and names the tools commit it runs.
+		if phase.KeyParts.Tools.Runner != PhasePoolRunner || phase.KeyParts.GateTools != toolsCommit {
+			t.Errorf("%s keys runner %s and gate tools %q, want the phase pool's %s and %s", phase.Name, short(phase.KeyParts.Tools.Runner), phase.KeyParts.GateTools, short(PhasePoolRunner), short(toolsCommit))
+		}
 		gofmt := phase.Name == "phase:gofmt"
 		if phase.KeyParts.Kind != "phase" || phase.Decision != "run" || phase.KeyParts.GateInputs != inputs.GateInputs || (phase.KeyParts.Env["ADAMIC_GATE_CHANGED"] != "") != gofmt {
 			t.Errorf("%s: %+v, decision %s", phase.Name, phase.KeyParts, phase.Decision)
@@ -290,5 +298,19 @@ func TestPhaseUnitsAreRunPysListPlusGofmtKeyedOnTheWholeTree(t *testing.T) {
 		if keys[phase.Name] == phase.UnitKey {
 			t.Errorf("%s kept its key on another tree", phase.Name)
 		}
+	}
+}
+
+// Without a pool that takes kind phase, phase units are refused, never keyed on a runner no phase pool serves.
+// Not parallel: it points PoolsFile at a table with no phase pool.
+func TestPhaseUnitsNeedAPhasePool(t *testing.T) {
+	tree, gateTools := planFixture(t)
+	table := filepath.Join(t.TempDir(), "pools.json")
+	os.WriteFile(table, []byte(`{"pools": [{"name": "codex-strict", "tier": "codex-strict", "runner": "`+strings.Repeat("d", 64)+`", "memoryMegabytes": 16384, "cpus": 4}]}`), 0o644)
+	saved := PoolsFile
+	PoolsFile = table
+	defer func() { PoolsFile = saved }()
+	if _, err := PhaseUnits(tree, gateTools, strings.Repeat("b", 40), strings.Repeat("c", 40), Tools{Go: "go1.27.0"}, ParityInputs{}); err == nil {
+		t.Fatal("phase units were keyed with no pool taking kind phase")
 	}
 }

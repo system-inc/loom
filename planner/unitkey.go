@@ -24,6 +24,10 @@ type KeyParts struct {
 	Tools      Tools             `json:"tools"`
 	Env        map[string]string `json:"env"`
 	GateInputs string            `json:"gateInputs"`
+	// GateTools is a phase unit's gate tools commit (40 hex), which the runner checks out: a phase runs run.py from the
+	// tools, so the key commits to the commit itself (Loom, Oct 10 02:09Z). Empty, and so absent, on every other kind,
+	// whose keys stay where they were.
+	GateTools string `json:"gateTools,omitempty"`
 }
 
 // Select is which of the package's tests the unit runs.

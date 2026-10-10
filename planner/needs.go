@@ -26,6 +26,31 @@ type Pool struct {
 	Runner          string `json:"runner"`
 	MemoryMegabytes int    `json:"memoryMegabytes"`
 	Cpus            int    `json:"cpus"`
+	// Kinds are the unit kinds the pool takes when it is limited to some (a box pool that runs phases): empty takes
+	// tests and products.
+	Kinds []string `json:"kinds,omitempty"`
+}
+
+// PhaseRunner is the runner a phase unit keys on: the runner of the pool that takes kind phase, never a test pool's
+// (Loom, Oct 10 02:09Z). No such pool, or two serving different runners, is an error: a phase keyed on a runner no
+// phase pool serves would wait unplaced.
+func PhaseRunner(pools []Pool) (string, error) {
+	runner := ""
+	for _, pool := range pools {
+		for _, kind := range pool.Kinds {
+			if kind != "phase" {
+				continue
+			}
+			if runner != "" && runner != pool.Runner {
+				return "", fmt.Errorf("two phase pools serve different runners, %s and %s", short(runner), short(pool.Runner))
+			}
+			runner = pool.Runner
+		}
+	}
+	if runner == "" {
+		return "", fmt.Errorf("no pool in the pool table takes kind phase")
+	}
+	return runner, nil
 }
 
 // PoolsFile is the pool table the planner reads, ~/.loom/pools.json unless a command names another (--pools).

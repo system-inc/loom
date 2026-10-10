@@ -22,7 +22,8 @@ const JudgedPhase = "census"
 // run.py itself lists them at the gate tools (run.py --list-units, never retyped here), plus gofmt. A phase is keyed on
 // the whole tree (its git tree object) and the gate tools commit, so it never reuses across trees, and it always runs
 // tonight: its reads closure is 1.1. Its unit line is the key's select.run, from which the placer builds
-// run.py --phase <first word> [--unit <rest>].
+// run.py --phase <first word> [--unit <rest>], with the tools checked out at the key's gateTools. Its runner is the
+// phase pool's (PhaseRunner over the pool table), never the test units'.
 func PhaseUnits(tree, gateTools, base, sha string, tools Tools, inputs ParityInputs) ([]PlannedResult, error) {
 	module, err := modulePath(tree)
 	if err != nil {
@@ -52,6 +53,13 @@ func PhaseUnits(tree, gateTools, base, sha string, tools Tools, inputs ParityInp
 	}
 	toolsCommit, err := gitOutput(gateTools, "rev-parse", "HEAD")
 	if err != nil {
+		return nil, err
+	}
+	pools, err := LoadPools(PoolsFile)
+	if err != nil {
+		return nil, err
+	}
+	if tools.Runner, err = PhaseRunner(pools); err != nil {
 		return nil, err
 	}
 	closure, reads := phaseHash("loom-phase-tree", treeObject), phaseHash("loom-phase-tools", toolsCommit)
@@ -85,7 +93,7 @@ func PhaseUnits(tree, gateTools, base, sha string, tools Tools, inputs ParityInp
 			return nil, err
 		}
 		parts := KeyParts{Kind: "phase", Package: module, Select: Select{Run: line}, Closure: closure, Reads: reads,
-			Products: []string{}, Tools: tools, Env: env, GateInputs: inputs.GateInputs}
+			Products: []string{}, Tools: tools, Env: env, GateInputs: inputs.GateInputs, GateTools: toolsCommit}
 		key, err := UnitKey(parts)
 		if err != nil {
 			return nil, err
