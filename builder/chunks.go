@@ -73,12 +73,13 @@ func (source Source) Bytes() int64 {
 	return total
 }
 
-// SourceChunks is the tree's tracked files, submodules included (git ls-files --recurse-submodules), and its manifest
-// (TrackedManifest: what git answers about each repository in it, which a source with no .git can't ask), as chunks. A
+// SourceChunks is the tree's tracked files, submodules included (git ls-files --recurse-submodules), its manifest
+// (TrackedManifest: what git answers about each repository in it, which a source with no .git can't ask), and each of
+// installs' npm packages at <directory>/node_modules (node.go), each install one chunk of its own, as chunks. A
 // tracked symbolic link goes in as a link, and one Unpack would refuse fails here, at build time, as does a tree
-// whose manifest can't be made, and one whose files aren't what its manifest records (checkSource). Git is asked
-// through planner.LocalGit, as the manifest and the tree's hash are.
-func SourceChunks(tree string) (Source, error) {
+// whose manifest can't be made, one whose files aren't what its manifest records (checkSource), and one that tracks a
+// path inside an install's node_modules. Git is asked through planner.LocalGit, as the manifest and the tree's hash are.
+func SourceChunks(tree string, installs []NodeInstall) (Source, error) {
 	listing, err := planner.LocalGit(tree, "ls-files", "--recurse-submodules", "-z").Output()
 	if err != nil {
 		return Source{}, fmt.Errorf("git ls-files in %s: %w", tree, err)
@@ -96,34 +97,65 @@ func SourceChunks(tree string) (Source, error) {
 	if err = checkSource(tree, names, tracked); err != nil {
 		return Source{}, err
 	}
-	return chunkSource(tree, names, manifest)
+	groups := make([]chunkGroup, len(installs))
+	for index, install := range installs {
+		groups[index].top = nodeModules(install.Directory)
+		if groups[index].entries, err = nodeEntries(install); err != nil {
+			return Source{}, err
+		}
+	}
+	return chunkSource(tree, names, manifest, groups)
 }
 
-// A sourceFile is one path and its weight. One alone is a chunk of its own, whatever it weighs.
+// A chunkGroup is entries that are one chunk of their own, every one inside top: an npm install's.
+type chunkGroup struct {
+	top     string
+	entries []archiveEntry
+}
+
+// A sourceFile is one path and its weight. One alone is a chunk of its own, whatever it weighs; files of one group
+// (numbered from 1; 0 is none) are one chunk together, whatever they weigh.
 type sourceFile struct {
 	entry  archiveEntry
 	weight int64
 	alone  bool
+	group  int
 }
 
 // ChunkFiles is the named paths of tree, in whatever order they come, as chunks: each regular file and symbolic link
 // (a link Unpack would refuse fails here), in byte order, cut where cutAfter says. Each chunk is archived as the whole
 // source was, deterministically, all of them at once.
 func ChunkFiles(tree string, names []string) (Source, error) {
-	return chunkSource(tree, names, nil)
+	return chunkSource(tree, names, nil, nil)
 }
 
 // chunkSource is ChunkFiles with the manifest's files beside the named paths, each a chunk of its own: a repository's
 // files list then changes only its own chunk, when that repository moves, and the HEAD that changes on every commit
-// takes no tracked file's chunk with it. A tracked path where the manifest goes is refused.
-func chunkSource(tree string, names []string, manifest []archiveEntry) (Source, error) {
+// takes no tracked file's chunk with it. Each of groups is one chunk of its own: an npm install, which changes only when
+// its lockfile does. A tracked path where the manifest goes is refused, and so is one inside a group's directory, which
+// would split it.
+func chunkSource(tree string, names []string, manifest []archiveEntry, groups []chunkGroup) (Source, error) {
 	files := make([]sourceFile, 0, len(names)+len(manifest))
 	for _, entry := range manifest {
 		files = append(files, sourceFile{entry: entry, weight: int64(len(entry.Content)) + tarHeaderWeight, alone: true})
 	}
+	for index, group := range groups {
+		for _, entry := range group.entries {
+			if !strings.HasPrefix(entry.Name, group.top+"/") {
+				return Source{}, fmt.Errorf("%s isn't inside %s", entry.Name, group.top)
+			}
+			// A group is never cut, so what it weighs decides nothing.
+			files = append(files, sourceFile{entry: entry, group: index + 1})
+		}
+	}
 	for _, name := range names {
 		if len(manifest) > 0 && (name == TrackedDirectory || strings.HasPrefix(name, TrackedDirectory+"/")) {
 			return Source{}, fmt.Errorf("the tree tracks %s, where its source carries its manifest", name)
+		}
+		for _, group := range groups {
+			if name == group.top || strings.HasPrefix(name, group.top+"/") {
+				return Source{}, fmt.Errorf("the tree tracks %s, inside %s, which Workshop installs", name, group.top)
+			}
 		}
 		full := filepath.Join(tree, filepath.FromSlash(name))
 		info, err := os.Lstat(full)
@@ -173,7 +205,8 @@ func chunkSource(tree string, names []string, manifest []archiveEntry) (Source, 
 }
 
 // chunkRuns sorts files by name and cuts them into runs: before a file that weighs chunkTarget alone or is to be alone,
-// and after one cutAfter picks. A name listed twice is refused.
+// and after one cutAfter picks; a group's files, wherever they sort, only before its first and after its last. A name
+// listed twice is refused.
 func chunkRuns(files []sourceFile) ([][]sourceFile, error) {
 	files = append([]sourceFile{}, files...)
 	sort.Slice(files, func(left, right int) bool { return files[left].entry.Name < files[right].entry.Name })
@@ -182,6 +215,15 @@ func chunkRuns(files []sourceFile) ([][]sourceFile, error) {
 	for index, file := range files {
 		if index > 0 && files[index-1].entry.Name == file.entry.Name {
 			return nil, fmt.Errorf("%s is in the source twice", file.entry.Name)
+		}
+		if file.group != 0 {
+			if index > start && files[index-1].group != file.group {
+				runs, start = append(runs, files[start:index]), index
+			}
+			if index == len(files)-1 || files[index+1].group != file.group {
+				runs, start = append(runs, files[start:index+1]), index+1
+			}
+			continue
 		}
 		if (file.weight >= chunkTarget || file.alone) && index > start {
 			runs, start = append(runs, files[start:index]), index

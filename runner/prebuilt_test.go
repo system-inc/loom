@@ -845,12 +845,21 @@ func TestALeftoverPartialFetchIsNeverTrusted(t *testing.T) {
 }
 
 // The real prepare.sh's environment mode readies a prebuilt unit's environment over an unpacked source with neither
-// git nor go on its PATH, and refuses an instance without adamic's toolchain as the instance's (exit 2).
+// git, go nor npm on its PATH, and refuses an instance without adamic's toolchain as the instance's (exit 2). The
+// source's npm packages came with it (#v03v751): it installs none and leaves them as they are.
 func TestPrepareEnvironmentNeedsNoGitAndNoGo(t *testing.T) {
 	directory := t.TempDir()
 	bin, home, tree := filepath.Join(directory, "bin"), filepath.Join(directory, "home"), filepath.Join(directory, "source")
 	for _, path := range []string{bin, home, tree} {
 		os.MkdirAll(path, 0o755)
+	}
+	nodeModules := filepath.Join(tree, "stage3", "api", "node_modules")
+	os.MkdirAll(filepath.Join(nodeModules, "@types", "node"), 0o755)
+	os.WriteFile(filepath.Join(tree, "stage3", "api", "package-lock.json"), []byte("{}\n"), 0o644)
+	os.WriteFile(filepath.Join(nodeModules, "@types", "node", "package.json"), []byte(`{"version":"25.3.3"}`+"\n"), 0o644)
+	installed, err := os.Stat(nodeModules)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, tool := range []string{"bash", "df", "awk", "sort", "head", "mkdir", "env"} {
 		path, err := exec.LookPath(tool)
@@ -878,6 +887,13 @@ func TestPrepareEnvironmentNeedsNoGitAndNoGo(t *testing.T) {
 	}
 	if content, _ := os.ReadFile(environment); !bytes.Contains(content, []byte("ADAMIC_TOOLCHAIN_LOADED=1\x00")) {
 		t.Fatalf("the environment lacks the toolchain's: %q", content)
+	}
+	entries, _ := os.ReadDir(nodeModules)
+	if now, err := os.Stat(nodeModules); err != nil || !os.SameFile(now, installed) || len(entries) != 1 || entries[0].Name() != "@types" {
+		t.Errorf("the source's node_modules changed: %v, %v", entries, err)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "root", "adamic-npm")); err == nil {
+		t.Error("prepare.sh kept npm trees for a prebuilt unit")
 	}
 }
 

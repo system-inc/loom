@@ -51,8 +51,9 @@ type PlannedUnitWire struct {
 	// Resources is the unit's declared need (Planner's unit-needs), placement only, outside the key: a rerun alone is
 	// placed by it as the first placement was, or it lands on a tier that can't hold it.
 	Resources protocol.Resources `json:"resources"`
-	// Tree is the tree key of Workshop's build of the future's tree (planner.PlannedResult.Tree), on a test or product
-	// unit: what the placer names on its job, and what `loom build-trees` builds. Empty: the plan carried none.
+	// Tree is the tree key of Workshop's build of the future's tree (planner.PlannedResult.Tree), on a test, product or
+	// phase unit: what the placer names on its job, what a rerun on the future runs, and what `loom build-trees` builds.
+	// Empty: the plan carried none.
 	Tree string `json:"tree,omitempty"`
 }
 
@@ -110,10 +111,13 @@ func (NoMainRecords) Latest(base, unitKey string) ([]TestOutcome, bool, error) {
 // Puller judges every ready future one pass at a time.
 type Puller struct {
 	Source FutureSource
-	RunOf  func(tree string, attempt int) string                                                              // coordinator.FutureRun
-	Read   func(run string) ([]protocol.Event, error)                                                         // coordinator.ReadRunEvents, bound
-	Rerun  func(keyParts json.RawMessage, resources protocol.Resources, sha string) ([]protocol.Event, error) // planner.JobUnitFor with the unit's resources, then coordinator.RerunAlone
-	Log    func(run, sha256 string) ([]byte, error)                                                           // coordinator.ReadRunBlob, bound: each attempt's test log
+	RunOf  func(tree string, attempt int) string      // coordinator.FutureRun
+	Read   func(run string) ([]protocol.Event, error) // coordinator.ReadRunEvents, bound
+	// Rerun is planner.JobUnitFor with the unit's resources, then coordinator.RerunAlone. tree is the key of the build
+	// the rerun runs (#v03v751): the planned unit's when sha is the future's, empty when it's the base's, which the
+	// caller keys itself (planner.ReadCommitIdentity), a rerun on a base whose tree isn't built being void, never red.
+	Rerun func(keyParts json.RawMessage, resources protocol.Resources, sha, tree string) ([]protocol.Event, error)
+	Log   func(run, sha256 string) ([]byte, error) // coordinator.ReadRunBlob, bound: each attempt's test log
 	// NeedNow is a unit's declared need as of now (NeedOf over a fresh unit-needs.json); nil skips the need-changed
 	// rule.
 	NeedNow func(keyParts json.RawMessage, listed protocol.Resources) (protocol.Resources, error)
@@ -258,9 +262,10 @@ func (puller Puller) VoidListed(future PlannedFuture, attempt int, infra, cause 
 func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.Event) (Loop, Job) {
 	parts := map[string]json.RawMessage{}
 	resources := map[string]protocol.Resources{}
+	trees := map[string]string{}
 	plan := []PlanUnit{}
 	for _, unit := range future.Units {
-		parts[unit.UnitKey], resources[unit.UnitKey] = unit.KeyParts, unit.Resources
+		parts[unit.UnitKey], resources[unit.UnitKey], trees[unit.UnitKey] = unit.KeyParts, unit.Resources, unit.Tree
 		planUnit := planUnitOf(unit)
 		if unit.Decision == "reuse" {
 			planUnit.Reused = "reused"
@@ -272,8 +277,13 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	}
 	loop := puller.Loop
 	loop.Runs = EventRuns{Read: func(string) ([]protocol.Event, error) { return events, nil }, Log: puller.Log}
-	loop.Fabric = EventFabric{Rerun: func(unitKey, tree string) ([]protocol.Event, error) {
-		return puller.Rerun(parts[unitKey], resources[unitKey], tree)
+	loop.Fabric = EventFabric{Rerun: func(unitKey, sha string) ([]protocol.Event, error) {
+		// The future's rerun runs its plan's build; the base's, keyed by the caller, its own.
+		tree := ""
+		if sha == future.Future {
+			tree = trees[unitKey]
+		}
+		return puller.Rerun(parts[unitKey], resources[unitKey], sha, tree)
 	}, Log: puller.Log}
 	if puller.NeedNow != nil {
 		loop.Need = func(unitKey string) (protocol.Resources, protocol.Resources, error) {

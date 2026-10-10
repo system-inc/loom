@@ -89,3 +89,57 @@ func TestATreeNamingAnotherToolchainIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// A commit is keyed as its checkout is, from the repository's objects alone (Judge's rerun on a unit's base,
+// #v03v751): the same identity for a commit behind HEAD as ReadTreeIdentity reads in a checkout of it, the same
+// toolchain refusals, and a commit the repository doesn't hold named. Mutants: go.work not carried (a workspace's
+// toolchain line unread); HEAD's tree hash read for every commit.
+func TestACommitIsKeyedAsItsCheckoutIs(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	os.WriteFile(filepath.Join(bin, "go"), []byte("#!/bin/bash\necho go1.27.1\necho linux\necho amd64\n"), 0o755)
+	t.Setenv("PATH", bin+":"+filepath.Dir(git)+":/usr/bin:/bin")
+	commit := func(tree string, files map[string]string) string {
+		writeFiles(t, tree, files)
+		for _, arguments := range [][]string{{"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"}} {
+			if output, err := exec.Command("git", append([]string{"-C", tree}, arguments...)...).CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v %s", arguments, err, output)
+			}
+		}
+		sha, _ := exec.Command("git", "-C", tree, "rev-parse", "HEAD").Output()
+		return strings.TrimSpace(string(sha))
+	}
+	for name, files := range map[string]map[string]string{
+		"none":                    {"go.mod": "module m\n\ngo 1.27\n", "a.go": "package m\n"},
+		"go.mod's another":        {"go.mod": "module m\n\ngo 1.27\n\ntoolchain go1.27.2 // pinned\n"},
+		"go.work's over go.mod's": {"go.mod": "module m\n\ntoolchain go1.27.1\n", "go.work": "go 1.27\n\ntoolchain go1.28.0\n\nuse .\n"},
+		"no module at all":        {"README": "x\n"},
+	} {
+		repository := filepath.Join(t.TempDir(), "repository")
+		os.MkdirAll(repository, 0o755)
+		exec.Command("git", "-C", repository, "init", "-q").Run()
+		base := commit(repository, files)
+		// HEAD moves on: what's keyed is the commit named, not the checkout's.
+		commit(repository, map[string]string{"later.txt": "later\n"})
+		checkout := filepath.Join(t.TempDir(), "checkout")
+		if output, err := exec.Command("git", "clone", "-q", repository, checkout).CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v %s", name, err, output)
+		}
+		exec.Command("git", "-C", checkout, "checkout", "-q", base).Run()
+		want, wantErr := ReadTreeIdentity(checkout)
+		got, err := ReadCommitIdentity(repository, base)
+		if got != want || (err == nil) != (wantErr == nil) || (err != nil && err.Error() != wantErr.Error()) {
+			t.Errorf("%s: the commit keys %+v (%v), and its checkout %+v (%v)", name, got, err, want, wantErr)
+		}
+	}
+	repository := filepath.Join(t.TempDir(), "repository")
+	os.MkdirAll(repository, 0o755)
+	exec.Command("git", "-C", repository, "init", "-q").Run()
+	commit(repository, map[string]string{"go.mod": "module m\n"})
+	if _, err := ReadCommitIdentity(repository, strings.Repeat("d", 40)); err == nil || !strings.Contains(err.Error(), "isn't in "+repository) {
+		t.Errorf("a commit the repository doesn't hold: %v", err)
+	}
+}

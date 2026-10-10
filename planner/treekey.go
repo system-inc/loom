@@ -78,6 +78,42 @@ func ReadTreeIdentity(tree string) (TreeIdentity, error) {
 	if err != nil {
 		return TreeIdentity{}, err
 	}
+	return identityIn(tree, hash)
+}
+
+// ReadCommitIdentity is ReadTreeIdentity of commit, read from repository's objects with no checkout, so Judge can name
+// the build a rerun on a unit's base runs (#v03v751): the commit's git tree hash, and the rest read by ReadTreeIdentity's
+// own code inside a directory holding only the commit's go.work and go.mod, the files at a tree's top that go and
+// TreeToolchain read for it. A commit the repository doesn't hold fails it, named.
+func ReadCommitIdentity(repository, commit string) (TreeIdentity, error) {
+	hash, err := LocalGit(repository, "rev-parse", "--verify", "--quiet", commit+"^{tree}").Output()
+	if err != nil {
+		return TreeIdentity{}, fmt.Errorf("commit %s isn't in %s: %w", commit, repository, err)
+	}
+	listed, err := LocalGit(repository, "ls-tree", "--name-only", commit, "--", "go.work", "go.mod").Output()
+	if err != nil {
+		return TreeIdentity{}, fmt.Errorf("git ls-tree %s in %s: %w", commit, repository, err)
+	}
+	directory, err := os.MkdirTemp("", "loom-commit-")
+	if err != nil {
+		return TreeIdentity{}, err
+	}
+	defer os.RemoveAll(directory)
+	for _, name := range strings.Fields(string(listed)) {
+		content, err := LocalGit(repository, "show", commit+":"+name).Output()
+		if err == nil {
+			err = os.WriteFile(filepath.Join(directory, name), content, 0o644)
+		}
+		if err != nil {
+			return TreeIdentity{}, fmt.Errorf("%s at %s: %w", name, commit, err)
+		}
+	}
+	return identityIn(directory, strings.TrimSpace(string(hash)))
+}
+
+// identityIn is the identity of a tree whose git tree hash is hash, the rest read in directory: go env GOVERSION, GOOS
+// and GOARCH under TreeBuildEnvironment, and the release the tree names (TreeToolchain), which must be go's.
+func identityIn(tree, hash string) (TreeIdentity, error) {
 	values, err := goEnv(tree, append(os.Environ(), TreeBuildEnvironment()...), TreeGoVersionBound, "GOVERSION", "GOOS", "GOARCH")
 	if err != nil {
 		return TreeIdentity{}, err

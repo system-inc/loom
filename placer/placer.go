@@ -170,9 +170,9 @@ type Placer struct {
 	Keep time.Duration
 	// Trees is the rollout gate for Workshop's builds (#w7agfa9): set only once every runner of the fleet runs a
 	// release that decodes `TestJob.Tree` (an older runner decodes a job strictly and refuses one carrying it). Set,
-	// every test and product unit's job names its plan's tree key, and an attempt waits, held, until the store holds
-	// that tree's index (TreeState), voided as Loom's, named, when the tree builder's build failed or past TreeWait.
-	// Unset, no job names a tree and nothing waits, as before.
+	// every test, product and phase unit's job names its plan's tree key (a phase job's for its npm packages alone),
+	// and an attempt waits, held, until the store holds that tree's index (TreeState), voided as Loom's, named, when
+	// the tree builder's build failed or past TreeWait. Unset, no job names a tree and nothing waits, as before.
 	Trees     bool
 	TreeState func(tree string) (TreeState, error)
 	// TreeWait is how long an attempt waits on its tree's index; zero means TreeWaitBound.
@@ -461,7 +461,7 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 			record.Unplaced = append(record.Unplaced, fmt.Sprintf("%s: %s", unitName(unit, parts.Kind), why))
 			continue
 		}
-		if placer.Trees && planner.RunsTreeBuild(parts.Kind) {
+		if placer.Trees && planner.ReadsTreeBuild(parts.Kind) {
 			if unit.Tree == "" {
 				// A plan from before the planner keyed trees: no build is named for it, so it never runs one.
 				record.Unplaced = append(record.Unplaced, fmt.Sprintf("%s: its plan carries no tree key", unitName(unit, parts.Kind)))
@@ -489,7 +489,7 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 			return false, err
 		}
 		for index := range candidates {
-			if planner.RunsTreeBuild(candidates[index].job.Kind) {
+			if planner.ReadsTreeBuild(candidates[index].job.Kind) {
 				candidates[index].job.Test.Tree = tree
 			}
 		}

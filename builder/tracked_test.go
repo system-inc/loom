@@ -98,7 +98,7 @@ func unpackSource(t *testing.T, source Source) string {
 // its parent's files pin. It is in the source, each file a chunk of its own, and never in the checkout.
 func TestTheManifestIsGitsOwnOutput(t *testing.T) {
 	top := trackedTree(t)
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestASubmoduleAwayFromItsPinFailsNamed(t *testing.T) {
 	for _, repository := range manifestRepositories[1:] {
 		top := trackedTree(t)
 		gitIn(t, filepath.Join(top, filepath.FromSlash(repository)), "commit", "-q", "--allow-empty", "-m", "moved")
-		_, err := SourceChunks(top)
+		_, err := SourceChunks(top, nil)
 		if err == nil || !strings.Contains(err.Error(), "submodule "+repository+" is at") || !strings.Contains(err.Error(), "pins") {
 			t.Errorf("%s moved from its pin: %v", repository, err)
 		}
@@ -183,7 +183,7 @@ func TestAMissingSubmoduleFailsNamed(t *testing.T) {
 			parent, inside = filepath.Join(top, "sub"), "deep/inner"
 		}
 		gitIn(t, parent, "submodule", "deinit", "-q", "-f", inside)
-		_, err := SourceChunks(top)
+		_, err := SourceChunks(top, nil)
 		if err == nil || !strings.Contains(err.Error(), "submodule "+repository+", pinned at") || !strings.Contains(err.Error(), "isn't checked out") {
 			t.Errorf("%s not checked out: %v", repository, err)
 		}
@@ -235,7 +235,7 @@ func TestTheManifestIsTheSameForTheSameTree(t *testing.T) {
 func TestTheManifestsChunksMoveOnlyWithTheirRepository(t *testing.T) {
 	top := trackedTree(t)
 	chunksOf := func() map[string]string {
-		source, err := SourceChunks(top)
+		source, err := SourceChunks(top, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -278,7 +278,7 @@ func TestTheManifestsChunksMoveOnlyWithTheirRepository(t *testing.T) {
 // A tree that tracks a path where the manifest goes is refused: the source would hold it twice, or beside it.
 func TestATreeTrackingTheManifestsDirectoryIsRefused(t *testing.T) {
 	tree := gitTree(t, map[string]string{"a.txt": "a\n", TrackedDirectory + "/note": "mine\n"})
-	if _, err := SourceChunks(tree); err == nil || !strings.Contains(err.Error(), "tracks "+TrackedDirectory+"/note") {
+	if _, err := SourceChunks(tree, nil); err == nil || !strings.Contains(err.Error(), "tracks "+TrackedDirectory+"/note") {
 		t.Fatalf("a tree tracking %s/note: %v", TrackedDirectory, err)
 	}
 }
@@ -317,7 +317,7 @@ func TestASourceItsManifestContradictsFailsNamed(t *testing.T) {
 	} {
 		top := trackedTree(t)
 		change.change(top)
-		_, err := SourceChunks(top)
+		_, err := SourceChunks(top, nil)
 		if err == nil || !strings.Contains(err.Error(), "isn't what its manifest records, first "+strings.TrimPrefix(change.want, "first ")) {
 			t.Errorf("%s: %v", name, err)
 		}
@@ -333,7 +333,7 @@ func TestASubmoduleAtAManifestFilesNameIsRefused(t *testing.T) {
 		top := gitTree(t, map[string]string{"top.txt": "top\n"})
 		gitIn(t, top, "submodule", "add", "-q", inner, at)
 		gitCommit(t, top)
-		if _, err := SourceChunks(top); err == nil || !strings.Contains(err.Error(), "submodule "+at+" is at a path through") {
+		if _, err := SourceChunks(top, nil); err == nil || !strings.Contains(err.Error(), "submodule "+at+" is at a path through") {
 			t.Errorf("a submodule at %s: %v", at, err)
 		}
 	}
@@ -345,7 +345,7 @@ func TestASubmoduleAtAManifestFilesNameIsRefused(t *testing.T) {
 	gitIn(t, top, "submodule", "add", "-q", sub, "sub")
 	gitCommit(t, top)
 	gitIn(t, top, "submodule", "update", "-q", "--init", "--recursive")
-	if _, err := SourceChunks(top); err == nil || !strings.Contains(err.Error(), "submodule sub/files is at a path through") {
+	if _, err := SourceChunks(top, nil); err == nil || !strings.Contains(err.Error(), "submodule sub/files is at a path through") {
 		t.Errorf("a submodule's submodule at files: %v", err)
 	}
 }
@@ -354,7 +354,7 @@ func TestASubmoduleAtAManifestFilesNameIsRefused(t *testing.T) {
 // lacks files, or GIT_DIR another repository, the source and TreeHash are what they are without.
 func TestGitAnswersForTheTreesOwnRepository(t *testing.T) {
 	top := trackedTree(t)
-	want, err := SourceChunks(top)
+	want, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestGitAnswersForTheTreesOwnRepository(t *testing.T) {
 	other := gitTree(t, map[string]string{"other.txt": "other\n"})
 	for _, variable := range [][2]string{{"GIT_INDEX_FILE", partial}, {"GIT_DIR", filepath.Join(other, ".git")}} {
 		t.Setenv(variable[0], variable[1])
-		got, err := SourceChunks(top)
+		got, err := SourceChunks(top, nil)
 		hash, hashErr := planner.TreeHash(top)
 		os.Unsetenv(variable[0])
 		if err != nil || !slices.Equal(got.Chunks, want.Chunks) {
@@ -398,7 +398,7 @@ func TestAReplacedCommitIsReadAsItIs(t *testing.T) {
 	if replaced := strings.TrimSpace(string(gitIn(t, top, "rev-parse", "HEAD^{tree}"))); replaced == tree {
 		t.Fatal("the replace ref replaced nothing")
 	}
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

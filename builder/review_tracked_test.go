@@ -67,7 +67,7 @@ func compare(t *testing.T, unpacked string, repo string) []string {
 func TestReviewModifiedTrackedFile(t *testing.T) {
 	top := trackedTree(t)
 	os.WriteFile(filepath.Join(top, "top.txt"), []byte("mutated by a build step\n"), 0o644)
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Logf("refused: %v", err)
 		return
@@ -81,7 +81,7 @@ func TestReviewStagedNewFile(t *testing.T) {
 	top := trackedTree(t)
 	os.WriteFile(filepath.Join(top, "staged.txt"), []byte("staged\n"), 0o644)
 	gitIn(t, top, "add", "staged.txt")
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Logf("refused: %v", err)
 		return
@@ -94,7 +94,7 @@ func TestReviewStagedNewFile(t *testing.T) {
 func TestReviewSubmoduleDirty(t *testing.T) {
 	top := trackedTree(t)
 	os.WriteFile(filepath.Join(top, "sub", "sub.txt"), []byte("dirty in sub\n"), 0o644)
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Logf("refused: %v", err)
 		return
@@ -123,7 +123,7 @@ func TestReviewGitIndexFileEnv(t *testing.T) {
 		t.Fatal(err, string(out))
 	}
 	t.Setenv("GIT_INDEX_FILE", other)
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Logf("refused: %v", err)
 		return
@@ -138,7 +138,7 @@ func TestReviewSubmoduleNamedFiles(t *testing.T) {
 	top := gitTree(t, map[string]string{"top.txt": "top\n"})
 	gitIn(t, top, "submodule", "add", "-q", inner, "files")
 	gitCommit(t, top)
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Logf("refused at build: %v", err)
 		return
@@ -162,7 +162,7 @@ func TestReviewReplaceRef(t *testing.T) {
 	replacement := strings.TrimSpace(string(gitIn(t, top, "commit-tree", "-m", "replaced", "4b825dc642cb6eb9a060e54bf8d69288fbee4904")))
 	gitIn(t, top, "replace", head, replacement)
 	gitIn(t, top, "checkout", "-q", "--force", "--detach", head) // what GitCheckout does
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Logf("refused: %v", err)
 		return
@@ -182,7 +182,7 @@ func TestReviewAssumeUnchanged(t *testing.T) {
 	gitIn(t, top, "update-index", "--assume-unchanged", "z.txt")
 	os.WriteFile(filepath.Join(top, "z.txt"), []byte("hidden change\n"), 0o644)
 	status := gitIn(t, top, "status", "--porcelain", "--untracked-files=no")
-	source, err := SourceChunks(top)
+	source, err := SourceChunks(top, nil)
 	if err != nil {
 		t.Logf("refused: %v", err)
 		return

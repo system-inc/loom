@@ -9,15 +9,17 @@
 #	prepare.sh trim-only <root> <exclusive | shared>
 #
 # environment readies only what a prebuilt test job's binaries run with (prebuilt.go), over <tree>, the tree's source
-# the runner already unpacked from the action store: the instance's adamic toolchain (env.sh, which must exist: exit 2
-# without it), stage3/api's npm packages and the gate inputs. No checkout, no setup, and nothing of Go.
+# the runner already unpacked from the action store, its npm packages among it: the instance's adamic toolchain
+# (env.sh, which must exist: exit 2 without it) and the gate inputs. No checkout, no setup, no npm, and nothing of Go;
+# it writes nothing into <tree>.
 #
-# <root> holds everything it keeps between units beside the tree (the npm trees, the gate inputs, the setup marker) and
-# is where it looks for what earlier units left. trim (a strict runner's: one unit at a time) first removes what
-# earlier units left there; keep removes nothing. exclusive says the machine is the runner's alone (a Codex instance,
-# --exclusive): only then does it clear HOME's adamic runtime builds and Go's build cache too, and run adamic's own
-# cloud/setup.sh, which installs into HOME. shared (a house box, which other work shares) touches nothing of HOME but
-# what go test itself writes, and a checkout on a machine without adamic's toolchain is unfit there, exit 2, named.
+# <root> holds everything it keeps between units beside the tree (the npm trees the runner placed for a checkout, the
+# gate inputs, the setup marker) and is where it looks for what earlier units left. trim (a strict runner's: one unit at
+# a time) first removes what earlier units left there; keep removes nothing. exclusive says the machine is the runner's
+# alone (a Codex instance, --exclusive): only then does it clear HOME's adamic runtime builds and Go's build cache too,
+# and run adamic's own cloud/setup.sh, which installs into HOME. shared (a house box, which other work shares) touches
+# nothing of HOME but what go test itself writes, and a checkout on a machine without adamic's toolchain is unfit there,
+# exit 2, named.
 #
 # Exit 0: the tree is at <sha> and <environment file> holds the environment, NUL separated. Exit 3: the job is refused
 # (the sha or base can't be fetched from the public repository, a submodule isn't public on GitHub); nothing ran. Exit 2:
@@ -149,16 +151,18 @@ elif [ -z "${toolchain}" ]; then
 fi
 mkdir -p -m 1777 "${TMPDIR:-${root}}"
 
-# stage3/api's pinned npm packages, npm ci from the public registry once per lockfile, hardlinked into the tree.
+# stage3/api's npm packages: nothing here installs them (#v03v751). A prebuilt unit's tree holds them already, installed
+# on Workshop and unpacked from its source (builder/node.go). A checkout's are linked in from <root>/adamic-npm/<lockfile
+# sha256>/node_modules, where the runner placed them from the build its job names (runner/node.go) before this ran; a
+# checkout whose lockfile has none placed can't be readied, Loom's, named.
 lockfile=${tree}/stage3/api/package-lock.json
-if [ -f "${lockfile}" ]; then
+if [ "${mode}" = checkout ] && [ -f "${lockfile}" ]; then
 	key=$(sha256sum "${lockfile}" | cut -c1-64)
 	cache=${root}/adamic-npm/${key} target=${tree}/stage3/api/node_modules
-	if [ ! -d "${cache}/node_modules" ]; then
-		staging=${cache}.staging-$$
-		mkdir -p "${staging}" && cp "${tree}/stage3/api/package.json" "${lockfile}" "${staging}/"
-		(cd "${staging}" && npm_config_update_notifier=false npm ci --ignore-scripts --no-audit --no-fund --install-strategy=hoisted --registry=https://registry.npmjs.org > npm.log 2>&1) && mv "${staging}" "${cache}" || { say "npm ci of stage3/api failed"; tail -20 "${staging}/npm.log"; exit 2; }
-	fi
+	[ -d "${cache}/node_modules" ] || {
+		say "stage3/api's npm packages for lockfile ${key} aren't on this runner: the job names no tree build holding them, and a runner never installs"
+		exit 2
+	}
 	if [ "$(cat "${target}/.fast-gate-lockfile-sha256" 2> /dev/null)" != "${key}" ]; then
 		[ -e "${target}" ] && mv "${target}" "${root}/adamic-npm/replaced-$$-${SECONDS}"
 		cp -al "${cache}/node_modules" "${target}" && echo "${key}" > "${target}/.fast-gate-lockfile-sha256"

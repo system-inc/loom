@@ -139,7 +139,7 @@ func heldBuild(t *testing.T, store Store, version string) (TreeIndex, string) {
 		result.Products = products[result.Package]
 		index.Packages[result.Package] = result
 	}
-	source, err := SourceChunks(tree)
+	source, err := SourceChunks(tree, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

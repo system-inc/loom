@@ -13,7 +13,7 @@ func TestEveryJobNamesItsKeysRunner(t *testing.T) {
 	t.Parallel()
 	sha, base, key, runner := strings.Repeat("c", 40), strings.Repeat("b", 40), strings.Repeat("1", 64), strings.Repeat("e", 64)
 	test := KeyParts{Kind: "test", Package: protocol.AdamicModule + "/internal/oracle", Tools: Tools{Go: "go1.27.1", Runner: runner}}
-	rerun, err := JobUnitFor(test, sha)
+	rerun, err := JobUnitFor(test, sha, strings.Repeat("7", 64))
 	if err != nil || rerun.Test.Runner != runner {
 		t.Fatalf("a rerun's job names runner %q (%v)", rerun.Test.Runner, err)
 	}

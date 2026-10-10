@@ -62,6 +62,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	censusRows := flags.String("census-rows", "", "the skip census's rows, comma-separated files (the tools tree's skips.json and census-extra.json); every unit whose tests pass is held to it")
 	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
 	censusGit := flags.String("census-git", "", "with --census-rows, a clone of Adamic whose origin answers whether a pending skip's awaited branch is on main")
+	treeGit := flags.String("tree-git", "", "a clone of Adamic holding the commits Workshop built (the tree builder's): a rerun on a unit's base runs that commit's tree build, keyed from it; without it, every rerun on a base is void, base tree not built")
 	storeFlags := addStoreFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -134,12 +135,19 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Read: func(run string) ([]protocol.Event, error) {
 			return coordinator.ReadRunEvents(runContext, *wire, secret, run)
 		},
-		Rerun: func(keyParts json.RawMessage, resources protocol.Resources, sha string) ([]protocol.Event, error) {
+		Rerun: func(keyParts json.RawMessage, resources protocol.Resources, sha, tree string) ([]protocol.Event, error) {
 			var parts planner.KeyParts
 			if err := json.Unmarshal(keyParts, &parts); err != nil {
 				return nil, fmt.Errorf("a planned unit's keyParts: %w", err)
 			}
-			unit, err := planner.JobUnitFor(parts, sha)
+			tree, void, err := rerunTree(*treeGit, store.TreeIndexed, sha, tree)
+			if err != nil {
+				return nil, err
+			}
+			if void != "" {
+				return []protocol.Event{{Type: "error", Phase: protocol.PhasePlace, Message: "not placed: " + void}}, nil
+			}
+			unit, err := planner.JobUnitFor(parts, sha, tree)
 			if err != nil {
 				// A unit the planner can't rebuild as a job (a phase or product unit, or a test keyed on
 				// ADAMIC_GATE_CHANGED's file hash) can't be placed again: its rerun is void with that cause, and never
@@ -682,4 +690,32 @@ func loadNeeds(repository string) (planner.UnitNeeds, error) {
 		return planner.UnitNeeds{}, err
 	}
 	return planner.LoadUnitNeeds(directory)
+}
+
+// rerunTree is the tree build a rerun at sha runs (#v03v751): planned, the unit's plan's, for a rerun on the future,
+// and for one on its base (planned empty) the base commit's, keyed from treeGit as the planner keys a tree
+// (planner.ReadCommitIdentity) and run only once indexed says the store holds it. A base whose tree isn't built (not
+// in treeGit, not keyable, its index not up, or no --tree-git) is void's cause, named: never red, and never built on a
+// runner. Building base trees on demand is #6ygdzat's. A store that can't be read is an error, for the pass to try
+// again.
+func rerunTree(treeGit string, indexed func(tree string) (bool, error), sha, planned string) (string, string, error) {
+	if planned != "" {
+		return planned, "", nil
+	}
+	if treeGit == "" {
+		return "", "base tree not built: the judge has no --tree-git to key base " + sha + "'s tree", nil
+	}
+	identity, err := planner.ReadCommitIdentity(treeGit, sha)
+	if err != nil {
+		return "", fmt.Sprintf("base tree not built: keying base %s: %v", sha, err), nil
+	}
+	tree := identity.Key()
+	held, err := indexed(tree)
+	if err != nil {
+		return "", "", fmt.Errorf("reading base %s's tree index trees/%s.json: %w", sha, tree, err)
+	}
+	if !held {
+		return "", fmt.Sprintf("base tree not built: trees/%s.json, base %s's, isn't in the store", tree, sha), nil
+	}
+	return tree, "", nil
 }

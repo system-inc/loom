@@ -182,7 +182,7 @@ func TestAOneFileChangeSendsOneChunk(t *testing.T) {
 	withChunkTarget(t, 4<<10)
 	files := manyFiles(300)
 	tree := gitTree(t, files)
-	source, err := SourceChunks(tree)
+	source, err := SourceChunks(tree, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestAOneFileChangeSendsOneChunk(t *testing.T) {
 	} {
 		os.WriteFile(filepath.Join(tree, filepath.FromSlash(change.name)), []byte(change.content), 0o644)
 		gitCommit(t, tree)
-		again, err := SourceChunks(tree)
+		again, err := SourceChunks(tree, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -247,7 +247,7 @@ func TestTheChunksUnpackToTheWholeArchivesTree(t *testing.T) {
 	os.Symlink("../top.txt", filepath.Join(tree, "d", "up"))
 	os.Symlink("x", filepath.Join(tree, "d", "b", "y"))
 	gitCommit(t, tree)
-	source, err := SourceChunks(tree)
+	source, err := SourceChunks(tree, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestTheChunksUnpackToTheWholeArchivesTree(t *testing.T) {
 	// A link that would leave fails the build, as the whole archive's did.
 	os.Symlink("../../outside", filepath.Join(tree, "d", "out"))
 	gitCommit(t, tree)
-	if _, err = SourceChunks(tree); err == nil || !strings.Contains(err.Error(), "outside") {
+	if _, err = SourceChunks(tree, nil); err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("a link out of the tree: %v", err)
 	}
 }
@@ -318,7 +318,9 @@ func TestAnIndexOfAnotherFormatIsUnfitAndOverlappingChunksPoisoned(t *testing.T)
 	for name, content := range map[string]string{
 		"the whole archive's": `{"tree":"t","source":"` + sum + `","packages":{}}`,
 		"another format's":    `{"format":1,"tree":"t","source":[{"blob":"` + sum + `","first":"a","last":"b","files":1,"bytes":1}],"packages":{}}`,
-		"a later format's":    `{"format":3,"tree":"t","source":[],"packages":{}}`,
+		// Format 2's runners ran npm themselves, so its source holds no npm packages.
+		"format 2's":       `{"format":2,"tree":"t","source":[{"blob":"` + sum + `","first":"a","last":"b","files":1,"bytes":1}],"packages":{}}`,
+		"a later format's": `{"format":4,"tree":"t","source":[],"packages":{}}`,
 	} {
 		if _, err := ParseTree("k", []byte(content)); !errors.Is(err, ErrIndexFormat) || strings.Contains(err.Error(), "poisoned") {
 			t.Errorf("%s index: %v", name, err)

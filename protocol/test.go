@@ -74,8 +74,10 @@ type TestJob struct {
 	Go string `json:"go,omitempty"`
 	// Tree is the tree key of Workshop's build of the job's tree (planner.TreeKey, as `loom build-tree` prints it):
 	// the runner reads trees/<Tree>.json from the action store and runs the prebuilt test binaries it names, each
-	// fetched by sha256 with the tree's source and the products its tests read, and never builds. A go test job's only.
-	// Empty: the runner compiles the packages with go test, as before Workshop built every tree.
+	// fetched by sha256 with the tree's source and the products its tests read, and never builds. A phase job, run on
+	// a checkout, takes only the tree's npm packages from it (#v03v751), since no runner installs them. Empty: a go
+	// test job's packages are compiled with go test, as before Workshop built every tree, and a checkout that needs npm
+	// packages can't be readied.
 	Tree string `json:"tree,omitempty"`
 }
 
@@ -135,9 +137,6 @@ func CheckTestJob(job TestJob) error {
 	}
 	if job.Go != "" && job.Phase != GofmtPhase {
 		return fmt.Errorf("go names the gofmt phase's Go release, and this job isn't gofmt's")
-	}
-	if job.Tree != "" && job.Phase != "" {
-		return fmt.Errorf("tree names a build of test binaries, and a phase job runs none")
 	}
 	if job.Tree != "" && !Sha256Pattern.MatchString(job.Tree) {
 		return fmt.Errorf("tree %q isn't a tree key, 64 lowercase hex digits", job.Tree)
