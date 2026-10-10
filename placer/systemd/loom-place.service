@@ -1,0 +1,36 @@
+# Loom's placer on Workshop: `loom place`'s pull loop (cmd/loom/place.go, package placer), beside loom-plan and
+# loom-judge. Every 10 s: GET /futures?state=planned; each attempt its ledger doesn't hold is placed whole in one
+# detached `loom run --run-id future-<tree>-<attempt>` on the pools that take its units, or posted void as Loom's,
+# neverPlaced, naming each unit it can't place. A user unit, installed as the updater's is (docs/updater.md):
+#
+#   cp placer/systemd/loom-place.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now loom-place.service
+#
+# KillMode=process: each run's `loom run` is the placer's child and stays in this unit's cgroup, and its own session
+# doesn't take it out. With the default, a restart (every update's hook restarts the daemons) would kill every run in
+# flight and leave its attempt to the judge's 45-minute backstop. Only the placer is stopped; its runs finish.
+#
+# Token: ~/.loom/placer-token, scope coordinator, run "placer" (`~/.loom/bin/loom coordinator-token --days 30 placer`),
+# read once at start. It also reads ~/.loom/token-secret (each run's tokens), ~/.loom/pools.json (every pass),
+# ~/.loom/r2-releases.conf (a void's records go to the action store), the judge's warm files, and unit-needs.json
+# through its own clone ~/loom-placer/adamic.git (not the judge's: two fetches into one clone would race on its locks).
+# The ledger ~/loom-placer/placed.jsonl is held by one placer at a time; a second refuses to start.
+#
+# PLACE_POOL_HAS must match pools.json's names and the judge's JUDGE_POOL_HAS: a pool without one has no toolchain.
+[Unit]
+Description=Loom placer: places every planned future's attempt on the pools that take its units
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/loom-placer
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment="PLACE_POOL_HAS=--pool-has codex-strict=go,clang,node,wasiSdk --pool-has box-strict=go,clang,node,wasiSdk --pool-has box-phase=go,clang,node"
+ExecStart=%h/.loom/bin/loom place --queue https://loom.system.inc --token-file %h/.loom/placer-token --wire https://runs.loom.system.inc --source %h/Projects/system/loom --pools %h/.loom/pools.json $PLACE_POOL_HAS --needs-git %h/loom-placer/adamic.git --r2 %h/.loom/r2-releases.conf --ledger %h/loom-placer/placed.jsonl --runs %h/loom-placer/runs --interval 10s
+KillMode=process
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
