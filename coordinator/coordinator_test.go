@@ -165,9 +165,17 @@ func newFakeWire(t *testing.T) *fakeWire {
 		case len(parts) >= 3 && parts[0] == "runs" && claims.Run != parts[1]:
 			http.Error(writer, "other run", http.StatusForbidden)
 		case len(parts) == 3 && parts[2] == "plan":
+			// As the Worker does: set once (201), the same plan again 200, a different one 409.
 			var plan protocol.Plan
 			protocol.Decode(bytes.NewReader(body), &plan)
+			if held, set := wire.plans[parts[1]]; set {
+				if !reflect.DeepEqual(held, plan) {
+					http.Error(writer, "a different plan is set", http.StatusConflict)
+				}
+				return
+			}
 			wire.plans[parts[1]] = plan
+			writer.WriteHeader(http.StatusCreated)
 		case len(parts) == 3 && parts[2] == "events":
 			if _, done := wire.verdict[parts[1]]; done {
 				http.Error(writer, "verdict held", http.StatusConflict)

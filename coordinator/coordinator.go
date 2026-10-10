@@ -154,8 +154,14 @@ func Run(runContext context.Context, config Config, job protocol.Job) (Result, e
 			return result, fmt.Errorf("input %s isn't in the store; upload it first", input)
 		}
 	}
-	if err := wire.postPlan(runContext, run, coordinatorToken, body); err != nil {
+	created, err := wire.postPlan(runContext, run, coordinatorToken, body)
+	if err != nil {
 		return result, fmt.Errorf("posting the plan: %w", err)
+	}
+	if !created && config.Run != "" {
+		// A given id whose plan was already set is a run another coordinator started (two placers, or one placing
+		// twice): running it again would post a second stream of the same units. Refused before anything is queued.
+		return result, fmt.Errorf("run %s already has its plan: another coordinator started it, so this one runs nothing", run)
 	}
 	fmt.Fprintf(config.Log, "run %s: %d units on %d slots%s\n  %s\n", run, len(plan), len(config.Slots), map[bool]string{true: ", uncached", false: ""}[config.Uncached], result.Page)
 

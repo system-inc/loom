@@ -25,6 +25,12 @@ type wireClient struct {
 var errNotFound = errors.New("not found")
 
 func (wire *wireClient) call(callContext context.Context, method string, path string, token string, body []byte) ([]byte, error) {
+	answer, _, err := wire.callStatus(callContext, method, path, token, body)
+	return answer, err
+}
+
+// callStatus is call with the status of the answer it returns, for a caller that tells a 201 from a 200.
+func (wire *wireClient) callStatus(callContext context.Context, method string, path string, token string, body []byte) ([]byte, int, error) {
 	var lastError error
 	for attempt := range 3 {
 		if attempt > 0 {
@@ -32,7 +38,7 @@ func (wire *wireClient) call(callContext context.Context, method string, path st
 		}
 		request, err := http.NewRequestWithContext(callContext, method, strings.TrimSuffix(wire.url, "/")+path, bytes.NewReader(body))
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		request.Header.Set("Authorization", "Bearer "+token)
 		if body != nil {
@@ -47,25 +53,26 @@ func (wire *wireClient) call(callContext context.Context, method string, path st
 		response.Body.Close()
 		switch {
 		case response.StatusCode == http.StatusNotFound:
-			return nil, errNotFound
+			return nil, response.StatusCode, errNotFound
 		case response.StatusCode/100 == 2:
-			return answer, nil
+			return answer, response.StatusCode, nil
 		case response.StatusCode/100 == 5 || response.StatusCode == http.StatusTooManyRequests:
 			lastError = fmt.Errorf("%s %s: %s %s", method, path, response.Status, bytes.TrimSpace(answer))
 		default:
-			return nil, fmt.Errorf("%s %s: %s %s", method, path, response.Status, bytes.TrimSpace(answer))
+			return nil, response.StatusCode, fmt.Errorf("%s %s: %s %s", method, path, response.Status, bytes.TrimSpace(answer))
 		}
 	}
-	return nil, lastError
+	return nil, 0, lastError
 }
 
-func (wire *wireClient) postPlan(callContext context.Context, run string, token string, plan protocol.Plan) error {
+// postPlan sets the run's plan and says whether this post set it (201) or found the same plan already set (200).
+func (wire *wireClient) postPlan(callContext context.Context, run string, token string, plan protocol.Plan) (bool, error) {
 	body, err := json.Marshal(plan)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = wire.call(callContext, http.MethodPost, "/runs/"+run+"/plan", token, body)
-	return err
+	_, status, err := wire.callStatus(callContext, http.MethodPost, "/runs/"+run+"/plan", token, body)
+	return status == http.StatusCreated, err
 }
 
 func (wire *wireClient) postVerdict(callContext context.Context, run string, token string, verdict protocol.Verdict) error {

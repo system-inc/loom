@@ -428,7 +428,8 @@ func TestRerunAloneTakesTheTopTierAndLeavesThePoolAsItWas(t *testing.T) {
 	}
 }
 
-// A pipeline future's units run under the id Judge reads them by, and an id the wire won't take is refused.
+// A pipeline future's units run under the id Judge reads them by, a second run under it is refused, and an id the wire
+// won't take is refused.
 func TestARunTakesTheIdItIsGiven(t *testing.T) {
 	wire := newFakeWire(t)
 	settings := config(wire)
@@ -436,6 +437,14 @@ func TestARunTakesTheIdItIsGiven(t *testing.T) {
 	result := run(t, settings, shell("a", "echo a"))
 	if result.Run != settings.Run || len(wire.events(settings.Run)) == 0 {
 		t.Fatalf("ran as %q, the wire holds %d events under %q", result.Run, len(wire.events(settings.Run)), settings.Run)
+	}
+	// The same id again finds its plan set: another coordinator's run, so this one queues nothing.
+	queued := len(wire.events(settings.Run))
+	if _, err := Run(context.Background(), settings, protocol.Job{Name: "j", Units: []protocol.JobUnit{shell("a", "echo a")}}); err == nil || !strings.Contains(err.Error(), "already has its plan") {
+		t.Fatalf("a second run under %s wasn't refused (%v)", settings.Run, err)
+	}
+	if len(wire.events(settings.Run)) != queued {
+		t.Fatal("the refused run posted events")
 	}
 	settings.Run = "not a run/id"
 	if _, err := Run(context.Background(), settings, protocol.Job{Name: "j", Units: []protocol.JobUnit{shell("a", "true")}}); err == nil {
