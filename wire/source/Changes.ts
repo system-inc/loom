@@ -6,7 +6,7 @@
 
 import { canonicalJson } from './Events';
 import { jsonResponse, readBodyText } from './Http';
-import { checkParitySelect, type ParitySelect } from './Queue';
+import { checkParitySelect, witnessRefusal, type ParitySelect } from './Queue';
 import type { TokenClaims } from './Token';
 
 export const MaximumChangeBodyBytes = 1024 * 1024;
@@ -29,6 +29,7 @@ export interface ChangeRequest {
     // Release's parity runs only (Queue, #6c3xkws): tested on exactly merge(base, sha), never landed.
     parity?: true;
     select?: ParitySelect;
+    witness?: true;
 }
 
 // The three calls Web makes, as internal requests; Queue's object and the stand-in both answer them.
@@ -60,7 +61,7 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
         return 'the change is a JSON object';
     }
     const fields = parsed as Record<string, unknown>;
-    const allowed = ['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity', 'select'];
+    const allowed = ['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity', 'select', 'witness'];
     const unknown = Object.keys(fields).filter(function (key) {
         return !allowed.includes(key);
     });
@@ -73,13 +74,17 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
     if (typeof fields.base !== 'string' || !ShaPattern.test(fields.base)) {
         return 'base is a commit, 40 lowercase hex digits';
     }
-    if (fields.base === fields.sha) {
+    const witness = witnessRefusal(fields);
+    if (witness !== null) {
+        return witness;
+    }
+    if (fields.base === fields.sha && fields.witness !== true) {
         return 'base is sha itself, so the change has nothing in it';
     }
     if (fields.owner !== owner) {
         return `owner is ${owner}, the submit token's owner`;
     }
-    if (!Array.isArray(fields.paths) || fields.paths.length === 0 || fields.paths.length > MaximumChangePaths) {
+    if (!Array.isArray(fields.paths) || (fields.paths.length === 0 && fields.witness !== true) || fields.paths.length > MaximumChangePaths) {
         return `paths lists 1 to ${MaximumChangePaths} paths the change touches`;
     }
     const seen = new Set<string>();
@@ -119,6 +124,7 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
         fixesRed: fixesRed,
         ...(fields.parity === true ? { parity: true as const } : {}),
         ...(select === null ? {} : { select: select }),
+        ...(fields.witness === true ? { witness: true as const } : {}),
     };
 }
 

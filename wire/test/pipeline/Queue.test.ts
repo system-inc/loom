@@ -598,6 +598,52 @@ describe('a withdrawn plan', function () {
     });
 });
 
+describe('a witness of main', function () {
+    it('is a parity run of a main commit with no paths, planned every unit uncached, and never lands', async function () {
+        const queue = await freshQueue({ [sha(31)]: facts({}, []) });
+        const witness = { sha: sha(31), base: sha(31), owner: 'system_adamic_loom_release', paths: [], parity: true, witness: true };
+        expect((await submit(queue, { ...witness, parity: undefined })).status).toBe(422);
+        expect((await submit(queue, { ...witness, base: main })).status).toBe(422);
+        expect((await submit(queue, { ...witness, paths: ['a.go'] })).status).toBe(422);
+        expect((await submit(queue, { ...witness, witness: 'yes' })).status).toBe(422);
+        // A real change still needs paths.
+        expect((await submit(queue, change(32, { paths: [] }))).status).toBe(422);
+        const id = ((await (await submit(queue, witness)).json()) as { change: string }).change;
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: unknown[] }).futures).toMatchObject([
+            { future: sha(31), parity: true, witness: true, uncached: true },
+        ]);
+        const units = await planOf(['a', 'b']);
+        // The index holds a passed verdict for b, so a normal future could reuse it; a witness may not.
+        const other = ((await (await submit(queue, change(35))).json()) as { change: string }).change;
+        await postPlan(queue, sha(35), [units[1]]);
+        expect((await postBatch(queue, sha(35), batch(other, sha(35), 'run-b', [record(other, units[1]?.unitKey ?? '', 'run-b', 'passed', null)], 'green'))).status).toBe(200);
+        expect((await postPlan(queue, sha(31), [units[0], { ...units[1], decision: 'reuse', reused: 'run-b' }])).status).toBe(422);
+        expect((await postPlan(queue, sha(31), units)).status).toBe(200);
+        expect((await landings(queue)).map((order) => order.change)).toEqual([other]);
+        expect(id).toMatch(/^chg_/);
+    });
+});
+
+describe('the replay proof', function () {
+    it('reads the whole log and the head, and replaying the log reaches exactly that head and main', async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(33))).json()) as { change: string }).change;
+        await postWhole(queue, id, sha(33), 'passed', null);
+        await report(queue, id, { main: sha(80), from: main, landed: sha(33) });
+        const head = (await (await queue.fetch('https://queue/head')).json()) as { seq: number; head: string; landedMain: string };
+        const lines = (await (await queue.fetch('https://queue/log?after=0')).text())
+            .trim()
+            .split('\n')
+            .map(function (line) {
+                return JSON.parse(line) as QueueEvent;
+            });
+        const replayed = await replay(lines);
+        expect(head).toEqual({ seq: replayed.seq, head: replayed.head, landedMain: sha(80) });
+        expect(replayed.landedMain).toBe(sha(80));
+        expect(lines).toHaveLength(head.seq);
+    });
+});
+
 describe('a parity run', function () {
     it("plans exactly the box record's selection when it carries one, uncached", async function () {
         const queue = await freshQueue();
@@ -678,6 +724,8 @@ describe("loom-pipeline's queue seams", function () {
             ['POST', '/verdicts'],
             ['POST', `/landings/chg_${'q'.repeat(26)}`],
             ['GET', '/submissions?state=unchecked'],
+            ['GET', '/log?after=0'],
+            ['GET', '/head'],
             ['POST', `/submissions/chg_${'q'.repeat(26)}/facts`],
         ];
         for (const [method, path] of routes) {

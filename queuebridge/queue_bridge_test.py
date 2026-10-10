@@ -68,10 +68,12 @@ class FakeGate:
         self.landed.append((record, tree))
         return self.landing
 
-    laneRefusal = None
+    # push-main in check-only mode: (code, stdout, stderr), and every argument list it was given.
+    checkResult = (0, "checked", "")
 
-    def laneChecks(self, base, tree):
-        return self.laneRefusal
+    def check(self, arguments, label):
+        self.checks = getattr(self, "checks", []) + [arguments]
+        return self.checkResult
 
     def landTestOnly(self, tree, label):
         self.landed.append(("test-only", tree))
@@ -191,13 +193,35 @@ class Tick(unittest.TestCase):
         pipeline, gate = FakePipeline([future], paths=["internal/oracle/a_test.go", "internal/oracle/a.go"]), FakeGate()
         queue_bridge.tick(pipeline, gate, memory())
         self.assertEqual(gate.queued, [tree])
-        # The lane's checks refuse a test that isn't gofmt'd: the change's red, its reason in the run.
+        # push-main's lane checks refuse a test that isn't gofmt'd: the change's red, its reason in the run.
         pipeline, gate = FakePipeline([future], paths=["internal/oracle/a_test.go"]), FakeGate()
-        gate.laneRefusal = "internal/oracle/a_test.go isn't gofmt-formatted"
+        gate.checkResult = (1, "", "refused: internal/oracle/a_test.go isn't gofmt-formatted")
         queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(gate.checks, [["--test-only", tree]])
         verdict = pipeline.posts()[0][1]["verdict"]
         self.assertEqual((verdict["status"], verdict["cause"]), ("failed", "change"))
         self.assertIn("gofmt", verdict["run"])
+
+    def test_nothing_reads_green_until_push_main_s_own_checks_pass(self):
+        # A green record that push-main refuses (zerorun: a unit ran none of its tests) is a void, never a pass.
+        pipeline, gate = FakePipeline([future]), FakeGate({"ref": "gate-logs/r/fast", "status": "green", "gated": tree})
+        gate.checkResult = (1, "", "refused: gate-logs/r/fast has units that ran none of the tests they named")
+        queue_bridge.tick(pipeline, gate, memory())
+        verdict = pipeline.posts()[0][1]["verdict"]
+        self.assertEqual((verdict["status"], verdict["cause"]), ("void", "infra"))
+        self.assertIn("ran none of the tests", verdict["rule"])
+        self.assertEqual(gate.checks, [["--fast-gate", "gate-logs/r/fast", tree]])
+        # main's ruled red goes to push-main by name, which rechecks its output.
+        pipeline, gate = FakePipeline([future]), FakeGate({"ref": "gate-logs/r/fast", "status": "red", "gated": tree})
+        gate.failures = ["stage1/cohere/gitignore TestThePortAnswersAsGoCohereAndGitDo_022"]
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(gate.checks[0][:3], ["--fast-gate", "gate-logs/r/fast", "--infra-red"])
+        self.assertEqual(pipeline.posts()[0][1]["verdict"]["cause"], "mainRed")
+        # A docs change takes the ruled gate's census; a hold posts nothing.
+        pipeline, gate = FakePipeline([future], paths=["docs/a.md"]), FakeGate()
+        gate.checkResult = (3, "", "held")
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual((gate.checks[0][0], pipeline.posts()), ("--ruled-gate", []))
 
     def test_the_mac_lands_nothing_once_the_pusher_holds_main(self):
         queue_bridge.landsHere = False

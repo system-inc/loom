@@ -64,6 +64,15 @@ describe('submitting a change', function () {
         expect(queue.received).toHaveLength(0);
     });
 
+    it("passes a witness of main on to the queue: base the sha itself, no paths", async function () {
+        const queue = new MemoryQueue();
+        const witness = { sha: sha, base: sha, owner: owner, paths: [], parity: true, witness: true };
+        expect((await submit(queue, JSON.stringify(witness))).status).toBe(201);
+        expect(await queue.received[0]?.text()).toContain('"witness":true');
+        expect((await submit(queue, JSON.stringify({ ...witness, parity: false }))).status).toBe(400);
+        expect((await submit(queue, JSON.stringify({ ...witness, witness: undefined }))).status).toBe(400);
+    });
+
     it("passes a parity run on to the queue, and nothing but true as parity", async function () {
         const queue = new MemoryQueue();
         expect((await submit(queue, body({ parity: true }))).status).toBe(201);

@@ -219,13 +219,11 @@ class Gate:
             listed = git("rev-list", "--parents", "-n", "1", sha).split()
         return listed[1:]
 
-    def laneChecks(self, base, tree):
-        """push-main's test-only lane checks on tree against base, from the merge tree: None when they pass, else why."""
-        directory = os.path.dirname(pushMain)
-        git("fetch", "-q", "--no-tags", "origin", tree)
-        ran = subprocess.run(["python3", os.path.join(directory, "lane-checks.py"), base, tree, tree], capture_output=True, text=True,
-                             cwd=os.path.dirname(os.path.dirname(directory)), timeout=300)
-        return None if ran.returncode == 0 else ((ran.stdout + ran.stderr).strip() or "exit %d" % ran.returncode)
+    def check(self, arguments, label):
+        """push-main.sh in check-only mode: every check it runs, the landing commit built, nothing pushed."""
+        ran = subprocess.run(["bash", pushMain, *arguments, label], capture_output=True, text=True,
+                             cwd=os.path.dirname(os.path.dirname(os.path.dirname(pushMain))), env=dict(os.environ, PUSH_MAIN_CHECK_ONLY="1"))
+        return ran.returncode, ran.stdout, ran.stderr
 
     def landRuled(self, ruling, tree, label):
         """push-main.sh --ruled-gate: the census and static checks on the merged tree, no product suite."""
@@ -278,6 +276,14 @@ def verdictOf(record, tree, gate, served=False):
     return body
 
 
+def checked(gate, arguments, change):
+    """push-main's whole judgment on a candidate, nothing pushed: (exit code, its reason). 3 is a hold."""
+    code, out, err = gate.check(arguments, "queue %s" % change)
+    reason = ([line for line in err.splitlines() if line.startswith("refused")] or err.splitlines()[-1:] or out.splitlines()[-1:] or ["exit %d" % code])[0]
+    log("push-main checked %s (%s): exit %d %s" % (change, " ".join(arguments[:2]), code, reason[:200] if code else ""))
+    return code, reason
+
+
 def tick(pipeline, gate, memory):
     """One pass: git's facts, verdicts for unplanned futures, then every landing order. memory holds what was done or said."""
     status, unchecked = pipeline.call("GET", "/submissions?state=unchecked")
@@ -307,12 +313,14 @@ def tick(pipeline, gate, memory):
             if change in memory["ruled"]:
                 continue
             verdict = {"future": tree, "run": lane[0], "status": "passed", "cause": None, "rule": lane[1]}
-            # The test-only lane's checks (gofmt, declared tools, t.Parallel, vet) run before the verdict, since the
-            # pusher only fast-forwards: a violation is the change's red, its reason in the run.
-            if lane[0] == "test-only":
-                refused = gate.laneChecks(future["base"], tree)
-                if refused is not None:
-                    verdict.update(status="failed", cause="change", run="test-only lane checks refused: " + refused[:300])
+            # The pusher only fast-forwards, so push-main's own checks for the lane (the ruled gate's census on the
+            # landing tree, or the test-only lane's checks) run here, before anything reads green (Loom, 00:54Z).
+            arguments = ["--ruled-gate", docsRuling, tree, "0", "0", "0", "0"] if lane[0] == "ruled-gate:docs" else ["--test-only", tree]
+            code, why = checked(gate, arguments, change)
+            if code == 3:
+                continue
+            if code != 0:
+                verdict.update(status="failed", cause="change", run="%s refused by push-main's checks: %s" % (lane[0], why[:300]))
             status, answer = pipeline.call("POST", "/verdicts", {"change": change, "verdict": verdict})
             log("verdict %s passed under %s: %d %s" % (change, lane[1], status, answer))
             if status in (200, 409):
@@ -328,6 +336,19 @@ def tick(pipeline, gate, memory):
         if key in memory["posted"]:
             continue
         body = dict(verdictOf(record, tree, gate, served=tree in memory["requeued"]), change=change)
+        verdict = body["verdict"]
+        # Nothing reads green, or main's red, on today's record alone: push-main's checks on it (zerorun on the
+        # record's job, --infra-red's recheck of each ruled red on its output, the pause rule) run first. A refusal is
+        # a void with push-main's reason in its rule, never a pass.
+        if verdict["status"] == "passed" or verdict["cause"] == "mainRed":
+            infra = []
+            for name in excusedNames(gate.failing(record["ref"]) or []) or []:
+                infra += ["--infra-red", name]
+            code, why = checked(gate, ["--fast-gate", record["ref"], *infra, verdict["future"]], change)
+            if code == 3:
+                continue
+            if code != 0:
+                verdict.update(status="void", cause="infra", rule="%s; push-main refused: %s" % (rule, why[:300]))
         status, answer = pipeline.call("POST", "/verdicts", body)
         log("verdict %s %s on %s: %d %s" % (change, body["verdict"]["status"], record["ref"], status, answer))
         if status in (200, 409):

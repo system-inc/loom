@@ -57,7 +57,28 @@ export interface ChangeRecord {
     // A parity run's selection, the box record's own (Release's proof 1): exactly these packages run, uncached, and
     // within a package run.py split, exactly these tests.
     select?: ParitySelect;
+    // A witness of main (Release's proof 3, #82d430f): a parity run of a main commit itself, base = sha, no paths, every
+    // package planned uncached, never landed.
+    witness?: true;
     submittedAt: string;
+}
+
+// Whether a request is a well-formed witness, or why not: a parity run of one sha with base the same sha, no paths, no
+// select and no parent. Whether the sha is on main is git's fact, checked like any base.
+export function witnessRefusal(fields: Record<string, unknown>): string | null {
+    if (fields.witness === undefined) {
+        return null;
+    }
+    if (fields.witness !== true) {
+        return 'witness is true for a witness of main, or absent';
+    }
+    if (fields.parity !== true || fields.base !== fields.sha || !Array.isArray(fields.paths) || fields.paths.length > 0) {
+        return 'a witness is a parity run of a main commit: parity true, base the sha itself, paths empty';
+    }
+    if (fields.select !== undefined || (fields.parent ?? null) !== null) {
+        return 'a witness plans every package, alone: no select and no parent';
+    }
+    return null;
 }
 
 export interface ParitySelect {
@@ -206,6 +227,8 @@ export interface QueueState {
     refused: number;
     head: string;
     seq: number;
+    // main as the lander last reported it (the newest change.landed's main), or null before any landing.
+    landedMain: string | null;
 }
 
 const shaPattern = /^[0-9a-f]{40}$/;
@@ -291,8 +314,8 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
         return 'the change is a JSON object';
     }
     for (const key of Object.keys(parsed)) {
-        if (!['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity', 'select'].includes(key)) {
-            return `unknown field ${JSON.stringify(key)}; a change is sha, base, owner, paths, and optionally parent, fixesRed, parity and select`;
+        if (!['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity', 'select', 'witness'].includes(key)) {
+            return `unknown field ${JSON.stringify(key)}; a change is sha, base, owner, paths, and optionally parent, fixesRed, parity, select and witness`;
         }
     }
     if (typeof parsed.sha !== 'string' || !shaPattern.test(parsed.sha)) {
@@ -304,9 +327,13 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
     if (typeof parsed.owner !== 'string' || !/^[a-z][a-z0-9_]{0,63}$/.test(parsed.owner)) {
         return 'owner is a username: lowercase letters, digits and underscores';
     }
+    const witness = witnessRefusal(parsed);
+    if (witness !== null) {
+        return witness;
+    }
     if (
         !Array.isArray(parsed.paths) ||
-        parsed.paths.length === 0 ||
+        (parsed.paths.length === 0 && parsed.witness !== true) ||
         !parsed.paths.every(function (path) {
             return typeof path === 'string' && path !== '' && !path.startsWith('/') && !path.split('/').includes('..');
         })
@@ -343,6 +370,7 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
         fixesRed: fixesRed,
         ...(parsed.parity === true ? { parity: true as const } : {}),
         ...(select === null ? {} : { select: select }),
+        ...(parsed.witness === true ? { witness: true as const } : {}),
     };
 }
 
@@ -488,7 +516,7 @@ export function parityOf(state: QueueState, future: FutureEntry): boolean {
 }
 
 export function emptyState(): QueueState {
-    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0 };
+    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null };
 }
 
 // A whole verdict's decision, by the judge's rule: a failure that is main's red (excused, as Green excuses it) doesn't
@@ -612,6 +640,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'change.landed' && entry !== undefined) {
         entry.state = 'landed';
         entry.landed = event.data.main as string;
+        state.landedMain = entry.landed;
         state.line = state.line.filter(function (id) {
             return id !== entry.record.change;
         });
@@ -904,6 +933,12 @@ export class Queue extends DurableObject<Env> {
         }
         if (path === '/verdicts' && method === 'POST') {
             return this.decideWhole(request);
+        }
+        if (path === '/head' && method === 'GET') {
+            return this.readHead();
+        }
+        if (path === '/log' && method === 'GET') {
+            return this.events(request);
         }
         if (path === '/events' && method === 'GET') {
             return url.searchParams.get('owners') === '1' ? this.ownerEvents(request) : this.events(request);
@@ -1267,6 +1302,10 @@ export class Queue extends DurableObject<Env> {
             if (future.decided !== null) {
                 return jsonResponse(409, { error: `future ${tree} was decided ${future.decided.status} by today's gate, run ${future.decided.run}` });
             }
+            // A witness runs every unit uncached: nothing it plans is reused.
+            if (state.changes.get(future.changes[0] ?? '')?.record.witness === true && units.some((unit) => unit.decision !== 'run')) {
+                return jsonResponse(422, { error: 'a witness runs every unit uncached, none reused' });
+            }
             // A parity run with the box record's selection runs exactly those packages, uncached.
             const select = state.changes.get(future.changes[0] ?? '')?.record.select;
             if (select !== undefined) {
@@ -1460,6 +1499,13 @@ export class Queue extends DurableObject<Env> {
         });
     }
 
+    // The log's head and main as the lander last reported it, for the replay proof (#ey1ay4f): replaying GET /log from
+    // genesis must reach exactly this seq and head.
+    private async readHead(): Promise<Response> {
+        const state = await this.current();
+        return jsonResponse(200, { seq: state.seq, head: state.head, landedMain: state.landedMain });
+    }
+
     private async readVerdict(unitKey: string): Promise<Response> {
         const indexed = (await this.current()).verdicts.get(unitKey);
         if (indexed === undefined) {
@@ -1497,6 +1543,7 @@ export class Queue extends DurableObject<Env> {
                         changes: future.changes,
                         parity: parityOf(state, future),
                         ...(select === undefined ? {} : { select: select }),
+                        ...(state.changes.get(future.changes[0] ?? '')?.record.witness === true ? { witness: true, uncached: true } : {}),
                     };
                 });
             return jsonResponse(200, { futures: futures });
