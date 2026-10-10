@@ -466,6 +466,59 @@ describe("the queue's board pushes", function () {
     });
 });
 
+describe('a stack', function () {
+    it('lands a dependent only after its base, and parks every dependent when its base goes red', async function () {
+        const queue = await freshQueue();
+        const idOf = async function (response: Promise<Response>): Promise<string> {
+            return ((await (await response).json()) as { change: string }).change;
+        };
+        const a = await idOf(submit(queue, change(1)));
+        const b = await idOf(submit(queue, change(2, { parent: a })));
+        const c = await idOf(submit(queue, change(3, { parent: b })));
+        const other = await idOf(submit(queue, change(4)));
+        // B passes first: it waits for A, whose commits it carries.
+        await postWhole(queue, b, sha(2), 'passed', null);
+        expect(await landings(queue)).toEqual([]);
+        await postWhole(queue, a, sha(1), 'passed', null);
+        expect(
+            (await landings(queue)).map(function (order) {
+                return order.change;
+            }),
+        ).toEqual([a]);
+        await report(queue, a, { main: sha(50), from: main, landed: sha(1) });
+        expect(
+            (await landings(queue)).map(function (order) {
+                return order.change;
+            }),
+        ).toEqual([b]);
+        // A second stack: its base goes red, and both dependents, however deep, are parked with the reason.
+        const d = await idOf(submit(queue, change(5)));
+        const e = await idOf(submit(queue, change(6, { parent: d })));
+        const f = await idOf(submit(queue, change(7, { parent: e })));
+        await postWhole(queue, d, sha(5), 'failed', 'change');
+        const feed = (await (await queue.fetch('https://queue/events?owners=1')).text())
+            .trim()
+            .split('\n')
+            .map(function (line) {
+                return JSON.parse(line) as QueueEvent;
+            })
+            .filter(function (event) {
+                return event.type !== 'change.landed';
+            });
+        expect(
+            feed.map(function (event) {
+                return [event.type, event.subject.change, event.data.reason ?? null];
+            }),
+        ).toEqual([
+            ['change.red', d, null],
+            ['change.parked', e, `its base ${d} is red`],
+            ['change.parked', f, `its base ${d} is red`],
+        ]);
+        expect(await (await queue.fetch(`https://queue/changes/${c}`)).json()).toMatchObject({ state: 'queued' });
+        expect(await (await queue.fetch(`https://queue/changes/${other}`)).json()).toMatchObject({ state: 'queued' });
+    });
+});
+
 describe('a landing order', function () {
     it("needs the future's own verdicts to say green, not only a decision that did", function () {
         const verdictOf = function (unitKey: string, status: UnitVerdict['status'], cause: UnitVerdict['cause'], future = sha(1)): UnitVerdict {

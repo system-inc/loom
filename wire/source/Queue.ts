@@ -1050,6 +1050,7 @@ export class Queue extends DurableObject<Env> {
             const reason = gitRefusalOf(entry.record, facts);
             if (reason !== null) {
                 await this.append('change.refused', { change: change }, { facts: facts, reason: reason });
+                await this.parkDependents(change);
                 return jsonResponse(200, { change: change, state: 'refused', reason: reason });
             }
             await this.buildFuture(entry.record, facts);
@@ -1128,6 +1129,7 @@ export class Queue extends DurableObject<Env> {
             await this.append('verdict.decided', subject, { verdict: checked.verdict });
             if (checked.verdict.status === 'failed' && checked.verdict.cause === 'change') {
                 await this.append('change.red', { change: checked.change, future: future.tree }, { verdict: checked.verdict });
+                await this.parkDependents(checked.change);
             }
             return jsonResponse(200, { change: checked.change, state: entry.state, landable: futureLandable(future) });
         });
@@ -1228,17 +1230,38 @@ export class Queue extends DurableObject<Env> {
             await this.append('verdict.decided', { change: batch.change, future: tree, run: batch.run }, { decision: logged, rule: batch.rule, quarantine: batch.quarantine });
             if (decision.status === 'red') {
                 await this.append('change.red', { change: batch.change, future: tree, run: batch.run }, { decision: logged, kicks: batch.kicks });
+                await this.parkDependents(batch.change);
             }
             return jsonResponse(200, { future: tree, decided: decision.status, landable: futureLandable(future) });
         });
     }
 
-    // The landing orders the workshop pusher pulls: every change whose future may land, in line order.
+    // Every change on its way that stacks on `base`, however deep, parked with the reason (#05b5c2f): a dependent's
+    // sha carries its base's commits, so it can't land while its base can't. Restacking it on the base's fix is next.
+    private async parkDependents(base: string): Promise<void> {
+        const state = await this.current();
+        const baseState = state.changes.get(base)?.state ?? 'gone';
+        for (const [change, entry] of [...state.changes]) {
+            let parent = entry.record.parent;
+            while (parent !== null && parent !== base) {
+                parent = state.changes.get(parent)?.record.parent ?? null;
+            }
+            if (parent === base && isLive(entry)) {
+                await this.append('change.parked', { change: change, future: entry.future ?? undefined }, { reason: `its base ${base} is ${baseState}`, base: base });
+            }
+        }
+    }
+
+    // The landing orders the pusher pulls: every change whose future may land, in line order. A change that stacks on
+    // another lands only after its base has.
     private async landings(): Promise<Response> {
         const state = await this.current();
         const orders = state.line.flatMap(function (change) {
             const entry = state.changes.get(change);
             if (entry === undefined || !isLive(entry) || entry.future === null || !futureLandable(state.futures.get(entry.future))) {
+                return [];
+            }
+            if (entry.record.parent !== null && state.changes.get(entry.record.parent)?.state !== 'landed') {
                 return [];
             }
             const future = state.futures.get(entry.future);
@@ -1273,8 +1296,9 @@ export class Queue extends DurableObject<Env> {
                 await this.append(
                     'change.parked',
                     { change: change, future: entry.future },
-                    { reason: `main is ${parsed.main}, which ${entry.future} doesn't fast-forward from: ${parsed.refused}. Resubmit on main.`, main: parsed.main },
+                    { reason: `the push of ${entry.future} onto main ${parsed.main} was refused: ${parsed.refused}. Resubmit on main.`, main: parsed.main },
                 );
+                await this.parkDependents(change);
                 return jsonResponse(200, { change: change, state: 'parked' });
             }
             if (parsed.landed !== entry.future) {
