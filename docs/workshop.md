@@ -1,0 +1,33 @@
+# Workshop, the builder
+
+Workshop is the house's only builder (WSL2, 64 threads, 125 GB of memory, a 1 TB disk). `loom build-tree` builds one future's tree there cold and puts it in the action store (builder/store.go). Kirk's rules for the machine: it keeps at least 200 GB free, runs near 80% busy, and stays reachable. This is how `build-tree` keeps them.
+
+## Disk (#ckv0pmg)
+
+- **A floor at start.** `build-tree` doesn't start while the cache base or Go's build cache has under `--floor-gb` free (200), or the temporary directory has under `--temp-floor-gb` free (20, since it may be memory). It names which one and how much it has. With `GOCACHE=off` there is no build cache to watch.
+- **A floor for every job.** Admission reads the disk as its third reading, beside the CPU and memory. While a watched filesystem is under its floor, no job starts. Running jobs finish first, since one may be what is filling the disk. If none is left and the disk is still short, each job not yet started fails with the reason, so the build fails loudly instead of filling the disk or waiting forever.
+- **Go's build cache under a cap.** Before a build, a cache over `--go-cache-gb` (150) loses its least recently used entries, oldest modification time first, down to three quarters of the cap. Go touches an entry it uses at most hourly, so anything used in the last 24 hours stays. Only cache entries are removed, never Go's own files, and a link at `GOCACHE` is followed. A lock on `loom-trim.lock` in the cache keeps two trims from overlapping.
+- **Each tree's directory goes once it is up.** When the tree's index is written, the tree's working directory is renamed to `.removing-<hash>-<pid>`, a name no tree hash matches, and then emptied file by file. A removal stopped partway therefore never leaves a tree directory whose products are half gone, which buildcache would count as hits and the store would receive hollow. `TreeCache` sweeps any `.removing-` directory before it hands out a tree's. A tree whose index didn't go up stays, so a retry needn't rebuild it. A removal that fails after the index is up is only a warning.
+- **`publish.sh` on Workshop.** It runs with `LOOM_PUBLISH_FLOOR_GB=200`, the same floor; its default stays 10 for a machine that only publishes.
+
+## Compilers
+
+- **Go.** Warm compiles every package's tests once, then builds every main package of the tree's module and of the modules it replaces (cohere's, for adamic) with the flags adamic's `buildcache.GoBuild` uses. A product test's own go build then finds every package compiled. The 6-minute straggler of Oct 10 was the grain formatter's go build compiling the part of typescript-go's chain that only cohere's `command/cohere` reaches. A later job's go process gets a share of the compile limit (`--compile`, every thread but four by default) of max(2, limit/jobs). The jobs admitted at once are capped so their shares never add up to more than the limit.
+- **C.** `build-tree` doesn't bound clang itself. The busy gauge bounds when C-heavy jobs start; a tool's count inside a running job is the tool's own business. A shim on `PATH` was tried and dropped: adamic hashes the compiler's path into its native keys, so bounding the tool that way would split keys between shimmed and unshimmed builds, and could make the same product conflict in the store. Keys must not depend on how a tool is bounded.
+
+## For adamic's owners: a launcher for the C compiler
+
+A bound on clang that moves no key needs adamic to run its compiler through a launcher, keeping the real compiler in its keys. Concretely, in `internal/native`:
+
+1. **Read the launcher.** Read `ADAMIC_CC_LAUNCHER` once, as a path to an executable, or empty.
+2. **Launch every compile through it.** Wherever the C compiler is run, call `exec.Command(launcher, append([]string{compiler}, arguments...)...)` when the launcher is set, and `exec.Command(compiler, arguments...)` when it isn't. That covers:
+   - `tsgo.go`: the checker-archive build, `exec.Command("clang", ...)`
+   - `units.go`: `compileUnit`'s preprocess and compile, and `buildUnitsWithLibrary`'s link
+   - `units_tsgo.go`
+   - `library.go`: the runtime library's compiles under `cachedRuntime`
+3. **Probe the compiler directly.** Run `--version` on the real compiler, not through the launcher, so its output is the compiler's own.
+4. **Keep the real compiler in the keys.** Leave `compiler`, the real path from `exec.LookPath(compilerName(options))` (`library.go`, `units.go:386`, `units_tsgo.go`), in `unitKey` (`units.go:280`) and `runtimeKey` (`library.go:121`). Never put the launcher's path or name there, so a launched build and an unlaunched one share every key.
+5. **Leave the WebAssembly clang path as it is.** `compilerName`'s path to the clang beside `WASI_SYSROOT` stays the compiler and goes through the launcher like any other.
+6. **Bound cgo separately.** cgo's compiles run `CC` and are Go's; they would be bounded by setting `CC` to a launcher script. But `buildcache.GoInputs` keys `CC` as go resolves it, so that is a separate change, with the same rule: the key names the real compiler.
+
+With that change, `build-tree` would set `ADAMIC_CC_LAUNCHER` to a loom subcommand that takes one of a machine-wide set of slots under `~/.loom` and then runs the compiler.
