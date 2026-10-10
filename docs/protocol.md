@@ -66,11 +66,14 @@ One JSON object per line. Every event carries `run`, `unit`, `sequence` (from 0,
 | `uploaded` | `path`, `sha256`, `bytes` |
 | `error` | `phase`, `message` |
 | `cached` | `key` (the unit's cache key), `fromRun` (the run that proved it), `events` (sha256 of that unit's event log) |
+| `timing` | `timing`: what only the runner knows of the unit's time and size (`protocol.Timing`), one event just before `finished`: `fetchSeconds`, `unpackSeconds`, `prepareSeconds`, `testSeconds`, `storeBytes`, `cacheBytes`, `houseBytes`, `peakMegabytes` (its cgroup's `memory.peak`), `shareCpus`, `shareMemoryMegabytes`, `unitsInHand` and `load` (at its start), each left off at zero |
 | `finished` | `status`: `passed`, `failed` or `broken` (below) |
 
 `finished` is always the last event of a unit. A unit without one never finished.
 
 **Zeros are left off.** Go writes these fields with `omitempty`, so a zero doesn't appear: an empty output line has no `text`, a zero-byte upload no `bytes`, an instant exit no `wallSeconds`. A field the type allows but the line lacks reads as its zero (`""`, `0`, `false`, `{}`), and every viewer must read it that way. `code` is the exception: exit code 0 is always written, and an `exit` with no `code` was killed by `signal`. `protocol/testdata/events.jsonl` is what Go writes; the Worker's tests post it as it stands.
+
+**Every unit leaves a row.** Once the judge has posted a run, it writes one row for each unit that reported in it (`judge/rows.go`): run, future, attempt, unit key, name and kind, the worker, when the run was placed (the placer's ledger), started and finished, the queue wait between placed and started, the `exit` event's seconds, the `finished` status, and the `timing` event's fields at the row's top level. A run's rows are one object, `units/<YYYY>/<MM>/<DD>/<run>.jsonl` in `loom-artifacts` (the day it was decided, UTC), under no lifecycle rule. `loom units [--days N | --day YYYY-MM-DD] [--name <text>] [--box <text>] [--by name|box|day] [--json]` reads them with the store's key and prints each group's count, statuses, and the p50 and p90 of its wall, queue wait, phases and peak memory, over the rows that say each.
 
 **Error phases**, where the runner was when it went wrong:
 

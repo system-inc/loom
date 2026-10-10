@@ -68,6 +68,7 @@ const usage = `usage:
   loom build-actions --tree <dir> --gate-tools <dir> [--r2 <key file>] [--packages a,b] [--list]
   loom fetch-actions --cache <dir> [--read <url>] [--skip-native] [--house-cache <url>] <productKey>...
   loom store-audit [--r2 <key file>]
+  loom units [--days N | --day YYYY-MM-DD] [--name <text>] [--box <text>] [--kind <kind>] [--status <status>] [--by name|box|day] [--json] [--r2 <key file>]
   loom build-tree --tree <dir> [--r2 <key file>] [--future <sha>] [--tree-key <key>] [--jobs N]
   loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--r2 <key file>] [--once]
   loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--lifecycle-unchecked] [--dry-run]
@@ -127,6 +128,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "fetch-actions" {
 		return fetchActions(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "units" {
+		return units(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "store-audit" {
 		return storeAudit(arguments[1:], stdout, stderr)
