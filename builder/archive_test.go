@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/system-inc/loom/builder/moduletest"
 )
 
 // An entry is one tar entry a test writes by hand, as a dishonest or broken archive would hold it.
@@ -272,5 +274,46 @@ func TestUnpackLooksUpParentsOnDiskWhereTheFilesystemFoldsNames(t *testing.T) {
 				t.Fatal("an entry was written through the link")
 			}
 		})
+	}
+}
+
+// A tree's module cache holds every module its build graph needs, laid out as a proxy, and go reads the tree's
+// packages from it alone; it leaves out sumdb answers and lock files, and archiving it leaves the tree as it was.
+// Mutant: lock files kept.
+func TestATreesModulesAreArchivedForItsRunners(t *testing.T) {
+	proxy := t.TempDir()
+	goSum := moduletest.Proxy(t, proxy)
+	tree := gitTree(t, map[string]string{
+		"go.mod": "module example.com/uses\n\ngo 1.22\n\n" + moduletest.Require,
+		"go.sum": goSum,
+		"u/u.go": "package u\n\nimport _ \"" + moduletest.Import + "\"\n",
+	})
+	archive, err := ModuleCacheArchive(tree, []string{"GOPROXY=file://" + proxy, "GOSUMDB=off"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpacked := t.TempDir()
+	if err = Unpack(bytes.NewReader(archive), unpacked, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"v1.0.0.zip", "v1.0.0.mod", "v1.0.0.info"} {
+		if _, err := os.Stat(filepath.Join(unpacked, "example.com", "dep", "@v", name)); err != nil {
+			t.Errorf("the module cache lacks %s", name)
+		}
+	}
+	filepath.WalkDir(unpacked, func(path string, entry os.DirEntry, err error) error {
+		if err == nil && (entry.Name() == "sumdb" || strings.HasSuffix(entry.Name(), ".lock")) {
+			t.Errorf("the module cache holds %s", path)
+		}
+		return nil
+	})
+	command := exec.Command("go", "list", "-deps", "./...")
+	command.Dir = tree
+	command.Env = append(os.Environ(), "GOPROXY=file://"+unpacked, "GOSUMDB=off", "GOFLAGS=-mod=readonly -modcacherw", "GOMODCACHE="+t.TempDir(), "GOTOOLCHAIN=local")
+	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), moduletest.Import) {
+		t.Fatalf("go list from the module cache alone: %v: %s", err, output)
+	}
+	if status, err := exec.Command("git", "-C", tree, "status", "--porcelain").Output(); err != nil || len(status) != 0 {
+		t.Fatalf("archiving the modules changed the tree: %s %v", status, err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,4 +69,30 @@ func TestPanic(t *testing.T) {
 // TestExit exits 0 in the middle of the tests, which -test.paniconexit0 turns into a failure.
 func TestExit(t *testing.T) {
 	os.Exit(0)
+}
+
+// TestListExport asks for an allowed go list with GOFLAGS asking for export data, which would compile the package.
+func TestListExport(t *testing.T) {
+	command := exec.Command("go", "list", "-f", "{{.Export}}", "errors")
+	command.Env = append(os.Environ(), "GOFLAGS=-export=true", "GOCACHE="+t.TempDir())
+	output, err := command.CombinedOutput()
+	if err == nil && len(strings.TrimSpace(string(output))) > 0 {
+		t.Fatalf("the allowed go list compiled the package: %s", output)
+	}
+	t.Logf("%q %v", output, err)
+}
+
+// TestModules lists a package that imports a third-party module, as buildcache's GoInputs does.
+func TestModules(t *testing.T) {
+	output, err := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "github.com/system-inc/adamic/internal/uses").CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "example.com/dep") {
+		t.Fatalf("go list -deps: %v: %s", err, output)
+	}
+}
+
+// TestListUpdates asks a module proxy for newer versions.
+func TestListUpdates(t *testing.T) {
+	if output, err := exec.Command("go", "list", "-m", "-u", "all").CombinedOutput(); err != nil {
+		t.Fatalf("go list -m -u all: %v: %s", err, output)
+	}
 }

@@ -217,6 +217,23 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File
 	return partial, size, nil
 }
 
+// moduleCacheBytes is what the trees' GOMODCACHEs beside the unpacked sources hold, which the cache's bound counts.
+func (cache blobCache) moduleCacheBytes() int64 {
+	caches, _ := filepath.Glob(filepath.Join(filepath.Dir(cache.directory), sourceDirectoryName, "*"+moduleCacheSuffix))
+	total := int64(0)
+	for _, directory := range caches {
+		filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
+			if err == nil && entry.Type().IsRegular() {
+				if info, err := entry.Info(); err == nil {
+					total += info.Size()
+				}
+			}
+			return nil
+		})
+	}
+	return total
+}
+
 // A cachedBlob is one blob the cache holds.
 type cachedBlob struct {
 	sum  string
@@ -326,7 +343,7 @@ func (cache blobCache) trim(keep map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	total := inFlight
+	total := inFlight + cache.moduleCacheBytes()
 	for _, blob := range blobs {
 		total += blob.size
 	}

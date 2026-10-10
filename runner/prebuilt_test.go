@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/builder/moduletest"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -58,6 +59,13 @@ import (
 //	a live unpacking swept: TestASourceUnpackedPartwayIsNeverTrusted
 //	a partial left when the disk filled: TestAFullDiskMidFetchLeavesNothing
 //	-test.paniconexit0 dropped: TestAPanicAndAnExitMidRunAreRed
+//	either cache swept without its sweep lock: TestASweepNeverTakesANameBeforeItsMakerLocksIt
+//	the test's GOFLAGS passed to the runner's go: TestAnAllowedGoListNeverCompiles
+//	a proxy query allowed: TestAProxyQueryIsRefused
+//	modules read elsewhere than the tree's module cache, or no GOMODCACHE of the tree's own:
+//	TestATestsModulesComeFromTheTreesModuleCache
+//	the module cache not readied before the tests: TestAModuleTheCacheLacksIsLooms
+//	module caches not counted toward the bound: TestTheModuleCachesCountTowardTheBound
 
 const lowerPackage = protocol.AdamicModule + "/internal/lower"
 
@@ -74,37 +82,69 @@ var fixtureBinary struct {
 	// runner may have.
 	goVersion string
 	goBinary  string
+	// files are the fixture tree's, and modules its module cache, as build-tree archives it: the tree requires a
+	// third-party module (moduletest), which internal/uses imports.
+	files   map[string]string
+	modules []byte
 }
 
 func prebuiltBinary(t *testing.T) []byte {
 	t.Helper()
-	fixtureBinary.once.Do(func() {
-		directory, err := os.MkdirTemp("", "loom-prebuilt-")
-		if err != nil {
-			fixtureBinary.err = err
-			return
-		}
-		defer os.RemoveAll(directory)
-		binary := filepath.Join(directory, "lower.test")
-		command := exec.Command("go", "test", "-c", "-o", binary, "./internal/lower")
-		command.Dir = filepath.Join("testdata", "prebuilt")
-		command.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=-mod=mod")
-		if output, err := command.CombinedOutput(); err != nil {
-			fixtureBinary.err = fmt.Errorf("go test -c: %v: %s", err, output)
-			return
-		}
-		fixtureBinary.content, fixtureBinary.err = os.ReadFile(binary)
-		version, err := exec.Command("go", "env", "GOVERSION", "GOROOT").Output()
-		if fields := strings.Fields(string(version)); err == nil && len(fields) == 2 {
-			fixtureBinary.goVersion, fixtureBinary.goBinary = fields[0], filepath.Join(fields[1], "bin", "go")
-		} else if fixtureBinary.err == nil {
-			fixtureBinary.err = fmt.Errorf("go env GOVERSION GOROOT: %q %v", version, err)
-		}
-	})
+	fixtureBinary.once.Do(func() { fixtureBinary.err = buildFixture(t) })
 	if fixtureBinary.err != nil {
 		t.Fatalf("compiling the fixture: %v", fixtureBinary.err)
 	}
 	return fixtureBinary.content
+}
+
+// buildFixture makes the fixture's tree from testdata/prebuilt, with a requirement of moduletest's module and a
+// package importing it, compiles its test binary, and archives its module cache, all from a module proxy on disk.
+func buildFixture(t *testing.T) error {
+	directory, err := os.MkdirTemp("", "loom-prebuilt-")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		os.Chmod(directory, 0o755)
+		removeDirectory(directory)
+	}()
+	proxy, tree := filepath.Join(directory, "proxy"), filepath.Join(directory, "tree")
+	goSum := moduletest.Proxy(t, proxy)
+	fixtureBinary.files = map[string]string{"go.sum": goSum, "internal/uses/uses.go": "package uses\n\nimport _ \"" + moduletest.Import + "\"\n"}
+	for _, name := range []string{"go.mod", "internal/lower/lower_test.go", "internal/lower/testdata/fixture.txt"} {
+		content, err := os.ReadFile(filepath.Join("testdata", "prebuilt", filepath.FromSlash(name)))
+		if err != nil {
+			return err
+		}
+		fixtureBinary.files[name] = string(content)
+	}
+	fixtureBinary.files["go.mod"] += "\n" + moduletest.Require
+	for name, content := range fixtureBinary.files {
+		os.MkdirAll(filepath.Dir(filepath.Join(tree, name)), 0o755)
+		if err := os.WriteFile(filepath.Join(tree, name), []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	binary := filepath.Join(directory, "lower.test")
+	command := exec.Command("go", "test", "-c", "-o", binary, "./internal/lower")
+	command.Dir = tree
+	command.Env = append(os.Environ(), "GOWORK=off", "GOFLAGS=-mod=readonly -modcacherw", "GOPROXY=file://"+proxy, "GOSUMDB=off", "GOMODCACHE="+filepath.Join(directory, "modcache"))
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("go test -c: %v: %s", err, output)
+	}
+	if fixtureBinary.content, err = os.ReadFile(binary); err != nil {
+		return err
+	}
+	if fixtureBinary.modules, err = builder.ModuleCacheArchive(tree, []string{"GOWORK=off", "GOPROXY=file://" + proxy, "GOSUMDB=off"}); err != nil {
+		return err
+	}
+	version, err := exec.Command("go", "env", "GOVERSION", "GOROOT").Output()
+	fields := strings.Fields(string(version))
+	if err != nil || len(fields) != 2 {
+		return fmt.Errorf("go env GOVERSION GOROOT: %q %v", version, err)
+	}
+	fixtureBinary.goVersion, fixtureBinary.goBinary = fields[0], filepath.Join(fields[1], "bin", "go")
+	return nil
 }
 
 // A prebuiltStore is the action store's public domain: GET of trees/<key>.json and blobs/<sha256>, no credentials,
@@ -176,31 +216,29 @@ func gzipped(t *testing.T, content []byte) []byte {
 
 // A prebuiltTree is the fixture's tree built as Workshop builds it: its index, and every blob it names, in the store.
 type prebuiltTree struct {
-	key    string
-	index  builder.TreeIndex
-	binary string
-	source string
-	store  *prebuiltStore
+	key     string
+	index   builder.TreeIndex
+	binary  string
+	source  string
+	modules string
+	store   *prebuiltStore
 }
 
 func newPrebuiltTree(t *testing.T, store *prebuiltStore) *prebuiltTree {
 	t.Helper()
-	files := []tarEntry{}
-	for _, name := range []string{"go.mod", "internal/lower/lower_test.go", "internal/lower/testdata/fixture.txt"} {
-		content, err := os.ReadFile(filepath.Join("testdata", "prebuilt", filepath.FromSlash(name)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		files = append(files, tarEntry{name: name, kind: tar.TypeReg, content: string(content)})
-	}
 	tree := &prebuiltTree{store: store}
-	tree.source = store.putBlob(makeTar(t, files, true))
 	tree.binary = store.putBlob(gzipped(t, prebuiltBinary(t)))
+	files := []tarEntry{}
+	for name, content := range fixtureBinary.files {
+		files = append(files, tarEntry{name: name, kind: tar.TypeReg, content: content})
+	}
+	tree.source = store.putBlob(makeTar(t, files, true))
+	tree.modules = store.putBlob(fixtureBinary.modules)
 	product := store.putBlob(makeTar(t, []tarEntry{
 		{name: fixtureProductKey + ".inputs", kind: tar.TypeReg, content: "{}\n"},
 		{name: fixtureProductKey + "/tool", kind: tar.TypeReg, content: "the product\n", mode: 0o755},
 	}, true))
-	tree.index = builder.TreeIndex{Tree: strings.Repeat("7", 40), Go: fixtureBinary.goVersion, Goos: runtime.GOOS, Goarch: runtime.GOARCH, Source: tree.source,
+	tree.index = builder.TreeIndex{Tree: strings.Repeat("7", 40), Go: fixtureBinary.goVersion, Goos: runtime.GOOS, Goarch: runtime.GOARCH, Source: tree.source, Modules: tree.modules,
 		Products: map[string]string{fixtureProductKey: product},
 		Packages: map[string]builder.TreePackage{lowerPackage: {Package: lowerPackage, Directory: "internal/lower", Binary: tree.binary, Products: []string{fixtureProductKey}}}}
 	tree.rekey(t)
@@ -240,12 +278,17 @@ func newPrebuiltFixture(t *testing.T) *prebuiltFixture {
 		t.Skip("no bash")
 	}
 	fixture := &prebuiltFixture{directory: t.TempDir(), store: newPrebuiltStore(t)}
+	// The tree's GOMODCACHE is read-only, as go leaves it.
+	t.Cleanup(func() { removeDirectory(fixture.directory) })
 	fixture.bin = filepath.Join(fixture.directory, "bin")
 	os.MkdirAll(fixture.bin, 0o755)
 	if err := os.Symlink(bash, filepath.Join(fixture.bin, "bash")); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fixture.bin)
+	// A HOME of its own, so a module go fetched outside the tree's module cache would show.
+	t.Setenv("HOME", filepath.Join(fixture.directory, "home"))
+	os.MkdirAll(filepath.Join(fixture.directory, "home"), 0o755)
 	if found, err := exec.LookPath("go"); err == nil {
 		t.Fatalf("the scrubbed PATH still finds go at %s", found)
 	}
@@ -397,7 +440,7 @@ func TestATestThatBuildsIsLoomsNeverRed(t *testing.T) {
 	fixture.tree.publish(t)
 	result, events, _ := runUnit(t, fixture.unit("^(TestA|TestProduct)$"), fixture.options(t))
 	runner := strings.Join(outputLines(events, "runner"), "\n")
-	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "a test tried to build") {
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "a test ran go for more than a read-only query") {
 		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), runner)
 	}
 	if !strings.Contains(runner, "a test ran go build -o ") {
@@ -898,7 +941,7 @@ func TestAGoOfAnotherReleaseIsUnfit(t *testing.T) {
 	fixture := newPrebuiltFixture(t)
 	fixture.withGo(t, "#!/bin/sh\necho go1.0.0\n")
 	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
-	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `says "go1.0.0" under GOTOOLCHAIN=`+fixtureBinary.goVersion) {
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `is "go1.0.0" under GOTOOLCHAIN=local (<nil>), and the tree was built with `+fixtureBinary.goVersion) {
 		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
 	}
 	if _, err := os.Stat(filepath.Join(result.Workspace, "loom-out", "part-0.jsonl")); err == nil {
@@ -915,7 +958,7 @@ func TestABuildIsRefusedWithAGoHere(t *testing.T) {
 	fixture.tree.index.Packages[lowerPackage] = built
 	fixture.tree.publish(t)
 	result, events, _ := runUnit(t, fixture.unit("^TestProduct$"), fixture.options(t))
-	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `a test tried to build (1 go commands, the first "go build -o `) {
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `a test ran go for more than a read-only query (1 go commands, the first "go build -o `) {
 		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
 	}
 }
@@ -1126,5 +1169,88 @@ func TestASweepNeverTakesANameBeforeItsMakerLocksIt(t *testing.T) {
 		}
 		maker.Close()
 		<-swept
+	}
+}
+
+// A test's allowed go list runs with the runner's GOFLAGS, never the test's: GOFLAGS=-export=true can't make it compile.
+func TestAnAllowedGoListNeverCompiles(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestListExport$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("the stand-in let go list compile: %s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+}
+
+// A test's go list of a package importing a third-party module reads it from the tree's module cache, put in the
+// tree's own GOMODCACHE before the tests, and nothing goes to HOME's.
+func TestATestsModulesComeFromTheTreesModuleCache(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestModules$"), fixture.options(t))
+	runner := strings.Join(outputLines(events, "runner"), "\n")
+	if result.Status != protocol.StatusPassed || !strings.Contains(runner, "the tree's modules are in ") {
+		t.Fatalf("%s; errors %q\n%s\n%s", result.Status, errorPhases(events), runner, testLog(t, result))
+	}
+	moduleCache := newSourceCache(filepath.Join(fixture.directory, "root")).moduleCache(fixture.tree.modules)
+	if _, err := os.Stat(filepath.Join(moduleCache, moduletest.Path+"@"+moduletest.Version, "dep.go")); err != nil {
+		t.Errorf("the module isn't in the tree's GOMODCACHE: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.directory, "home", "go")); err == nil {
+		t.Error("go wrote HOME's module cache")
+	}
+}
+
+// A module the tree's module cache lacks breaks the unit, named, before any test runs.
+func TestAModuleTheCacheLacksIsLooms(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	versions := moduletest.Path + "/@v/"
+	fixture.tree.index.Modules = fixture.store.putBlob(makeTar(t, []tarEntry{
+		{name: versions + "list", kind: tar.TypeReg, content: moduletest.Version + "\n"},
+		{name: versions + moduletest.Version + ".info", kind: tar.TypeReg, content: `{"Version":"` + moduletest.Version + `"}`},
+	}, true))
+	fixture.tree.publish(t)
+	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "a module the tree needs isn't in its module cache, blob "+fixture.tree.index.Modules) {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+	if _, err := os.Stat(filepath.Join(result.Workspace, "loom-out", "part-0.jsonl")); err == nil {
+		t.Error("a test ran")
+	}
+}
+
+// A go list that asks a module proxy (-u, -versions, -retracted) is refused like a build, and its red is Loom's.
+func TestAProxyQueryIsRefused(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestListUpdates$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `the first "go list -m -u all"`) {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+}
+
+// The trees' GOMODCACHEs count toward the blob cache's bound, so a full module cache makes blobs go.
+func TestTheModuleCachesCountTowardTheBound(t *testing.T) {
+	contents := [][]byte{bytes.Repeat([]byte("a"), 100), bytes.Repeat([]byte("b"), 100), bytes.Repeat([]byte("c"), 100)}
+	served, sums := newBlobServer(t, contents...)
+	root := t.TempDir()
+	cache := blobCache{directory: filepath.Join(root, blobDirectoryName), limit: 350, store: served.server.URL, client: served.server.Client()}
+	for index, sum := range sums {
+		readBlob(t, cache, sum)
+		at := time.Now().Add(time.Duration(index-10) * time.Minute)
+		os.Chtimes(filepath.Join(cache.directory, sum), at, at)
+	}
+	moduleCache := newSourceCache(root).moduleCache(strings.Repeat("d", 64))
+	os.MkdirAll(moduleCache, 0o755)
+	os.WriteFile(filepath.Join(moduleCache, "module.zip"), bytes.Repeat([]byte("m"), 200), 0o644)
+	if err := cache.trim(nil); err != nil {
+		t.Fatal(err)
+	}
+	for index, sum := range sums {
+		_, err := os.Stat(filepath.Join(cache.directory, sum))
+		if (index < 2) != (err != nil) {
+			t.Errorf("blob %d of 3, oldest first: present %v, with 200 bytes in a module cache and a 350 byte bound", index+1, err == nil)
+		}
 	}
 }

@@ -403,9 +403,12 @@ type TreeIndex struct {
 	Future string `json:"future"`
 	Go     string `json:"go"`
 	// Goos and Goarch are the platform the binaries were built for, go env GOOS and GOARCH on Workshop.
-	Goos     string                 `json:"goos"`
-	Goarch   string                 `json:"goarch"`
-	Source   string                 `json:"source"`
+	Goos   string `json:"goos"`
+	Goarch string `json:"goarch"`
+	Source string `json:"source"`
+	// Modules is the blob of the tree's module download cache (ModuleCacheArchive): the only place a runner's go
+	// reads a module from. Empty: none published.
+	Modules  string                 `json:"modules,omitempty"`
 	Seconds  float64                `json:"seconds"`
 	Products map[string]string      `json:"products"`
 	Packages map[string]TreePackage `json:"packages"`
@@ -730,7 +733,7 @@ func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error
 
 // blobs are every blob the index names: the source archive, each product's archive, each built package's binary.
 func (index TreeIndex) blobs() []string {
-	named := map[string]bool{index.Source: true}
+	named := map[string]bool{index.Source: true, index.Modules: true}
 	for _, sum := range index.Products {
 		named[sum] = true
 	}
@@ -804,6 +807,9 @@ func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 	}
 	if !productKeyPattern.MatchString(index.Source) {
 		return poisoned("its source archive is %q", index.Source)
+	}
+	if index.Modules != "" && !productKeyPattern.MatchString(index.Modules) {
+		return poisoned("its module cache is %q", index.Modules)
 	}
 	for product, sum := range index.Products {
 		if !productKeyPattern.MatchString(product) || !productKeyPattern.MatchString(sum) {

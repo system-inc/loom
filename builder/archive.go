@@ -157,6 +157,62 @@ func SourceArchive(tree string) ([]byte, error) {
 	return writeArchive(entries)
 }
 
+// ModuleCacheArchive is the archive of a tree's module download cache: every module in its build graph (go mod download
+// all, run in the tree, workspace and all, into a scratch GOMODCACHE), as GOMODCACHE/cache/download lays them out,
+// which is what GOPROXY=file:// reads, without its sumdb answers or lock files. A runner's read-only go queries read
+// modules from it and from nowhere else, never the network. environment is added to go's: where the modules come from.
+// Measured Oct 10: adamic's is 63 MB, and go list -deps -test ./... runs from it with GOPROXY=file:// and nothing else.
+func ModuleCacheArchive(tree string, environment []string) ([]byte, error) {
+	scratch, err := os.MkdirTemp("", "loom-modules-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		// go makes its module cache read-only; go clean -modcache is how it is removed.
+		clean := exec.Command("go", "clean", "-modcache")
+		clean.Env = append(os.Environ(), "GOMODCACHE="+scratch, "GOFLAGS=")
+		clean.Run()
+		os.RemoveAll(scratch)
+	}()
+	command := exec.Command("go", "mod", "download", "all")
+	command.Dir = tree
+	command.Env = append(append(os.Environ(), "GOMODCACHE="+scratch, "GOFLAGS="), environment...)
+	if output, err := command.CombinedOutput(); err != nil {
+		tail := output
+		if len(tail) > 4000 {
+			tail = tail[len(tail)-4000:]
+		}
+		return nil, fmt.Errorf("go mod download all: %v\n%s", err, tail)
+	}
+	download := filepath.Join(scratch, "cache", "download")
+	entries := []archiveEntry{}
+	err = filepath.WalkDir(download, func(file string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name, err := filepath.Rel(download, file)
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir() && name == "sumdb":
+			return filepath.SkipDir
+		case entry.IsDir() || strings.HasSuffix(name, ".lock") || !entry.Type().IsRegular():
+			return nil
+		}
+		entries = append(entries, archiveEntry{Name: filepath.ToSlash(name), File: file})
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		// A tree that needs no module has none.
+		err = nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return writeArchive(entries)
+}
+
 // checkLink refuses a symbolic link at name whose target could lead out of the directory it is unpacked into: an
 // absolute or unclean target, one that climbs above the top, or a .. after a name, which could climb out of a
 // directory another link leads into. Nor may a link lead to itself or to a directory it sits in (`.`, `..` from

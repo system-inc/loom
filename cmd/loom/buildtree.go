@@ -151,6 +151,16 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	// The tree's modules, after its source is archived (go may write go.sum), from Workshop's own module cache first.
+	proxy, err := exec.Command("go", "env", "GOMODCACHE", "GOPROXY").Output()
+	if err != nil {
+		return fail(err)
+	}
+	moduleCache, upstream, _ := strings.Cut(strings.TrimSpace(string(proxy)), "\n")
+	modules, err := builder.ModuleCacheArchive(*tree, []string{"GOPROXY=file://" + filepath.Join(strings.TrimSpace(moduleCache), "cache", "download") + "," + strings.TrimSpace(upstream)})
+	if err != nil {
+		return fail(fmt.Errorf("the tree's modules: %w", err))
+	}
 	treeIndex := builder.TreeIndex{Tree: treeHash, Future: *future, Go: strings.TrimSpace(string(goVersion)), Goos: strings.TrimSpace(goos),
 		Goarch: strings.TrimSpace(goarch), Packages: map[string]builder.TreePackage{}}
 	for _, result := range built {
@@ -166,6 +176,10 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	uploadStarted := time.Now()
 	treeIndex.Seconds = time.Since(started).Seconds()
+	// The module cache goes up before the index that names it, as every other blob does.
+	if treeIndex.Modules, err = store.PutBlob(modules); err != nil {
+		return fail(fmt.Errorf("the tree's modules: %w", err))
+	}
 	treeKey, indexWritten, err := builder.PublishTree(store, &treeIndex, build.Out, build.Cache, source, held.Held())
 	if err != nil {
 		return fail(err)

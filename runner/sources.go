@@ -35,8 +35,9 @@ import (
 
 const sourceDirectoryName = "loom-sources"
 
-// keepSources is how many trees' sources a runner keeps unpacked: a future's and the main it stacks on.
-var keepSources = 2
+// keepSources is how many unpacked archives a runner keeps: a future's source and module cache, and the main's it
+// stacks on.
+var keepSources = 4
 
 const unpackingPrefix = ".unpacking-"
 const sourceRemovingPrefix = ".removing-"
@@ -117,6 +118,15 @@ func (cache sourceCache) lockFile(sum string) (*os.File, error) {
 		}
 	}
 }
+
+// moduleCache is the GOMODCACHE the tests' go queries use for the module cache unpacked as sum: one per tree, kept and
+// removed with it, and counted toward the blob cache's bound.
+func (cache sourceCache) moduleCache(sum string) string {
+	return filepath.Join(cache.directory, sum+moduleCacheSuffix)
+}
+
+// moduleCacheSuffix names a tree's GOMODCACHE beside its unpacked module cache.
+const moduleCacheSuffix = "-modcache"
 
 // release lets the source go.
 func (held *heldSource) release() {
@@ -205,7 +215,8 @@ func (cache sourceCache) moveAway(directory string) error {
 		os.Remove(away)
 		return err
 	}
-	return os.RemoveAll(away)
+	// A GOMODCACHE is read-only, as go leaves it.
+	return removeDirectory(away)
 }
 
 // sweep removes each .unpacking- and .removing- directory whose lock no one holds: what a killed runner left.
@@ -279,6 +290,9 @@ func (cache sourceCache) remove(sum string) {
 		return
 	}
 	if cache.moveAway(filepath.Join(cache.directory, sum)) == nil {
+		if _, err := os.Lstat(cache.moduleCache(sum)); err == nil {
+			cache.moveAway(cache.moduleCache(sum))
+		}
 		os.Remove(lockPath)
 	}
 }

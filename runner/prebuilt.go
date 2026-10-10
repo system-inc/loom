@@ -101,6 +101,18 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	} else {
 		needed = append([]neededBlob{{sum: index.Source, what: "the tree's source"}}, needed...)
 	}
+	// The tree's module cache, unpacked once like its source: the only place the tests' go queries read a module.
+	var modules *heldSource
+	if index.Modules != "" {
+		if modules, err = sources.hold(index.Modules); err != nil {
+			run.fail(protocol.PhaseStart, fmt.Errorf("holding the tree's module cache: %w (the instance's, never the change's)", err))
+			return protocol.StatusBroken
+		}
+		defer modules.release()
+		if !modules.ready {
+			needed = append(needed, neededBlob{sum: index.Modules, what: "the tree's module cache"})
+		}
+	}
 	fetchStarted := time.Now()
 	files, err := run.fetchBlobs(prepareContext, cache, needed)
 	defer func() {
@@ -125,6 +137,12 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	if !held.ready {
 		if err := sources.unpack(prepareContext, held, files[index.Source]); err != nil {
 			run.fail(protocol.PhaseStart, fmt.Errorf("unpacking the tree's source: %w (Loom's, never the change's)", err))
+			return protocol.StatusBroken
+		}
+	}
+	if modules != nil && !modules.ready {
+		if err := sources.unpack(prepareContext, modules, files[index.Modules]); err != nil {
+			run.fail(protocol.PhaseStart, fmt.Errorf("unpacking the tree's module cache: %w (Loom's, never the change's)", err))
 			return protocol.StatusBroken
 		}
 	}
@@ -179,7 +197,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 			break
 		}
 	}
-	standIn, err := run.standInGo(prepareContext, environment, index.Go, source)
+	standIn, err := run.standInGo(prepareContext, environment, index, sources, source)
 	if err != nil {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
@@ -384,14 +402,23 @@ func gunzipTo(blob io.Reader, path string) error {
 	return err
 }
 
+// delegatedEnvironment is what every go the runner runs for its tests sees above theirs, never the tests' own: the
+// runner's go and no other (GOTOOLCHAIN=local, so no Go is ever downloaded), no go env file and no GOFLAGS of the
+// test's (-mod=readonly alone, so nothing compiles or writes go.mod), the tree's module cache as the only proxy, no
+// checksum database, and a module cache per tree under the runner's root.
+func delegatedEnvironment(proxy, moduleCache string) []string {
+	return []string{"GOTOOLCHAIN=local", "GOENV=off", "GOFLAGS=-mod=readonly", "GOPROXY=" + proxy, "GOSUMDB=off", "GOMODCACHE=" + moduleCache}
+}
+
 // A goStandIn is the go a prebuilt unit's tests find first on PATH, and the files it writes what they asked of it in:
 // each build it refused, each read-only query the runner's go answered (with its exit), each one no go here could.
 type goStandIn struct {
 	refused, answered, unanswered string
 }
 
-// standInScript is the stand-in go. A read-only query (version, env, list, each with only the flags on its allow list)
-// goes to the runner's go under GOTOOLCHAIN set to the tree's release; anything else, a build among it, is refused.
+// standInScript is the stand-in go. A read-only query (version, env, list, each with only the flags on its allow list:
+// none that builds, none that asks a proxy) goes to the runner's go under delegatedEnvironment; anything else, a build
+// among it, is refused.
 const standInScript = `#!/bin/sh
 # loom-runner's stand-in go (prebuilt.go): the runner never builds.
 allowed=no
@@ -404,7 +431,7 @@ env)
 	for argument in "$@"; do case "$argument" in -json | -changed) ;; -*) allowed=no ;; esac; done ;;
 list)
 	allowed=yes
-	for argument in "$@"; do case "$argument" in -deps | -json | -json=* | -e | -f | -f=* | -find | -m | -u | -versions | -retracted | -mod=readonly | -mod=vendor | -tags | -tags=*) ;; -*) allowed=no ;; esac; done ;;
+	for argument in "$@"; do case "$argument" in -deps | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=*) ;; -*) allowed=no ;; esac; done ;;
 esac
 if [ "$allowed" = no ]; then
 	printf 'go %s\n' "$*" >> REFUSED
@@ -417,8 +444,8 @@ if [ -z "$real" ]; then
 	echo "loom-runner: go $*: this runner has no Go to answer it" >&2
 	exit 1
 fi
-GOTOOLCHAIN=RELEASE
-export GOTOOLCHAIN
+unset GONOSUMDB GONOSUMCHECK GOPRIVATE GONOPROXY GOINSECURE
+ENVIRONMENT
 "$real" "$@"
 status=$?
 printf '%s go %s\n' "$status" "$*" >> ANSWERED
@@ -426,13 +453,21 @@ exit "$status"
 `
 
 // standInGo puts the stand-in go first on the tests' PATH. The runner's own go, found on the tests' PATH behind it or
-// else on the runner's, answers read-only queries, and must say it is the tree's Go release under GOTOOLCHAIN set to
-// it, or the unit is unfit, named. With no go, it says so on the record.
-func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, goVersion, directory string) (goStandIn, error) {
-	release := strings.Fields(goVersion)
+// else on the runner's, answers read-only queries under delegatedEnvironment, reading modules only from the tree's
+// module cache (index.Modules, unpacked in sources): it must report exactly the tree's Go release under
+// GOTOOLCHAIN=local, or the unit is unfit, both named, and every module the tree needs is put in the tree's own
+// GOMODCACHE before the tests run, so none of them sees go fetch one, and a module the cache lacks breaks the unit,
+// named. With no go, the record says so.
+func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, index builder.TreeIndex, sources sourceCache, directory string) (goStandIn, error) {
+	release := strings.Fields(index.Go)
 	if len(release) == 0 {
 		return goStandIn{}, fmt.Errorf("the tree's index names no Go release: the store is poisoned")
 	}
+	proxy, moduleCache := "off", filepath.Join(run.directory, "modules")
+	if index.Modules != "" {
+		proxy, moduleCache = "file://"+filepath.Join(sources.directory, index.Modules), sources.moduleCache(index.Modules)
+	}
+	delegated := delegatedEnvironment(proxy, moduleCache)
 	real, err := lookPath("go", environment["PATH"])
 	if err != nil {
 		real, err = lookPath("go", os.Getenv("PATH"))
@@ -441,14 +476,25 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 		real = ""
 		run.say("no go here: a test's read-only go query goes unanswered, and a unit that asks one is unfit; no test builds here")
 	} else {
-		command := exec.CommandContext(checkContext, real, "env", "GOVERSION")
-		command.Env, command.Dir = append(packageEnvironment(environment, protocol.TestPackage{}), "GOTOOLCHAIN="+release[0]), directory
-		output, err := command.Output()
-		if says := strings.TrimSpace(string(output)); err != nil || says != release[0] {
-			return goStandIn{}, fmt.Errorf("refused as unfit: the runner's go at %s says %q under GOTOOLCHAIN=%s (%v), and the tree was built with %s: Loom's, never the change's",
-				real, says, release[0], err, release[0])
+		goCommand := func(arguments ...string) ([]byte, error) {
+			command := exec.CommandContext(checkContext, real, arguments...)
+			command.Env, command.Dir = append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), directory
+			return command.CombinedOutput()
 		}
-		run.say("go at " + real + " answers the tests' read-only go queries as " + release[0] + "; no test builds here")
+		output, err := goCommand("env", "GOVERSION")
+		if says := strings.TrimSpace(string(output)); err != nil || says != release[0] {
+			return goStandIn{}, fmt.Errorf("refused as unfit: the runner's go at %s is %q under GOTOOLCHAIN=local (%v), and the tree was built with %s: Loom's, never the change's",
+				real, says, err, release[0])
+		}
+		if index.Modules != "" {
+			started := time.Now()
+			if output, err := goCommand("mod", "download", "all"); err != nil {
+				lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+				return goStandIn{}, fmt.Errorf("a module the tree needs isn't in its module cache, blob %s (%v): %s: Loom's, never the change's", index.Modules, err, lines[len(lines)-1])
+			}
+			run.say(fmt.Sprintf("the tree's modules are in %s in %.1f s", moduleCache, time.Since(started).Seconds()))
+		}
+		run.say("go at " + real + " answers the tests' read-only go queries as " + release[0] + ", from the tree's module cache; no test builds or downloads here")
 	}
 	bin := filepath.Join(run.directory, "stand-in")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
@@ -456,8 +502,13 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 	}
 	standIn := goStandIn{refused: filepath.Join(run.directory, "go-refused"), answered: filepath.Join(run.directory, "go-answered"),
 		unanswered: filepath.Join(run.directory, "go-unanswered")}
+	exports := ""
+	for _, variable := range delegated {
+		name, value, _ := strings.Cut(variable, "=")
+		exports += name + "=" + shellQuote(value) + "\nexport " + name + "\n"
+	}
 	script := strings.NewReplacer("REFUSED", shellQuote(standIn.refused), "UNANSWERED", shellQuote(standIn.unanswered),
-		"ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release[0])).Replace(standInScript)
+		"ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "ENVIRONMENT\n", exports).Replace(standInScript)
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
 		return goStandIn{}, err
 	}
@@ -500,7 +551,7 @@ func (run *unitRun) settleGo(standIn goStandIn, status string) string {
 	}
 	refused := fileLines(standIn.refused)
 	for _, line := range refused {
-		run.say("a test ran " + line + ", and this runner never builds")
+		run.say("a test ran " + line + ", and this runner never builds or downloads")
 	}
 	if unanswered := fileLines(standIn.unanswered); len(unanswered) > 0 {
 		run.fail(protocol.PhaseRun, fmt.Errorf("refused as unfit: the tests need Go for %q (%d queries), and this runner has none: a placement fact, never the change's",
@@ -511,7 +562,7 @@ func (run *unitRun) settleGo(standIn goStandIn, status string) string {
 		return status
 	}
 	if len(refused) > 0 {
-		run.fail(protocol.PhaseRun, fmt.Errorf("a test tried to build (%d go commands, the first %q), and this runner never builds: Loom's, never the change's", len(refused), refused[0]))
+		run.fail(protocol.PhaseRun, fmt.Errorf("a test ran go for more than a read-only query (%d go commands, the first %q), and this runner never builds or downloads: Loom's, never the change's", len(refused), refused[0]))
 		return protocol.StatusBroken
 	}
 	if len(failed) > 0 {
