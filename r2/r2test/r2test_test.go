@@ -121,6 +121,18 @@ func TestARefreshRedatesAKeyWithoutSendingItsBytes(t *testing.T) {
 	if err = bucket.Refresh("releases/current.txt", held.ETag); err == nil || fake.Count("COPY", "releases/") != 0 {
 		t.Fatalf("a refresh outside Writable: %v", err)
 	}
+	// A large object is refreshed over the ETag its read gave: R2 compresses a GET that takes gzip and weakens the ETag,
+	// which no x-amz-copy-source-if-match matches, so keep's refresh of a tree's index would never land. Mutant: no
+	// Accept-Encoding.
+	large := bytes.Repeat([]byte("index "), CompressedFrom)
+	fake.Set("trees/large.json", large, now.Add(-6*24*time.Hour))
+	_, read, err := bucket.GetObject("trees/large.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = bucket.Refresh("trees/large.json", read.ETag); err != nil || !fake.Modified("trees/large.json").Equal(now) {
+		t.Fatalf("a refresh of a large object over %q: %v, modified %v", read.ETag, err, fake.Modified("trees/large.json"))
+	}
 }
 
 // The fake refuses a request signed by another key, with another secret, or over other bytes than it carries.
