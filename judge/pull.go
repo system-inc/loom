@@ -401,6 +401,23 @@ type PoolEntry struct {
 	Runner          string `json:"runner"`
 	MemoryMegabytes int    `json:"memoryMegabytes"`
 	Cpus            int    `json:"cpus"`
+	// Kinds are the unit kinds the pool takes when it is limited to some (box-phase takes only phase, Fabric's Oct 10
+	// 02:12Z): empty takes tests and products, as the planner reads it.
+	Kinds []string `json:"kinds,omitempty"`
+}
+
+// Takes is whether the pool takes a unit of this kind: a pool limited to some kinds takes only those, and an
+// unlimited one takes every kind but phase, which goes only to a pool that names it.
+func (pool PoolEntry) Takes(kind string) bool {
+	if len(pool.Kinds) == 0 {
+		return kind != "phase"
+	}
+	for _, taken := range pool.Kinds {
+		if taken == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // LoadPools reads pools.json, refusing a pool without a name, a runner, or positive memory and cpus.
@@ -419,13 +436,13 @@ func LoadPools(content []byte) ([]PoolEntry, error) {
 	return table.Pools, nil
 }
 
-// FitPools is every pool a rerun of a unit may go to: it serves the runner the unit's key names (a unit runs only on
-// its key's runner), and each worker holds the unit's declared need. None means the rerun can't be placed: void,
+// FitPools is every pool a rerun of a unit may go to: it takes the unit's kind, it serves the runner the unit's key
+// names (a unit runs only on its key's runner), and each worker holds the unit's declared need. None means the rerun can't be placed: void,
 // with that cause, never silent.
-func FitPools(pools []PoolEntry, runner string, need protocol.Resources) []PoolEntry {
+func FitPools(pools []PoolEntry, kind, runner string, need protocol.Resources) []PoolEntry {
 	fit := []PoolEntry{}
 	for _, pool := range pools {
-		if (runner == "" || pool.Runner == runner) && pool.MemoryMegabytes >= need.MemoryMegabytes && pool.Cpus >= need.Cpus {
+		if pool.Takes(kind) && (runner == "" || pool.Runner == runner) && pool.MemoryMegabytes >= need.MemoryMegabytes && pool.Cpus >= need.Cpus {
 			fit = append(fit, pool)
 		}
 	}

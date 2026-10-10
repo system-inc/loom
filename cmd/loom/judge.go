@@ -151,10 +151,10 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 					return []protocol.Event{{Unit: unit.Id, Type: "error", Phase: protocol.PhasePlace, Message: "not placed: " + err.Error()}}, nil
 				}
 				unit.Resources = need
-				fit := judge.FitPools(table, parts.Tools.Runner, need)
+				fit := judge.FitPools(table, parts.Kind, parts.Tools.Runner, need)
 				if len(fit) == 0 {
 					return []protocol.Event{{Unit: unit.Id, Type: "error", Phase: protocol.PhasePlace,
-						Message: fmt.Sprintf("not placed: no pool serves runner %.12s with %d MB and %d cpus", parts.Tools.Runner, need.MemoryMegabytes, need.Cpus)}}, nil
+						Message: fmt.Sprintf("not placed: no pool takes a %s unit on runner %.12s with %d MB and %d cpus", parts.Kind, parts.Tools.Runner, need.MemoryMegabytes, need.Cpus)}}, nil
 				}
 				rerunConfig.Slots = nil
 				for _, pool := range fit {

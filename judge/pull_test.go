@@ -327,7 +327,7 @@ func TestARerunGoesOnlyToAPoolServingItsRunnerThatHoldsItsNeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	pools, err := LoadPools(content)
-	if err != nil || len(pools) != 4 {
+	if err != nil || len(pools) != 5 {
 		t.Fatalf("pools %+v (%v)", pools, err)
 	}
 	keyRunner := "8a70ebce11315bce6395da08b0226f32f592cbb747d4f329438594bf7056b7f0"
@@ -338,14 +338,27 @@ func TestARerunGoesOnlyToAPoolServingItsRunnerThatHoldsItsNeed(t *testing.T) {
 		}
 		return strings.Join(list, ",")
 	}
-	if got := names(FitPools(pools, keyRunner, protocol.Resources{})); got != "codex-strict,box-strict-8a70" {
+	if got := names(FitPools(pools, "test", keyRunner, protocol.Resources{})); got != "codex-strict,box-strict-8a70" {
 		t.Fatalf("fit %s, want both pools serving its key's runner", got)
 	}
-	if got := names(FitPools(pools, keyRunner, protocol.Resources{MemoryMegabytes: 32768, Cpus: 4})); got != "box-strict-8a70" {
+	if got := names(FitPools(pools, "test", keyRunner, protocol.Resources{MemoryMegabytes: 32768, Cpus: 4})); got != "box-strict-8a70" {
 		t.Fatalf("fit %s, want only the box serving its runner for a 32 GB need", got)
 	}
-	if got := FitPools(pools, keyRunner, protocol.Resources{MemoryMegabytes: 131072}); len(got) != 0 {
+	if got := FitPools(pools, "test", keyRunner, protocol.Resources{MemoryMegabytes: 131072}); len(got) != 0 {
 		t.Fatalf("fit %v for a need no pool holds", got)
+	}
+	// A phase pool serving the same runner never takes a test rerun, even one only it could hold, and an empty key
+	// runner doesn't let a test reach it either; a phase goes only there.
+	if got := FitPools(pools, "test", keyRunner, protocol.Resources{MemoryMegabytes: 32768, Cpus: 16}); len(got) != 0 {
+		t.Fatalf("fit %v: a test rerun went to the phase pool", got)
+	}
+	for _, pool := range FitPools(pools, "test", "", protocol.Resources{}) {
+		if pool.Name == "box-phase-8a70" {
+			t.Fatal("a test rerun with no key runner went to the phase pool")
+		}
+	}
+	if got := names(FitPools(pools, "phase", keyRunner, protocol.Resources{})); got != "box-phase-8a70" {
+		t.Fatalf("fit %s, want only the phase pool for a phase", got)
 	}
 	if _, err := LoadPools([]byte(`{"pools":[{"name":"p","runner":"","memoryMegabytes":1,"cpus":1}]}`)); err == nil {
 		t.Fatal("read a pool with no runner")

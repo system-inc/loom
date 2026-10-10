@@ -4,6 +4,7 @@
   {"name": "codex-strict", "tier": "codex-strict", "runner": "8a70ebce11315bce6395da08b0226f32f592cbb747d4f329438594bf7056b7f0", "memoryMegabytes": 16384, "cpus": 4},
   {"name": "box-strict-8a70", "tier": "box-strict", "runner": "8a70ebce11315bce6395da08b0226f32f592cbb747d4f329438594bf7056b7f0", "memoryMegabytes": 65536, "cpus": 8},
   {"name": "codex-strict-cold", "tier": "codex-strict", "runner": "62b615decb5eb37fb4f7df7c599aba8f8f14472f760dc1da177fe0d82a23c310", "memoryMegabytes": 16384, "cpus": 4},
-  {"name": "box-strict", "tier": "box-strict", "runner": "62b615decb5eb37fb4f7df7c599aba8f8f14472f760dc1da177fe0d82a23c310", "memoryMegabytes": 65536, "cpus": 8}
+  {"name": "box-strict", "tier": "box-strict", "runner": "62b615decb5eb37fb4f7df7c599aba8f8f14472f760dc1da177fe0d82a23c310", "memoryMegabytes": 65536, "cpus": 8},
+  {"name": "box-phase-8a70", "tier": "box-phase", "runner": "8a70ebce11315bce6395da08b0226f32f592cbb747d4f329438594bf7056b7f0", "memoryMegabytes": 65536, "cpus": 16, "kinds": ["phase"]}
  ]
 }
