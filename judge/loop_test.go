@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/system-inc/loom/protocol"
 )
 
 var (
@@ -483,5 +485,61 @@ func TestAPhaseIsDecidedByItsExitLikeTheBoxsStage(t *testing.T) {
 				t.Fatalf("record %s lacks the phase rule", post.Verdicts[0])
 			}
 		})
+	}
+}
+
+func TestAnAttemptOnAnotherRunnerThanItsKeyIsVoid(t *testing.T) {
+	key, other := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	on := func(runner string, status string) Finished {
+		finished := passed()
+		finished.Attempt.Status, finished.Attempt.RunnerSha256 = status, runner
+		return finished
+	}
+	cases := []struct {
+		name    string
+		first   Finished
+		script  []Finished
+		require bool
+		status  string
+		asked   int
+	}{
+		{"its key's runner passes", on(key, Passed), nil, false, Passed, 0},
+		{"another runner is void and placed again, and the right runner's pass stands", on(other, Passed), []Finished{on(key, Passed)}, false, Passed, 1},
+		{"another runner past the retries stays void", on(other, Passed), []Finished{on(other, Passed), on(other, Passed)}, false, Void, 2},
+		{"an unreported runner is accepted before the switch", on(RunnerUnreported, Passed), nil, false, Passed, 0},
+		{"an unreported runner is void after the switch", on(RunnerUnreported, Passed), []Finished{on(RunnerUnreported, Passed), on(RunnerUnreported, Passed)}, true, Void, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			h.runs["u"] = c.first
+			h.script("u", futureTree, c.script...)
+			loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now, RequireRunner: c.require}
+			post, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "u", Runner: key}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record := recordOf(t, post, "u"); record.Status != c.status || len(h.fabric.Asked) != c.asked {
+				t.Fatalf("%+v with placements %v, want %s with %d", record, h.fabric.Asked, c.status, c.asked)
+			}
+		})
+	}
+	// An alone rerun on another runner can't decide a cause either.
+	decision, err := Decide(Evidence{First: Attempt{Status: Failed, RunnerSha256: key}, KeyRunner: key,
+		Candidate: &Rerun{Status: Passed, RunnerSha256: other}, Main: &Rerun{Status: Passed, RunnerSha256: key}})
+	if err != nil || decision.Decided || decision.Status != Void {
+		t.Fatalf("decision %+v (%v), want void from the candidate rerun on another runner", decision, err)
+	}
+}
+
+func TestTheRecordNamesAnUnreportedRunner(t *testing.T) {
+	finished, _ := FinishedFromEvents([]protocol.Event{started(), {Type: "finished", Status: "passed"}})
+	reported, _ := FinishedFromEvents([]protocol.Event{{Type: "started", RunnerSha256: strings.Repeat("a", 64)}, {Type: "finished", Status: "passed"}})
+	if finished.Attempt.RunnerSha256 != RunnerUnreported || reported.Attempt.RunnerSha256 != strings.Repeat("a", 64) {
+		t.Fatalf("runners %q and %q", finished.Attempt.RunnerSha256, reported.Attempt.RunnerSha256)
+	}
+	encoded, _ := Verdict{Attempts: []Attempt{finished.Attempt}}.Canonical()
+	if !strings.Contains(string(encoded), `"runnerSha256":"unreported"`) {
+		t.Fatalf("record %s doesn't name the gap", encoded)
 	}
 }

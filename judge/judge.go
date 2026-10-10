@@ -57,13 +57,16 @@ var infraKinds = map[string]bool{InfraDisk: true, InfraKill: true, InfraNeverPla
 
 // An Attempt is one run of a unit on one machine.
 type Attempt struct {
-	Machine     string  `json:"machine"`
-	Runner      string  `json:"runner"`
-	StartedAt   string  `json:"startedAt"`
-	FinishedAt  string  `json:"finishedAt"`
-	Exit        int     `json:"exit"`
-	WallSeconds float64 `json:"wallSeconds"`
-	Status      string  `json:"status"` // passed, failed or broken
+	Machine string `json:"machine"`
+	Runner  string `json:"runner"`
+	// RunnerSha256 is the runner binary's sha256 its started event reported, or RunnerUnreported for a runner that
+	// doesn't send it yet, so the gap is named on the record.
+	RunnerSha256 string  `json:"runnerSha256"`
+	StartedAt    string  `json:"startedAt"`
+	FinishedAt   string  `json:"finishedAt"`
+	Exit         int     `json:"exit"`
+	WallSeconds  float64 `json:"wallSeconds"`
+	Status       string  `json:"status"` // passed, failed or broken
 }
 
 // A TestOutcome is one test's result inside a unit.
@@ -187,9 +190,32 @@ func (verdict Verdict) Canonical() ([]byte, error) {
 
 // A Rerun is one alone rerun of a failed unit: on the candidate, or on main at the future's base.
 type Rerun struct {
-	Status string        // passed, failed or broken
-	Infra  string        // the infra kind when Status is broken
-	Tests  []TestOutcome // its test outcomes
+	Status       string        // passed, failed or broken
+	Infra        string        // the infra kind when Status is broken
+	Tests        []TestOutcome // its test outcomes
+	RunnerSha256 string        // the runner binary it ran on, as its attempt reported it
+}
+
+// RunnerUnreported is an attempt's RunnerSha256 when its runner didn't send one.
+const RunnerUnreported = "unreported"
+
+// runnerMismatch says why an attempt can't be a verdict on its key, or "" when it can: it ran on a runner binary other
+// than the one its key names (Loom, Oct 10 01:52Z: no pass is stored under a runner that didn't compute it). A runner
+// that reports nothing is accepted, the gap on the record, until requireReported (the logged fail-closed switch, a
+// cutover condition). A key with no runner part names nothing to check.
+func runnerMismatch(keyRunner, ran string, requireReported bool) string {
+	switch {
+	case keyRunner == "":
+		return ""
+	case ran == "" || ran == RunnerUnreported:
+		if requireReported {
+			return "its runner reported no sha256, and the judge requires one"
+		}
+		return ""
+	case ran != keyRunner:
+		return fmt.Sprintf("it ran on runner %.12s, and its key names runner %.12s", ran, keyRunner)
+	}
+	return ""
 }
 
 // Evidence is everything Decide reads for one unit.
@@ -208,6 +234,10 @@ type Evidence struct {
 	// them proves nothing, whatever it reported: its skips aren't passes, so it's void and placed again (the
 	// wasi-family-must-run mutant).
 	MissingTools []string
+	// KeyRunner is the unit key's tools.runner part, the runner binary's sha256; RequireRunner turns a runner that
+	// reports none from accepted into void.
+	KeyRunner     string
+	RequireRunner bool
 	// Phase marks a kind phase unit, one of the box fast gate's non-test stages (Loom, Oct 10 01:41Z): decided by its
 	// exit, as the box decides a stage, with no alone reruns.
 	Phase     bool
@@ -234,6 +264,11 @@ func Decide(evidence Evidence) (Decision, error) {
 	if len(evidence.MissingTools) > 0 {
 		return Decision{Status: Void, Cause: CauseInfra, Infra: InfraRefused, Next: "retry",
 			Why: "run without " + strings.Join(evidence.MissingTools, ", ") + ": its skips prove nothing; place it on a fit runner"}, nil
+	}
+	if evidence.First.Status != Broken {
+		if why := runnerMismatch(evidence.KeyRunner, evidence.First.RunnerSha256, evidence.RequireRunner); why != "" {
+			return Decision{Status: Void, Cause: CauseInfra, Infra: InfraRefused, Next: "retry", Why: why + ": void, placed again"}, nil
+		}
 	}
 	if evidence.Phase {
 		switch evidence.First.Status {
@@ -281,6 +316,9 @@ func Decide(evidence Evidence) (Decision, error) {
 		return Decision{Next: "rerunAlone", Why: "failed: rerun alone on the candidate and on main before a cause is set"}, nil
 	}
 	for _, rerun := range []*Rerun{evidence.Candidate, evidence.Main} {
+		if why := runnerMismatch(evidence.KeyRunner, rerun.RunnerSha256, evidence.RequireRunner); why != "" && rerun.Status != Broken {
+			return Decision{Status: Void, Cause: CauseInfra, Infra: InfraRefused, Next: "retry", Why: "an alone rerun: " + why + ", rerun again"}, nil
+		}
 		switch rerun.Status {
 		case Passed, Failed:
 		case Broken:

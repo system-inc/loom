@@ -54,6 +54,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	postParity := flags.Bool("post-parity", false, "with --dry-run, post the batches of parity futures (which never land) and print the rest: the steady judge before cutover")
 	void := flags.String("void", "", "post one listed future's run as void and exit, <tree>:<attempt> (the attempt Queue lists); needs --cause")
 	cause := flags.String("cause", "", "with --void, why the run is void, which leads the decision's problems")
+	requireRunner := flags.Bool("require-runner", false, "void an attempt whose runner reports no sha256 (the logged fail-closed switch, a cutover condition, once every pool's runner sends it); a mismatch is void either way")
 	censusRows := flags.String("census-rows", "", "the skip census's rows, comma-separated files (the tools tree's skips.json and census-extra.json); every unit whose tests pass is held to it")
 	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
 	censusGit := flags.String("census-git", "", "with --census-rows, a clone of Adamic whose origin answers whether a pending skip's awaited branch is on main")
@@ -126,6 +127,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}}},
 		Stale: judge.StaleAfter,
 	})
+	puller.Loop.RequireRunner = *requireRunner
 	if *censusRows != "" {
 		census, err := censusConfig(strings.Split(*censusRows, ","), *censusHeavy, *censusGit)
 		if err != nil {

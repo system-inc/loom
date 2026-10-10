@@ -39,7 +39,10 @@ func FinishedFromEvents(events []protocol.Event) (finished Finished, found bool)
 		}
 		return Finished{}, false
 	}
-	attempt := Attempt{Machine: events[start].Machine, Runner: events[start].RunnerVersion, StartedAt: events[start].Time}
+	attempt := Attempt{Machine: events[start].Machine, Runner: events[start].RunnerVersion, RunnerSha256: events[start].RunnerSha256, StartedAt: events[start].Time}
+	if attempt.RunnerSha256 == "" {
+		attempt.RunnerSha256 = RunnerUnreported
+	}
 	reader := newTestReader()
 	outputs := []string{}
 	killed, finishedStatus := false, ""

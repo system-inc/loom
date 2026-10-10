@@ -101,6 +101,7 @@ type PlanUnit struct {
 	UnitKey string
 	Reused  string // the reused verdict's id; empty when the unit runs
 	Kind    string // the unit key's kind: test, product or phase
+	Runner  string // the unit key's tools.runner: the runner binary's sha256 every attempt must have run on
 	// Named are the top-level tests the plan named for the unit (planner.RunNames of its select.run), each of which
 	// must reach a result in its test log; empty when the plan runs every test, or names them by a pattern the
 	// planner can't read back.
@@ -152,6 +153,9 @@ type Loop struct {
 	Census *CensusConfig
 	// RequireTestLog holds every passed unit to a read test log with a test result in it (RuleZeroRun).
 	RequireTestLog bool
+	// RequireRunner is the logged fail-closed switch (Loom, Oct 10 01:52Z, a cutover condition): an attempt whose
+	// runner reports no sha256 is void, like one whose sha256 differs from its key's. Off, it's accepted, the gap named.
+	RequireRunner bool
 }
 
 // CensusConfig is what the census step reads: the tools tree's rows, whether an awaited branch is on main, and the
@@ -292,7 +296,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		// A unit that never reported is placed again like any infra.
 		first = Finished{Attempt: Attempt{Status: Broken}, Infra: InfraSilent}
 	}
-	evidence := evidenceOf(first, unit)
+	evidence := loop.evidenceOf(first, unit)
 	verdict.Attempts = append(verdict.Attempts, first.Attempt)
 	verdict.Tests, verdict.Outputs = nonNil(first.Tests), nonNilStrings(first.Outputs)
 	source := first // the attempt whose tests the verdict carries
@@ -321,7 +325,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 				verdict.Attempts = append(verdict.Attempts, again.Attempt)
 				verdict.Tests, verdict.Outputs = nonNil(again.Tests), nonNilStrings(again.Outputs)
 				source = again
-				evidence = evidenceOf(again, unit)
+				evidence = loop.evidenceOf(again, unit)
 			} else {
 				// An alone rerun broke: run both again.
 				evidence.Candidate, evidence.Main = nil, nil
@@ -384,8 +388,8 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 		return err
 	}
 	verdict.Attempts = append(verdict.Attempts, candidate.Attempt, main.Attempt)
-	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests}
-	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests}
+	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256}
+	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256}
 	evidence.MainRecorded = nil
 	if found {
 		evidence.MainRecorded = recorded
@@ -393,9 +397,9 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 	return nil
 }
 
-func evidenceOf(finished Finished, unit PlanUnit) Evidence {
+func (loop Loop) evidenceOf(finished Finished, unit PlanUnit) Evidence {
 	return Evidence{First: finished.Attempt, FirstInfra: finished.Infra, FirstTests: finished.Tests, MissingTools: finished.MissingTools,
-		Phase: unit.Kind == KindPhase}
+		Phase: unit.Kind == KindPhase, KeyRunner: unit.Runner, RequireRunner: loop.RequireRunner}
 }
 
 // KindPhase is a unit key's kind for one of the box fast gate's non-test stages.

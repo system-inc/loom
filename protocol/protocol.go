@@ -137,8 +137,11 @@ type Event struct {
 	Type     string `json:"type"`
 
 	// started
-	Machine         string            `json:"machine,omitempty"`
-	RunnerVersion   string            `json:"runnerVersion,omitempty"`
+	Machine       string `json:"machine,omitempty"`
+	RunnerVersion string `json:"runnerVersion,omitempty"`
+	// RunnerSha256 is the runner binary's own sha256 (/proc/self/exe), the form a unit key's tools.runner part takes,
+	// so the judge can void an attempt that ran on a runner its key doesn't name (Loom, Oct 10 01:52Z).
+	RunnerSha256    string            `json:"runnerSha256,omitempty"`
 	Cpus            int               `json:"cpus,omitempty"`
 	MemoryMegabytes int               `json:"memoryMegabytes,omitempty"`
 	InputHashes     map[string]string `json:"inputs,omitempty"`

@@ -269,22 +269,30 @@ func TestAnEmptyFutureIsLeftAndOneFuturesErrorNeverStopsTheRest(t *testing.T) {
 	}
 }
 
-func TestThePullerReadsAUnitsKindFromItsKey(t *testing.T) {
+func TestThePullerReadsAUnitsKindAndRunnerFromItsKey(t *testing.T) {
 	tree, unit := strings.Repeat("d", 40), strings.Repeat("1", 64)
-	queue := &StubQueue{}
-	puller := NewPuller(Puller{
-		Source: listedFutures{{Future: tree, Change: PlannedChange{Change: "chg_A"}, Units: []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"kind":"phase"}`), Decision: "run"}}}},
-		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-1" },
-		Read: func(string) ([]protocol.Event, error) {
-			return []protocol.Event{{Unit: unit, Type: "started"}, {Unit: unit, Type: "exit", Code: code(1)}, {Unit: unit, Type: "finished", Status: "failed"}}, nil
-		},
-		Rerun: func(json.RawMessage, string) ([]protocol.Event, error) {
-			t.Fatal("a phase red was rerun alone")
-			return nil, nil
-		},
-		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now, RequireTestLog: true},
-	})
-	if judged, err := puller.PullOnce(); err != nil || judged != 1 || queue.Posts[tree][0].Decision.Status != "red" {
-		t.Fatalf("judged %d (%v): want the phase red by its exit", judged, err)
+	pull := func(ranOn string) FuturePost {
+		queue := &StubQueue{}
+		puller := NewPuller(Puller{
+			Source: listedFutures{{Future: tree, Change: PlannedChange{Change: "chg_A"}, Units: []PlannedUnitWire{{UnitKey: unit,
+				KeyParts: json.RawMessage(`{"kind":"phase","tools":{"runner":"` + strings.Repeat("a", 64) + `"}}`), Decision: "run"}}}},
+			RunOf: func(tree string, attempt int) string { return "future-" + tree + "-1" },
+			Read: func(string) ([]protocol.Event, error) {
+				return []protocol.Event{{Unit: unit, Type: "started", RunnerSha256: ranOn}, {Unit: unit, Type: "exit", Code: code(1)}, {Unit: unit, Type: "finished", Status: "failed"}}, nil
+			},
+			// A phase red is never rerun alone; a void attempt is placed again, and this placement never reports.
+			Rerun: func(json.RawMessage, string) ([]protocol.Event, error) { return nil, nil },
+			Main:  NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now, RequireTestLog: true},
+		})
+		if judged, err := puller.PullOnce(); err != nil || judged != 1 {
+			t.Fatalf("judged %d (%v)", judged, err)
+		}
+		return queue.Posts[tree][0]
+	}
+	if post := pull(strings.Repeat("a", 64)); post.Decision.Status != "red" {
+		t.Fatalf("decision %+v: want the phase red by its exit on its key's runner", post.Decision)
+	}
+	if post := pull(strings.Repeat("b", 64)); post.Decision.Status != "void" {
+		t.Fatalf("decision %+v: want void, on a runner other than keyParts.tools.runner", post.Decision)
 	}
 }
