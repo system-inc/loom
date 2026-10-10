@@ -95,6 +95,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .tile[data-state="passed"] { background: #2f9e5c; border-color: var(--passed); }
 .tile[data-state="void"] { background: #4a3812; border-color: var(--void); }
 .tile[data-state="failed"] { background: #c8261d; border-color: var(--failed); box-shadow: 0 0 12px rgba(255,122,112,.6); }
+.tiles .empty { grid-column: 1 / -1; }
 .legend { display: flex; gap: 16px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .legend .tile { display: inline-block; width: 10px; vertical-align: middle; margin-right: 6px; }
 .verdict { flex-direction: row; align-items: center; gap: 18px; }
@@ -242,10 +243,11 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
     }
 
+    // A change the board first saw already finished has no trip it can time.
     function took(line) {
         var from = Date.parse(line.firstSeenAt);
         var to = line.finishedAt ? Date.parse(line.finishedAt) : Date.now();
-        return isNaN(from) ? '' : duration((to - from) / 1000);
+        return isNaN(from) || (line.finishedAt && to - from < 1000) ? '\u2013' : duration((to - from) / 1000);
     }
 
     function sorted(filter) {
@@ -254,6 +256,12 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 
     function finishedUnits(units) {
         return units.passed + units.failed + units.void;
+    }
+
+    // An attempt that finished with void units decides nothing: a void is never a verdict, and the queue lists the
+    // next attempt, so the change is still testing.
+    function voided(line) {
+        return line.state === 'testing' && line.units.void > 0 && line.units.planned > 0 && finishedUnits(line.units) >= line.units.planned;
     }
 
     // The change the page centres on: the last one that moved while on its way, else the last that finished.
@@ -270,7 +278,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     // Where a change stands on the track. Blocks aren't in the log yet, so a change goes from the line to its build.
     function stageOf(line) {
         if (!line) { return -1; }
-        var decided = line.units.planned > 0 && finishedUnits(line.units) >= line.units.planned;
+        var decided = line.units.planned > 0 && finishedUnits(line.units) >= line.units.planned && !voided(line);
         return { queued: 0, parked: 0, refused: 0, building: 2, testing: decided ? 4 : 3, red: 5, landed: 6 }[line.state];
     }
 
@@ -367,6 +375,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         if (line && line.state === 'landed') { verdict = ['Green', 'green', 'every planned unit passed, and the units equal the plan']; }
         else if (line && line.state === 'red') { verdict = ['Red', 'red', line.units.failed + ' of ' + line.units.planned + ' units failed; its owner has the failing test and a repro']; }
         else if (line && line.state === 'parked') { verdict = ['Parked', 'held', 'held behind a change it stacks on; it restacks by itself']; }
+        else if (line && voided(line)) { verdict = ['Void', 'held', line.units.void + ' of ' + line.units.planned + ' units never finished, so nothing is decided; the next attempt runs them again']; }
         else if (line && line.state === 'refused') { verdict = ['Refused', 'red', 'the queue refused it at the door']; }
         word.textContent = verdict[0];
         if (verdict[1]) { word.dataset.state = verdict[1]; } else { delete word.dataset.state; }
@@ -420,7 +429,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         document.querySelectorAll('[data-from]').forEach(function (node) {
             var from = Date.parse(node.dataset.from);
             var to = node.dataset.to ? Date.parse(node.dataset.to) : Date.now();
-            if (!isNaN(from)) { node.textContent = duration((to - from) / 1000); }
+            if (!isNaN(from)) { node.textContent = node.dataset.to && to - from < 1000 ? '\u2013' : duration((to - from) / 1000); }
         });
     }
 
