@@ -56,6 +56,10 @@ type TestJob struct {
 	ChangedPaths []string `json:"changedPaths,omitempty"`
 	// Sample is the commit ADAMIC_GATE_SAMPLE names, for the tests that sample a corpus by commit. Empty: unset.
 	Sample string `json:"sample,omitempty"`
+	// Runner is the runner binary's sha256 the unit's key names (keyParts.tools.runner): a runner whose own sha256 isn't
+	// this one refuses the job as unfit before anything runs, since the judge voids whatever another runner computes.
+	// Empty: any runner (a product's key names none).
+	Runner string `json:"runner,omitempty"`
 	// Phase, in place of Packages, is one non-test phase of the box fast gate: run.py's unit line, the phase and, for
 	// wasi, stage3 or catalog, its one unit (the planner's phase units, keyParts.select.run). The runner builds
 	// run.py --phase <phase> [--unit <unit>] itself, each a separate argument. Empty: a go test job.
@@ -97,6 +101,9 @@ func CheckTestJob(job TestJob) error {
 	}
 	if job.GateInputs != "" && !Sha256Pattern.MatchString(job.GateInputs) {
 		return fmt.Errorf("gateInputs %q isn't a sha256, 64 lowercase hex digits", job.GateInputs)
+	}
+	if job.Runner != "" && !Sha256Pattern.MatchString(job.Runner) {
+		return fmt.Errorf("runner %q isn't a sha256, 64 lowercase hex digits", job.Runner)
 	}
 	if job.Phase != "" {
 		fields := strings.Fields(job.Phase)

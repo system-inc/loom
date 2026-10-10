@@ -118,10 +118,12 @@ func (options Options) withDefaults() Options {
 }
 
 // A Result is how one unit ended: its status as the finished event reported it, and the workspace it ran
-// in, which is gone by now unless Options.Keep was set.
+// in, which is gone by now unless Options.Keep was set. OtherRunner is the runner a test job named when this runner
+// refused it for not being that one, which a serving runner reads as unfit.
 type Result struct {
-	Status    string
-	Workspace string
+	Status      string
+	Workspace   string
+	OtherRunner string
 }
 
 // LoadUnit reads a unit from a file, from standard input ("-"), or from an https URL, and decodes it
@@ -173,6 +175,8 @@ type unitRun struct {
 	directory string // made for this unit; holds the workspace and the staging area for fetched blobs
 	workspace string // where the inputs land and the command runs
 	staging   string // fetched blobs wait here, verified, until they are placed
+	// otherRunner is the runner the unit's test job named, when it isn't this one and the unit was refused for it.
+	otherRunner string
 }
 
 // Run runs one unit and streams its events to options.Events. Every path through it ends with exactly one
@@ -213,7 +217,7 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 		}
 	}
 	run.finish(status)
-	return Result{Status: status, Workspace: run.workspace}
+	return Result{Status: status, Workspace: run.workspace, OtherRunner: run.otherRunner}
 }
 
 // execute is the unit's life between started and finished, and returns the status finished reports.
@@ -227,6 +231,17 @@ func (run *unitRun) execute(runContext context.Context) string {
 			run.fail(protocol.PhaseStart, err)
 			return protocol.StatusBroken
 		}
+	}
+	// A job runs only on the runner its key names: the judge voids what another computes, so running it would only
+	// spend the unit's time. A runner that can't read its own binary can't be that one.
+	if job := run.unit.Test; job != nil && job.Runner != "" && job.Runner != selfSha256() {
+		run.otherRunner = job.Runner
+		own := selfSha256()
+		if own == "" {
+			own = "unreadable"
+		}
+		run.fail(protocol.PhaseStart, fmt.Errorf("refused as unfit: the job's key names runner %.12s, and this runner is %.12s: Loom's, never the change's", job.Runner, own))
+		return protocol.StatusBroken
 	}
 	if err := run.makeWorkspace(); err != nil {
 		run.fail(protocol.PhaseStart, err)

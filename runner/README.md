@@ -5,10 +5,13 @@ Runs one Loom unit on this machine and streams its events to stdout as JSON line
 ```
 loom-runner run [--workspace <directory>] [--keep] <unit.json | https URL | ->
 loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--workspace <directory>] [--log <file>]
+loom-runner install-serve
 loom-runner version
 ```
 
-`serve` is for machines Loom can't ssh into (docs/protocol.md, "The pool"): it asks the pool for a unit (`POST <pool>/next`), runs it as `run` would, each unit posting its own events to the wire it names, and asks again, until less than a minute remains before `--until`. Events go to `--log` or nowhere; stdout gets one summary line at the end (units, passed, failed, broken, seconds). It exits 0 at the deadline or on `SIGTERM` (which breaks the unit in hand), and 2 when the pool refuses its token.
+`serve` is for machines Loom can't ssh into (docs/protocol.md, "The pool"): it asks the pool for a unit (`POST <pool>/next`), runs it as `run` would, each unit posting its own events to the wire it names, and asks again, until less than a minute remains before `--until`. Events go to `--log` or nowhere; stdout gets one summary line at the end (units, passed, failed, broken, seconds). It exits 0 at the deadline, on `SIGHUP` once the unit in hand finishes (a drain), or on `SIGTERM` (which breaks the unit in hand), and 2 when the pool refuses its token. After refusing a unit whose test job names another runner it asks for nothing for ten minutes, since its pool's other units name that runner too.
+
+`install-serve` readies a Linux box's `loom-serve.service` from `~/.loom/serve.conf` and `~/.loom/serve-token`, enables it and reloads it; the updater's hook runs it after every release (docs/serving.md).
 
 Flags go before the unit. Exit codes: `0` passed, `1` failed, `2` broken (or the unit couldn't be read).
 

@@ -64,11 +64,12 @@ func FutureJobUnit(unitKey string, parts KeyParts, sha, base string, changed []s
 	return protocol.JobUnit{}, fmt.Errorf("a %q unit has no job: its kind isn't test, product or phase", parts.Kind)
 }
 
-// goTestJob is the go test job of a test or product unit's package and selection at sha. The four gate switches are
-// the strict runner's own; a sample and changed paths are carried as the job's fields, the paths only when they hash
-// to what the key holds. Any other env the key names can't be said by a test job, so the unit is refused.
+// goTestJob is the go test job of a test or product unit's package and selection at sha, naming the runner its key
+// names, which alone may run it. The four gate switches are the strict runner's own; a sample and changed paths are
+// carried as the job's fields, the paths only when they hash to what the key holds. Any other env the key names can't
+// be said by a test job, so the unit is refused.
 func goTestJob(parts KeyParts, sha string, changed []string) (*protocol.TestJob, error) {
-	test := &protocol.TestJob{Repository: protocol.AdamicRepository, Sha: sha, GateInputs: parts.GateInputs,
+	test := &protocol.TestJob{Repository: protocol.AdamicRepository, Sha: sha, GateInputs: parts.GateInputs, Runner: parts.Tools.Runner,
 		Packages: []protocol.TestPackage{{Package: parts.Package, Run: parts.Select.Run, Skip: parts.Select.Skip}}}
 	for name, value := range parts.Env {
 		switch {
@@ -93,11 +94,12 @@ func goTestJob(parts KeyParts, sha string, changed []string) (*protocol.TestJob,
 // phaseJob is the phase job of a phase unit: its run.py unit line at the gate tools commit its key names, at sha
 // merged onto base. gofmt's (protocol.GofmtPhase), which the runner runs itself, is keyed on the change's paths, so it
 // carries them, checked against the key as goTestJob checks a test's, and its key's Go release; any other phase carries
-// neither. Any env a phase job can't say is refused, and so is a gofmt with no paths but a witness's (CheckTestJob).
+// neither. It names its key's runner, as a test job does. Any env a phase job can't say is refused, and so is a gofmt
+// with no paths but a witness's (CheckTestJob).
 func phaseJob(parts KeyParts, sha, base string, changed []string) (*protocol.TestJob, error) {
 	line := parts.Select.Run
 	test := &protocol.TestJob{Repository: protocol.AdamicRepository, Sha: sha, Base: base, GateInputs: parts.GateInputs,
-		Phase: line, Tools: parts.GateTools}
+		Phase: line, Tools: parts.GateTools, Runner: parts.Tools.Runner}
 	if line == protocol.GofmtPhase {
 		// The runner runs only the gofmt that the key's Go release built.
 		test.Go = parts.Tools.Go

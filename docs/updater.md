@@ -74,7 +74,7 @@ One run, in order:
 8. Runs each hook with `LOOM_UPDATE_VERSION`, `LOOM_UPDATE_PREVIOUS` (empty on a first install) and `LOOM_UPDATE_BIN` (`~/.loom/bin`), stdin closed, output to `update.log`. When every hook exits 0 it writes `hooked`. A failed hook is logged and makes the run exit 1, after the others run, and since `hooked` isn't written, the next run runs every hook again, and so on until they pass. A service is never left on old code without the log saying so every minute.
 9. Appends `installed <version>, previous <version>` to `update.log`, and POSTs `{"host", "version", "previous", "at"}` to the report URL if one is set. A failed report is logged and retried by every later run until one succeeds; it never fails the update.
 
-A run killed between two `bin/` links leaves `version` naming the old version, so the next run switches every link again. A hook is how a machine says which of its services Loom's binaries feed. For example, `updated.d/50-runner` on Linux holds `systemctl --user restart loom-runner`, and on macOS `launchctl kickstart -k gui/$(id -u)/com.loom.runner`, each service running `~/.loom/bin/loom-runner`. Since a hook can run more than once for one version, it should be safe to repeat, as a restart is. The updater knows nothing of the services.
+A run killed between two `bin/` links leaves `version` naming the old version, so the next run switches every link again. A hook is how a machine says which of its services Loom's binaries feed. For example, `updated.d/50-serve` on a Linux box runs `"$LOOM_UPDATE_BIN/loom-runner" install-serve`, which installs the release's `loom-serve.service` and reloads it, so serve drains the unit in hand and starts again on the new runner (docs/serving.md); on macOS a hook would hold `launchctl kickstart -k gui/$(id -u)/<label>` for a service running `~/.loom/bin/loom-runner`. Since a hook can run more than once for one version, it should be safe to repeat, as a restart is. The updater knows nothing of the services.
 
 ## Publishing
 
@@ -123,7 +123,7 @@ sed "s#HOME_DIRECTORY#${HOME}#g" updater/com.loom.update.plist > ~/Library/Launc
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.loom.update.plist
 ```
 
-Then point each Loom service at `~/.loom/bin/<name>` and give it a hook in `~/.loom/updated.d/`.
+Then point each Loom service at `~/.loom/bin/<name>` and give it a hook in `~/.loom/updated.d/`. A Linux box that serves a pool does both with `loom-serve` (docs/serving.md).
 
 ## Tests
 

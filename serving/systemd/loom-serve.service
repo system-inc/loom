@@ -1,0 +1,34 @@
+# Loom's serve on a Linux box (docs/serving.md): `loom-runner serve` asks this box's pool on the wire for units and
+# runs them one at a time, on the release's runner, beside loom-update. Nobody copies this file: `loom-runner
+# install-serve`, which the updater's hook ~/.loom/updated.d/50-serve runs after every release, renders it from
+# ~/.loom/serve.conf (POOL and FLAGS below) into ~/.config/systemd/user/loom-serve.service, enables it and reloads it.
+#
+# Reload is a drain (SIGHUP): serve asks for nothing more, lets the unit in hand finish, and exits 0, and Restart=always
+# starts it again on the runner the release just linked, so a release breaks no unit. --until ends every serve the same
+# way each hour, so it starts fresh and reads its token again. Stop is SIGTERM to serve alone (KillMode=mixed): it
+# breaks only the unit in hand, which it posts broken to the wire, and the unit's leftovers are killed once serve exits.
+#
+# Token: ~/.loom/serve-token, mode 600, a pool token for POOL. Each start copies it into this unit's own runtime
+# directory, and serve reads that copy and removes it, so the token is never on a command line.
+# Root: ~/loom-serve/root holds the blob cache and the unpacked sources under the runner's own bounds (4 GiB of blobs,
+# 3 GiB free before a prebuilt unit starts); ~/loom-serve/units holds each unit's workspace while it runs.
+[Unit]
+Description=Loom serve: this box takes units from its pool on the wire and runs them
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+RuntimeDirectory=loom-serve
+RuntimeDirectoryMode=0700
+ExecStartPre=/usr/bin/install -m 600 %h/.loom/serve-token %t/loom-serve/pool-token
+ExecStart=%h/.loom/bin/loom-runner serve FLAGS --pool https://runs.loom.system.inc/pools/POOL --token-file %t/loom-serve/pool-token --worker %H --until 1h --root %h/loom-serve/root --workspace %h/loom-serve/units
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=90
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

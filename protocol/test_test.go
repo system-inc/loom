@@ -44,6 +44,7 @@ func TestATestJobIsChecked(t *testing.T) {
 		"a changed path line break":   func(job *TestJob) { job.ChangedPaths = []string{"a\nb"} },
 		"a tree that isn't a key":     func(job *TestJob) { job.Tree = "../trees/x" },
 		"an uppercase tree key":       func(job *TestJob) { job.Tree = strings.Repeat("A", 64) },
+		"a runner that isn't a hash":  func(job *TestJob) { job.Runner = "git-1c6a7d5" },
 	}
 	for name, change := range refused {
 		job := testJob()
@@ -63,6 +64,11 @@ func TestATestJobIsChecked(t *testing.T) {
 	job.Tree = strings.Repeat("f", 64)
 	if err := CheckTestJob(job); err != nil {
 		t.Errorf("a go test job naming its tree's build refused: %v", err)
+	}
+	job = testJob()
+	job.Runner = strings.Repeat("e", 64)
+	if err := CheckTestJob(job); err != nil {
+		t.Errorf("a test job naming its key's runner refused: %v", err)
 	}
 }
 
