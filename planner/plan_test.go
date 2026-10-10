@@ -211,3 +211,38 @@ func TestPlanByKeyReusesOnTheUncachedRunsKeys(t *testing.T) {
 		t.Fatalf("by-key decisions %v: want a run (the change reaches it) and b reused", decisions)
 	}
 }
+
+// A change's plan keys the gate inputs on every unit and the change's paths only on the units whose tests import
+// internal/gatesample, read from go list. Mutant: a reader keyed without ADAMIC_GATE_CHANGED is refused.
+func TestAChangeKeysGateInputsEverywhereAndItsPathsOnlyOnGateSampleReaders(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := planFixture(t)
+	writeFiles(t, tree, map[string]string{
+		"internal/gatesample/sample.go": "package gatesample\n\nconst Stride = 1\n",
+		"c/c.go":                        "package c\n",
+		"c/c_test.go":                   "package c\n\nimport (\n\t\"testing\"\n\n\t\"example.com/plan/internal/gatesample\"\n)\n\nfunc TestC(t *testing.T) { _ = gatesample.Stride }\n",
+	})
+	if output, err := exec.Command("git", "-C", tree, "add", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v %s", err, output)
+	}
+	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
+	inputs := ParityInputs{GateInputs: strings.Repeat("4", 64), ChangedPaths: []string{"a/a.go"}}
+	results, err := PlanChange(tree, gateTools, tools, MemoryIndex{}, false, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range results {
+		reader := result.Name == "example.com/plan/c"
+		if result.KeyParts.GateInputs != inputs.GateInputs || (result.KeyParts.Env["ADAMIC_GATE_CHANGED"] != "") != reader {
+			t.Errorf("%s: gate inputs %q, env %v (a gatesample reader: %v)", result.Name, result.KeyParts.GateInputs, result.KeyParts.Env, reader)
+		}
+	}
+	dropped := func(tree, gateTools string, unit Unit, tools Tools, compilerPackages []string) (KeyParts, error) {
+		parts, err := KeyFor(tree, gateTools, unit, tools, compilerPackages)
+		delete(parts.Env, "ADAMIC_GATE_CHANGED")
+		return parts, err
+	}
+	if _, err := planTree(tree, gateTools, tools, MemoryIndex{}, false, dropped, nil, &inputs); err == nil {
+		t.Error("a gatesample reader keyed without ADAMIC_GATE_CHANGED was planned")
+	}
+}

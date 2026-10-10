@@ -21,7 +21,8 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	t.Parallel()
 	tree, gateTools := planFixture(t)
 	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
-	first, err := PlanTree(tree, gateTools, tools, MemoryIndex{}, false)
+	gateInputs := strings.Repeat("4", 64)
+	first, err := PlanChange(tree, gateTools, tools, MemoryIndex{}, false, ParityInputs{GateInputs: gateInputs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,11 +82,11 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	defer queue.Close()
 	client := QueueClient{Base: queue.URL, Token: "coordinator-token"}
 	checkout := func(sha string) (string, func(), error) { return tree, func() {}, nil }
-	if count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "fut-2", ""); err != nil || count != 1 || len(posted) != 1 || posted["fut-2"] == nil {
+	if count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "fut-2", gateInputs); err != nil || count != 1 || len(posted) != 1 || posted["fut-2"] == nil {
 		t.Fatalf("planning fut-2 alone planned %d futures (%v), posted %d", count, err, len(posted))
 	}
 	delete(posted, "fut-2")
-	count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "", strings.Repeat("4", 64))
+	count, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "", gateInputs)
 	if err != nil || count != 3 {
 		t.Fatalf("planned %d futures (%v), want 3", count, err)
 	}
@@ -160,7 +161,7 @@ func TestAFutureMovingNoKeyPostsAnEmptyPlan(t *testing.T) {
 		return tree, func() {}, nil
 	}
 	client := QueueClient{Base: queue.URL, Token: "t"}
-	if _, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "", ""); err != nil {
+	if _, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "", strings.Repeat("4", 64)); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(posted["readme"], `"empty":true`) {

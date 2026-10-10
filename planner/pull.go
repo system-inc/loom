@@ -268,6 +268,7 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 			continue
 		}
 		var results []PlannedResult
+		var paths []string
 		if future.Parity || future.Select != nil {
 			// A parity plan runs what the box ran (its selection, or every tested package when it names none) with the
 			// box's inputs, and reuses nothing.
@@ -280,7 +281,16 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 				results, err = PlanSelected(tree, gateTools, tools, selection, inputs)
 			}
 		} else {
-			results, err = PlanTree(tree, gateTools, tools, index, future.Uncached)
+			// A change runs with the gate inputs and its paths, keyed (Loom, 01:40Z); a plan without the gate inputs
+			// is never posted, since its corpus and pinned-TypeScript tests would skip into a pass.
+			switch {
+			case !Sha256Hex(gateInputs):
+				err = fmt.Errorf("a change's plan needs the gate inputs' manifest sha256 (--gate-inputs-file), not %q", gateInputs)
+			default:
+				if paths, err = client.ChangePaths(future); err == nil {
+					results, err = PlanChange(tree, gateTools, tools, index, future.Uncached, ParityInputs{GateInputs: gateInputs, ChangedPaths: paths})
+				}
+			}
 		}
 		cleanup()
 		if err != nil {
@@ -288,7 +298,7 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 			continue
 		}
 		if !future.Parity && future.Select == nil {
-			empty, reason, err := unmoved(client, checkout, future, gateTools, tools, results)
+			empty, reason, err := unmoved(client, checkout, future, gateTools, tools, ParityInputs{GateInputs: gateInputs, ChangedPaths: paths}, results)
 			if err != nil {
 				failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
 				continue
@@ -318,7 +328,7 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 // from the keys, never from file extensions, so a Markdown file a test embeds or reads still plans its readers. Only
 // a change whose every path ends in .md is checked, since Queue refuses an empty plan for any other (and the base's
 // keys cost a second plan).
-func unmoved(client QueueClient, checkout Checkout, future Future, gateTools string, tools Tools, results []PlannedResult) (bool, string, error) {
+func unmoved(client QueueClient, checkout Checkout, future Future, gateTools string, tools Tools, inputs ParityInputs, results []PlannedResult) (bool, string, error) {
 	if future.Base == "" {
 		return false, "", nil
 	}
@@ -338,7 +348,7 @@ func unmoved(client QueueClient, checkout Checkout, future Future, gateTools str
 	if err != nil {
 		return false, "", err
 	}
-	base, err := PlanTree(tree, gateTools, tools, MemoryIndex{}, true)
+	base, err := PlanChange(tree, gateTools, tools, MemoryIndex{}, true, inputs)
 	cleanup()
 	if err != nil {
 		return false, "", fmt.Errorf("base %s: %w", future.Base, err)

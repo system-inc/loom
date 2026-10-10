@@ -34,7 +34,7 @@ type PlannedResult struct {
 // decided by Choose against the verdict index. A package the change didn't reach keeps its key and so its verdict;
 // selection is the key, so no unit is left out to make the plan smaller.
 func PlanTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool) ([]PlannedResult, error) {
-	return planTree(tree, gateTools, tools, index, uncached, KeyFor, nil)
+	return planTree(tree, gateTools, tools, index, uncached, KeyFor, nil, nil)
 }
 
 // PlanSelected plans a parity run: exactly the selection's packages, every unit run and none reused, and for a package
@@ -44,7 +44,7 @@ func PlanTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 // change's paths as ADAMIC_GATE_CHANGED (the file the strict runner writes, sorted and newline-joined), and the sample.
 func PlanSelected(tree, gateTools string, tools Tools, selection ParitySelect, inputs ParityInputs) ([]PlannedResult, error) {
 	selection.inputs = &inputs
-	return planTree(tree, gateTools, tools, MemoryIndex{}, true, KeyFor, &selection)
+	return planTree(tree, gateTools, tools, MemoryIndex{}, true, KeyFor, &selection, nil)
 }
 
 // PlanByKey is the planner's selection by key for a parity future, as proof 3 compares it with the future's uncached
@@ -59,7 +59,7 @@ func PlanByKey(checkout Checkout, parent, sha, gateTools string, tools Tools, se
 			return nil, err
 		}
 		defer cleanup()
-		return planTree(tree, gateTools, tools, index, uncached, KeyFor, &selection)
+		return planTree(tree, gateTools, tools, index, uncached, KeyFor, &selection, nil)
 	}
 	parentPlan, err := plan(parent, MemoryIndex{}, true)
 	if err != nil {
@@ -141,10 +141,45 @@ func exactRun(tests []string) (string, error) {
 	return "^(" + strings.Join(quoted, "|") + ")$", nil
 }
 
+// PlanChange plans a change's future (Loom, Oct 10 01:4xZ): every tested package, decided against the verdict index,
+// each keyed with the gate inputs it runs with, so the corpus and pinned-TypeScript tests run rather than skip into a
+// pass. The change's paths reach only the units whose tests import internal/gatesample, the one reader of
+// ADAMIC_GATE_CHANGED, read from go list: on every unit they would make each key the change's own and end reuse.
+func PlanChange(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool, inputs ParityInputs) ([]PlannedResult, error) {
+	return planTree(tree, gateTools, tools, index, uncached, KeyFor, nil, &inputs)
+}
+
+// GateSample is the package whose tests read ADAMIC_GATE_CHANGED.
+const GateSample = "internal/gatesample"
+
+// gateSampleReaders is the tested packages whose test closure holds internal/gatesample.
+func gateSampleReaders(tree, module string) (map[string]bool, error) {
+	command := exec.Command("go", "list", "-test", "-f", "{{.ImportPath}}|{{join .Deps \",\"}}", "./...")
+	command.Dir = tree
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("go list -test ./...: %w: %s", err, strings.TrimSpace(stderr.String()))
+	}
+	target := module + "/" + GateSample
+	readers := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		name, deps, _ := strings.Cut(line, "|")
+		owner := strings.SplitN(name, " ", 2)[0]
+		for _, dep := range strings.Split(deps, ",") {
+			if strings.SplitN(dep, " ", 2)[0] == target {
+				readers[strings.TrimSuffix(owner, ".test")] = true
+			}
+		}
+	}
+	return readers, nil
+}
+
 // A keyFunction makes a unit's key parts. PlanTree's is KeyFor; the selector's mutants are weaker ones.
 type keyFunction func(tree, gateTools string, unit Unit, tools Tools, compilerPackages []string) (KeyParts, error)
 
-func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool, keyFor keyFunction, selection *ParitySelect) ([]PlannedResult, error) {
+func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool, keyFor keyFunction, selection *ParitySelect, change *ParityInputs) ([]PlannedResult, error) {
 	module, packages, err := listPackages(tree)
 	if err != nil {
 		return nil, err
@@ -212,6 +247,25 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 			environment["ADAMIC_GATE_SAMPLE"] = selection.inputs.Sample
 		}
 	}
+	changeEnvironment, readers := map[string]string{}, map[string]bool{}
+	if change != nil {
+		for name, value := range GateEnvironment {
+			changeEnvironment[name] = value
+		}
+		if len(change.ChangedPaths) > 0 {
+			directory, err := os.MkdirTemp("", "loom-plan-changed-")
+			if err != nil {
+				return nil, err
+			}
+			defer os.RemoveAll(directory)
+			if changeEnvironment["ADAMIC_GATE_CHANGED"], err = ChangedPathsFile(directory, change.ChangedPaths); err != nil {
+				return nil, err
+			}
+			if readers, err = gateSampleReaders(tree, module); err != nil {
+				return nil, err
+			}
+		}
+	}
 	results := []PlannedResult{}
 	planned := []PlannedUnit{}
 	parts := map[string]KeyParts{}
@@ -226,6 +280,12 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 		if selection != nil && selection.inputs != nil {
 			unit.GateInputs, unit.Environment = selection.inputs.GateInputs, environment
 		}
+		if change != nil {
+			unit.GateInputs = change.GateInputs
+			if readers[listed.ImportPath] {
+				unit.Environment = changeEnvironment
+			}
+		}
 		if selection != nil && len(selection.Tests[listed.ImportPath]) > 0 {
 			if unit.Run, err = exactRun(selection.Tests[listed.ImportPath]); err != nil {
 				return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
@@ -234,6 +294,11 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 		keyParts, err := keyFor(tree, gateTools, unit, tools, compilers)
 		if err != nil {
 			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
+		}
+		// A gatesample reader keyed without the change's paths would sample nothing changed and pass on a key that
+		// can't tell one change from another.
+		if change != nil && readers[listed.ImportPath] && keyParts.Env["ADAMIC_GATE_CHANGED"] == "" {
+			return nil, fmt.Errorf("unit %s reads ADAMIC_GATE_CHANGED (it imports %s) and was keyed without it", listed.ImportPath, GateSample)
 		}
 		key, err := UnitKey(keyParts)
 		if err != nil {
