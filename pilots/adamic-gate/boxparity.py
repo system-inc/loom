@@ -2,7 +2,7 @@
 """boxparity.py <box record dir> <verdicts.jsonl>: parity proof 1's comparator (#1th6k0h, contracts v1 on #ykg8g6k).
 
 Does the new path reproduce the box's verdict on one candidate, test for test? The box record is a gate-logs/<sha12>/
-<stamp>/fast tree: its fast.json and its test.jsonl (go test JSON). The new path's side is one candidate's verdict
+<stamp>/fast tree: its fast.json and its test.jsonl or test.jsonl.gz (go test JSON). The new path's side is one candidate's verdict
 records (contract 3), one JSON object per line. A test's outcome is its last word (pass, fail or skip) in its package,
 as parity.py reads it; on the new side it is the verdict's tests[] entry, and the unitKey that ran it is named.
 
@@ -20,6 +20,7 @@ The first line is the summary; each difference follows, sorted. Exit 0 when ever
 --top-level compares top-level tests only (no '/' in the name), for a new path whose tests[] carries no subtests.
 """
 
+import gzip
 import json
 import os
 import sys
@@ -34,7 +35,10 @@ def boxSide(directory, topLevel):
     if notRun:
         return None, summary, "box record holds %d planned tests that never ran" % len(notRun)
     outcomes = {}
-    for line in open(os.path.join(directory, "test.jsonl"), errors="replace"):
+    plain = os.path.join(directory, "test.jsonl")
+    # Older records keep their go test lines gzipped.
+    stream = open(plain, errors="replace") if os.path.exists(plain) else gzip.open(plain + ".gz", "rt", errors="replace")
+    for line in stream:
         try:
             event = json.loads(line)
         except ValueError:

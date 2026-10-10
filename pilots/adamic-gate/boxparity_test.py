@@ -85,6 +85,11 @@ check("a void verdict is not comparable, exit 3", code == 3 and "k4" in output a
 code, output = run(box, verdicts(root, same + [("k5", "passed", [("TestB", "pass")])]))
 check("two units disagreeing on one test is not comparable, exit 3", code == 3 and "units k2 and k5 disagree" in output, output)
 
+zipped = plant(root, [("TestA", "pass"), ("TestB", "fail"), ("TestC", "skip"), ("TestA/sub", "pass")])
+subprocess.run(["gzip", os.path.join(zipped, "test.jsonl")], check=True)
+code, output = run(zipped, verdicts(root, same))
+check("an older record's test.jsonl.gz is read the same, exit 0", code == 0 and "4 tests the same" in output, output)
+
 code, output = run(os.path.join(root, "missing"), verdicts(root, same))
 check("a missing box record is unreadable, exit 2", code == 2, output)
 
