@@ -84,11 +84,20 @@ type Bucket struct {
 // accountIdPattern is a Cloudflare account id, the first label of the S3 endpoint's host.
 var accountIdPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
+// bucketNamePattern is a plain R2 bucket name: lowercase letters, digits and hyphens, 3 to 63 of them, starting and
+// ending with a letter or digit, and never a slash, which would make the rest of the name a key prefix.
+var bucketNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`)
+
 // Open is the bucket named name on credentials' account, refusing an account id that isn't one, so nothing from the
-// credentials file can steer the host a request is signed for.
+// credentials file can steer the host a request is signed for, and a name that isn't a plain bucket name, so nothing
+// from a flag can move every key under another prefix (loom-artifacts/releases would put the action store's writes
+// under releases/, past Writable).
 func Open(credentials Credentials, name string) (Bucket, error) {
 	if !accountIdPattern.MatchString(credentials.AccountId) {
 		return Bucket{}, fmt.Errorf("account_id %q isn't a Cloudflare account id, 32 lowercase hex digits", credentials.AccountId)
+	}
+	if !bucketNamePattern.MatchString(name) {
+		return Bucket{}, fmt.Errorf("bucket %q isn't a plain bucket name: lowercase letters, digits and hyphens, no slash", name)
 	}
 	return Bucket{Endpoint: "https://" + credentials.AccountId + ".r2.cloudflarestorage.com", Name: name, Credentials: credentials}, nil
 }

@@ -70,6 +70,12 @@ func TestReadCredentialsReadsUploadShsFile(t *testing.T) {
 		}
 	}
 	credentials.AccountId = "0123456789abcdef0123456789abcdef"
+	// A name that isn't a plain bucket name would move every key under another prefix, past Put's guard.
+	for _, name := range []string{"loom-artifacts/releases", "loom-artifacts/", "Loom-Artifacts", "loom_artifacts", "-loom", "lo", "", "loom-artifacts?x=1", "../loom"} {
+		if _, err = Open(credentials, name); err == nil {
+			t.Errorf("bucket %q opened", name)
+		}
+	}
 	if bucket, err := Open(credentials, "loom-artifacts"); err != nil || bucket.Endpoint != "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com" || bucket.Name != "loom-artifacts" {
 		t.Fatalf("%+v %v", bucket, err)
 	}
