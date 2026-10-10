@@ -33,3 +33,17 @@ func cpuTimes() (total, idle uint64, ok bool) {
 	}
 	return total, idle, true
 }
+
+// loadAverage is the machine's one-minute load average, from /proc/loadavg; 0 when unreadable.
+func loadAverage() float64 {
+	content, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(content))
+	if len(fields) == 0 {
+		return 0
+	}
+	load, _ := strconv.ParseFloat(fields[0], 64)
+	return load
+}

@@ -200,6 +200,8 @@ type unitRun struct {
 	workspace string // where the inputs land and the command runs
 	staging   string // fetched blobs wait here, verified, until they are placed
 	live      *livestatus.Writer
+	// timing is what the unit's timing event says (#g1jvdbq), filled in as it goes.
+	timing protocol.Timing
 }
 
 // Run runs one unit and streams its events to options.Events. Every path through it ends with exactly one
@@ -213,6 +215,11 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 			fmt.Fprintf(run.options.Diagnostics, "loom-runner: removing workspace %s: %v\n", run.directory, err)
 		}
 	}
+	if run.options.share != nil {
+		run.timing.PeakMegabytes = run.options.share.cgroup.peakMegabytes()
+	}
+	timing := run.timing
+	run.emitter.emit(protocol.Event{Type: "timing", Timing: &timing})
 	run.finish(status)
 	return Result{Status: status, Workspace: run.workspace}
 }
@@ -238,6 +245,10 @@ func begin(unit protocol.Unit, options Options) *unitRun {
 	if options.share != nil {
 		// The unit's share is what it can use, and what a started event says.
 		machine.cpus, machine.memoryMegabytes = options.share.cpus, options.share.memoryMegabytes
+	}
+	run.timing = protocol.Timing{ShareCpus: machine.cpus, ShareMemoryMegabytes: machine.memoryMegabytes, UnitsInHand: 1, Load: loadAverage()}
+	if options.share != nil && options.share.inHand > 0 {
+		run.timing.UnitsInHand = options.share.inHand
 	}
 	inputHashes := map[string]string{}
 	for _, input := range unit.Inputs {
@@ -287,6 +298,7 @@ func (run *unitRun) execute(runContext context.Context) string {
 		// Outputs go up whatever the tests did, as for a command.
 		return worse(run.runTest(runContext), run.uploadOutputs(runContext))
 	}
+	fetchStarted := time.Now()
 	if err := run.fetchInputs(runContext); err != nil {
 		run.fail(protocol.PhaseFetch, err)
 		return protocol.StatusBroken
@@ -296,7 +308,10 @@ func (run *unitRun) execute(runContext context.Context) string {
 		run.fail(protocol.PhaseFetch, err)
 		return protocol.StatusBroken
 	}
+	run.timing.FetchSeconds = seconds(time.Since(fetchStarted))
+	commandStarted := time.Now()
 	outcome, err := run.runCommand(runContext)
+	run.timing.TestSeconds = seconds(time.Since(commandStarted))
 	if err != nil {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken

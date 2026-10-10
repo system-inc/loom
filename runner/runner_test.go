@@ -255,8 +255,12 @@ func TestASilentUnitStillReportsStartedExitAndFinished(t *testing.T) {
 		for _, event := range events {
 			kinds = append(kinds, event.Type)
 		}
-		if strings.Join(kinds, " ") != "started exit finished" {
+		// The timing event, just before finished, says the unit's share and that it ran alone (#g1jvdbq).
+		if strings.Join(kinds, " ") != "started exit timing finished" {
 			t.Fatalf("%s: events %v", test.command, kinds)
+		}
+		if timing := events[2].Timing; timing == nil || timing.ShareCpus != events[0].Cpus || timing.ShareMemoryMegabytes != events[0].MemoryMegabytes || timing.UnitsInHand != 1 {
+			t.Fatalf("%s: timing %+v beside started %+v", test.command, timing, events[0])
 		}
 		if events[1].Code == nil || *events[1].Code != test.code || result.Status != test.status {
 			t.Fatalf("%s: exit %+v, status %s", test.command, events[1], result.Status)

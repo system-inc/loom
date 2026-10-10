@@ -92,3 +92,26 @@ func TestCgroupAUnitKeepsToItsCpus(t *testing.T) {
 	}
 	t.Fatal("no exit event")
 }
+
+// A unit run alone, one at a time, gets a cgroup too, of the whole machine's share, so its timing says its peak memory
+// (#g1jvdbq). Mutant: alone units without a cgroup, whose timing has no peak.
+func TestCgroupAUnitRunAloneHasACgroupAndItsTimingAPeak(t *testing.T) {
+	delegatedForTest(t)
+	pool := newTestPool(t)
+	pool.queue = []protocol.Unit{pool.unit("alone", `python3 -c 'b = bytearray(300 << 20); import time; time.sleep(1)'`)}
+	options := pool.slotsOptions(t, 8, 64<<10, 1, 1, 1024)
+	if summary, err := Serve(context.Background(), options); err != nil || summary.Passed != 1 {
+		t.Fatalf("summary %+v, %v", summary, err)
+	}
+	pool.mutex.Lock()
+	defer pool.mutex.Unlock()
+	for _, event := range pool.events["alone"] {
+		if event.Type == "timing" {
+			if event.Timing.PeakMegabytes < 300 || event.Timing.ShareCpus != 8 || event.Timing.ShareMemoryMegabytes != 64<<10*9/10 || event.Timing.UnitsInHand != 1 {
+				t.Fatalf("the alone unit's timing: %+v", event.Timing)
+			}
+			return
+		}
+	}
+	t.Fatal("no timing event")
+}

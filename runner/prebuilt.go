@@ -177,6 +177,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		return protocol.StatusBroken
 	}
 	fetchSeconds := time.Since(fetchStarted).Seconds()
+	run.timing.FetchSeconds = seconds(time.Since(fetchStarted))
 	keep := map[string]bool{}
 	for _, blob := range needed {
 		keep[blob.sum] = true
@@ -229,6 +230,8 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	}
 	files = nil
 	run.say(fmt.Sprintf("ready in %.1f s: fetched in %.1f s, unpacked in %.1f s", time.Since(started).Seconds(), fetchSeconds, time.Since(unpackStarted).Seconds()))
+	run.timing.UnpackSeconds = seconds(time.Since(unpackStarted))
+	prepareStarted := time.Now()
 
 	run.phase(livestatus.PhasePreparing)
 	script := filepath.Join(run.directory, "prepare.sh")
@@ -278,7 +281,10 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
+	run.timing.PrepareSeconds = seconds(time.Since(prepareStarted))
 	run.phase(livestatus.PhaseTesting)
+	testStarted := time.Now()
+	defer func() { run.timing.TestSeconds = seconds(time.Since(testStarted)) }()
 	status := run.runPackages(runContext, job, out, started, deadline, func(testContext context.Context, index int, part string) packageResult {
 		if packages[index].built.Error != "" {
 			return buildFailedPackage(packages[index], part)
@@ -463,6 +469,7 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 	}
 	run.say(fmt.Sprintf("%d blobs: %d bytes from the store, %d bytes in %d blobs from the cache, %d bytes from the house cache", len(needed),
 		fetched+chunksFetched, cached+chunksCached, cachedCount+chunksCachedCount, housed+chunksHoused))
+	run.timing.StoreBytes, run.timing.CacheBytes, run.timing.HouseBytes = fetched+chunksFetched, cached+chunksCached, housed+chunksHoused
 	return files, errors.Join(errs...)
 }
 
