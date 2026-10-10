@@ -55,6 +55,7 @@ func treePhaseList(phases builder.TreePhases) []livestatus.Phase {
 		}
 	}
 	add("checkout", phases.Checkout, 0)
+	add("keying", phases.Keying, 0)
 	add("readying", phases.Readying, 0)
 	add("npm install", phases.NpmInstall, 0)
 	add("listing", phases.Listing, 0)

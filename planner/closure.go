@@ -109,18 +109,7 @@ func closureFiles(tree, importPath string) (map[string]string, error) {
 		if err := decoder.Decode(&listed); err != nil {
 			return nil, fmt.Errorf("go list output: %w", err)
 		}
-		// The synthesized test main (pkg.test) has no files of its own on disk.
-		if listed.Standard || listed.Dir == "" || strings.HasSuffix(strings.SplitN(listed.ImportPath, " ", 2)[0], ".test") {
-			continue
-		}
-		owner := strings.SplitN(listed.ImportPath, " ", 2)[0]
-		for _, group := range [][]string{listed.GoFiles, listed.CgoFiles, listed.CFiles, listed.CXXFiles, listed.HFiles, listed.SFiles,
-			listed.SysoFiles, listed.EmbedFiles, listed.TestGoFiles, listed.XTestGoFiles, listed.TestEmbedFiles, listed.XTestEmbedFiles} {
-			for _, name := range group {
-				files[owner+"/"+filepath.ToSlash(name)] = filepath.Join(listed.Dir, name)
-			}
-		}
-		addModuleFiles(listed, files)
+		addListedFiles(listed, files)
 	}
 	if len(files) == 0 {
 		return nil, fmt.Errorf("go list found no files for %s", importPath)
@@ -129,6 +118,42 @@ func closureFiles(tree, importPath string) (map[string]string, error) {
 		return nil, err
 	}
 	return files, nil
+}
+
+// addListedFiles adds one listed package's files to a closure, each by its name (its package's import path and its
+// name there), and its module's files.
+func addListedFiles(listed listedPackage, files map[string]string) {
+	// The synthesized test main (pkg.test) has no files of its own on disk.
+	if listed.Standard || listed.Dir == "" || strings.HasSuffix(strings.SplitN(listed.ImportPath, " ", 2)[0], ".test") {
+		return
+	}
+	owner := strings.SplitN(listed.ImportPath, " ", 2)[0]
+	for _, group := range [][]string{listed.GoFiles, listed.CgoFiles, listed.CFiles, listed.CXXFiles, listed.HFiles, listed.SFiles,
+		listed.SysoFiles, listed.EmbedFiles, listed.TestGoFiles, listed.XTestGoFiles, listed.TestEmbedFiles, listed.XTestEmbedFiles} {
+		for _, name := range group {
+			files[owner+"/"+filepath.ToSlash(name)] = filepath.Join(listed.Dir, name)
+		}
+	}
+	addModuleFiles(listed, files)
+}
+
+// A ListedClosure is one entry of a whole tree's `go list -deps -test -json`, with the transitive imports go lists
+// for it: the resident builder (#d1gp9ze) reads one listing for every package of a tree, and names each closure's
+// files from it with AddFiles, the one function Closure names them with.
+type ListedClosure struct {
+	listedPackage
+	Deps  []string
+	Error *struct{ Err string }
+}
+
+// AddFiles adds the entry's files to a closure, as Closure adds each package go lists for it.
+func (listed ListedClosure) AddFiles(files map[string]string) {
+	addListedFiles(listed.listedPackage, files)
+}
+
+// AddWorkspaceFiles adds the go.work the go command uses in the tree, and its go.work.sum, as Closure does.
+func AddWorkspaceFiles(tree string, files map[string]string) error {
+	return addWorkspaceFiles(tree, files)
 }
 
 // addModuleFiles adds a package's module's go.mod and, beside it, its go.sum: a go line or a replace moves the build

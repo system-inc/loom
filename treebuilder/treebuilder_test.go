@@ -54,8 +54,11 @@ func newHarness(t *testing.T, source judge.FutureSource, ledger *Ledger) *harnes
 		Source:  source,
 		Indexed: func(tree string) (bool, error) { return h.indexed[tree], nil },
 		Floor:   func() error { return h.short },
-		Build: func(want Want) (*builder.TreePhases, error) {
+		Build: func(want Want, running func(pid int) error) (*builder.TreePhases, error) {
 			h.builds = append(h.builds, want)
+			if err := running(4242); err != nil {
+				return nil, err
+			}
 			if h.fail == nil {
 				h.indexed[want.Tree] = true
 			}
@@ -221,7 +224,7 @@ func TestAFailedBuildStandsUntilItsRetry(t *testing.T) {
 		t.Fatal("a failure past RetryAfter still stands")
 	}
 	h.fail = errors.New("build-tree: exit status 1: 2 packages failed")
-	h.builder.Build = func(want Want) (*builder.TreePhases, error) {
+	h.builder.Build = func(want Want, _ func(int) error) (*builder.TreePhases, error) {
 		h.builds = append(h.builds, want)
 		h.indexed[want.Tree] = true
 		return nil, h.fail

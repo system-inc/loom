@@ -27,7 +27,8 @@ func TestEventsReadAsTheirStructureSays(t *testing.T) {
 		{"a pass", []protocol.Event{started(), {Type: "exit", Code: code(0)}, {Type: "finished", Status: "passed"}}, Passed, "", true},
 		{"a failure", []protocol.Event{started(), {Type: "exit", Code: code(1)}, {Type: "finished", Status: "failed"}}, Failed, "", true},
 		{"a signal is a kill", []protocol.Event{started(), {Type: "exit", Code: code(-1), Signal: "killed"}, {Type: "finished", Status: "failed"}}, Broken, InfraKill, true},
-		{"the runner's deadline is a kill", []protocol.Event{started(), {Type: "exit", Code: code(-1), TimedOut: true}, {Type: "finished", Status: "failed"}}, Broken, InfraKill, true},
+		{"the runner's deadline is no kill: a failure over budget", []protocol.Event{started(), {Type: "exit", Code: code(-1), TimedOut: true}, {Type: "finished", Status: "failed"}}, Failed, "", true},
+		{"the runner's deadline with its signal is still over budget, never a kill", []protocol.Event{started(), {Type: "exit", Code: code(-1), TimedOut: true, Signal: "killed"}, {Type: "finished", Status: "failed"}}, Failed, "", true},
 		{"a test that prints it exceeded its deadline is a failure, not a kill", []protocol.Event{started(),
 			{Type: "output", Text: "TestPortMatchesGoCohereClassOrder_001 exceeded its 90s deadline\nsignal: killed"},
 			{Type: "exit", Code: code(2)}, {Type: "finished", Status: "failed"}}, Failed, "", true},
@@ -43,6 +44,13 @@ func TestEventsReadAsTheirStructureSays(t *testing.T) {
 			finished, found := FinishedFromEvents(c.events)
 			if found != c.found || finished.Attempt.Status != c.status || finished.Infra != c.infra {
 				t.Fatalf("got %v %q %q, want %v %q %q", found, finished.Attempt.Status, finished.Infra, c.found, c.status, c.infra)
+			}
+			timedOut := false
+			for _, event := range c.events {
+				timedOut = timedOut || event.TimedOut
+			}
+			if (finished.OverBudget == OverBudgetDeadline) != timedOut {
+				t.Fatalf("over budget %q, want the deadline named only on a timed-out exit", finished.OverBudget)
 			}
 			if c.name == "the last attempt counts" && (finished.Attempt.Machine != "workshop" || finished.Attempt.StartedAt != "2026-10-09T23:55:00Z") {
 				t.Fatalf("attempt %+v, want the last one, on workshop", finished.Attempt)

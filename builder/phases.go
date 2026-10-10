@@ -12,14 +12,16 @@ import (
 // tree builder keeps them on the build's ledger record, so a tree's phases outlive its build.
 
 // TreePhases are one tree build's wall times, in seconds, by phase. Readying through Removal are laps of one clock,
-// end to end, so they add up to Total but for the moment between the last lap and the summary; Checkout is the tree
-// builder's, before build-tree starts, and outside Total. WarmTests and WarmMains split Warm, the Upload fields that
-// name what went up split Upload, and the product counts and their seconds split Products by what buildcache did with
-// each product: Fetched, a product the store held, and Built, one it compiled. Those seconds are each product's own,
+// end to end, so they add up to Total but for the moment between the last lap and the summary; Checkout and Keying
+// are the tree builder's, before build-tree starts, and outside Total. WarmTests and WarmMains split Warm, the Upload
+// fields that name what went up split Upload, and the product counts and their seconds split Products by what
+// buildcache did with each product: Fetched, a product the store held, and Built, one it compiled. Those seconds are each product's own,
 // summed: products build side by side, so they add up to more than Products' wall time.
 type TreePhases struct {
 	// Checkout is the tree builder's checkout of the future into its clone (`loom build-trees` only).
 	Checkout float64 `json:"checkout,omitempty"`
+	// Keying is the resident's keying of the tree against the nearest warm one (`loom build-trees --resident` only).
+	Keying float64 `json:"keying,omitempty"`
 	// Readying is everything before the first go process: the tree's identity, the store, Go's build cache trimmed,
 	// the floors read, the tree's directory and its lock.
 	Readying   float64 `json:"readying"`

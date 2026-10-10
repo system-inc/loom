@@ -87,12 +87,12 @@ echo '{"tree":"t","treeKey":"k","phases":{"readying":1.5,"warm":95.8,"productsBu
 echo 'build-tree: phases' >&2
 `)
 	want := treebuilder.Want{Tree: strings.Repeat("b", 64), Future: strings.Repeat("2", 40), Go: "go1.27.1"}
-	phases, err := buildWant(context.Background(), checkout, built, settings, want)
+	phases, err := buildWant(context.Background(), checkout, built, settings, want, nil, func(int) error { return nil })
 	if err != nil || phases == nil || phases.Checkout < 0.03 || phases.Warm != 95.8 || phases.ProductsBuilt != 12 || phases.Total != 700 {
 		t.Fatalf("a build's phases %+v (%v)", phases, err)
 	}
 	failed := script("echo 'build-tree: not starting' >&2\nexit 1\n")
-	phases, err = buildWant(context.Background(), checkout, failed, settings, want)
+	phases, err = buildWant(context.Background(), checkout, failed, settings, want, nil, func(int) error { return nil })
 	if err == nil || phases == nil || phases.Checkout < 0.03 || phases.Total != 0 {
 		t.Fatalf("a failed build's phases %+v (%v)", phases, err)
 	}

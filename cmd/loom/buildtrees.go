@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/resident"
 	"github.com/system-inc/loom/treebuilder"
 )
 
@@ -29,7 +31,7 @@ type buildTreesSettings struct {
 	jobs, compile                                              *int
 	floorGB, tempFloorGB, goCacheGB                            *uint64
 	bound, keep, interval                                      *time.Duration
-	once                                                       *bool
+	once, resident                                             *bool
 	store                                                      storeFlags
 }
 
@@ -54,12 +56,13 @@ func parseBuildTreesFlags(arguments []string, stderr io.Writer) (buildTreesSetti
 	settings.keep = flags.Duration("keep", 7*24*time.Hour, "how long the ledger's records and the builds' logs are kept")
 	settings.interval = flags.Duration("interval", 10*time.Second, "time between pulls")
 	settings.once = flags.Bool("once", false, "build at most one tree and exit")
+	settings.resident = flags.Bool("resident", false, "keep the trees built warm in memory (package resident) and hand each build its keys, read from the nearest warm tree's diff")
 	settings.store = addStoreFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return settings, err
 	}
 	if *settings.queue == "" || *settings.tokenFile == "" || *settings.bound <= 0 || flags.NArg() != 0 {
-		return settings, errors.New("usage: loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--requests <file>] [--logs <dir>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--bound 2h] [--keep 168h] [--interval 10s] [--once]")
+		return settings, errors.New("usage: loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--requests <file>] [--logs <dir>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--bound 2h] [--keep 168h] [--interval 10s] [--once] [--resident]")
 	}
 	return settings, nil
 }
@@ -123,6 +126,10 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	runContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	checkout := planner.GitCheckout(*settings.clone)
+	var warm *resident.Resident
+	if *settings.resident {
+		warm = resident.New()
+	}
 	loop := &treebuilder.Builder{
 		Source: judge.HTTPFutures{Base: *settings.queue, Token: strings.TrimSpace(string(token))},
 		Requests: func() ([]treebuilder.Request, error) {
@@ -130,13 +137,20 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		},
 		Indexed: store.TreeIndexed,
 		Floor:   func() error { return builder.CheckFloor(watched, nil) },
-		Build: func(want treebuilder.Want) (*builder.TreePhases, error) {
-			return buildWant(runContext, checkout, binary, settings, want)
+		Build: func(want treebuilder.Want, running func(pid int) error) (*builder.TreePhases, error) {
+			return buildWant(runContext, checkout, binary, settings, want, warm, running)
 		},
-		Ledger: ledger,
-		Keep:   *settings.keep,
-		Now:    time.Now,
-		Log:    stdout,
+		Phases: func(tree string) *builder.TreePhases {
+			return readTreePhases(filepath.Join(*settings.logs, tree+".log"))
+		},
+		Alive:    buildAlive,
+		Kill:     killGroup,
+		Bound:    *settings.bound,
+		Stopping: func() bool { return runContext.Err() != nil },
+		Ledger:   ledger,
+		Keep:     *settings.keep,
+		Now:      time.Now,
+		Log:      stdout,
 	}
 	var prunedAt time.Time
 	for runContext.Err() == nil {
@@ -169,9 +183,12 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 // buildWant checks the wanted future out and runs build-tree on it, and returns the build's phases: the checkout's
-// seconds, and build-tree's own from its summary line when it printed one. A checkout that fails is transient (GitHub's
-// 5xx, the network), retried soon and never the tree's failure; one the builder's stop cut short is a stop.
-func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want) (*builder.TreePhases, error) {
+// seconds, the resident's keying's, and build-tree's own from its summary line when it printed one. A checkout that
+// fails is transient (GitHub's 5xx, the network), retried soon and never the tree's failure; one the builder's stop cut
+// short is a stop. With a resident (warm), the tree is keyed against the nearest warm tree and its keys go to
+// build-tree in a file beside its log; a resident that can't key it is said in the log and the tree builds cold, as it
+// would without one.
+func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want, warm *resident.Resident, running func(pid int) error) (*builder.TreePhases, error) {
 	started := time.Now()
 	tree, cleanup, err := checkout(want.Future)
 	phases := &builder.TreePhases{Checkout: time.Since(started).Seconds()}
@@ -182,10 +199,27 @@ func buildWant(runContext context.Context, checkout planner.Checkout, binary str
 		return phases, fmt.Errorf("%w: checking %s out keyless: %v", treebuilder.ErrTransient, want.Future, err)
 	}
 	defer cleanup()
+	arguments := buildTreeArguments(settings, tree, want)
+	if warm != nil {
+		keyingStarted := time.Now()
+		keysFile := filepath.Join(*settings.logs, want.Tree+".keys.json")
+		keyed, err := warm.Key(tree, want.Future)
+		if err == nil {
+			err = keyed.WriteKeys(keysFile)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build-trees: the resident couldn't key tree %s of %s, so it builds cold: %v\n", want.Tree, want.Future, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "build-trees: tree %s of %s keyed by the resident in %.1f s, %d paths from %s, %d packages listed again\n",
+				want.Tree, want.Future, keyed.Seconds, len(keyed.Changed), keyed.From, len(keyed.Relisted))
+			arguments = append(arguments, "--keys", keysFile)
+		}
+		phases.Keying = time.Since(keyingStarted).Seconds()
+	}
 	log := filepath.Join(*settings.logs, want.Tree+".log")
-	err = runBuildTree(runContext, binary, buildTreeArguments(settings, tree, want), log, *settings.bound)
+	err = runBuildTree(runContext, binary, arguments, log, *settings.bound, running)
 	if built := readTreePhases(log); built != nil {
-		built.Checkout, phases = phases.Checkout, built
+		built.Checkout, built.Keying, phases = phases.Checkout, phases.Keying, built
 	}
 	return phases, err
 }
@@ -222,34 +256,64 @@ func buildTreeArguments(settings buildTreesSettings, tree string, want treebuild
 		"--go-cache-gb", strconv.FormatUint(*settings.goCacheGB, 10)}
 }
 
-// runBuildTree runs binary with arguments, its output to log (mode 600, new each build), in a process group of its own
-// that a stop or the bound kills whole, and says how it ended badly, with the log's last lines, or nil. Ended by the
-// builder's own stop (runContext's), it's treebuilder.ErrStopped: the builder's, never the tree's failure.
-func runBuildTree(runContext context.Context, binary string, arguments []string, log string, bound time.Duration) error {
+// runBuildTree runs binary with arguments, its output to log (mode 600, new each build), in a process group of its own,
+// calls running with its pid once it runs, and says how it ended badly, with the log's last lines, or nil. Past bound
+// its group is killed. Told to stop meanwhile (runContext's: a release's restart, #apsj7zp), it leaves the child
+// running and returns treebuilder.ErrDetached: the unit's KillMode=process spares the child, and the next builder
+// adopts it through its running record.
+func runBuildTree(runContext context.Context, binary string, arguments []string, log string, bound time.Duration, running func(pid int) error) error {
 	output, err := os.OpenFile(log, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer output.Close()
-	boundContext, cancel := context.WithTimeout(runContext, bound)
-	defer cancel()
-	command := exec.CommandContext(boundContext, binary, arguments...)
+	command := exec.Command(binary, arguments...)
 	command.Stdout, command.Stderr = output, output
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
-	command.WaitDelay = 10 * time.Second
-	err = command.Run()
+	if err = command.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	if err = running(command.Process.Pid); err != nil {
+		// Unrecorded, it could never be adopted: it goes now, and the build with it.
+		killGroup(command.Process.Pid)
+		<-done
+		return fmt.Errorf("recording the build running: %w", err)
+	}
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case err = <-done:
+	case <-runContext.Done():
+		return fmt.Errorf("%w: pid %d", treebuilder.ErrDetached, command.Process.Pid)
+	case <-timer.C:
+		killGroup(command.Process.Pid)
+		<-done
+		content, _ := os.ReadFile(log)
+		return fmt.Errorf("build-tree ran past its %v bound and was killed: %s", bound, logTail(content, 5))
+	}
 	if err == nil {
 		return nil
 	}
 	content, _ := os.ReadFile(log)
-	if runContext.Err() != nil {
-		return fmt.Errorf("%w (%v): %s", treebuilder.ErrStopped, err, logTail(content, 5))
-	}
-	if boundContext.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("build-tree ran past its %v bound and was killed: %s", bound, logTail(content, 5))
-	}
 	return fmt.Errorf("build-tree: %v: %s", err, logTail(content, 5))
+}
+
+// killGroup kills the process group pid leads, everything a build started.
+func killGroup(pid int) {
+	syscall.Kill(-pid, syscall.SIGKILL)
+}
+
+// buildAlive says whether pid is still the `loom build-tree` of tree, by its command line: a pid reused by another
+// process since is no build to wait for.
+func buildAlive(pid int, tree string) bool {
+	content, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return false
+	}
+	arguments := strings.Split(string(content), "\x00")
+	return slices.Contains(arguments, "build-tree") && slices.Contains(arguments, tree)
 }
 
 // pruneBuildLogs removes each build's log under directory last written over keep ago, by name.

@@ -74,6 +74,8 @@ const (
 
 	OverBudgetReady = "overBudgetReady"
 	OverBudgetRun   = "overBudgetRun"
+	// OverBudgetDeadline is the runner's own deadline on the unit's exit event (timedOut), its budget's hard ceiling.
+	OverBudgetDeadline = "deadline"
 )
 
 var infraKinds = map[string]bool{InfraDisk: true, InfraKill: true, InfraNeverPlaced: true, InfraRefused: true, InfraSilent: true}

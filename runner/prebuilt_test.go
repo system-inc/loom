@@ -1118,6 +1118,44 @@ func TestAStalledStoreBreaksTheUnitInItsTime(t *testing.T) {
 	}
 }
 
+// A unit says it's still running through every phase, its own fetch among them, which says nothing while a store
+// trickles: the coordinator places a unit again once it has been silent two heartbeats (#ravqt9s), so a slow fetch must
+// never read as a worker gone. Mutant: no unit-wide beat, and the stalled fetch is silent to its deadline.
+func TestAUnitBeatsThroughAStalledFetch(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	stall := make(chan struct{})
+	defer close(stall)
+	inner := fixture.store.server.Config.Handler
+	fixture.store.server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasPrefix(request.URL.Path, "/blobs/") {
+			inner.ServeHTTP(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Length", "1000000")
+		writer.WriteHeader(http.StatusOK)
+		writer.Write([]byte("x"))
+		writer.(http.Flusher).Flush()
+		select {
+		case <-stall:
+		case <-time.After(20 * time.Second):
+		}
+	})
+	unit := fixture.unit("^TestA$")
+	unit.TimeoutSeconds = 2
+	options := fixture.options(t)
+	options.Heartbeat = 300 * time.Millisecond
+	_, events, _ := runUnit(t, unit, options)
+	beats := 0
+	for _, line := range outputLines(events, "runner") {
+		if strings.Contains(line, "still running after") {
+			beats++
+		}
+	}
+	if beats < 3 {
+		t.Fatalf("%d beats through a 2 s stalled fetch with a 300 ms heartbeat:\n%s", beats, strings.Join(outputLines(events, "runner"), "\n"))
+	}
+}
+
 // A binary still running at the unit's deadline is killed, and the unit is red, timed out, as go test's was.
 func TestABinaryPastTheDeadlineIsKilled(t *testing.T) {
 	fixture := newPrebuiltFixture(t)
