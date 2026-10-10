@@ -67,6 +67,10 @@ import (
 //	TestATestsModulesComeFromTheTreesModuleCache
 //	the module cache not readied before the tests: TestAModuleTheCacheLacksIsLooms
 //	module caches not counted toward the bound: TestTheModuleCachesCountTowardTheBound
+//	a sweep back on os.RemoveAll, or leftovers not counted: TestASweepRemovesAReadOnlyLeftoverAndCountsWhatStays
+//	the wait for the sweep lock unbounded: TestAWaitToMakeAPartialIsBounded
+//	the go.work copy unused: TestATestsModulesComeFromTheTreesModuleCache
+//	the go.work copy's paths left relative: TestAWorkspaceCopyNamesTheTreesDirectories
 
 const lowerPackage = protocol.AdamicModule + "/internal/lower"
 
