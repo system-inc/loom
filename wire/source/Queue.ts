@@ -1380,8 +1380,13 @@ export class Queue extends DurableObject<Env> {
             if (entry.record.owner !== checked.owner) {
                 return jsonResponse(403, { reason: `change ${change} is ${entry.record.owner}'s` });
             }
-            if (entry.state !== 'red' && entry.state !== 'parked') {
-                return jsonResponse(409, { reason: `change ${change} is ${entry.state}; only a red or parked change moves to a new sha` });
+            // Kirk's yes (02:3xZ): a queued change whose future has no plan and no verdict moves too, so it's judged once on
+            // main's tip. The queue doesn't see placement, so a planned future is withdrawn first (unplan, which refuses
+            // once anything judged it); a plan or a verdict here refuses the move.
+            const future = state.futures.get(entry.future ?? '');
+            const untested = entry.state === 'queued' && (future === undefined || (future.units === null && !future.judged && future.decided === null));
+            if (entry.state !== 'red' && entry.state !== 'parked' && !untested) {
+                return jsonResponse(409, { reason: `change ${change} is ${entry.state}; only a red or parked change, or a queued one with no plan and no verdict, moves to a new sha` });
             }
             if (entry.shas.includes(checked.sha)) {
                 return jsonResponse(422, { reason: `change ${change} was already tested on ${checked.sha}; a resubmit needs a new sha` });

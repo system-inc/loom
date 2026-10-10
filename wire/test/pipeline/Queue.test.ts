@@ -833,8 +833,6 @@ describe('a resubmit', function () {
         const resubmit = function (fields: Record<string, unknown>): Promise<Response> {
             return queue.fetch(`https://queue/changes/${id}/sha`, { method: 'POST', body: JSON.stringify({ ...change(42), ...fields }) });
         };
-        // A change on its way doesn't move.
-        expect((await resubmit({})).status).toBe(409);
         await postWhole(queue, id, sha(41), 'failed', 'change');
         expect((await resubmit({ owner: 'system_adamic_other' })).status).toBe(403);
         expect((await resubmit({ sha: sha(41) })).status).toBe(422);
@@ -851,6 +849,38 @@ describe('a resubmit', function () {
         const restacked = (await logOf(queue)).find((event) => event.type === 'change.restacked');
         expect(restacked).toMatchObject({ subject: { change: id }, data: { from: sha(41), to: sha(42) } });
         expect((await replay(await logOf(queue))).changes.get(id)?.record.sha).toBe(sha(42));
+    });
+
+    it("moves a queued change with no plan and no verdict, so it's judged once on main's tip, and never a planned or judged one", async function () {
+        const queue = await freshQueue();
+        const idOf = async function (seed: number): Promise<string> {
+            return ((await (await submit(queue, change(seed))).json()) as { change: string }).change;
+        };
+        const resubmit = function (id: string, seed: number): Promise<Response> {
+            return queue.fetch(`https://queue/changes/${id}/sha`, { method: 'POST', body: JSON.stringify(change(seed)) });
+        };
+        const unplan = function (tree: string): Promise<Response> {
+            return queue.fetch(`https://queue/futures/${tree}/unplan`, { method: 'POST', body: JSON.stringify({ by: 'system_adamic_loom', reason: 'replan on main' }) });
+        };
+        // Queued with no plan: moves, keeping its id and place.
+        const fresh = await idOf(51);
+        expect((await resubmit(fresh, 52)).status).toBe(200);
+        expect(await (await queue.fetch(`https://queue/changes/${fresh}`)).json()).toMatchObject({ state: 'queued', record: { sha: sha(52) }, position: 0 });
+        // Planned: refused while the plan stands; withdrawn, it moves.
+        const planned = await idOf(53);
+        const units = await planOf(['q']);
+        expect((await postPlan(queue, sha(53), units)).status).toBe(200);
+        expect((await resubmit(planned, 54)).status).toBe(409);
+        expect((await unplan(sha(53))).status).toBe(200);
+        expect((await resubmit(planned, 54)).status).toBe(200);
+        // Judged (a void run): the plan can't be withdrawn, and the change can't move.
+        const judged = await idOf(55);
+        expect((await postPlan(queue, sha(55), units)).status).toBe(200);
+        const key = units[0]?.unitKey ?? '';
+        expect((await postBatch(queue, sha(55), batch(judged, sha(55), 'run-1', [record(judged, key, 'run-1', 'void', 'infra')], 'void'))).status).toBe(200);
+        expect((await unplan(sha(55))).status).toBe(409);
+        expect((await resubmit(judged, 56)).status).toBe(409);
+        expect((await replay(await logOf(queue))).changes.get(planned)?.record.sha).toBe(sha(54));
     });
 });
 
