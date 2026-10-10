@@ -20,6 +20,7 @@ import (
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/resident"
 	"github.com/system-inc/loom/treebuilder"
 )
 
@@ -30,7 +31,7 @@ type buildTreesSettings struct {
 	jobs, compile                                              *int
 	floorGB, tempFloorGB, goCacheGB                            *uint64
 	bound, keep, interval                                      *time.Duration
-	once                                                       *bool
+	once, resident                                             *bool
 	store                                                      storeFlags
 }
 
@@ -55,12 +56,13 @@ func parseBuildTreesFlags(arguments []string, stderr io.Writer) (buildTreesSetti
 	settings.keep = flags.Duration("keep", 7*24*time.Hour, "how long the ledger's records and the builds' logs are kept")
 	settings.interval = flags.Duration("interval", 10*time.Second, "time between pulls")
 	settings.once = flags.Bool("once", false, "build at most one tree and exit")
+	settings.resident = flags.Bool("resident", false, "keep the trees built warm in memory (package resident) and hand each build its keys, read from the nearest warm tree's diff")
 	settings.store = addStoreFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return settings, err
 	}
 	if *settings.queue == "" || *settings.tokenFile == "" || *settings.bound <= 0 || flags.NArg() != 0 {
-		return settings, errors.New("usage: loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--requests <file>] [--logs <dir>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--bound 2h] [--keep 168h] [--interval 10s] [--once]")
+		return settings, errors.New("usage: loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--requests <file>] [--logs <dir>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--bound 2h] [--keep 168h] [--interval 10s] [--once] [--resident]")
 	}
 	return settings, nil
 }
@@ -124,6 +126,10 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	runContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	checkout := planner.GitCheckout(*settings.clone)
+	var warm *resident.Resident
+	if *settings.resident {
+		warm = resident.New()
+	}
 	loop := &treebuilder.Builder{
 		Source: judge.HTTPFutures{Base: *settings.queue, Token: strings.TrimSpace(string(token))},
 		Requests: func() ([]treebuilder.Request, error) {
@@ -132,7 +138,7 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Indexed: store.TreeIndexed,
 		Floor:   func() error { return builder.CheckFloor(watched, nil) },
 		Build: func(want treebuilder.Want, running func(pid int) error) error {
-			return buildWant(runContext, checkout, binary, settings, want, running)
+			return buildWant(runContext, checkout, binary, settings, want, warm, running)
 		},
 		Alive:    buildAlive,
 		Kill:     killGroup,
@@ -174,8 +180,10 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 // buildWant checks the wanted future out and runs build-tree on it. A checkout that fails is transient (GitHub's 5xx,
-// the network), retried soon and never the tree's failure; one the builder's stop cut short is a stop.
-func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want, running func(pid int) error) error {
+// the network), retried soon and never the tree's failure; one the builder's stop cut short is a stop. With a resident
+// (warm), the tree is keyed against the nearest warm tree and its keys go to build-tree in a file beside its log; a
+// resident that can't key it is said in the log and the tree builds cold, as it would without one.
+func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want, warm *resident.Resident, running func(pid int) error) error {
 	tree, cleanup, err := checkout(want.Future)
 	if err != nil && runContext.Err() != nil {
 		return fmt.Errorf("%w: checking %s out: %v", treebuilder.ErrStopped, want.Future, err)
@@ -184,7 +192,22 @@ func buildWant(runContext context.Context, checkout planner.Checkout, binary str
 		return fmt.Errorf("%w: checking %s out keyless: %v", treebuilder.ErrTransient, want.Future, err)
 	}
 	defer cleanup()
-	return runBuildTree(runContext, binary, buildTreeArguments(settings, tree, want), filepath.Join(*settings.logs, want.Tree+".log"), *settings.bound, running)
+	arguments := buildTreeArguments(settings, tree, want)
+	if warm != nil {
+		keysFile := filepath.Join(*settings.logs, want.Tree+".keys.json")
+		keyed, err := warm.Key(tree, want.Future)
+		if err == nil {
+			err = keyed.WriteKeys(keysFile)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "build-trees: the resident couldn't key tree %s of %s, so it builds cold: %v\n", want.Tree, want.Future, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "build-trees: tree %s of %s keyed by the resident in %.1f s, %d paths from %s, %d packages listed again\n",
+				want.Tree, want.Future, keyed.Seconds, len(keyed.Changed), keyed.From, len(keyed.Relisted))
+			arguments = append(arguments, "--keys", keysFile)
+		}
+	}
+	return runBuildTree(runContext, binary, arguments, filepath.Join(*settings.logs, want.Tree+".log"), *settings.bound, running)
 }
 
 // readyClone makes the builder's clone when it's missing, an empty repository whose origin is the public adamic

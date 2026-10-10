@@ -238,12 +238,12 @@ func TestACheckoutHiccupIsTransient(t *testing.T) {
 		return "", nil, errors.New("git fetch --quiet origin: The requested URL returned error: 502")
 	}
 	want := treebuilder.Want{Tree: strings.Repeat("b", 64), Future: strings.Repeat("2", 40), Go: "go1.27.1"}
-	if err := buildWant(context.Background(), failing, "/bin/true", settings, want, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrTransient) || !strings.Contains(err.Error(), "502") {
+	if err := buildWant(context.Background(), failing, "/bin/true", settings, want, nil, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrTransient) || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("a checkout's 502: %v", err)
 	}
 	stopped, stop := context.WithCancel(context.Background())
 	stop()
-	if err := buildWant(stopped, failing, "/bin/true", settings, want, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrStopped) {
+	if err := buildWant(stopped, failing, "/bin/true", settings, want, nil, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrStopped) {
 		t.Fatalf("a checkout the stop cut short: %v", err)
 	}
 }
