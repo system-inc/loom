@@ -2,6 +2,19 @@
 
 Workshop is the house's only builder (WSL2, 64 threads, 125 GB of memory, a 1 TB disk). `loom build-tree` builds one future's tree there cold and puts it in the action store (builder/store.go). Kirk's rules for the machine: it keeps at least 100 GB free, runs near 80% busy, and stays reachable. This is how `build-tree` keeps them.
 
+## Provisioning
+
+Beyond Ubuntu's own git, curl and python3, Workshop needs two packages, installed once as the sudoer:
+
+```
+sudo apt-get install -y strace zstd
+```
+
+- **strace** records a traced run, the input `loom reads-check --trace` reads (the call list is `planner.TraceCalls`, below under read sets). Without it no unit can be measured, so no read set is ever recorded clean.
+- **zstd** keeps those traces, which are plain text and large, compressed: `zstd -dc <trace>.zst | loom reads-check --trace /dev/stdin ...` reads one back without unpacking it to disk.
+
+Both were first installed by hand on Oct 10; a rebuilt Workshop gets them here, before its first tree.
+
 ## Every planned future's tree (#w7agfa9)
 
 `loom build-trees` (package `treebuilder`, unit `treebuilder/systemd/loom-build-trees.service`) runs beside `loom place`. The planner keys each future's tree where it has it checked out (`planner.ReadTreeIdentity`, the one function `build-tree` keys with) and carries the key on every test and product unit of the plan. The key is read, and the tree built, under a pinned environment (`planner.TreeBuildEnvironment`: `GOTOOLCHAIN=local`, and the runners' `GOOS=linux`, `GOARCH=amd64`), so the release is the local go's; a tree whose toolchain line (go.work's, else go.mod's) names another release, or whose units are keyed on another, isn't planned, named. `build-tree` refuses a go other than the plan's (`--go`) and a machine that isn't linux/amd64. The planner's unit, `planner/systemd/loom-plan.service`, starts it under exactly the builder's environment. The builder reads Queue's planned listing every 10 s and builds the first tree a future runs whose `trees/<key>.json` the store lacks: it checks the commit out keyless in its own clone (`~/loom-trees/adamic`, origin the public repository, no user git configuration or credential) and runs `loom build-tree --tree-key <key>` in a child, which refuses a tree keying otherwise, under every floor and bound below. One tree at a time, and one builder: its ledger, `~/loom-trees/trees.jsonl`, is flocked.
