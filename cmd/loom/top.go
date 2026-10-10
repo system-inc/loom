@@ -51,7 +51,7 @@ const topReset = "\033[0m"
 func top(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("top", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin")
 	once := flags.Bool("once", false, "draw once, without colors, and exit")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		fmt.Fprint(stderr, usage)

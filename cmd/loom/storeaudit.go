@@ -19,7 +19,7 @@ func storeAudit(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("store-audit", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	home, _ := os.UserHomeDir()
-	write := flags.String("write", "", "loom-pipeline's action store, https://<pipeline>/actions")
+	write := flags.String("write", "", "loom's action store, https://<pipeline>/actions")
 	tokenFile := flags.String("token-file", filepath.Join(home, ".loom", "build-token"), "file holding this builder's build token")
 	indexDirectory := flags.String("index", filepath.Join(home, "loom-builder", "index"), "Workshop's index")
 	if err := flags.Parse(arguments); err != nil || *write == "" || flags.NArg() != 0 {

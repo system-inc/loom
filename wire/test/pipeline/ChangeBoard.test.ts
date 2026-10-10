@@ -1,4 +1,4 @@
-// loom-pipeline's board of changes: Queue's pushes in, one line per change out, to a board token only.
+// loom's board of changes: Queue's pushes in, one line per change out, to a board token only.
 
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';

@@ -1,4 +1,4 @@
-// Blobs in R2 (loom-store), addressed by sha256 under blobs/<sha256>. A PUT hands its body straight to R2
+// Blobs in R2 (loom-runs), addressed by sha256 under blobs/<sha256>. A PUT hands its body straight to R2
 // with the expected hash, and R2 verifies it: a body that doesn't match is never written. No JavaScript
 // touches the bytes on the way, because per-chunk work here is CPU time: a tee into a DigestStream used 2.2 s
 // of CPU on a 100 MiB PUT and was killed for exceeding the limit whenever the client sent fast (Oct 8, from a
@@ -56,7 +56,7 @@ export async function getBlob(store: R2Bucket, sha256: string): Promise<Response
     });
 }
 
-// cacheControl, when given, is stored with the blob and served with it from the public domain: loom-pipeline's
+// cacheControl, when given, is stored with the blob and served with it from the public domain: loom's
 // action store marks its blobs immutable, since a blob is named by its own hash and never replaced.
 export async function putBlob(store: R2Bucket, sha256: string, request: Request, cacheControl?: string): Promise<BlobPut> {
     const lengthText = request.headers.get('Content-Length');

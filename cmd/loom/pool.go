@@ -169,7 +169,7 @@ func pool(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	flags := flag.NewFlagSet("pool status", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin")
 	if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 1 {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -243,7 +243,7 @@ func writePoolStatus(writer io.Writer, name string, status poolStatus, now time.
 func poolCancel(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pool cancel", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin")
 	pools := flags.String("pools", "codex,codex-side", "the pools to drop the run's units from, comma separated")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 || !protocol.RunIdPattern.MatchString(flags.Arg(0)) {
 		fmt.Fprint(stderr, "usage: loom pool cancel [--pools codex,codex-side] [--wire <url>] <run>\n")
@@ -309,7 +309,7 @@ func cancelPoolRun(client *http.Client, wire string, secret []byte, pool string,
 func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("pool "+arguments[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin")
 	hours := flags.Int("hours", 24, "how long a pool token lasts")
 	runnerHash := flags.String("runner", "", "the runner binary's sha256 in the public store (from publish-runner)")
 	until := flags.String("until", "55m", "how long one serve turn runs before it exits for the next turn")
@@ -369,7 +369,7 @@ func poolTools(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "loom: the public store answered %s\n", response.Status)
 			return 3
 		}
-		fmt.Fprintf(stdout, "runner %s (%d bytes)\n%s\nhttps://adamic-store.kirkouimet.com/blobs/%s\n", version, len(content), hash, hash)
+		fmt.Fprintf(stdout, "runner %s (%d bytes)\n%s\nhttps://artifacts.loom.system.inc/blobs/%s\n", version, len(content), hash, hash)
 	case "prompt":
 		if flags.NArg() != 1 || !protocol.Sha256Pattern.MatchString(*runnerHash) {
 			fmt.Fprint(stderr, "loom: prompt needs a pool name and --runner <sha256>\n")
@@ -413,7 +413,7 @@ func servePrompt(wire string, pool string, token string, runnerHash string, unti
 			"its Go and Node toolchain, and downloads the test inputs from the same public store, each checked by its sha256. " +
 			"It reads no credentials or local data, and its output goes to /tmp/loom-before.log. "
 		readying = "script=/tmp/loom-before-" + before[:12] + ".sh\n" +
-			"[ -s \"$script\" ] || { curl -fsS -o \"$script.partial\" https://adamic-store.kirkouimet.com/blobs/" + before + " && " +
+			"[ -s \"$script\" ] || { curl -fsS -o \"$script.partial\" https://artifacts.loom.system.inc/blobs/" + before + " && " +
 			"echo \"" + before + "  $script.partial\" | sha256sum -c --quiet && mv \"$script.partial\" \"$script\"; } || true\n" +
 			"[ -s \"$script\" ] && (mkdir -p /tmp/loom-before && cd /tmp/loom-before && timeout 30m bash \"$script\" > /tmp/loom-before.log 2>&1) || true\n"
 	}
@@ -424,7 +424,7 @@ func servePrompt(wire string, pool string, token string, runnerHash string, unti
 		"Then reply with only its last line of output, nothing else.\n\n```bash\n" +
 		"set -e\nmkdir -p /tmp/loom-units\n" + readying +
 		"runner=/tmp/loom-runner-" + runnerHash[:12] + "\n" +
-		"if [ ! -x \"$runner\" ]; then curl -fsS -o \"$runner.partial\" https://adamic-store.kirkouimet.com/blobs/" + runnerHash + "; " +
+		"if [ ! -x \"$runner\" ]; then curl -fsS -o \"$runner.partial\" https://artifacts.loom.system.inc/blobs/" + runnerHash + "; " +
 		"echo \"" + runnerHash + "  $runner.partial\" | sha256sum -c --quiet; chmod 755 \"$runner.partial\"; mv \"$runner.partial\" \"$runner\"; fi\n" +
 		"(umask 077 && printf '%s\\n' '" + token + "' > /tmp/loom-pool-token)\n" +
 		"\"$runner\" serve" + strictFlag + " --pool " + strings.TrimSuffix(wire, "/") + "/pools/" + pool + " --token-file /tmp/loom-pool-token" +

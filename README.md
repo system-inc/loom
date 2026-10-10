@@ -3,7 +3,7 @@
 The kingdom's remote compute fabric: any job, on any machine we own or rent, streamed live, decided by our coordinator.
 Commands in, artifacts out. A runner holds no credential but its tokens (below); a missing unit is void, never green.
 `docs/protocol.md` is the contract: jobs, units, events, verdicts, tokens, the store and the wire's endpoints.
-`protocol/` holds its Go types; `runner/` and `coordinator/` (with `cmd/loom`) are the Go module's parts; `wire/` is the Cloudflare Worker, live at https://loom-wire.kirk-ouimet.workers.dev.
+`protocol/` holds its Go types; `runner/` and `coordinator/` (with `cmd/loom`) are the Go module's parts; `wire/` is the Cloudflare Worker, live at https://runs.loom.system.inc.
 The work and its laws live in the task tree at #system_adamic_developer_tools_loom.
 
 Tests, from a clean clone: `go test ./...`, then in `wire/` `pnpm install --frozen-lockfile && pnpm test && pnpm check`. There is no CI service: Loom gates itself once the coordinator exists.
@@ -51,7 +51,7 @@ text. It:
 7. runs adamic's own `cloud/setup.sh --wasi-sdk` at that commit, once per instance, which installs adamic's toolchain
    from the sources that script names, and loads its `env.sh`;
 8. runs `npm ci --ignore-scripts` for `stage3/api` from https://registry.npmjs.org, once per lockfile;
-9. fetches the gate inputs named by the job's hash from Loom's public store (https://adamic-store.kirkouimet.com),
+9. fetches the gate inputs named by the job's hash from Loom's public store (https://artifacts.loom.system.inc),
    checking every chunk and the total by sha256;
 10. runs `go mod download` for every Go module in the checkout, from Go's module proxy;
 11. writes the resulting environment for the tests.

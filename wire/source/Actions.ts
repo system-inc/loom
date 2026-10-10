@@ -1,7 +1,7 @@
 // The action store (contracts v1.1, #ykg8g6k): Workshop builds each action once, keyed by its productKey, and
-// writes its outputs here. refs/action/<productKey> in the public store (adamic-public) holds the sha256 of one
+// writes its outputs here. refs/action/<productKey> in the public store (loom-artifacts) holds the sha256 of one
 // manifest blob, and the manifest lists the outputs. Anyone reads it direct and unauthenticated at
-// adamic-store.kirkouimet.com/refs/action/<productKey>, then the manifest, then each blob, checking every hash.
+// artifacts.loom.system.inc/refs/action/<productKey>, then the manifest, then each blob, checking every hash.
 //
 // Only a build token writes here, and a build token writes nothing else, so every action a runner fetches was built
 // by a builder we named. Its run claim is the builder's name (workshop), and the ref keeps it. A ref is written

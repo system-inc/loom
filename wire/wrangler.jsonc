@@ -1,14 +1,14 @@
 // Loom's live wire: one Durable Object per run, one for the board, one per pool, blobs in R2. docs/protocol.md is the contract.
 {
     "$schema": "node_modules/wrangler/config-schema.json",
-    "name": "loom-wire",
+    "name": "loom-runs",
     "main": "source/Worker.ts",
-    "account_id": "8863664b1d7b406f63020b58b45764c5",
+    "account_id": "de6c2d43baac01ee481466e683f83e64",
     "compatibility_date": "2026-10-01",
     "workers_dev": true,
     "preview_urls": false,
     // The board's address for Kirk; workers.dev stays for runners and scripts.
-    "routes": [{ "pattern": "loom.kirkouimet.com", "custom_domain": true }],
+    "routes": [{ "pattern": "runs.loom.system.inc", "custom_domain": true }],
     "observability": { "enabled": true },
     "durable_objects": {
         "bindings": [
@@ -23,10 +23,10 @@
         { "tag": "v3", "new_sqlite_classes": ["Pool"] }
     ],
     "r2_buckets": [
-        { "binding": "Store", "bucket_name": "loom-store" },
-        // Adamic's open-source build products and test inputs: read by anyone at adamic-store.kirkouimet.com
+        { "binding": "Store", "bucket_name": "loom-runs" },
+        // Adamic's open-source build products and test inputs: read by anyone at artifacts.loom.system.inc
         // (every reader verifies the hash it asked for), written only through this Worker by a coordinator.
-        { "binding": "PublicStore", "bucket_name": "adamic-public" }
+        { "binding": "PublicStore", "bucket_name": "loom-artifacts" }
     ]
     // LOOM_TOKEN_SECRET is a secret: wrangler secret put LOOM_TOKEN_SECRET
 }

@@ -21,7 +21,7 @@ type VerdictIndex interface {
 	Latest(unitKey string) (Verdict, bool, error)
 }
 
-// MemoryIndex is the stub for Queue's verdict index until loom-pipeline serves it: a map from unit key to its latest
+// MemoryIndex is the stub for Queue's verdict index until loom serves it: a map from unit key to its latest
 // verdict, which the caller fills.
 type MemoryIndex map[string]Verdict
 

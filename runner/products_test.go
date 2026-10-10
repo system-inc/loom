@@ -15,7 +15,7 @@ import (
 	"github.com/system-inc/loom/protocol"
 )
 
-// productStore is the public action store as adamic-store.kirkouimet.com serves it: refs/action/<key> holds a
+// productStore is the public action store as artifacts.loom.system.inc serves it: refs/action/<key> holds a
 // manifest's sha256 as text, and blobs/<sha256> holds bytes. It notes every Authorization header it was sent.
 type productStore struct {
 	mutex   sync.Mutex

@@ -41,7 +41,7 @@ type Machine interface {
 
 // Config is one coordinator's world: where the wire is, the secret it signs with, and the slots it may use.
 type Config struct {
-	// Wire is the Worker's origin, such as https://loom-wire.kirk-ouimet.workers.dev.
+	// Wire is the Worker's origin, such as https://runs.loom.system.inc.
 	Wire string
 	// Secret signs the run's tokens (protocol.ReadTokenSecret reads ~/.loom/token-secret).
 	Secret []byte

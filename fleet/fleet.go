@@ -1,7 +1,7 @@
 // Package fleet is the coordinator's side of the fleet (#83911s7, Kirk Oct 10: "i should be able to add any compute to
 // the fleet and have pools that participate or individual machines"). The fleet is a registry of sources, each a Codex
 // fleet, a box, a Mac or anything added later, with a kind, a cap (the most units at once), a tier and an on switch,
-// held in loom-pipeline. A change to a source is a rule.changed event in Queue's log, so every cap change is recorded
+// held in loom. A change to a source is a rule.changed event in Queue's log, so every cap change is recorded
 // with who made it and when; each source's latest counts come from its arm (rearm.sh for Codex), once per pass.
 //
 // The cap is a ceiling, never a target. Kirk's own Mac is never a source.
@@ -31,7 +31,7 @@ var Kinds = []string{"codex", "box", "mac", "other"}
 // MaximumCap is the highest cap a source may carry, the wire's top priority's count of units at once.
 const MaximumCap = 1000
 
-// DefaultCodexCap is rearm's cap when neither loom-pipeline nor ~/.loom/codex-ceiling answers (Oct 9: the account's
+// DefaultCodexCap is rearm's cap when neither loom nor ~/.loom/codex-ceiling answers (Oct 9: the account's
 // wall is about 310 members; 80 is what the file held).
 const DefaultCodexCap = 80
 
@@ -40,7 +40,7 @@ var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,63}$`)
 // neverSources are Kirk's own Mac, by every name it goes by: it never takes part in Loom (Kirk, Oct 9 23:36Z).
 var neverSources = []string{"kirk-mac", "kirks-mac", "kirk-macbook", "kirk"}
 
-// A Source is one source as loom-pipeline answers it.
+// A Source is one source as loom answers it.
 type Source struct {
 	Name    string  `json:"name"`
 	Kind    string  `json:"kind"`
@@ -118,7 +118,7 @@ func contains(list []string, item string) bool {
 	return false
 }
 
-// A Client talks to loom-pipeline's fleet routes: reads with any token it's given, writes with a coordinator token.
+// A Client talks to loom's fleet routes: reads with any token it's given, writes with a coordinator token.
 type Client struct {
 	Pipeline string
 	HTTP     *http.Client
@@ -209,16 +209,16 @@ func (client *Client) PostCounts(callContext context.Context, name string, count
 	return err
 }
 
-// CapOf is the cap an arm honors this pass: the source's, when loom-pipeline answers and the source is on (an off
+// CapOf is the cap an arm honors this pass: the source's, when loom answers and the source is on (an off
 // source's cap is 0); else the number in the fallback file; else def. It says which it used, for the arm's log line.
 func (client *Client) CapOf(callContext context.Context, name string, fallbackFile string, def int) (int, string) {
 	if sources, err := client.List(callContext); err == nil {
 		for _, source := range sources {
 			if source.Name == name {
 				if !source.On {
-					return 0, fmt.Sprintf("loom-pipeline (%s is off, seq %d by %s)", name, source.Changed.Seq, source.Changed.By)
+					return 0, fmt.Sprintf("loom (%s is off, seq %d by %s)", name, source.Changed.Seq, source.Changed.By)
 				}
-				return source.Cap, fmt.Sprintf("loom-pipeline (seq %d by %s)", source.Changed.Seq, source.Changed.By)
+				return source.Cap, fmt.Sprintf("loom (seq %d by %s)", source.Changed.Seq, source.Changed.By)
 			}
 		}
 	}

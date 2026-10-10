@@ -1,7 +1,7 @@
 import { cloudflareTest } from '@cloudflare/vitest-plugin';
 import { defineConfig } from 'vitest/config';
 
-// loom-pipeline's tests, against its own Worker and bindings (pipeline.jsonc); loom-wire's are in vitest.config.ts.
+// loom's tests, against its own Worker and bindings (pipeline.jsonc); loom-runs's are in vitest.config.ts.
 export default defineConfig({
     plugins: [
         cloudflareTest({

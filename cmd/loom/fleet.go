@@ -29,12 +29,12 @@ import (
 func fleetCommand(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("fleet", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	pipeline := flags.String("pipeline", "https://loom-pipeline.kirk-ouimet.workers.dev", "loom-pipeline's origin")
+	pipeline := flags.String("pipeline", "https://loom.system.inc", "loom's origin")
 	by := flags.String("by", "", "who makes the change, for the log (default this user)")
 	kind := flags.String("kind", "", "add: the source's kind ("+fmt.Sprint(fleet.Kinds)+")")
 	capFlag := flags.Int("cap", -1, "add: the source's cap")
 	tier := flags.Int("tier", -1, "add: the source's tier")
-	fallback := flags.String("fallback", "", "cap-of: the file to read when loom-pipeline doesn't answer (default ~/.loom/codex-ceiling)")
+	fallback := flags.String("fallback", "", "cap-of: the file to read when loom doesn't answer (default ~/.loom/codex-ceiling)")
 	def := flags.Int("default", fleet.DefaultCodexCap, "cap-of: the cap when neither answers")
 	var counts fleet.Counts
 	flags.IntVar(&counts.Running, "running", 0, "counts: members running a unit")

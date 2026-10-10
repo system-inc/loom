@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// HTTPQueue posts a future's verdicts to loom-pipeline's Queue at POST /futures/<tree>/verdicts with the coordinator
+// HTTPQueue posts a future's verdicts to loom's Queue at POST /futures/<tree>/verdicts with the coordinator
 // token (wire/source/Queue.ts, checkJudgeBatch), the route Judge and Queue agreed on Oct 9. It replaces StubQueue.
 type HTTPQueue struct {
 	Base  string
@@ -48,7 +48,7 @@ func (queue HTTPQueue) PostVerdicts(future string, post FuturePost) error {
 	return fmt.Errorf("POST /futures/%s/verdicts: %s: %s", future, response.Status, strings.TrimSpace(string(detail)))
 }
 
-// HTTPBlobs puts a tests list in loom-pipeline's action store at PUT /actions/blobs/<sha256> with a build token
+// HTTPBlobs puts a tests list in loom's action store at PUT /actions/blobs/<sha256> with a build token
 // (wire/source/Actions.ts). The store checks the body against the name and keeps an existing blob as it is, so a put
 // is safe to repeat.
 type HTTPBlobs struct {

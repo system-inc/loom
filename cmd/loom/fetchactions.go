@@ -17,7 +17,7 @@ func fetchActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("fetch-actions", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	cache := flags.String("cache", "", "the runner's ADAMIC_BUILD_CACHE_DIR")
-	read := flags.String("read", "https://adamic-store.kirkouimet.com", "the public store, read direct")
+	read := flags.String("read", "https://artifacts.loom.system.inc", "the public store, read direct")
 	skipNative := flags.Bool("skip-native", false, "leave out products clang built, for the runner to build (Judge's ruling until #tsn1wp8 lands)")
 	if err := flags.Parse(arguments); err != nil || *cache == "" || flags.NArg() == 0 {
 		fmt.Fprintln(stderr, "usage: loom fetch-actions --cache <dir> [--read <url>] [--skip-native] <productKey>...")

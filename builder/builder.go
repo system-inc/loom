@@ -1,5 +1,5 @@
 // Package builder is Loom's Builder (gospel on #system_adamic_loom): Workshop builds each action once, keyed by its
-// productKey, into loom-pipeline's action store, and test runners only fetch.
+// productKey, into loom's action store, and test runners only fetch.
 //
 // An action is one product test, TestProduct_X in package P, on one tree. Its productKey is Planner's unit key with
 // kind product (Loom, Oct 9 00:0xZ: one key function, never a fork), whose closure covers the test code that defines
@@ -69,7 +69,7 @@ func (manifest Manifest) Canonical() ([]byte, error) {
 }
 
 // A Store is the action store: Read is the public bucket's address (refs and blobs read direct, unauthenticated),
-// Write is loom-pipeline's /actions, and Token a build token, which only a builder holds.
+// Write is loom's /actions, and Token a build token, which only a builder holds.
 type Store struct {
 	Read   string
 	Write  string
@@ -356,7 +356,7 @@ func Outputs(directory string) ([]Output, map[string]string, error) {
 	return outputs, files, err
 }
 
-// put sends one request to loom-pipeline with the build token, and returns the status and body.
+// put sends one request to loom with the build token, and returns the status and body.
 func (store Store) put(address string, body []byte) (int, []byte, error) {
 	request, err := http.NewRequest(http.MethodPut, address, bytes.NewReader(body))
 	if err != nil {

@@ -33,7 +33,7 @@ type ParitySelect struct {
 	inputs   *ParityInputs       // what the box record ran with, set by PlanSelected
 }
 
-// A QueueClient talks to loom-pipeline's planning routes with the coordinator token.
+// A QueueClient talks to loom's planning routes with the coordinator token.
 type QueueClient struct {
 	Base  string
 	Token string

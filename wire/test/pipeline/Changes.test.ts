@@ -1,4 +1,4 @@
-// The front door (docs/contracts.md, section 5), against loom-pipeline's Worker and, past its checks, MemoryQueue.
+// The front door (docs/contracts.md, section 5), against loom's Worker and, past its checks, MemoryQueue.
 
 import { describe, expect, it } from 'vitest';
 import { checkChangeRequest, handleChanges, MemoryQueue } from '../../source/Changes';
@@ -134,8 +134,8 @@ describe('reading changes', function () {
     });
 });
 
-describe("loom-pipeline's Worker", function () {
-    it('checks the token with loom-wire\'s verifier, then the shape, then hands the change to the queue', async function () {
+describe("loom's Worker", function () {
+    it('checks the token with loom-runs\'s verifier, then the shape, then hands the change to the queue', async function () {
         const submitToken = await token(owner, 'submit');
         expect((await call('/changes', { method: 'POST', body: body() })).status).toBe(401);
         for (const scope of ['runner', 'viewer', 'pool', 'publish', 'publish-candidate'] as const) {

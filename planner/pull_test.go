@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-// A stub Queue in loom-pipeline's shapes (wire/source/Queue.ts): two unplanned futures of one tree (one uncached),
+// A stub Queue in loom's shapes (wire/source/Queue.ts): two unplanned futures of one tree (one uncached),
 // the verdict index, and the plans posted back as bare lists, each unit's key recomputed from its posted keyParts.
 func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	t.Parallel()

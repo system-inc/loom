@@ -1,6 +1,6 @@
-// loom-pipeline's front door (docs/contracts.md, section 5): an owner submits a change with their submit token,
+// loom's front door (docs/contracts.md, section 5): an owner submits a change with their submit token,
 // anyone with a reason reads one, and the Mac's bridge reads what owners act on; its board shows a line per change.
-// The tokens are checked by the same verifier as loom-wire's; Changes.ts checks the rest and asks the Queue object.
+// The tokens are checked by the same verifier as loom-runs's; Changes.ts checks the rest and asks the Queue object.
 
 import { handleAction } from './Actions';
 import { ChangeBoardName, changeBoardOf, ChangeBoardSubprotocol } from './ChangeBoard';

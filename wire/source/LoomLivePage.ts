@@ -1,4 +1,4 @@
-// Loom Live: loom-pipeline's board, the cycle as it happens, drawn to the design Kirk approved on claude.ai (Oct 10,
+// Loom Live: loom's board, the cycle as it happens, drawn to the design Kirk approved on claude.ai (Oct 10,
 // "The cycle, live" on https://claude.ai/artifact/L7WZSJ5Lj2kBP3nPXtJVzw; #9v317cf). It reads only the ChangeBoard's
 // projection: a snapshot and then each change as Queue pushes it, over the stream at /board/stream, or the same
 // snapshot every two seconds when the stream can't open. Plain HTML and inline script under the response's CSP nonce,

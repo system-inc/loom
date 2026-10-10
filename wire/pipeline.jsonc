@@ -1,20 +1,21 @@
-// loom-pipeline: the deterministic path from a submitted change to main (the gospel on #system_adamic_loom; the
-// contracts in docs/contracts.md). Its own Worker beside loom-wire, which stays frozen until cutover, sharing this
+// loom: the deterministic path from a submitted change to main (the gospel on #system_adamic_loom; the
+// contracts in docs/contracts.md). Its own Worker beside loom-runs, which stays frozen until cutover, sharing this
 // directory's token, event and HTTP code. Each part adds its own bindings here: Queue its Durable Object and
-// migration. LOOM_TOKEN_SECRET is the same secret as loom-wire's: wrangler secret put LOOM_TOKEN_SECRET --config pipeline.jsonc
+// migration. LOOM_TOKEN_SECRET is the same secret as loom-runs's: wrangler secret put LOOM_TOKEN_SECRET --config pipeline.jsonc
 {
     "$schema": "node_modules/wrangler/config-schema.json",
-    "name": "loom-pipeline",
+    "name": "loom",
     "main": "source/Pipeline.ts",
-    "account_id": "8863664b1d7b406f63020b58b45764c5",
+    "account_id": "de6c2d43baac01ee481466e683f83e64",
     "compatibility_date": "2026-10-01",
     "workers_dev": true,
     "preview_urls": false,
+    "routes": [{ "pattern": "loom.system.inc", "custom_domain": true }],
     "observability": { "enabled": true },
     "r2_buckets": [
         // The action store (Actions.ts): refs/action/<productKey>, its manifest and the outputs, in the public bucket
-        // anyone reads at adamic-store.kirkouimet.com. Only a build token writes it, through this Worker.
-        { "binding": "PublicStore", "bucket_name": "adamic-public" }
+        // anyone reads at artifacts.loom.system.inc. Only a build token writes it, through this Worker.
+        { "binding": "PublicStore", "bucket_name": "loom-artifacts" }
     ],
     "durable_objects": {
         "bindings": [

@@ -9,7 +9,7 @@ import (
 )
 
 // List reads every key the action store holds under prefix ("refs", the action refs' product keys, or "blobs", the
-// blobs' sha256s), page by page from loom-pipeline's /actions/list with the build token.
+// blobs' sha256s), page by page from loom's /actions/list with the build token.
 func (store Store) List(prefix string) ([]string, error) {
 	keys := []string{}
 	cursor := ""

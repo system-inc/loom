@@ -38,9 +38,9 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	flags := flag.NewFlagSet("judge", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	queue := flags.String("queue", "", "loom-pipeline's base URL")
+	queue := flags.String("queue", "", "loom's base URL")
 	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin, where runs' events live and reruns are placed")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin, where runs' events live and reruns are placed")
 	source := flags.String("source", defaultSource(), "this repository's checkout, to build the pool runner's version from")
 	local := flags.Int("local", 0, "rerun on this machine with this many slots instead of pools")
 	var pools poolSlotsFlag
@@ -387,9 +387,9 @@ func remoteTip(repository, branch string) (string, error) {
 func judgeCarried(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("judge carried", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	queue := flags.String("queue", "", "loom-pipeline's base URL")
+	queue := flags.String("queue", "", "loom's base URL")
 	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin, where runs' events live")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin, where runs' events live")
 	tree := flags.String("tree", "", "the future's tested tree sha")
 	attempt := flags.Int("attempt", 0, "the attempt being placed")
 	// The placer calls this with only the flags above, so the warm rule defaults to the steady judge's files: one
@@ -500,7 +500,7 @@ func judgeWitness(arguments []string, stdout io.Writer, stderr io.Writer) int {
 func judgeGate(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("judge gate", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	queue := flags.String("queue", "", "loom-pipeline's base URL")
+	queue := flags.String("queue", "", "loom's base URL")
 	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
 	suitePath := flags.String("suite", "", "the gate-mutant suite, Adamic's cloud/gate-mutants.tsv")
 	canaryTree := flags.String("canary", "", "the tree of main's canary, a parity run of main's tip")

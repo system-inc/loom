@@ -21,7 +21,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	queue := flags.String("queue", "", "loom-pipeline's base URL")
+	queue := flags.String("queue", "", "loom's base URL")
 	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
 	repository := flags.String("repository", "", "a local clone of the repository the futures are in")
 	gateTools := flags.String("gate-tools", "", "the gate tools checkout, for executors.txt's reads lines")
@@ -128,7 +128,7 @@ func refreshGateTools(directory, branch string) error {
 func planByKey(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("plan by-key", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	queue := flags.String("queue", "", "loom-pipeline's base URL")
+	queue := flags.String("queue", "", "loom's base URL")
 	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
 	repository := flags.String("repository", "", "the planner's clone")
 	gateTools := flags.String("gate-tools", "", "the gate tools checkout, for executors.txt's reads lines")

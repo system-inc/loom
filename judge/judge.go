@@ -119,7 +119,7 @@ type Verdict struct {
 
 // TestsRef is a record's tests field, by reference (Loom's ruling, Oct 10 01:16Z): a Durable Object's SQLite value caps
 // at 2 MB and one package's record ran to 750 KB inline. The whole list is a blob in the action store, read tokenless at
-// adamic-store.kirkouimet.com/blobs/<sha256>; the record carries its hash, the counts, and inline only the tests that
+// artifacts.loom.system.inc/blobs/<sha256>; the record carries its hash, the counts, and inline only the tests that
 // failed or never ended, so a red names its test without a fetch.
 type TestsRef struct {
 	Sha256  string        `json:"sha256"`

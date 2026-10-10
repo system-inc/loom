@@ -1,4 +1,4 @@
-// Package ownerbridge carries what a change's owner acts on, and nothing else, from loom-pipeline to the owner's
+// Package ownerbridge carries what a change's owner acts on, and nothing else, from loom to the owner's
 // inbox (docs/contracts.md, section 5): change.landed, change.red and change.parked, read from the owners' feed
 // (GET /changes/events?after=<seq>, a coordinator token) and posted with `ahra os send <owner>` on Kirk's Mac until
 // the inbox has an HTTP door. Each event is sent once: the bridge keeps the last sequence it sent in a state file,
@@ -46,7 +46,7 @@ type Record struct {
 
 // Bridge reads the feed and sends what it holds.
 type Bridge struct {
-	Pipeline  string                                // loom-pipeline's origin
+	Pipeline  string                                // loom's origin
 	Token     func() string                         // a coordinator token, fresh enough to use
 	Client    *http.Client                          //
 	Send      func(owner string, text string) error // posts one message to one owner's inbox

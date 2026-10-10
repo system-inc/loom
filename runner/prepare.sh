@@ -137,7 +137,7 @@ fi
 # The gate inputs, from Loom's public store by hash: a manifest of chunks of one tar.gz and its total, every hash checked.
 tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs
 if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/null)" != "${gateInputs}" ]; then
-	fetch() { curl -fsS --retry 3 -o "$2" "https://adamic-store.kirkouimet.com/blobs/$1" && echo "$1  $2" | sha256sum -c --quiet; }
+	fetch() { curl -fsS --retry 3 -o "$2" "https://artifacts.loom.system.inc/blobs/$1" && echo "$1  $2" | sha256sum -c --quiet; }
 	staging=${tools}/staging-$$
 	mkdir -p "${staging}" && fetch "${gateInputs}" "${staging}/manifest" || { say "gate inputs manifest ${gateInputs} unreadable"; exit 2; }
 	while read -r hash; do

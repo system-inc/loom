@@ -17,7 +17,7 @@ function facts(overrides: Partial<GitFacts> = {}, diffPaths = ['internal/lower/a
 
 // A fresh queue object per test, with git answered from a table keyed by sha and a pinned clock.
 async function freshQueue(answers: Record<string, GitFacts> = {}): Promise<DurableObjectStub<Queue>> {
-    // The pipeline's binding (pipeline.jsonc); the generated Env type knows only loom-wire's.
+    // The pipeline's binding (pipeline.jsonc); the generated Env type knows only loom-runs's.
     const namespace = (env as unknown as { Queue: DurableObjectNamespace<Queue> }).Queue;
     const stub = namespace.get(namespace.idFromName('queue-' + crypto.randomUUID()));
     await runInDurableObject(stub, function (instance: Queue) {
@@ -1116,7 +1116,7 @@ describe('a landing order', function () {
     });
 });
 
-describe("loom-pipeline's queue seams", function () {
+describe("loom's queue seams", function () {
     it('open to a coordinator token only, and reach the Queue object past it', async function () {
         const coordinator = await token('system_adamic_loom', 'coordinator');
         const routes: [string, string][] = [

@@ -17,8 +17,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mintToken, type TokenScope } from '../source/Token.ts';
 
-const accountId = '8863664b1d7b406f63020b58b45764c5';
-const baseUrl = (process.argv[2] ?? 'https://loom-wire.kirk-ouimet.workers.dev').replace(/\/$/, '');
+const accountId = 'de6c2d43baac01ee481466e683f83e64';
+const baseUrl = (process.argv[2] ?? 'https://runs.loom.system.inc').replace(/\/$/, '');
 const wireDirectory = join(dirname(fileURLToPath(import.meta.url)), '..');
 const secret = readFileSync(join(homedir(), '.loom', 'token-secret'), 'utf8').trim();
 const daySeconds = 24 * 60 * 60;
@@ -290,7 +290,7 @@ async function smokeRun(): Promise<string> {
     const readArchive = (name: string) =>
         execFileSync(
             'npx',
-            ['wrangler', 'r2', 'object', 'get', `loom-store/runs/${run}/${name}`, '--remote', '--pipe'],
+            ['wrangler', 'r2', 'object', 'get', `loom-runs/runs/${run}/${name}`, '--remote', '--pipe'],
             { cwd: wireDirectory, env: { ...process.env, CLOUDFLARE_ACCOUNT_ID: accountId }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
         )
             .trim()

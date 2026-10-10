@@ -6,7 +6,7 @@
 // `board`, and it reaches only the board's endpoints. A pool token's run is the pool's name (a run id the wire
 // takes), and it reaches only that pool's next.
 // A submit token's run is its owner's username, and it reaches only the change endpoints. A build token's run is
-// its builder's name (workshop), and it reaches only loom-pipeline's action store (Actions.ts); loom-wire grants it
+// its builder's name (workshop), and it reaches only loom's action store (Actions.ts); loom-runs grants it
 // nothing.
 export type TokenScope = 'runner' | 'viewer' | 'coordinator' | 'board' | 'pool' | 'publish' | 'publish-candidate' | 'submit' | 'build';
 export const TokenScopes: readonly TokenScope[] = ['runner', 'viewer', 'coordinator', 'board', 'pool', 'publish', 'publish-candidate', 'submit', 'build'];

@@ -1,10 +1,10 @@
-// loom-wire stays frozen until cutover, and a build token (loom-pipeline's action store) reaches nothing on it.
+// loom-runs stays frozen until cutover, and a build token (loom's action store) reaches nothing on it.
 
 import { exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import { call, freshRun, Origin, randomBytes, sha256Hex, token } from './Helpers';
 
-describe('a build token on loom-wire', function () {
+describe('a build token on loom-runs', function () {
     it('reaches no public blob or ref, no run, no cache, and no /actions', async function () {
         const workshop = await token('workshop', 'build');
         const key = await sha256Hex(randomBytes(32));

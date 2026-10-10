@@ -31,8 +31,8 @@ const (
 	// ScopeSubmit submits a change to main and reads changes, and nothing else. Its run claim is the owner's
 	// username: the wire takes a change only when the body's owner matches it (docs/contracts.md, the API).
 	ScopeSubmit = "submit"
-	// ScopeBuild writes loom-pipeline's action store (refs/action/<productKey>, its manifest and its outputs) and
-	// nothing else; loom-wire grants it nothing. Its run claim is the builder's name (workshop), which each action
+	// ScopeBuild writes loom's action store (refs/action/<productKey>, its manifest and its outputs) and
+	// nothing else; loom-runs grants it nothing. Its run claim is the builder's name (workshop), which each action
 	// ref keeps, so a conflicting second write names both builders.
 	ScopeBuild = "build"
 )

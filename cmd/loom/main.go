@@ -138,7 +138,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	uncached := flags.Bool("uncached", false, "read and write no cache: every unit runs (what lands main)")
 	local := flags.Int("local", 0, "run on this machine with this many slots instead of ~/.loom/slots")
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin")
 	source := flags.String("source", defaultSource(), "this repository's checkout, to build the runner from")
 	slotsPath := flags.String("slots", "", "the slot allowance, one \"box class\" per line (default ~/.loom/slots)")
 	recordPath := flags.String("record", "", "write the run's record, every event as a JSON line, to this file")
@@ -284,7 +284,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 
 // gateLines reads what the gate is doing from its own files and posts it to the board as the gate's lines,
 // every interval, until stopped. --once prints one reading as JSON and posts nothing.
-// ownerBridge sends each change's owner what they act on (landed, red, parked) from loom-pipeline's owners' feed,
+// ownerBridge sends each change's owner what they act on (landed, red, parked) from loom's owners' feed,
 // with `ahra os send` from ~/Projects/ahra, once each: the last sequence sent is kept in ~/.loom/owner-bridge.seq.
 func ownerBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("owner-bridge", flag.ContinueOnError)
@@ -292,7 +292,7 @@ func ownerBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	once := flags.Bool("once", false, "send what is owed once, then exit")
 	// Each pass reads the log after the last owner event sent, so it is read at the pace an owner would notice.
 	interval := flags.Duration("interval", 30*time.Second, "how often to read the feed")
-	pipeline := flags.String("pipeline", "https://loom-pipeline.kirk-ouimet.workers.dev", "loom-pipeline's origin")
+	pipeline := flags.String("pipeline", "https://loom.system.inc", "loom's origin")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -350,7 +350,7 @@ func gateLines(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	once := flags.Bool("once", false, "print one reading as JSON and post nothing")
 	interval := flags.Duration("interval", 3*time.Second, "how often to read and post")
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -407,7 +407,7 @@ func board(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("board", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	days := flags.Int("days", 30, "how long the token lasts")
-	wire := flags.String("wire", "https://loom-wire.kirk-ouimet.workers.dev", "the wire's origin")
+	wire := flags.String("wire", "https://runs.loom.system.inc", "the wire's origin")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		fmt.Fprint(stderr, usage)
 		return 3
@@ -692,7 +692,7 @@ func coordinatorToken(arguments []string, stdout io.Writer, stderr io.Writer) in
 	return 0
 }
 
-// buildToken mints a builder's build token: it writes loom-pipeline's action store (each action's outputs, its
+// buildToken mints a builder's build token: it writes loom's action store (each action's outputs, its
 // manifest and refs/action/<productKey>) and nothing else. The builder (the token's run claim) is a machine's name,
 // workshop, which every ref it writes keeps, and the token expires after --days.
 func buildToken(arguments []string, stdout io.Writer, stderr io.Writer) int {

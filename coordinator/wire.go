@@ -17,7 +17,7 @@ import (
 // A wireClient makes the coordinator's calls to the wire: the plan, the verdict, the cache and blob checks.
 // Events go through a poster.Poster instead, as they happen.
 type wireClient struct {
-	url    string // the Worker's origin, such as https://loom-wire.kirk-ouimet.workers.dev
+	url    string // the Worker's origin, such as https://runs.loom.system.inc
 	client *http.Client
 }
 

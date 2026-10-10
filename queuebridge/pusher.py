@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The lander's hands (#83m6zw8): the only thing that moves adamic main, from workshop, with the lander's deploy key
-(Host github-lander, ~/.ssh/loom_lander), never from Kirk's Mac. Each tick it pulls loom-pipeline's landing orders and,
+(Host github-lander, ~/.ssh/loom_lander), never from Kirk's Mac. Each tick it pulls loom's landing orders and,
 in line order, fast-forwards main to each order's exact tested tree:
 
     git push origin <tree>:refs/heads/main     (no force: GitHub refuses anything that isn't a fast-forward)

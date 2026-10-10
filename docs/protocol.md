@@ -103,7 +103,7 @@ The coordinator decides a run from the plan and the events, never from a runner'
 
 ## Store
 
-Blobs are addressed by sha256 and live in R2 (`loom-store`) at `blobs/<sha256>`. A blob is reached only through a run: `GET <wire>/runs/<run>/blobs/<sha256>` returns the bytes and `PUT` stores them, the Worker recomputing the hash and refusing a mismatch. A `PUT` of a blob that already exists succeeds without rewriting it. The unit's `store.url` is that run's endpoint, so a runner never sees a key, a bucket or another run.
+Blobs are addressed by sha256 and live in R2 (`loom-runs`) at `blobs/<sha256>`. A blob is reached only through a run: `GET <wire>/runs/<run>/blobs/<sha256>` returns the bytes and `PUT` stores them, the Worker recomputing the hash and refusing a mismatch. A `PUT` of a blob that already exists succeeds without rewriting it. The unit's `store.url` is that run's endpoint, so a runner never sees a key, a bucket or another run.
 
 What each token may do there (its run must be the run in the path):
 
@@ -121,7 +121,7 @@ This is the run-scoped access the store promised, and it is better than an S3 pr
 
 ### The public store
 
-Open-source projects (Adamic, cohere) keep their build products and test inputs in a public bucket instead, by Kirk's call (Oct 8): `adamic-public`, read by anyone direct at `https://adamic-store.kirkouimet.com/blobs/<sha256>`, so a hundred instances fetch from Cloudflare's edge and never through the Worker. Every reader verifies the sha256 it asked for, so a public read can't be poisoned. Writes stay authenticated: `PUT /public/blobs/<sha256>` on the Worker, a coordinator token of any run, the same hash check, and `HEAD` to skip a blob already held; there is no public write. Uploads come from a machine with a fast uplink (Workshop's fiber, or a Codex instance while the star owns Workshop), never from Kirk's home connection. `loom-store` and its run-scoped access are unchanged for every other project.
+Open-source projects (Adamic, cohere) keep their build products and test inputs in a public bucket instead, by Kirk's call (Oct 8): `loom-artifacts`, read by anyone direct at `https://artifacts.loom.system.inc/blobs/<sha256>`, so a hundred instances fetch from Cloudflare's edge and never through the Worker. Every reader verifies the sha256 it asked for, so a public read can't be poisoned. Writes stay authenticated: `PUT /public/blobs/<sha256>` on the Worker, a coordinator token of any run, the same hash check, and `HEAD` to skip a blob already held; there is no public write. Uploads come from a machine with a fast uplink (Workshop's fiber, or a Codex instance while the star owns Workshop), never from Kirk's home connection. `loom-runs` and its run-scoped access are unchanged for every other project.
 
 ## Cache
 
@@ -213,7 +213,7 @@ All on the Worker (`wire/`). A token goes in `Authorization: Bearer <token>`, or
 | `POST /board/gate` | coordinator (any run) | The gate's lines, posted whole (see The gate's lines). |
 | `POST /board/machines` | coordinator (any run) | `{"machines": [{"name", "cores", "slots"}]}`: the machines this coordinator places units on. Each replaces the board's entry of that name. |
 | `POST /board/runs/<run>/viewer` | board | `{"token": "<viewer token for that run>"}`, expiring with the board token. |
-| `HEAD`, `PUT /public/blobs/<sha256>` | coordinator (any run) | The public store's write side (see The public store). Reads go direct to adamic-store.kirkouimet.com, never here. |
+| `HEAD`, `PUT /public/blobs/<sha256>` | coordinator (any run) | The public store's write side (see The public store). Reads go direct to artifacts.loom.system.inc, never here. |
 | `GET /cache/<key>` | coordinator (any run) | The `protocol.CacheEntry` for that key, or 404. |
 | `PUT /cache/<key>` | coordinator (any run) | Writes the entry once (201); an existing one is left as is (200). Refused when its `key` isn't the path's, or its outputs or event log aren't in the store. |
 

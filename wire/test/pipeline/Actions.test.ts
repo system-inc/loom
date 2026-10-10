@@ -152,7 +152,7 @@ describe('the action store', function () {
         expect((await put(await store(canonicalManifest({ key: key, outputs: [heldOutput] })))).status).toBe(201);
     });
 
-    it('is reached through loom-pipeline at /actions', async function () {
+    it('is reached through loom at /actions', async function () {
         const workshop = await token('workshop', 'build');
         const key = await freshKey();
         const manifest = await putProduct(workshop, key, { out: randomBytes(32) });

@@ -4,7 +4,7 @@ take over. Each tick, from Kirk's Mac beside the gate lane:
 
 0. Every submitted change still unchecked gets git's facts from this clone (the sha exists, its base is its ancestor
    and on main, the paths of base..sha), since no GitHub credential lives in Cloudflare. The queue decides on them.
-1. Every unplanned future loom-pipeline lists (slice 1: one change, tree = its sha) goes through today's fast gate
+1. Every unplanned future loom lists (slice 1: one change, tree = its sha) goes through today's fast gate
    exactly as a cut does: a cloud/land-queue-<tree8> branch at the tree, which fast-gate-watch gates like any
    cloud/land-* tip. Its newest finished record (gate-logs/<tree12>/<stamp>/fast) is the verdict input: green is
    passed, void is void, and red follows the contract's judge stub, "any second failure is the change": a first red
@@ -32,7 +32,7 @@ usage: queuebridge/queue_bridge.py    (launchd com.loom.queue-bridge runs it eve
 """
 import base64, fcntl, gzip, hashlib, hmac, json, os, re, subprocess, sys, time, urllib.error, urllib.request
 
-pipeline = os.environ.get("QUEUE_BRIDGE_URL", "https://loom-pipeline.kirk-ouimet.workers.dev")
+pipeline = os.environ.get("QUEUE_BRIDGE_URL", "https://loom.system.inc")
 state = os.environ.get("QUEUE_BRIDGE_STATE", os.path.expanduser("~/.loom/queue-bridge"))
 repository = os.environ.get("QUEUE_BRIDGE_REPOSITORY", os.path.expanduser("~/Projects/system/adamic"))
 pushMain = os.environ.get("QUEUE_BRIDGE_PUSH_MAIN", os.path.expanduser("~/.adamic-merge-tree/cloud/integration/push-main.sh"))

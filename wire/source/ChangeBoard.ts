@@ -1,4 +1,4 @@
-// loom-pipeline's board of changes: one line per change on its way to main. The Queue object pushes each change's
+// loom's board of changes: one line per change on its way to main. The Queue object pushes each change's
 // summary here as it moves (contracts v1.1: {change, owner, sha, state, future, units, updatedAt}, at most once a
 // second), and the board never polls. It keeps every change still on its way, and a landed, red, parked or refused
 // one for a day after it last moved. One Durable Object, named `board`. Viewers watch it over hibernating WebSockets:
@@ -98,7 +98,7 @@ export function checkChangeSummary(body: string): ChangeSummary | string {
     return parsed as ChangeSummary;
 }
 
-// The board object, by loom-pipeline's binding (pipeline.jsonc). Env is typed from loom-wire's config, which has none.
+// The board object, by loom's binding (pipeline.jsonc). Env is typed from loom-runs's config, which has none.
 export function changeBoardOf(environment: Env): DurableObjectStub {
     const namespace = (environment as unknown as { ChangeBoard: DurableObjectNamespace }).ChangeBoard;
     return namespace.get(namespace.idFromName(ChangeBoardName));

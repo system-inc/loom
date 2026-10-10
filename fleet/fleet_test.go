@@ -80,7 +80,7 @@ func number(value int) *int     { return &value }
 func word(value string) *string { return &value }
 func truth(value bool) *bool    { return &value }
 
-// A cap set through loom-pipeline is the one an arm honors on its next pass, and the log line can say whose it was.
+// A cap set through loom is the one an arm honors on its next pass, and the log line can say whose it was.
 func TestTheCapAnArmHonorsIsTheFleetsAndAnOffSourceGetsNone(t *testing.T) {
 	stub := newStubPipeline(t)
 	client := stub.client()
@@ -94,7 +94,7 @@ func TestTheCapAnArmHonorsIsTheFleetsAndAnOffSourceGetsNone(t *testing.T) {
 	os.WriteFile(fallback, []byte("80\n"), 0o644)
 	cap, from := client.CapOf(context.Background(), "codex", fallback, DefaultCodexCap)
 	if cap != 25 || !strings.Contains(from, "seq 2 by board") {
-		t.Fatalf("cap %d from %q, not 25 from loom-pipeline's seq 2 by board", cap, from)
+		t.Fatalf("cap %d from %q, not 25 from loom's seq 2 by board", cap, from)
 	}
 	// A cap of 0 is honored as 0, and an off source's cap is 0 whatever it holds: an arm sends no turns.
 	if _, err := client.Set(context.Background(), "codex", Change{Cap: number(0), By: "board"}); err != nil {
@@ -116,7 +116,7 @@ func TestTheCapAnArmHonorsIsTheFleetsAndAnOffSourceGetsNone(t *testing.T) {
 	}
 }
 
-// Without loom-pipeline, an arm falls back to the file it read before the fleet, then to the default.
+// Without loom, an arm falls back to the file it read before the fleet, then to the default.
 func TestAnArmFallsBackToTheFileThenTheDefault(t *testing.T) {
 	gone := &Client{Pipeline: "http://127.0.0.1:1", HTTP: http.DefaultClient, Token: func() string { return "t" }}
 	fallback := filepath.Join(t.TempDir(), "codex-ceiling")
@@ -151,6 +151,6 @@ func TestABadSourceOrChangeIsRefusedBeforeItIsSent(t *testing.T) {
 		}
 	}
 	if len(stub.sources) != 0 {
-		t.Fatalf("a refused change reached loom-pipeline: %v", stub.sources)
+		t.Fatalf("a refused change reached loom: %v", stub.sources)
 	}
 }

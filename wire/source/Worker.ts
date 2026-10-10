@@ -58,7 +58,7 @@ function offeredSubprotocols(request: Request): string[] {
         });
 }
 
-// Finds the token, checks it, and checks its scope and run. Returns the claims or the refusal. loom-pipeline
+// Finds the token, checks it, and checks its scope and run. Returns the claims or the refusal. loom
 // (source/Pipeline.ts) checks its tokens here too, so there is one verifier.
 export async function authorize(
     request: Request,
@@ -143,7 +143,7 @@ function askRun(environment: Env, run: string, operation: string, scope: TokenSc
 }
 
 // A page of ours: inline styles and script under the response's nonce, nothing from elsewhere, and only
-// this origin's own endpoints and WebSocket to talk to. loom-pipeline serves its pages through it too.
+// this origin's own endpoints and WebSocket to talk to. loom serves its pages through it too.
 export function pageResponse(html: string, nonce: string, host: string): Response {
     return new Response(html, {
         headers: {
@@ -389,7 +389,7 @@ async function handlePool(request: Request, environment: Env, pool: string, oper
 }
 
 // The cache belongs to no one run, so any run's coordinator token reaches it.
-// The public store (adamic-public): anyone reads it direct at adamic-store.kirkouimet.com/blobs/<sha256>, so a
+// The public store (loom-artifacts): anyone reads it direct at artifacts.loom.system.inc/blobs/<sha256>, so a
 // hundred instances fetch from Cloudflare's edge, never through this Worker. Only a coordinator token of any
 // run writes it, and a write is held to the same sha256 check as every blob, so nobody can poison or fill it.
 async function handlePublicBlob(request: Request, environment: Env, sha256: string): Promise<Response> {
@@ -407,7 +407,7 @@ async function handlePublicBlob(request: Request, environment: Env, sha256: stri
 }
 
 // A named ref in the public store: refs/<namespace>/<name> holds one blob's sha256 (64 hex digits), read direct
-// and unauthenticated at adamic-store.kirkouimet.com/refs/<namespace>/<name>. The build cache keeps a product's
+// and unauthenticated at artifacts.loom.system.inc/refs/<namespace>/<name>. The build cache keeps a product's
 // manifest under its cache key this way (@system_adamic, Oct 9). A ref is written only through here, by a
 // coordinator or publish token, and only to a blob the store already holds, so a ref never dangles. A cache key
 // is honest, so the same key always names the same product: a write that would change a ref is refused (409),
