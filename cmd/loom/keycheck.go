@@ -202,7 +202,7 @@ func checkKeys(checkContext context.Context, build builder.TreeBuild, directory 
 				if errs[index] != nil {
 					continue
 				}
-				moved, hits, failed, err := checkPackage(checkContext, build, pkg, tree, unit, cache, release, strings.TrimSpace(string(moduleCache)))
+				moved, hits, failed, err := checkPackage(checkContext, build, pkg, products[pkg.Package], tree, unit, cache, release, strings.TrimSpace(string(moduleCache)))
 				mutex.Lock()
 				copySeconds += seconds
 				result.Hits += hits
@@ -228,7 +228,7 @@ func checkKeys(checkContext context.Context, build builder.TreeBuild, directory 
 
 // checkPackage runs one package's product tests as a runner would and returns each product that wasn't a hit, how many
 // were, and the output's tail when the tests failed with nothing moved.
-func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg builder.TreePackage, tree, unit, cache, release, moduleCache string) ([]string, int, string, error) {
+func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg builder.TreePackage, products []string, tree, unit, cache, release, moduleCache string) ([]string, int, string, error) {
 	log := filepath.Join(unit, "builds.log")
 	environment := map[string]string{}
 	for _, variable := range os.Environ() {
@@ -255,7 +255,10 @@ func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg bui
 	}
 	command.Env = append(command.Env, "PWD="+directory)
 	output, runErr := command.CombinedOutput()
-	moved, hits := []string{}, 0
+	// Each product the runner side didn't find, with the key Workshop built it under beside the runner's, since the
+	// pair says which side drifted: Workshop's products of that name its tests didn't hit.
+	type missed struct{ name, key, outcome string }
+	misses, hit, hits := []missed{}, map[string]bool{}, 0
 	if file, err := os.Open(log); err == nil {
 		scanner := bufio.NewScanner(file)
 		for scanner.Scan() {
@@ -263,11 +266,25 @@ func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg bui
 			switch {
 			case ok && outcome == "hit":
 				hits++
+				hit[key] = true
 			case ok:
-				moved = append(moved, fmt.Sprintf("%s %s %s", name, key, outcome))
+				misses = append(misses, missed{name, key, outcome})
 			}
 		}
 		file.Close()
+	}
+	moved := []string{}
+	for _, miss := range misses {
+		workshop := []string{}
+		for _, key := range products {
+			if !hit[key[:min(12, len(key))]] && productName(cache, key) == miss.name {
+				workshop = append(workshop, key[:min(12, len(key))])
+			}
+		}
+		if len(workshop) == 0 {
+			workshop = []string{"none"}
+		}
+		moved = append(moved, fmt.Sprintf("%s workshop %s runner %s %s", miss.name, strings.Join(workshop, ","), miss.key, miss.outcome))
 	}
 	for _, refused := range standIn.Refused() {
 		moved = append(moved, "a test ran "+refused)
@@ -282,6 +299,21 @@ func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg bui
 		failed = fmt.Sprintf("%v\n%s", runErr, tail)
 	}
 	return moved, hits, failed, nil
+}
+
+// productName is a product's name as its census line says it, from the first line of the .inputs buildcache wrote
+// beside it ("name <name>"), spaces as underscores; "" when it has none.
+func productName(cache, key string) string {
+	content, err := os.ReadFile(filepath.Join(cache, key+".inputs"))
+	if err != nil {
+		return ""
+	}
+	first, _, _ := strings.Cut(string(content), "\n")
+	name, found := strings.CutPrefix(first, "name ")
+	if !found {
+		return ""
+	}
+	return strings.ReplaceAll(name, " ", "_")
 }
 
 // copyProduct copies product key, its directory and its .inputs, from one buildcache directory into another, as a
