@@ -30,6 +30,9 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "carried" {
 		return judgeCarried(arguments[1:], stdout, stderr)
 	}
+	if len(arguments) > 0 && arguments[0] == "witness" {
+		return judgeWitness(arguments[1:], stdout, stderr)
+	}
 	flags := flag.NewFlagSet("judge", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	queue := flags.String("queue", "", "loom-pipeline's base URL")
@@ -332,6 +335,55 @@ func judgeCarried(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	for _, unit := range units {
 		fmt.Fprintf(stdout, "%s %s\n", unit.UnitKey, unit.Run)
+	}
+	return 0
+}
+
+// judgeWitness compares an uncached witness run's verdicts with the planner's plan at the same tree (#82d430f, proof 3,
+// Loom Oct 10 01:29Z), prints the report, and exits 1 on any key fault (a reused key red uncached), 3 when the witness
+// is incomplete (a reused unit unwitnessed, or a void), and 0 only when it's clean.
+func judgeWitness(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("judge witness", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	planPath := flags.String("plan", "", "the planner's plan at the tree, PlannedUnitWire JSON")
+	verdictsPath := flags.String("verdicts", "", "the uncached run's verdict records, one JSON line each (records or Queue log events)")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if *planPath == "" || *verdictsPath == "" {
+		fmt.Fprintln(stderr, "usage: loom judge witness --plan <plan.json> --verdicts <verdicts.jsonl>")
+		return 2
+	}
+	content, err := os.ReadFile(*planPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge witness:", err)
+		return 2
+	}
+	plan, err := judge.ReadWitnessPlan(content)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge witness:", *planPath+":", err)
+		return 2
+	}
+	file, err := os.Open(*verdictsPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge witness:", err)
+		return 2
+	}
+	defer file.Close()
+	verdicts, err := judge.ReadWitnessVerdicts(file)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge witness:", *verdictsPath+":", err)
+		return 2
+	}
+	report := judge.CompareWitness(plan, verdicts)
+	for _, line := range report.Lines() {
+		fmt.Fprintln(stdout, line)
+	}
+	switch {
+	case len(report.KeyFaults) > 0:
+		return 1
+	case !report.Clean():
+		return 3
 	}
 	return 0
 }

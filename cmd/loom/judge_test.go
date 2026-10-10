@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 
@@ -77,5 +78,40 @@ func TestTheCensusConfigLoadsTheLiveRowsForThePoolsPlatform(t *testing.T) {
 	}
 	if _, err := censusConfig([]string{"../../judge/testdata/census/plain-skips.jsonl"}, ""); err == nil {
 		t.Fatal("a log was loaded as census rows")
+	}
+}
+
+func TestJudgeWitnessExitsOneOnAKeyFaultAndThreeWhenIncomplete(t *testing.T) {
+	directory := t.TempDir()
+	write := func(name, content string) string {
+		path := directory + "/" + name
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	plan := write("plan.json", `{"units":[{"unitKey":"a","decision":"reuse"},{"unitKey":"b","decision":"run"}]}`)
+	record := func(key, status string) string {
+		return `{"unitKey":"` + key + `","future":"t","status":"` + status + `","cause":null,"tests":{"sha256":"x"}}`
+	}
+	cases := []struct {
+		name, verdicts string
+		code           int
+		says           string
+	}{
+		{"clean", record("a", "passed") + "\n" + record("b", "failed") + "\n", 0, "witness clean"},
+		{"a reused key red", record("a", "failed") + "\n" + record("b", "passed") + "\n", 1, "keyFault a"},
+		{"unwitnessed", record("b", "passed") + "\n", 3, "unwitnessed a"},
+		{"from the log", `{"seq":4,"type":"verdict.decided","data":{"decision":{}}}` + "\n" + `{"seq":5,"type":"verdict.decided","data":{"verdict":` + record("a", "failed") + `}}` + "\n", 1, "keyFault a"},
+		{"two trees", record("a", "passed") + "\n" + strings.Replace(record("b", "passed"), `"t"`, `"u"`, 1) + "\n", 2, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var out, errors bytes.Buffer
+			code := judgeWitness([]string{"--plan", plan, "--verdicts", write(c.name+".jsonl", c.verdicts)}, &out, &errors)
+			if code != c.code || !strings.Contains(out.String(), c.says) {
+				t.Fatalf("exit %d, output %q %q", code, out.String(), errors.String())
+			}
+		})
 	}
 }
