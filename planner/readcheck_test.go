@@ -403,3 +403,31 @@ func TestADottedReadIsCheckedWhereItResolves(t *testing.T) {
 		t.Fatalf("findings %v, want the undeclared file the dotted name reached", got)
 	}
 }
+
+// Threads share their working directory (CLONE_FS, which every thread has; the second review's finding 2): a chdir,
+// an fchdir or a decoded AT_FDCWD in any one of them moves all of them, a clone3 included, while a forked process
+// keeps its own: its parent's chdir after the fork doesn't move it. Mutants that each fail it: a thread given its own
+// working directory; the group moved by chdir alone; a forked process sharing its parent's.
+func TestThreadsShareAWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	trace := strings.Join([]string{
+		`100 clone(child_stack=0xc000, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS) = 101`,
+		`101 chdir("/tree/sub") = 0`,
+		`100 execve("./tool", ["./tool"], 0x0 /* 1 vars */) = 0`,
+		`100 clone3({flags=CLONE_VM|CLONE_FS|CLONE_THREAD|CLONE_SIGHAND, stack=0x7f, stack_size=0x9000}, 88) = 102`,
+		`102 fchdir(5</tree/sub/dir>) = 0`,
+		`101 stat("a.txt", {st_mode=S_IFREG|0644, ...}) = 0`,
+		`100 clone(child_stack=NULL, flags=CLONE_CHILD_CLEARTID|SIGCHLD) = 200`,
+		`101 newfstatat(AT_FDCWD</tree/q>, "b.txt", {st_mode=S_IFREG|0644, ...}, 0) = 0`,
+		`102 access("c.txt", R_OK) = 0`,
+		`200 stat("d.txt", {st_mode=S_IFREG|0644, ...}) = 0`,
+	}, "\n")
+	accesses, err := TraceAccesses(strings.NewReader(trace), "/tree/p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/tree/q/b.txt", "/tree/q/c.txt", "/tree/sub", "/tree/sub/dir/a.txt", "/tree/sub/dir/d.txt"}
+	if !reflect.DeepEqual(accesses.Reads, []string{"/tree/sub/tool"}) || !reflect.DeepEqual(accesses.Lookups, want) {
+		t.Fatalf("reads %q lookups %q, want [/tree/sub/tool] and %q", accesses.Reads, accesses.Lookups, want)
+	}
+}

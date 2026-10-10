@@ -71,9 +71,9 @@ type traceEvent struct {
 
 // TraceAccesses reads a trace into the paths its run reached (TracedAccesses). A path resolves as TracedReads says.
 // Each process's working directory is the decoded AT_FDCWD of its latest *at call, or what its chdir or fchdir made
-// it, or its parent's when it forked; the traced process starts in directory. A listing names its descriptor's decoded
-// path, and one the trace didn't decode is refused, since its directory is unknown; so is a call by a numbered
-// descriptor the trace didn't decode.
+// it, or its parent's when it forked; threads and processes cloned with CLONE_FS share one, so any of them moves
+// it. The traced process starts in directory. A listing names its descriptor's decoded path, and one the trace didn't
+// decode is refused, since its directory is unknown; so is a call by a numbered descriptor the trace didn't decode.
 func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 	events, err := traceEvents(trace)
 	if err != nil {
@@ -81,8 +81,17 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 	}
 	reads, lookups, listings, present := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	working := map[string]string{}
+	// shared is each thread or process that shares its creator's working directory (CLONE_FS, which every thread
+	// has), to the first of them: a chdir by any one moves them all.
+	shared := map[string]string{}
+	group := func(pid string) string {
+		if first, found := shared[pid]; found {
+			return first
+		}
+		return pid
+	}
 	workingOf := func(pid string) string {
-		if cwd, found := working[pid]; found {
+		if cwd, found := working[group(pid)]; found {
 			return cwd
 		}
 		return directory
@@ -113,7 +122,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 	for _, event := range events {
 		if match := descriptor.FindStringSubmatch(event.arguments); match != nil && strings.HasPrefix(match[0], "AT_FDCWD<") {
 			// strace decodes AT_FDCWD as the process's working directory as it is: the truth, whatever came before.
-			working[event.pid] = filepath.Clean(match[1])
+			working[group(event.pid)] = filepath.Clean(match[1])
 		}
 		failed := func(err error) (TracedAccesses, error) {
 			return TracedAccesses{}, fmt.Errorf("trace line %q: %w", event.line, err)
@@ -121,7 +130,12 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 		switch {
 		case forkCalls[event.call]:
 			if event.result > 0 {
-				working[strconv.Itoa(event.result)] = workingOf(event.pid)
+				child := strconv.Itoa(event.result)
+				if strings.Contains(event.arguments, "CLONE_FS") || strings.Contains(event.arguments, "CLONE_THREAD") {
+					shared[child] = group(event.pid)
+				} else {
+					working[child] = workingOf(event.pid)
+				}
 			}
 		case event.call == "fchdir":
 			if event.result == 0 {
@@ -129,7 +143,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 				if match == nil || match[1] == "" {
 					return failed(fmt.Errorf("an fchdir whose directory wasn't decoded (--decode-fds=path)"))
 				}
-				working[event.pid] = filepath.Clean(match[1])
+				working[group(event.pid)] = filepath.Clean(match[1])
 			}
 		case listingCalls[event.call]:
 			if event.result < 0 {
@@ -197,7 +211,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			case event.call == "chdir":
 				lookup(path, event.result == 0)
 				if event.result == 0 {
-					working[event.pid] = path
+					working[group(event.pid)] = path
 				}
 			case opened && event.result >= 0 && (strings.Contains(flags, "O_TRUNC") || strings.Contains(flags, "O_CREAT") && strings.Contains(flags, "O_EXCL")):
 				// A file the run created or emptied holds only what the run writes into it.
