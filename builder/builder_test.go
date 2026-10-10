@@ -491,6 +491,51 @@ func TestAFetchRefusesOutputPathsARunnerShouldntWrite(t *testing.T) {
 	}
 }
 
+func TestAFetchCanLeaveOutWhatClangBuilt(t *testing.T) {
+	store := newFakeStore()
+	goProduct, nativeProduct := keyOf("go oracle"), keyOf("native release")
+	cache := t.TempDir()
+	productKey := keyOf("productKey")
+	run := func(action Action, environment []string) ([]byte, error) {
+		log := ""
+		for _, entry := range environment {
+			if value, ok := strings.CutPrefix(entry, "ADAMIC_BUILD_LOG="); ok {
+				log = value
+			}
+		}
+		for product, tool := range map[string]string{goProduct: "tool go version: go version go1.27.1 linux/amd64", nativeProduct: "tool clang --version: clang version 20.1.8"} {
+			os.MkdirAll(filepath.Join(cache, product), 0o755)
+			os.WriteFile(filepath.Join(cache, product, "out"), []byte(product), 0o755)
+			os.WriteFile(filepath.Join(cache, product+".inputs"), []byte("name "+product[:4]+"\nfile a.go\n"+tool+"\n"), 0o644)
+		}
+		os.WriteFile(log, []byte("build g "+goProduct[:12]+" miss 1.00\nbuild n "+nativeProduct[:12]+" miss 1.00\n"), 0o644)
+		return nil, nil
+	}
+	builder := Builder{Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: cache, Run: run, Key: func(Action) (string, error) { return productKey, nil }}
+	if results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_X"}}); results[0].Outcome != "built" || results[0].Products != 2 {
+		t.Fatalf("%+v", results)
+	}
+	runner := t.TempDir()
+	if err := (Store{Read: builder.Store.Read, SkipNative: true}).Fetch(productKey, runner); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(runner, goProduct, "out")); err != nil {
+		t.Fatalf("the Go product wasn't fetched: %v", err)
+	}
+	for _, left := range []string{nativeProduct, nativeProduct + ".inputs"} {
+		if _, err := os.Stat(filepath.Join(runner, left)); err == nil {
+			t.Fatalf("a native product was fetched: %s", left)
+		}
+	}
+	everything := t.TempDir()
+	if err := (Store{Read: builder.Store.Read}).Fetch(productKey, everything); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(everything, nativeProduct, "out")); err != nil {
+		t.Fatalf("without SkipNative the native product wasn't fetched: %v", err)
+	}
+}
+
 func TestTheCanonicalManifestMatchesTheStores(t *testing.T) {
 	// The bytes Actions.ts's canonicalManifest writes for the same manifest (test/pipeline/Actions.test.ts).
 	manifest := Manifest{Key: "k", Outputs: []Output{

@@ -74,6 +74,22 @@ type Store struct {
 	Write  string
 	Token  string
 	Client *http.Client
+	// SkipNative leaves out of a fetch every product its buildcache description says clang built, so the runner
+	// builds those itself (Judge's ruling until native products are reproducible, #tsn1wp8): Go products serve.
+	SkipNative bool
+}
+
+// nativeToolLine is how buildcache's description of a product names clang among its tools.
+const nativeToolLine = "tool clang --version:"
+
+// native reports whether a product's .inputs description names clang as one of its tools.
+func native(inputs []byte) bool {
+	for _, line := range strings.Split(string(inputs), "\n") {
+		if strings.HasPrefix(line, nativeToolLine) {
+			return true
+		}
+	}
+	return false
 }
 
 // ErrNotStored is an action with no ref.
@@ -168,7 +184,28 @@ func (store Store) Fetch(key, directory string) error {
 		return err
 	}
 	defer root.Close()
+	// With SkipNative, each product's description is read first, and a product clang built is left out whole.
+	skipped := map[string]bool{}
+	if store.SkipNative {
+		for _, output := range manifest.Outputs {
+			product, isInputs := strings.CutSuffix(output.Path, ".inputs")
+			if !isInputs || strings.Contains(product, "/") {
+				continue
+			}
+			content, err := store.blob(output.Sha256)
+			if err != nil {
+				return fmt.Errorf("action %s, %s: %w", key, output.Path, err)
+			}
+			if native(content) {
+				skipped[product] = true
+			}
+		}
+	}
 	for _, output := range manifest.Outputs {
+		product, _, _ := strings.Cut(strings.TrimSuffix(output.Path, ".inputs"), "/")
+		if skipped[product] {
+			continue
+		}
 		content, err := store.blob(output.Sha256)
 		if err != nil {
 			return fmt.Errorf("action %s, %s: %w", key, output.Path, err)
