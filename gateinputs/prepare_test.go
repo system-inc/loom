@@ -1,6 +1,7 @@
 package gateinputs
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,8 @@ import (
 //	unpacking in place, or the marker not removed first, or staging kept after a failure:
 //	TestAFailedUnpackLeavesNoMarkerAndNoStaging
 //	the trim not taking an earlier unit's staging: TestTheTrimTakesAKilledUnitsStaging
+//	no room check before the fetch, or one that counts only the floor: TestPrepareMakesRoomForBothSizesBeforeItFetches
+//	the tar's sha256 not checked against the job's name: TestPrepareChecksTheTarAgainstTheJobsName
 
 // prepareTools skips a test on a machine without what a runner's prepare.sh uses: coreutils' sha256sum among them.
 func prepareTools(t *testing.T) {
@@ -79,7 +82,7 @@ func TestPrepareUnpacksWhatPublishWrote(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
-	output, ok := run(root, published.Hash)
+	output, ok := run(root, published.Name)
 	if !ok {
 		t.Fatalf("prepare.sh: %s", output)
 	}
@@ -90,13 +93,13 @@ func TestPrepareUnpacksWhatPublishWrote(t *testing.T) {
 	if status := git(t, checkout, "status", "--porcelain", "--untracked-files=all"); status != "" {
 		t.Fatalf("the checkout prepare.sh unpacked isn't clean:\n%s", status)
 	}
-	if marker, _ := os.ReadFile(filepath.Join(root, "adamic-tools", "gate-inputs.manifest")); strings.TrimSpace(string(marker)) != published.Hash {
+	if marker, _ := os.ReadFile(filepath.Join(root, "adamic-tools", "gate-inputs.manifest")); strings.TrimSpace(string(marker)) != published.Name {
 		t.Fatalf("prepare.sh marked %q", marker)
 	}
 	chunk := published.Manifest.Chunks[0]
 	held, _ := fake.Object(Prefix + chunk)
 	fake.Set(Prefix+chunk, append(held[:len(held)-1:len(held)-1], held[len(held)-1]^1), time.Now())
-	if output, ok := run(t.TempDir(), published.Hash); ok || !strings.Contains(output, "gate inputs chunk "+chunk+" failed") {
+	if output, ok := run(t.TempDir(), published.Name); ok || !strings.Contains(output, "gate inputs chunk "+chunk+" failed") {
 		t.Fatalf("a poisoned chunk: %v: %s", ok, output)
 	}
 }
@@ -124,11 +127,11 @@ func TestAFailedUnpackLeavesNoMarkerAndNoStaging(t *testing.T) {
 	path := "PATH=" + stubs + ":" + os.Getenv("PATH")
 	root := t.TempDir()
 	marker := filepath.Join(root, "adamic-tools", "gate-inputs.manifest")
-	if output, ok := run(root, first.Hash, path); !ok {
+	if output, ok := run(root, first.Name, path); !ok {
 		t.Fatalf("the first unit: %s", output)
 	}
 	os.WriteFile(failing, nil, 0o644)
-	if output, ok := run(root, second.Hash, path); ok || !strings.Contains(output, "unpack failed") {
+	if output, ok := run(root, second.Name, path); ok || !strings.Contains(output, "unpack failed") {
 		t.Fatalf("an unpack that fails: %v: %s", ok, output)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -142,7 +145,7 @@ func TestAFailedUnpackLeavesNoMarkerAndNoStaging(t *testing.T) {
 		t.Fatalf("a failed unpack left its half in place of the inputs it replaced: css-printer/package.json is %s", read)
 	}
 	os.Remove(failing)
-	if output, ok := run(root, first.Hash, path); !ok {
+	if output, ok := run(root, first.Name, path); !ok {
 		t.Fatalf("the next unit: %s", output)
 	}
 	if read, _ := os.ReadFile(filepath.Join(root, "adamic-tools", Root, "css-printer", "package.json")); string(read) != `{"dependencies":{"prettier":"3.9.6"}}` {
@@ -170,5 +173,77 @@ func TestTheTrimTakesAKilledUnitsStaging(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, "adamic-tools", kept)); err != nil {
 			t.Fatalf("the trim took %s: %v", kept, err)
 		}
+	}
+}
+
+// Nothing is fetched until the root has room for the tar.gz and the unpacked inputs, both sizes the manifest's, above
+// the 1500 MB floor: a 1.5 GB fetch doesn't start on a disk with 1.5 GB free.
+func TestPrepareMakesRoomForBothSizesBeforeItFetches(t *testing.T) {
+	fake := r2test.New(t)
+	run := prepareSection(t, fake)
+	directory := inputsFixture(t)
+	noise := make([]byte, 3<<20)
+	for index := range noise {
+		noise[index] = byte(index*7919>>3 ^ index>>11)
+	}
+	write(t, filepath.Join(directory, "gitignore", ".gitignore"), string(noise), 0o644)
+	published, err := Publish(directory, 1<<20, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	need := (published.Manifest.Compressed+published.Manifest.Size)/(1<<20) + 1500
+	if need < 1503 {
+		t.Fatalf("the fixture needs %d MB, too little above the floor to tell its sizes were counted", need)
+	}
+	stubs := t.TempDir()
+	df := func(free int64) string {
+		write(t, filepath.Join(stubs, "df"), "#!/bin/bash\necho 'Filesystem 1048576-blocks Used Available Capacity Mounted on'\n"+
+			"for path in \"${@:2}\"; do echo \"/dev/stub 9999 1 "+fmt.Sprint(free)+" 1% /\"; done\n", 0o755)
+		return "PATH=" + stubs + ":" + os.Getenv("PATH")
+	}
+	fake.ResetRequests()
+	output, ok := run(t.TempDir(), published.Name, df(need-1))
+	if ok || !strings.Contains(output, fmt.Sprintf("the gate inputs need %d MB", need)) {
+		t.Fatalf("%d MB free for %d MB: %v: %s", need-1, need, ok, output)
+	}
+	for _, chunk := range published.Manifest.Chunks {
+		if fake.Count("PUBLIC", Prefix+chunk) != 0 {
+			t.Fatalf("chunk %.12s was fetched onto a disk without room for it", chunk)
+		}
+	}
+	if output, ok := run(t.TempDir(), published.Name, df(need)); !ok {
+		t.Fatalf("%d MB free for %d MB: %s", need, need, output)
+	}
+}
+
+// The manifest needn't be trusted: one that names another tar is refused, and one whose chunks and total are whole
+// but make another tar than the job's name is refused before anything is unpacked.
+func TestPrepareChecksTheTarAgainstTheJobsName(t *testing.T) {
+	fake := r2test.New(t)
+	run := prepareSection(t, fake)
+	first, err := Publish(inputsFixture(t), 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := inputsFixture(t)
+	write(t, filepath.Join(other, "css-printer", "package.json"), `{"moved":1}`, 0o644)
+	second, err := Publish(other, 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := strings.Repeat("d", 64)
+	fake.Set(Prefix+elsewhere, first.Manifest.Bytes(), time.Now())
+	if output, ok := run(t.TempDir(), elsewhere); ok || !strings.Contains(output, "a tar other than "+elsewhere) {
+		t.Fatalf("a manifest naming another tar: %v: %s", ok, output)
+	}
+	swapped := second.Manifest
+	swapped.Name, swapped.Size = first.Name, first.Manifest.Size
+	fake.Set(Prefix+first.Name, swapped.Bytes(), time.Now())
+	root := t.TempDir()
+	if output, ok := run(root, first.Name); ok || !strings.Contains(output, "gate inputs tar isn't "+first.Name) {
+		t.Fatalf("another tar's chunks under the first's name: %v: %s", ok, output)
+	}
+	if _, err := os.Stat(filepath.Join(root, "adamic-tools", Root)); !os.IsNotExist(err) {
+		t.Fatalf("another tar was unpacked under the first's name: %v", err)
 	}
 }

@@ -48,8 +48,9 @@ type TestJob struct {
 	Base string `json:"base,omitempty"`
 	// Packages are the go test runs, one package each, with its -run and -skip patterns (empty: every test).
 	Packages []TestPackage `json:"packages"`
-	// GateInputs is the sha256 of the gate inputs' manifest in Loom's public store (the pinned TypeScript, the
-	// formatters' libraries and corpora), fetched and checked by hash. Empty: none.
+	// GateInputs names the gate inputs in Loom's public store (the pinned TypeScript, the formatters' libraries and
+	// corpora): the sha256 of their uncompressed tar, whose manifest is at gate-inputs/<name>, fetched and checked by
+	// hash (gateinputs/gateinputs.go). Empty: none.
 	GateInputs string `json:"gateInputs,omitempty"`
 	// ChangedPaths are the paths the change touched, which the tests read through ADAMIC_GATE_CHANGED, and which a
 	// gofmt phase job checks. No other phase job carries them.

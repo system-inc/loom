@@ -24,16 +24,17 @@ func gateInputsDefaults() (directory, manifestFile string) {
 // (gateinputs/gateinputs.go):
 //
 //	loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--bucket <name>] [--read <url>] [--dry-run]
-//	loom gate-inputs check [--manifest-file <path>] [--read <url>] [<manifest sha256>]
+//	loom gate-inputs check [--manifest-file <path>] [--read <url>] [<name>]
 //
-// publish packs the directory deterministically, writes its chunks and manifest under gate-inputs/ in the bucket
-// (each only if missing), reads the manifest back from the public domain, and only then writes the manifest's sha256
-// to the manifest file, which the planner rereads before every pull. It refuses a bucket whose lifecycle would expire
-// gate-inputs/, and says so when its key may not read the lifecycle. --dry-run packs and prints the sha256, and
+// publish names the directory by its deterministic tar, writes its chunks and manifest under gate-inputs/ in the
+// bucket (nothing when that name is already whole there, and otherwise each only if missing), reads the manifest back
+// from the public domain, and only then writes the name to the manifest file, which the planner rereads before every
+// pull. It refuses a bucket whose lifecycle would expire
+// gate-inputs/, and says so when its key may not read the lifecycle. --dry-run packs and prints the name, and
 // writes nothing anywhere. check reads a manifest back as a runner would and exits 1 when it isn't whole.
 func gateInputs(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	usage := "usage: loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--bucket <name>] [--read <url>] [--dry-run]\n" +
-		"       loom gate-inputs check [--manifest-file <path>] [--read <url>] [<manifest sha256>]"
+		"       loom gate-inputs check [--manifest-file <path>] [--read <url>] [<name>]"
 	if len(arguments) == 0 {
 		fmt.Fprintln(stderr, usage)
 		return 2
@@ -61,7 +62,7 @@ func gateInputs(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				fmt.Fprintln(stderr, "gate-inputs publish:", err)
 				return 1
 			}
-			fmt.Fprintf(stdout, "%s: %d chunks, %d bytes (dry run: nothing written)\n", manifest.Hash(), len(manifest.Chunks), bytes)
+			fmt.Fprintf(stdout, "%s: %d chunks, %d bytes, %d unpacked (dry run: nothing written)\n", manifest.Name, len(manifest.Chunks), bytes, manifest.Size)
 			return 0
 		}
 		store, err := storeFlags.open(&builder.Requests{})
@@ -117,12 +118,12 @@ func publishGateInputs(directory, manifestFile string, bucket r2.Bucket, read st
 		return 1
 	}
 	previous, _ := gateinputs.ReadFile(manifestFile)
-	if err = gateinputs.WriteFile(manifestFile, published.Hash); err != nil {
+	if err = gateinputs.WriteFile(manifestFile, published.Name); err != nil {
 		fmt.Fprintln(stderr, "gate-inputs publish:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "%s: %d chunks, %d bytes, %d objects written; %s names it\n", published.Hash, len(published.Manifest.Chunks), published.Bytes, published.Uploaded, manifestFile)
-	if previous != "" && previous != published.Hash {
+	fmt.Fprintf(stdout, "%s: %d chunks, %d bytes, %d objects written; %s names it\n", published.Name, len(published.Manifest.Chunks), published.Manifest.Compressed, published.Uploaded, manifestFile)
+	if previous != "" && previous != published.Name {
 		fmt.Fprintf(stdout, "the gate inputs moved from %.12s: every unit key the planner makes from its next pull moves with them\n", previous)
 	}
 	return 0

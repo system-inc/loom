@@ -165,25 +165,37 @@ if [ -f "${lockfile}" ]; then
 	fi
 fi
 
-# The gate inputs, from Loom's public store by hash under gate-inputs/, where `loom gate-inputs publish` writes them and no
-# lifecycle expires them: a manifest of chunks of one tar.gz and its total, every hash checked (gateinputs/gateinputs.go).
-# The marker naming what is unpacked goes first and comes back last, and the inputs are unpacked in staging and moved
-# into place whole, so a unit that fails anywhere between (a full disk, its deadline) leaves no marker naming inputs that
-# aren't there, and the next unit fetches them again. Staging goes when this ends, however it ends, short of a kill,
-# whose leavings the next trim takes.
+# The gate inputs, from Loom's public store under gate-inputs/, where `loom gate-inputs publish` writes them and no
+# lifecycle expires them (gateinputs/gateinputs.go). Their name, the job's, is the sha256 of their uncompressed tar; the
+# manifest by that name lists the chunks of a tar.gz of it, then "total <sha256> <bytes>" of the tar.gz and "tar <name>
+# <bytes>". Every chunk, the total and the tar itself are checked by sha256, the last against the job's name, so the
+# manifest needn't be trusted. Nothing is fetched until the root has room for the tar.gz and the unpacked inputs above
+# the 1500 MB floor. The marker naming what is unpacked goes first and comes back last, and the inputs are unpacked in
+# staging and moved into place whole, so a unit that fails anywhere between (a full disk, its deadline) leaves no marker
+# naming inputs that aren't there, and the next unit fetches them again. Staging goes when this ends, however it ends,
+# short of a kill, whose leavings the next trim takes.
 tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs
 if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/null)" != "${gateInputs}" ]; then
-	fetch() { curl -fsS --retry 3 -o "$2" "https://artifacts.loom.system.inc/gate-inputs/$1" && echo "$1  $2" | sha256sum -c --quiet; }
-	staging=${tools}/staging-$$
+	fetch() { curl -fsS --retry 3 -o "$2" "https://artifacts.loom.system.inc/gate-inputs/$1"; }
+	staging=${tools}/staging-$$ archive=${tools}/staging-$$/gate-inputs.tar.gz
 	trap 'rm -rf "${staging}"' EXIT
 	rm -f "${tools}/gate-inputs.manifest"
 	mkdir -p "${staging}/unpacked" && fetch "${gateInputs}" "${staging}/manifest" || { say "gate inputs manifest ${gateInputs} unreadable"; exit 2; }
+	read -r _ total compressed < <(grep '^total ' "${staging}/manifest")
+	read -r _ name size < <(grep '^tar ' "${staging}/manifest")
+	[[ ${total:-} =~ ^[0-9a-f]{64}$ && ${compressed:-} =~ ^[0-9]{1,15}$ && ${size:-} =~ ^[0-9]{1,15}$ && ${name:-} = "${gateInputs}" ]] ||
+		{ say "gate inputs manifest ${gateInputs} names no total, or a tar other than ${gateInputs}"; exit 2; }
+	need=$(((compressed + size) / 1048576 + 1500)) free=$(freeMegabytes)
+	[ "${free:-0}" -ge "${need}" ] || { say "only ${free} MB free, and the gate inputs need ${need} MB"; exit 2; }
 	while read -r hash; do
 		[[ ${hash} =~ ^[0-9a-f]{64}$ ]] || { say "gate inputs manifest holds a line that isn't a hash"; exit 2; }
-		fetch "${hash}" "${staging}/part" && cat "${staging}/part" >> "${staging}/gate-inputs.tar.gz" || { say "gate inputs chunk ${hash} failed"; exit 2; }
-	done < <(grep -v '^total ' "${staging}/manifest")
-	echo "$(sed -n 's/^total //p' "${staging}/manifest")  ${staging}/gate-inputs.tar.gz" | sha256sum -c --quiet || { say "gate inputs total hash differs"; exit 2; }
-	tar -C "${staging}/unpacked" -xzf "${staging}/gate-inputs.tar.gz" && [ -d "${staging}/unpacked/gate-inputs" ] || { say "gate inputs unpack failed"; exit 2; }
+		fetch "${hash}" "${staging}/part" && echo "${hash}  ${staging}/part" | sha256sum -c --quiet && cat "${staging}/part" >> "${archive}" ||
+			{ say "gate inputs chunk ${hash} failed"; exit 2; }
+	done < <(grep -v -e '^total ' -e '^tar ' "${staging}/manifest")
+	rm -f "${staging}/part"
+	echo "${total}  ${archive}" | sha256sum -c --quiet || { say "gate inputs total hash differs"; exit 2; }
+	[ "$(gzip -dc "${archive}" | sha256sum | cut -c1-64)" = "${gateInputs}" ] || { say "gate inputs tar isn't ${gateInputs}"; exit 2; }
+	tar -C "${staging}/unpacked" -xzf "${archive}" && [ -d "${staging}/unpacked/gate-inputs" ] || { say "gate inputs unpack failed"; exit 2; }
 	{ [ ! -e "${inputs}" ] || mv "${inputs}" "${staging}/replaced"; } && mv "${staging}/unpacked/gate-inputs" "${inputs}" &&
 		echo "${gateInputs}" > "${tools}/gate-inputs.manifest" || { say "the gate inputs couldn't be moved into place"; exit 2; }
 	rm -rf "${staging}"

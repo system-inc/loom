@@ -70,7 +70,7 @@ const usage = `usage:
   loom build-tree --tree <dir> [--r2 <key file>] [--future <sha>] [--tree-key <key>] [--jobs N]
   loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--r2 <key file>] [--once]
   loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--dry-run]
-  loom gate-inputs check [--manifest-file <path>] [<manifest sha256>]
+  loom gate-inputs check [--manifest-file <path>] [<name>]
 `
 
 func main() {

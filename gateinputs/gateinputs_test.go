@@ -2,6 +2,7 @@ package gateinputs
 
 import (
 	"bytes"
+	"compress/gzip"
 	"net/http"
 	"os"
 	"os/exec"
@@ -23,7 +24,10 @@ import (
 //	NormalizeIndex reading a mandatory extension as optional: TestNormalizeIndexRefusesWhatItCantRewriteWhole
 //	Publish writing what the bucket holds again (no HEAD first), or its chunks under blobs/:
 //	TestPublishWritesChunksFirstUnderGateInputsAndNothingTwice
-//	Check skipping the manifest's hash, or the chunks' presence: TestCheckRefusesAManifestNoRunnerCouldRead
+//	Check skipping the manifest's tar, or the chunks' presence: TestCheckRefusesAManifestNoRunnerCouldRead
+//	the name taken from the tar.gz, or a publish that writes again what is already whole by name:
+//	TestTheNameIsTheTarsSoACompressionChangeMovesNoKey
+//	a held manifest kept over its missing chunks: TestPublishReplacesAManifestWhoseChunksAreGone
 //	a Pin reading its file once, or keying on a manifest it didn't check: TestAPinRereadsItsFileAndChecksEachManifestOnce
 //	HomeExpires missing a whole-bucket rule, or a rule on a key under the prefix: TestHomeExpiresNamesEveryRuleThatReachesThePrefix
 
@@ -98,8 +102,8 @@ func pack(t *testing.T, directory string) (Manifest, map[string][]byte) {
 func TestPackGivesTheSameHashAfterABoxsOwnRuns(t *testing.T) {
 	directory := inputsFixture(t)
 	before, _ := pack(t, directory)
-	if again, _ := pack(t, directory); again.Hash() != before.Hash() {
-		t.Fatalf("the same directory packed twice: %s then %s", before.Hash(), again.Hash())
+	if again, _ := pack(t, directory); again.Name != before.Name {
+		t.Fatalf("the same directory packed twice: %s then %s", before.Name, again.Name)
 	}
 	index := filepath.Join(directory, "typescript", ".git", "index")
 	raw, _ := os.ReadFile(index)
@@ -116,8 +120,8 @@ func TestPackGivesTheSameHashAfterABoxsOwnRuns(t *testing.T) {
 	os.Chmod(filepath.Join(directory, "css-printer", "package.json"), 0o664)
 	os.Chmod(filepath.Join(directory, "typescript", "bin", "tsc"), 0o775)
 	write(t, filepath.Join(directory, "cycle-ledger-output.json"), `{"run":2,"longer":true}`, 0o644)
-	if after, _ := pack(t, directory); after.Hash() != before.Hash() {
-		t.Fatalf("a box's own runs moved the gate inputs' hash: %s then %s", before.Hash(), after.Hash())
+	if after, _ := pack(t, directory); after.Name != before.Name {
+		t.Fatalf("a box's own runs moved the gate inputs' hash: %s then %s", before.Name, after.Name)
 	}
 }
 
@@ -132,14 +136,14 @@ func TestPackMovesTheHashWithEveryByteAndModeTheTestsRead(t *testing.T) {
 		"a new file":            func() { write(t, filepath.Join(directory, "graphql", "package.json"), "{}", 0o644) },
 		"a lost executable bit": func() { os.Chmod(filepath.Join(directory, "typescript", "bin", "tsc"), 0o644) },
 	}
-	seen := map[string]string{before.Hash(): "the fixture"}
+	seen := map[string]string{before.Name: "the fixture"}
 	for _, name := range []string{"a changed byte", "a new file", "a lost executable bit"} {
 		changes[name]()
 		after, _ := pack(t, directory)
-		if earlier, found := seen[after.Hash()]; found {
-			t.Errorf("%s packs to %s, as %s did", name, after.Hash(), earlier)
+		if earlier, found := seen[after.Name]; found {
+			t.Errorf("%s packs to %s, as %s did", name, after.Name, earlier)
 		}
-		seen[after.Hash()] = name
+		seen[after.Name] = name
 	}
 }
 
@@ -254,8 +258,8 @@ func TestPublishWritesChunksFirstUnderGateInputsAndNothingTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want, _ := pack(t, directory); published.Hash != want.Hash() || published.Uploaded != len(want.Chunks)+1 {
-		t.Fatalf("published %s with %d objects written, packed %s with %d chunks", published.Hash, published.Uploaded, want.Hash(), len(want.Chunks))
+	if want, _ := pack(t, directory); published.Name != want.Name || published.Uploaded != len(want.Chunks)+1 {
+		t.Fatalf("published %s with %d objects written, packed %s with %d chunks", published.Name, published.Uploaded, want.Name, len(want.Chunks))
 	}
 	puts := []string{}
 	for _, request := range fake.Requests() {
@@ -263,7 +267,7 @@ func TestPublishWritesChunksFirstUnderGateInputsAndNothingTwice(t *testing.T) {
 			puts = append(puts, key)
 		}
 	}
-	if len(puts) == 0 || puts[len(puts)-1] != Prefix+published.Hash {
+	if len(puts) == 0 || puts[len(puts)-1] != Prefix+published.Name {
 		t.Fatalf("the manifest wasn't written last: %v", puts)
 	}
 	for _, key := range puts {
@@ -274,13 +278,13 @@ func TestPublishWritesChunksFirstUnderGateInputsAndNothingTwice(t *testing.T) {
 	if keys := fake.Keys(""); len(keys) != len(published.Manifest.Chunks)+1 {
 		t.Fatalf("the bucket holds %v", keys)
 	}
-	if body, _ := fake.Object(Prefix + published.Hash); !bytes.Equal(body, published.Manifest.Bytes()) {
+	if body, _ := fake.Object(Prefix + published.Name); !bytes.Equal(body, published.Manifest.Bytes()) {
 		t.Fatalf("the manifest reads %q", body)
 	}
 	fake.ResetRequests()
 	again, err := Publish(directory, 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
-	if err != nil || again.Hash != published.Hash || again.Uploaded != 0 || fake.Count(http.MethodPut, "") != 0 {
-		t.Fatalf("publishing again: %s, %d written, %d puts, %v", again.Hash, again.Uploaded, fake.Count(http.MethodPut, ""), err)
+	if err != nil || again.Name != published.Name || again.Uploaded != 0 || fake.Count(http.MethodPut, "") != 0 {
+		t.Fatalf("publishing again: %s, %d written, %d puts, %v", again.Name, again.Uploaded, fake.Count(http.MethodPut, ""), err)
 	}
 }
 
@@ -292,20 +296,20 @@ func TestCheckRefusesAManifestNoRunnerCouldRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Check(fake.Public(), fake.Server.Client(), published.Hash); err != nil {
+	if _, err := Check(fake.Public(), fake.Server.Client(), published.Name); err != nil {
 		t.Fatalf("a whole manifest: %v", err)
 	}
 	notAManifest := []byte("not a manifest\n")
 	fake.Set(Prefix+digest(notAManifest), notAManifest, time.Now())
 	poisoned := strings.Repeat("a", 64)
 	fake.Set(Prefix+poisoned, published.Manifest.Bytes(), time.Now())
-	// In order: the chunk goes last, so a poisoned manifest naming it is refused for its hash alone.
+	// In order: the chunk goes last, so another tar's manifest is refused for its name alone.
 	cases := []struct{ name, hash string }{
 		{"missing", strings.Repeat("b", 64)},
-		{"not its own hash", poisoned},
+		{"another tar's manifest", poisoned},
 		{"not a manifest", digest(notAManifest)},
 		{"not even a sha256", "../blobs/x"},
-		{"missing a chunk", published.Hash},
+		{"missing a chunk", published.Name},
 	}
 	for _, check := range cases {
 		if check.name == "missing a chunk" {
@@ -336,18 +340,18 @@ func TestAPinRereadsItsFileAndChecksEachManifestOnce(t *testing.T) {
 	if _, _, err := pin.Current(); err == nil {
 		t.Fatal("a missing file was read")
 	}
-	WriteFile(file, first.Hash)
+	WriteFile(file, first.Name)
 	fake.ResetRequests()
 	for range 2 {
-		if hash, moved, err := pin.Current(); err != nil || hash != first.Hash || moved {
+		if hash, moved, err := pin.Current(); err != nil || hash != first.Name || moved {
 			t.Fatalf("the first manifest: %s, moved %v, %v", hash, moved, err)
 		}
 	}
-	if reads := fake.Count("PUBLIC", Prefix+first.Hash); reads != 1 {
+	if reads := fake.Count("PUBLIC", Prefix+first.Name); reads != 1 {
 		t.Fatalf("the first manifest was read %d times in two pulls", reads)
 	}
-	WriteFile(file, second.Hash)
-	if hash, moved, err := pin.Current(); err != nil || hash != second.Hash || !moved {
+	WriteFile(file, second.Name)
+	if hash, moved, err := pin.Current(); err != nil || hash != second.Name || !moved {
 		t.Fatalf("after a publish: %s, moved %v, %v", hash, moved, err)
 	}
 	WriteFile(file, strings.Repeat("c", 64))
@@ -370,6 +374,68 @@ func TestHomeExpiresNamesEveryRuleThatReachesThePrefix(t *testing.T) {
 		rules := []r2.LifecycleRule{{Id: "action store", Prefix: "blobs/", Days: 7}, {Id: "this one", Prefix: prefix, Days: 7}}
 		if got := HomeExpires(rules) != nil; got != expires {
 			t.Errorf("a rule on %q: expires the home %v, want %v", prefix, got, expires)
+		}
+	}
+}
+
+// The name is the tar's: a gzip that compresses otherwise (a new Go's) makes other chunks and another total, the same
+// name, and a publish that finds that name already whole writes nothing.
+func TestTheNameIsTheTarsSoACompressionChangeMovesNoKey(t *testing.T) {
+	directory := inputsFixture(t)
+	fake := r2test.New(t)
+	published, err := Publish(directory, 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, size, err := Identity(directory)
+	if err != nil || name != published.Name || size != published.Manifest.Size {
+		t.Fatalf("Identity is %s, %d bytes (%v); Pack's %s, %d", name, size, err, published.Name, published.Manifest.Size)
+	}
+	defer func(level int) { compressionLevel = level }(compressionLevel)
+	compressionLevel = gzip.BestSpeed
+	faster, _ := pack(t, directory)
+	if faster.Total == published.Manifest.Total || faster.Name != published.Name {
+		t.Fatalf("another compression: total %.12s (was %.12s), name %.12s (was %.12s)", faster.Total, published.Manifest.Total, faster.Name, published.Name)
+	}
+	fake.ResetRequests()
+	again, err := Publish(directory, 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil || again.Name != published.Name || again.Uploaded != 0 || fake.Count(http.MethodPut, "") != 0 {
+		t.Fatalf("publishing under another compression: %.12s, %d written, %d puts, %v", again.Name, again.Uploaded, fake.Count(http.MethodPut, ""), err)
+	}
+}
+
+// A manifest held by the name whose chunks aren't all there is replaced, its missing chunk written again.
+func TestPublishReplacesAManifestWhoseChunksAreGone(t *testing.T) {
+	directory := inputsFixture(t)
+	fake := r2test.New(t)
+	published, err := Publish(directory, 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.Delete(Prefix + published.Manifest.Chunks[0])
+	again, err := Publish(directory, 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil || again.Uploaded != 2 {
+		t.Fatalf("publishing over a manifest missing a chunk: %d written, %v", again.Uploaded, err)
+	}
+	if _, err := Check(fake.Public(), fake.Server.Client(), published.Name); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A manifest is read whole or refused: chunks, then the total and the tar, each with its size.
+func TestParseManifestRefusesAnythingElse(t *testing.T) {
+	a, b, c := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	good := a + "\ntotal " + b + " 12\ntar " + c + " 3072\n"
+	if manifest, err := ParseManifest([]byte(good)); err != nil || manifest.Name != c || manifest.Size != 3072 || manifest.Compressed != 12 || len(manifest.Chunks) != 1 {
+		t.Fatalf("%+v %v", manifest, err)
+	}
+	for _, bad := range []string{
+		strings.TrimSuffix(good, "\n"), "total " + b + " 12\ntar " + c + " 3072\n", a + "\ntar " + c + " 3072\ntotal " + b + " 12\n",
+		a + "\ntotal " + b + "\ntar " + c + " 3072\n", a + "\ntotal " + b + " 12\ntar " + c + " -1\n", a + "\ntotal " + b + " 12\ntar " + c + " 03072\n",
+		a + "\ntotal " + b + "  12\ntar " + c + " 3072\n", "x\ntotal " + b + " 12\ntar " + c + " 3072\n", a + "\ntotal " + b + " 12\n",
+	} {
+		if _, err := ParseManifest([]byte(bad)); err == nil {
+			t.Errorf("read %q", bad)
 		}
 	}
 }

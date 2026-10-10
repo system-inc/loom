@@ -1,23 +1,26 @@
 // Package gateinputs publishes the gate inputs and checks them for their readers. The gate inputs are the files
 // adamic's corpus and parity tests read beside the tree, under ~/adamic-tools/gate-inputs on a box (adamic's
 // docs/gate-inputs.md): the pinned TypeScript checkout and the cycle ledger's, the CSS fixtures, the formatters' npm
-// projects, the 100 MiB ignore corpus and the checker archive. A unit runs with them by one hash, the sha256 of their
-// manifest, which the planner reads from ~/.loom/gate-inputs-manifest into every unit's key and test job
+// projects, the 100 MiB ignore corpus and the checker archive. A unit runs with them by one name, the sha256 of their
+// uncompressed tar, which the planner reads from ~/.loom/gate-inputs-manifest into every unit's key and test job
 // (protocol.TestJob.GateInputs, planner.KeyParts.GateInputs), and which a runner's prepare.sh fetches, checks and
 // unpacks into <root>/adamic-tools/gate-inputs.
 //
-// The manifest is text: one line per chunk of a single tar.gz of the directory, each chunk's sha256 in order, then
-// "total <sha256 of the whole tar.gz>". Chunks and manifest live in the public bucket under gate-inputs/<sha256>,
-// a prefix no lifecycle rule names, so a manifest never expires out from under the units keyed on it (the first one,
-// made by hand on Oct 8, lived in blobs/, which expires after 7 days, and was gone by the first witness).
+// The manifest, at gate-inputs/<name> in the public bucket, is text: one line per chunk of a tar.gz of that tar, each
+// chunk's sha256 in order, then "total <sha256> <bytes>" of the whole tar.gz, then "tar <name> <bytes>". A runner
+// checks every chunk, the total, and the tar's own sha256 against the name it was given, so the manifest needn't be
+// trusted, and makes room for both sizes before it fetches anything. Chunks live beside it at gate-inputs/<sha256>,
+// a prefix no lifecycle rule names, so nothing expires out from under the units keyed on it (the first manifest, made
+// by hand on Oct 8, lived in blobs/, which expires after 7 days, and was gone by the first witness).
 //
-// Pack is deterministic, so the manifest's hash is a function of what the tests read and nothing else: entries in
-// byte order, every time the same fixed time, no owner, a file's mode only 0644 or 0755, gzip with no name or time.
-// What a box's own runs write into the directory is left out or normalized, so publishing the directory a box gate
-// runs against gives the same hash before and after its tests: the cycle ledger's output file is never packed, and a
-// git checkout's index is packed with its stat data zeroed (as `git read-tree` leaves it), which git reads by
-// comparing content. The same bytes always give the same hash, so publishing again moves no key, and any byte that
-// changes moves every key that names it.
+// The name is the tar's, not the tar.gz's, so a gzip that compresses differently (a new Go) moves no key. The tar is
+// deterministic, so the name is a function of what the tests read and nothing else: entries in byte order, every time
+// the same fixed time, no owner, a file's mode only 0644 or 0755, a hard link packed as its file. What a box's own runs
+// write into the directory is left out or normalized, so publishing the directory a box gate runs against gives the
+// same name before and after its tests: the cycle ledger's output file is never packed, and every git index (a
+// checkout's, a submodule's, a worktree's) is packed with its stat data zeroed (as `git read-tree` leaves it), which
+// git reads by comparing content. The same bytes always give the same name, so publishing again moves no key, and any
+// byte that changes moves every key that names it.
 package gateinputs
 
 import (
@@ -34,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,10 +72,14 @@ func digest(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// A Manifest is the tar.gz's chunks by sha256, in order, and the whole tar.gz's sha256.
+// A Manifest is the tar.gz's chunks by sha256, in order, the whole tar.gz's sha256 and size, and the tar's: Name, the
+// gate inputs' one name in every key that runs with them, and Size, about what they take unpacked.
 type Manifest struct {
-	Chunks []string
-	Total  string
+	Chunks     []string
+	Total      string
+	Compressed int64
+	Name       string
+	Size       int64
 }
 
 // Bytes is the manifest as prepare.sh reads it.
@@ -80,51 +88,68 @@ func (manifest Manifest) Bytes() []byte {
 	for _, chunk := range manifest.Chunks {
 		text.WriteString(chunk + "\n")
 	}
-	text.WriteString("total " + manifest.Total + "\n")
+	fmt.Fprintf(&text, "total %s %d\ntar %s %d\n", manifest.Total, manifest.Compressed, manifest.Name, manifest.Size)
 	return text.Bytes()
 }
 
-// Hash is the manifest's sha256: the gate inputs' one name, in every key that runs with them.
-func (manifest Manifest) Hash() string {
-	return digest(manifest.Bytes())
+// sizedLine reads "<word> <sha256> <bytes>".
+func sizedLine(line, word string) (string, int64, error) {
+	fields := strings.Fields(line)
+	if len(fields) == 3 && fields[0] == word && Sha256Hex(fields[1]) && line == strings.Join(fields, " ") {
+		if size, err := strconv.ParseInt(fields[2], 10, 64); err == nil && size >= 0 && strconv.FormatInt(size, 10) == fields[2] {
+			return fields[1], size, nil
+		}
+	}
+	return "", 0, fmt.Errorf("a manifest's %s line is %s <sha256> <bytes>, not %q", word, word, line)
 }
 
-// ParseManifest reads a manifest, refusing anything but at least one chunk line, then one total line, each a sha256.
+// ParseManifest reads a manifest, refusing anything but at least one chunk line, each a sha256, then the total line,
+// then the tar line.
 func ParseManifest(content []byte) (Manifest, error) {
 	text, found := strings.CutSuffix(string(content), "\n")
 	if !found {
 		return Manifest{}, fmt.Errorf("a manifest ends with a newline")
 	}
 	lines := strings.Split(text, "\n")
+	if len(lines) < 3 {
+		return Manifest{}, fmt.Errorf("a manifest names at least one chunk, its total and its tar")
+	}
 	manifest := Manifest{}
-	for index, line := range lines {
-		if index == len(lines)-1 {
-			total, isTotal := strings.CutPrefix(line, "total ")
-			if !isTotal || !Sha256Hex(total) {
-				return Manifest{}, fmt.Errorf("a manifest's last line is total <sha256>, not %q", line)
-			}
-			manifest.Total = total
-			continue
-		}
+	var err error
+	if manifest.Total, manifest.Compressed, err = sizedLine(lines[len(lines)-2], "total"); err != nil {
+		return Manifest{}, err
+	}
+	if manifest.Name, manifest.Size, err = sizedLine(lines[len(lines)-1], "tar"); err != nil {
+		return Manifest{}, err
+	}
+	for index, line := range lines[:len(lines)-2] {
 		if !Sha256Hex(line) {
 			return Manifest{}, fmt.Errorf("a manifest's line %d is a chunk's sha256, not %q", index+1, line)
 		}
 		manifest.Chunks = append(manifest.Chunks, line)
 	}
-	if len(manifest.Chunks) == 0 {
-		return Manifest{}, fmt.Errorf("a manifest names no chunk")
-	}
 	return manifest, nil
+}
+
+// counter hashes and counts what it is written.
+type counter struct {
+	hash  hashWriter
+	bytes int64
+}
+
+func (count *counter) Write(content []byte) (int, error) {
+	count.bytes += int64(len(content))
+	return count.hash.Write(content)
 }
 
 // chunker cuts what it is written into chunks of size bytes, handing each to emit, and hashes the whole.
 type chunker struct {
 	size   int
 	buffer []byte
-	total  []byte
 	whole  hashWriter
 	emit   func(hash string, content []byte) error
 	chunks []string
+	sizes  []int64
 }
 
 type hashWriter interface {
@@ -154,7 +179,7 @@ func (chunks *chunker) flush() error {
 		return nil
 	}
 	hash := digest(chunks.buffer)
-	chunks.chunks = append(chunks.chunks, hash)
+	chunks.chunks, chunks.sizes = append(chunks.chunks, hash), append(chunks.sizes, int64(len(chunks.buffer)))
 	if err := chunks.emit(hash, chunks.buffer); err != nil {
 		return err
 	}
@@ -162,29 +187,63 @@ func (chunks *chunker) flush() error {
 	return nil
 }
 
-// Pack writes the directory as one deterministic tar.gz under Root, cut into chunks of chunkSize bytes (ChunkSize
-// when zero), handing each chunk to emit in order as it is cut, and returns the manifest. It refuses what can't be
-// packed the same way twice or would unpack outside the tools directory: a special file, a symbolic link that is
-// absolute or leaves the directory, a git lock (a git command was running in it), or a git index it can't read.
+// compressionLevel is the tar.gz's; the name doesn't depend on it.
+var compressionLevel = gzip.DefaultCompression
+
+// Identity is the gate inputs' name and the tar's size, without compressing or cutting anything: what Pack's would be.
+func Identity(directory string) (string, int64, error) {
+	tarred := &counter{hash: sha256.New()}
+	if err := writeTar(directory, tarred); err != nil {
+		return "", 0, err
+	}
+	return hex.EncodeToString(tarred.hash.Sum(nil)), tarred.bytes, nil
+}
+
+// Pack writes the directory as one deterministic tar under Root, gzipped and cut into chunks of chunkSize bytes
+// (ChunkSize when zero), handing each chunk to emit in order as it is cut, and returns the manifest. It refuses what
+// can't be packed the same way twice or would unpack outside the tools directory: a special file, a symbolic link that
+// is absolute or resolves outside the directory, a git lock (a git command was running in it), or a git index it
+// can't read.
 func Pack(directory string, chunkSize int, emit func(hash string, content []byte) error) (Manifest, error) {
 	if chunkSize <= 0 {
 		chunkSize = ChunkSize
 	}
+	chunks := &chunker{size: chunkSize, buffer: make([]byte, 0, chunkSize), whole: sha256.New(), emit: emit}
+	compressed, err := gzip.NewWriterLevel(chunks, compressionLevel)
+	if err != nil {
+		return Manifest{}, err
+	}
+	tarred := &counter{hash: sha256.New()}
+	err = writeTar(directory, io.MultiWriter(tarred, compressed))
+	if err == nil {
+		err = compressed.Close()
+	}
+	if err == nil {
+		err = chunks.flush()
+	}
+	if err != nil {
+		return Manifest{}, err
+	}
+	compressedBytes := int64(0)
+	for _, size := range chunks.sizes {
+		compressedBytes += size
+	}
+	return Manifest{Chunks: chunks.chunks, Total: hex.EncodeToString(chunks.whole.Sum(nil)), Compressed: compressedBytes,
+		Name: hex.EncodeToString(tarred.hash.Sum(nil)), Size: tarred.bytes}, nil
+}
+
+// writeTar writes the directory as Pack's tar.
+func writeTar(directory string, out io.Writer) error {
 	directory, err := filepath.EvalSymlinks(directory)
 	if err != nil {
-		return Manifest{}, err
+		return err
 	}
 	if info, err := os.Stat(directory); err != nil {
-		return Manifest{}, err
+		return err
 	} else if !info.IsDir() {
-		return Manifest{}, fmt.Errorf("%s isn't a directory", directory)
+		return fmt.Errorf("%s isn't a directory", directory)
 	}
-	chunks := &chunker{size: chunkSize, buffer: make([]byte, 0, chunkSize), whole: sha256.New(), emit: emit}
-	compressed, err := gzip.NewWriterLevel(chunks, gzip.DefaultCompression)
-	if err != nil {
-		return Manifest{}, err
-	}
-	archive := tar.NewWriter(compressed)
+	archive := tar.NewWriter(out)
 	err = filepath.WalkDir(directory, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -246,19 +305,10 @@ func Pack(directory string, chunkSize int, emit func(hash string, content []byte
 		_, err = archive.Write(content)
 		return err
 	})
-	if err == nil {
-		err = archive.Close()
-	}
-	if err == nil {
-		err = compressed.Close()
-	}
-	if err == nil {
-		err = chunks.flush()
-	}
 	if err != nil {
-		return Manifest{}, err
+		return err
 	}
-	return Manifest{Chunks: chunks.chunks, Total: hex.EncodeToString(chunks.whole.Sum(nil))}, nil
+	return archive.Close()
 }
 
 // put writes content at key unless the bucket already holds it: a key is its content's sha256, so a held key of the
@@ -280,18 +330,27 @@ func put(bucket r2.Bucket, key string, content []byte, contentType string) (bool
 	return err == nil, err
 }
 
-// A Published manifest is what Publish made and how much of it the bucket lacked.
+// A Published manifest is what Publish made, or found already published, and how much of it the bucket lacked.
 type Published struct {
 	Manifest Manifest
-	Hash     string
+	Name     string
 	Bytes    int64
 	Uploaded int
 }
 
-// Publish packs the directory and writes every chunk, then the manifest, under Prefix, each only if the bucket lacks
-// it, so a manifest is never there before its chunks and publishing the same bytes again writes nothing. It then reads
-// the manifest back from the public domain, read, as every runner will (Check), and returns it.
+// Publish names the directory (Identity) and, when the public domain already holds a whole manifest by that name,
+// however its tar.gz was compressed, writes nothing. Otherwise it packs the directory and writes every chunk, then the
+// manifest, under Prefix, each only if the bucket lacks it, so a manifest is never there before its chunks; one held
+// by that name whose chunks aren't all there is replaced. It then reads the manifest back from the public domain,
+// read, as every runner will (Check), and returns it.
 func Publish(directory string, chunkSize int, bucket r2.Bucket, read string, client *http.Client) (Published, error) {
+	name, _, err := Identity(directory)
+	if err != nil {
+		return Published{}, err
+	}
+	if held, err := Check(read, client, name); err == nil {
+		return Published{Manifest: held, Name: name}, nil
+	}
 	published := Published{}
 	manifest, err := Pack(directory, chunkSize, func(hash string, content []byte) error {
 		published.Bytes += int64(len(content))
@@ -304,16 +363,22 @@ func Publish(directory string, chunkSize int, bucket r2.Bucket, read string, cli
 	if err != nil {
 		return Published{}, err
 	}
-	published.Manifest, published.Hash = manifest, manifest.Hash()
-	uploaded, err := put(bucket, Prefix+published.Hash, manifest.Bytes(), "text/plain; charset=utf-8")
-	if err != nil {
+	if manifest.Name != name {
+		return Published{}, fmt.Errorf("%s changed while it was packed: named %.12s, packed %.12s", directory, name, manifest.Name)
+	}
+	published.Manifest, published.Name = manifest, name
+	options := r2.PutOptions{ContentType: "text/plain; charset=utf-8", CacheControl: "no-cache", IfNoneMatch: true}
+	if held, err := bucket.Head(Prefix + name); err == nil {
+		options.IfNoneMatch, options.IfMatch = false, held.ETag
+	} else if !errors.Is(err, r2.ErrNotFound) {
 		return Published{}, err
 	}
-	if uploaded {
-		published.Uploaded++
+	if err = bucket.Put(Prefix+name, manifest.Bytes(), options); err != nil {
+		return Published{}, fmt.Errorf("the manifest %s: %w", name, err)
 	}
-	if _, err = Check(read, client, published.Hash); err != nil {
-		return Published{}, fmt.Errorf("published %s, but it doesn't read back: %w", published.Hash, err)
+	published.Uploaded++
+	if _, err = Check(read, client, name); err != nil {
+		return Published{}, fmt.Errorf("published %s, but it doesn't read back: %w", name, err)
 	}
 	return published, nil
 }
@@ -329,12 +394,13 @@ func HomeExpires(rules []r2.LifecycleRule) *r2.LifecycleRule {
 	return nil
 }
 
-// Check reads the manifest named hash from the public domain, read, as a runner's prepare.sh will: it must hash to
-// its name and parse, and the domain must hold every chunk it names. A runner checks each chunk's bytes as it fetches
-// it; this checks only that they are there, so a planner can refuse to key units on a manifest no runner could read.
+// Check reads the manifest of the gate inputs named hash from the public domain, read, as a runner's prepare.sh will:
+// it must parse and name that tar, and the domain must hold every chunk it names. A runner checks each chunk's bytes
+// and the tar's as it fetches them; this checks only that they are there, so a planner can refuse to key units on gate
+// inputs no runner could read.
 func Check(read string, client *http.Client, hash string) (Manifest, error) {
 	if !Sha256Hex(hash) {
-		return Manifest{}, fmt.Errorf("the gate inputs' manifest is named by its sha256, not %q", hash)
+		return Manifest{}, fmt.Errorf("the gate inputs are named by their tar's sha256, not %q", hash)
 	}
 	if client == nil {
 		client = &http.Client{Timeout: time.Minute}
@@ -352,12 +418,12 @@ func Check(read string, client *http.Client, hash string) (Manifest, error) {
 	if response.StatusCode != http.StatusOK {
 		return Manifest{}, fmt.Errorf("%s%s answered %s", base, hash, response.Status)
 	}
-	if digest(content) != hash {
-		return Manifest{}, fmt.Errorf("%s%s hashes to %s", base, hash, digest(content))
-	}
 	manifest, err := ParseManifest(content)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%s%s: %w", base, hash, err)
+	}
+	if manifest.Name != hash {
+		return Manifest{}, fmt.Errorf("%s%s is the manifest of the tar %s", base, hash, manifest.Name)
 	}
 	for _, chunk := range manifest.Chunks {
 		response, err := client.Head(base + chunk)
@@ -372,7 +438,7 @@ func Check(read string, client *http.Client, hash string) (Manifest, error) {
 	return manifest, nil
 }
 
-// ReadFile reads a manifest file as the planner keeps it: the manifest's sha256 on one line.
+// ReadFile reads a manifest file as the planner keeps it: the gate inputs' name on one line.
 func ReadFile(path string) (string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -380,7 +446,7 @@ func ReadFile(path string) (string, error) {
 	}
 	hash := strings.TrimSpace(string(content))
 	if !Sha256Hex(hash) {
-		return "", fmt.Errorf("%s holds %q, not the gate inputs' manifest sha256", path, hash)
+		return "", fmt.Errorf("%s holds %q, not the gate inputs' name, a sha256", path, hash)
 	}
 	return hash, nil
 }
@@ -388,7 +454,7 @@ func ReadFile(path string) (string, error) {
 // WriteFile writes the manifest file whole or not at all: a reader never sees half a hash.
 func WriteFile(path, hash string) error {
 	if !Sha256Hex(hash) {
-		return fmt.Errorf("%q isn't a manifest's sha256", hash)
+		return fmt.Errorf("%q isn't the gate inputs' name, a sha256", hash)
 	}
 	partial := path + ".partial"
 	if err := os.WriteFile(partial, []byte(hash+"\n"), 0o644); err != nil {
