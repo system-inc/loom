@@ -176,6 +176,10 @@ type Event struct {
 	Timing *Timing `json:"timing,omitempty"`
 	// finished
 	Status string `json:"status,omitempty"`
+	// MissingTools names, by Toolchains' names, each toolchain the unit requires that its runner found missing or
+	// broken before running it (#vv28ewd): the unit finished broken without running, and the judge reads it void, never
+	// red, since tests run without their toolchain skip into passes that prove nothing.
+	MissingTools []string `json:"missingTools,omitempty"`
 }
 
 // A Timing is what only the runner knows of a unit's time and size, as fields: one timing event, just before finished
