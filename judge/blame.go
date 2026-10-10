@@ -147,6 +147,9 @@ func KickFor(blame Blame, record ChangeRecord, verdict Verdict) (Kick, error) {
 		}
 		why += "; census: " + strings.Join(verdict.censusFailing, ", ") + " (classify each skip in the census, or make it run)"
 	}
+	if verdict.slowdown != "" {
+		why += "; " + verdict.slowdown
+	}
 	return Kick{Change: record.Change, Owner: record.Owner, UnitKey: blame.UnitKey, Future: verdict.Future,
 		Tests: tests, Outputs: outputs, Diff: record.Base + ".." + record.Sha,
 		Repro: "loom repro " + blame.UnitKey, Why: why}, nil
