@@ -15,8 +15,8 @@ change = "chg_" + "c" * 26
 
 
 class FakePipeline:
-    def __init__(self, futures=(), landings=(), unchecked=()):
-        self.futures, self.landings, self.unchecked, self.calls = list(futures), list(landings), list(unchecked), []
+    def __init__(self, futures=(), landings=(), unchecked=(), paths=("a.go",)):
+        self.futures, self.landings, self.unchecked, self.paths, self.calls = list(futures), list(landings), list(unchecked), list(paths), []
 
     def call(self, method, path, body=None):
         self.calls.append((method, path, body))
@@ -24,6 +24,8 @@ class FakePipeline:
             return 200, {"changes": self.unchecked}
         if path.startswith("/futures"):
             return 200, {"futures": self.futures}
+        if path.startswith("/changes/") and method == "GET":
+            return 200, {"record": {"paths": self.paths}}
         if path == "/landings" and method == "GET":
             return 200, {"landings": self.landings}
         return 200, {"ok": True}
@@ -58,6 +60,10 @@ class FakeGate:
         self.landed.append((record, tree))
         return self.landing
 
+    def landRuled(self, ruling, tree, label):
+        self.landed.append(("ruled", tree))
+        return self.landing
+
     def main(self):
         return new
 
@@ -66,7 +72,7 @@ class FakeGate:
 
 
 def memory():
-    return {"queued": [], "posted": [], "held": [], "requeued": []}
+    return {"queued": [], "posted": [], "held": [], "requeued": [], "ruled": []}
 
 
 future = {"future": tree, "tree": tree, "base": old, "changes": [change]}
@@ -108,6 +114,22 @@ class Tick(unittest.TestCase):
         queue_bridge.tick(pipeline, gate, held)
         self.assertEqual(gate.requeued, [tree])
         self.assertEqual([(body["verdict"]["status"], body["verdict"]["cause"]) for path, body in pipeline.posts()], [("void", "flake"), ("failed", "change")])
+
+    def test_a_markdown_only_change_takes_the_ruled_gate_and_lands_through_it(self):
+        pipeline, gate, held = FakePipeline([future], paths=["docs/front-door.md"]), FakeGate(), memory()
+        queue_bridge.tick(pipeline, gate, held)
+        queue_bridge.tick(pipeline, gate, held)
+        self.assertEqual(gate.queued, [])
+        self.assertEqual(pipeline.posts(), [("/verdicts", {"change": change, "verdict": {
+            "future": tree, "run": "ruled-gate:docs", "status": "passed", "cause": None, "rule": "ruled-gate-docs-v0"}})])
+        pushed = (0, "Pushed main %s..%s\n" % (old, new), "")
+        pipeline, gate = FakePipeline(landings=[dict(order, run="ruled-gate:docs")]), FakeGate(landing=pushed)
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(gate.landed, [("ruled", tree)])
+        # Code in the change keeps it on today's fast gate.
+        pipeline, gate = FakePipeline([future], paths=["docs/front-door.md", "cmd/x/main.go"]), FakeGate()
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(gate.queued, [tree])
 
     def test_a_void_is_served_once_more_and_only_once(self):
         pipeline, held = FakePipeline([future]), memory()

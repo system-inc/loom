@@ -17,6 +17,10 @@ take over. Each tick, from Kirk's Mac beside the gate lane:
    reported with the new main, the main it moved from, and the tree it landed, once git shows that tree on main. A
    hold (exit 3) or main's pause waits; any other refusal is reported, which parks the change.
 
+A change that touches only Markdown takes the ruled gate instead (Loom, Oct 10 00:18Z: docs and test-only changes take
+push-main --ruled-gate plus its census, not the product suite): it is posted passed under that ruling at once, and its
+landing runs push-main --ruled-gate, which runs the census and the cheap static checks on the merged tree itself.
+
 The queue decides; this only carries. No credential that moves main lives in Cloudflare.
 
 usage: queuebridge/queue_bridge.py    (launchd com.loom.queue-bridge runs it every minute)
@@ -31,6 +35,13 @@ secretPath = os.environ.get("QUEUE_BRIDGE_SECRET", os.path.expanduser("~/.loom/t
 requeueScript = os.environ.get("QUEUE_BRIDGE_REQUEUE", os.path.expanduser("~/.loom/bin/requeue.sh"))
 github = "system-inc/adamic"
 rule = "todays-gate-v0"
+docsRule = "ruled-gate-docs-v0"
+docsRuling = "docs only: Markdown no product test reads (Loom, Oct 10 00:18Z)"
+
+
+def docsOnly(paths):
+    """Whether a change touches only Markdown, which the ruled gate lands with its census and no product suite."""
+    return bool(paths) and all(path.endswith(".md") for path in paths)
 
 
 def log(text):
@@ -129,6 +140,12 @@ class Gate:
             listed = git("rev-list", "--parents", "-n", "1", sha).split()
         return listed[1:]
 
+    def landRuled(self, ruling, tree, label):
+        """push-main.sh --ruled-gate: the census and static checks on the merged tree, no product suite."""
+        ran = subprocess.run(["bash", pushMain, "--ruled-gate", ruling, tree, "0", "0", "0", "0", label], capture_output=True, text=True,
+                             cwd=os.path.dirname(os.path.dirname(os.path.dirname(pushMain))))
+        return ran.returncode, ran.stdout, ran.stderr
+
     def main(self):
         git("fetch", "-q", "origin", "main")
         return git("rev-parse", "origin/main")
@@ -172,6 +189,16 @@ def tick(pipeline, gate, memory):
         # A parity run is Release's proof of the new path against a box record: today's gate never decides it.
         if future.get("parity"):
             continue
+        status, read = pipeline.call("GET", "/changes/" + change)
+        if status == 200 and docsOnly(read["record"]["paths"]):
+            if change in memory["ruled"]:
+                continue
+            verdict = {"future": tree, "run": "ruled-gate:docs", "status": "passed", "cause": None, "rule": docsRule}
+            status, answer = pipeline.call("POST", "/verdicts", {"change": change, "verdict": verdict})
+            log("verdict %s passed under the docs ruling: %d %s" % (change, status, answer))
+            if status in (200, 409):
+                memory["ruled"].append(change)
+            continue
         record = gate.record(tree)
         if record is None:
             if tree not in memory["queued"] and gate.queue(tree):
@@ -195,7 +222,10 @@ def tick(pipeline, gate, memory):
         return
     for order in orders["landings"]:
         change, tree = order["change"], order["future"]
-        code, out, err = gate.land(order["run"], tree, "queue %s (%s)" % (change, order["owner"]))
+        if order["run"] == "ruled-gate:docs":
+            code, out, err = gate.landRuled(docsRuling, tree, "queue %s (%s)" % (change, order["owner"]))
+        else:
+            code, out, err = gate.land(order["run"], tree, "queue %s (%s)" % (change, order["owner"]))
         pushed = re.search(r"Pushed main ([0-9a-f]{40})\.\.([0-9a-f]{40})", out)
         if code == 0 and pushed and gate.contains(pushed.group(2), tree):
             status, answer = pipeline.call("POST", "/landings/" + change, {"main": pushed.group(2), "from": pushed.group(1), "landed": tree})
@@ -223,7 +253,7 @@ def main():
         return
     path = os.path.join(state, "memory.json")
     memory = json.load(open(path)) if os.path.exists(path) else {}
-    for name in ("queued", "posted", "held", "requeued"):
+    for name in ("queued", "posted", "held", "requeued", "ruled"):
         memory.setdefault(name, [])
     try:
         tick(Pipeline(pipeline, token()), Gate(), memory)
