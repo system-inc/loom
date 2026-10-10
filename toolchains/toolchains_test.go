@@ -13,6 +13,7 @@ import (
 //	a probe that always passes: TestABrokenToolchainFailsItsProbe
 //	a probe that always fails: TestAWorkingBoxPassesEveryProbe
 //	the environment not sourced (probes on the caller's PATH): TestAWorkingBoxPassesEveryProbe
+//	the caller's environment inherited (a box's own WASI_SYSROOT masking a broken claim): TestABrokenToolchainFailsItsProbe
 //	a claim with no probe passed over: TestAClaimWithNoProbeOrNoToolchainFails
 
 // stubs are a working box's tools: go builds its standard library, clang compiles a sanitized overflow into a program
@@ -78,6 +79,8 @@ func TestABrokenToolchainFailsItsProbe(t *testing.T) {
 		{"go without its standard library", map[string]string{"go": `case $1 in version) echo go1.27.1 ;; *) echo "package fmt is not in std" >&2; exit 1 ;; esac`}, true, "go", "package fmt is not in std"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			// The caller holds a WASI_SYSROOT of its own (a box's shell, Oct 10 on Cloud): only env.sh may reach a probe.
+			t.Setenv("WASI_SYSROOT", t.TempDir())
 			replaced := test.replaced
 			if test.toolchain == "wasiSdk" && test.why == "" {
 				// The link of Oct 10: clang compiles, and wasm-ld can't open the builtins.

@@ -127,6 +127,11 @@ func probe(checkContext context.Context, toolchain, environment string) string {
 	command := exec.CommandContext(probeContext, "bash", "-c", `source "$2" > /dev/null 2>&1 || { echo "sourcing $2 failed"; exit 1; }
 `+script, "probe", directory, environment)
 	command.Dir = directory
+	// Nothing of the caller's environment reaches the probe but its home and a base PATH: what the toolchain needs must
+	// come from env.sh, as it does for a unit, so a variable the caller happens to hold (a box's own WASI_SYSROOT) can never
+	// make a broken claim pass.
+	home, _ := os.UserHomeDir()
+	command.Env = []string{"HOME=" + home, "PATH=/usr/local/bin:/usr/bin:/bin"}
 	output, err := command.CombinedOutput()
 	if err == nil {
 		return ""
