@@ -293,9 +293,9 @@ func TestAKeptIndexAndEverythingItNamesAreKeptFresh(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	old := now.Add(-6 * 24 * time.Hour)
 	source, product, binary := []byte("a source archive"), []byte("a product's archive"), []byte("a test binary")
-	better := TreeIndex{Tree: "t", Source: digest(source), Products: map[string]string{keyOf("p"): digest(product)},
+	better := TreeIndex{Format: TreeIndexFormat, Tree: "t", Source: digest(source), Products: map[string]string{keyOf("p"): digest(product)},
 		Packages: map[string]TreePackage{"a": {Package: "a", Binary: digest(binary), Products: []string{keyOf("p")}}, "b": {Package: "b", Binary: digest(binary)}}}
-	worse := TreeIndex{Tree: "t", Source: digest(source), Products: map[string]string{},
+	worse := TreeIndex{Format: TreeIndexFormat, Tree: "t", Source: digest(source), Products: map[string]string{},
 		Packages: map[string]TreePackage{"a": {Package: "a", Error: "a conflict"}, "b": {Package: "b", Binary: digest(binary)}}}
 	plant := func(t *testing.T) (*r2test.Fake, Store) {
 		fake, store := clocked(t, &now)

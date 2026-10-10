@@ -73,7 +73,7 @@ Workshop built and builds nothing (`runner/prebuilt.go`, #pcn6prz). In place of 
    under its floor free (3 GiB by default), it removes more, then the unpacked sources no unit holds; a disk still short,
    or a short disk the caches aren't on, refuses the unit as unfit, broken, never failed (serve itself keeps today's
    1500 MB floor);
-2. reads `trees/<tree>.json` from the store (the runner's own setting, never the unit's), holds it to its key, refuses a
+2. reads `trees/<tree>.json` from the store (the runner's own setting, never the unit's), holds it to its key and its format (`builder.TreeIndexFormat`: an index in another format is as good as none, and Workshop builds the tree again), refuses a
    tree built for another platform (the key and index name `GOOS`/`GOARCH`) before fetching anything, and fetches each
    package's test binary, the products its tests read, and the tree's source, every one checked against its sha256 as
    it arrives and again when read from the cache, each fetch's bytes and seconds on the unit's record; a fetch is

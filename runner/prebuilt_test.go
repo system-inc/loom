@@ -249,7 +249,7 @@ func newPrebuiltTree(t *testing.T, store *prebuiltStore) *prebuiltTree {
 		{name: fixtureProductKey + ".inputs", kind: tar.TypeReg, content: "{}\n"},
 		{name: fixtureProductKey + "/tool", kind: tar.TypeReg, content: "the product\n", mode: 0o755},
 	}, true))
-	tree.index = builder.TreeIndex{Tree: strings.Repeat("7", 40), Go: fixtureBinary.goVersion, Goos: runtime.GOOS, Goarch: runtime.GOARCH, Source: tree.source, Modules: tree.modules,
+	tree.index = builder.TreeIndex{Format: builder.TreeIndexFormat, Tree: strings.Repeat("7", 40), Go: fixtureBinary.goVersion, Goos: runtime.GOOS, Goarch: runtime.GOARCH, Source: tree.source, Modules: tree.modules,
 		Products: map[string]string{fixtureProductKey: product},
 		Packages: map[string]builder.TreePackage{lowerPackage: {Package: lowerPackage, Directory: "internal/lower", Binary: tree.binary, Products: []string{fixtureProductKey}}}}
 	tree.rekey(t)

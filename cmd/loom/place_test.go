@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -218,7 +219,8 @@ func TestThePlacerReadsATreesBuildFromTheBucketAndTheBuildersLedger(t *testing.T
 	if state, err = read(other); err != nil || state.Found || state.Indexed {
 		t.Fatalf("a tree the builder never saw: %+v %v", state, err)
 	}
-	bucket.Put("trees/"+key+".json", []byte("{}\n"), r2.PutOptions{ContentType: "application/json"})
+	index, _ := json.Marshal(builder.TreeIndex{Format: builder.TreeIndexFormat, Tree: "t", Source: strings.Repeat("d", 64)})
+	bucket.Put("trees/"+key+".json", index, r2.PutOptions{ContentType: "application/json"})
 	if state, err = read(key); err != nil || !state.Indexed {
 		t.Fatalf("a tree whose index is up: %+v %v", state, err)
 	}

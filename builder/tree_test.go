@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/planner"
-	"github.com/system-inc/loom/r2"
 	"github.com/system-inc/loom/r2/r2test"
 )
 
@@ -198,7 +197,7 @@ func TestARunnerRefusesATreeThatDoesntCheck(t *testing.T) {
 	plant := func(t *testing.T, archive []byte) (*r2test.Fake, Store) {
 		fake, _ := serve(t)
 		source := tarGzip(t, entry{name: "p/case.txt", body: "case"})
-		index := TreeIndex{Source: digest(source), Products: map[string]string{product: digest(archive)},
+		index := TreeIndex{Format: TreeIndexFormat, Source: digest(source), Products: map[string]string{product: digest(archive)},
 			Packages: map[string]TreePackage{"p": {Package: "p", Directory: "p", Binary: digest(binary), Products: []string{product}}}}
 		encoded, _ := index.encode()
 		for _, blob := range [][]byte{binary, archive, source} {
@@ -309,23 +308,49 @@ func TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy(t *testing.T) {
 	}
 }
 
-// A tree is indexed once the bucket holds trees/<key>.json, read from the bucket, and anything not a tree key is
-// refused before a request. Mutant: a missing index read as held.
-func TestATreeIsIndexedOnceTheBucketHoldsItsIndex(t *testing.T) {
+// A tree is built once the bucket holds an index of it this release can read, read from the bucket: an index in another
+// format (an older release's, at an unchanged tree key) or one that doesn't parse is as good as none, so the tree
+// builder builds it again and the placer releases no unit to a runner that would refuse it; and anything not a tree
+// key is refused before a request. A build then replaces the other format's index even when that one failed fewer
+// packages. Mutants: the index's existence read as built (a HEAD); an index in another format kept over a new one.
+func TestATreeIsIndexedOnlyByAnIndexThisReleaseReads(t *testing.T) {
 	fake, store := serve(t)
 	key := strings.Repeat("e", 64)
 	if indexed, err := store.TreeIndexed(key); err != nil || indexed {
 		t.Fatalf("before its index: %v %v", indexed, err)
 	}
-	bucket := fake.Bucket()
-	if err := bucket.Put("trees/"+key+".json", []byte("{}\n"), r2.PutOptions{ContentType: "application/json"}); err != nil {
-		t.Fatal(err)
+	source := []byte("source")
+	fake.Set("blobs/"+digest(source), source, time.Now())
+	index := func(format int, failed bool) []byte {
+		held := TreeIndex{Format: format, Tree: "t", Source: digest(source), Products: map[string]string{}, Packages: map[string]TreePackage{}}
+		if failed {
+			held.Packages["p"] = TreePackage{Package: "p", Error: "go test -c: exit status 1", Failure: WorkshopFailure}
+		}
+		encoded, _ := held.encode()
+		return encoded
 	}
+	for name, content := range map[string][]byte{"an older format's": index(TreeIndexFormat-1, false), "a newer format's": index(TreeIndexFormat+1, false),
+		"one that doesn't parse": []byte("{\"format\": 1, \"source\": \"not a sha256\"}\n")} {
+		fake.Set("trees/"+key+".json", content, time.Now())
+		if indexed, err := store.TreeIndexed(key); err != nil || indexed {
+			t.Fatalf("%s index read as built: %v %v", name, indexed, err)
+		}
+	}
+	fake.Set("trees/"+key+".json", index(TreeIndexFormat, false), time.Now())
 	if indexed, err := store.TreeIndexed(key); err != nil || !indexed {
-		t.Fatalf("after its index: %v %v", indexed, err)
+		t.Fatalf("an index this release reads: %v %v", indexed, err)
 	}
 	if _, err := store.TreeIndexed("../releases/current"); err == nil {
 		t.Fatal("a path that isn't a tree key was asked")
+	}
+	fake.Set("trees/"+key+".json", index(TreeIndexFormat-1, false), time.Now())
+	rebuilt := TreeIndex{Format: TreeIndexFormat, Tree: "t", Source: digest(source), Products: map[string]string{},
+		Packages: map[string]TreePackage{"p": {Package: "p", Error: "go test -c: exit status 1", Failure: WorkshopFailure}}}
+	if written, err := store.writeIndex(key, &rebuilt); err != nil || !written {
+		t.Fatalf("a rebuild over an older format's index with fewer failures: written %v (%v)", written, err)
+	}
+	if indexed, err := store.TreeIndexed(key); err != nil || !indexed {
+		t.Fatalf("after the rebuild: %v %v", indexed, err)
 	}
 }
 

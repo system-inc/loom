@@ -395,9 +395,17 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 	return byPackage, failed
 }
 
+// TreeIndexFormat is the shape of tree index this release writes and reads (TreeIndex.Format). A change to what an
+// index holds or how a runner reads it is a new format: indexes in the old one stay at their keys, read as missing, so
+// the tree builder builds them again and the placer releases no unit to a runner that would refuse them.
+const TreeIndexFormat = 1
+
 // A TreeIndex is trees/<treeKey>.json, a tree's build: the source archive's blob, each product's archive by its key,
 // and each package with its binary's blob and the products its tests read.
 type TreeIndex struct {
+	// Format is the index's shape, TreeIndexFormat for what this release writes and reads: an index in another (an
+	// older release's, or a newer one's) is one this release can't read, so it counts as no index at all.
+	Format int    `json:"format"`
 	Tree   string `json:"tree"`
 	Future string `json:"future"`
 	Go     string `json:"go"`
@@ -585,6 +593,7 @@ func each(count, jobs int, work func(index int) error) error {
 // (writeIndex keeps one with fewer failed packages).
 func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte, held map[string]string) (string, bool, error) {
 	treeKey := planner.TreeKey(treeIndex.Tree, treeIndex.Go, treeIndex.Goos, treeIndex.Goarch)
+	treeIndex.Format = TreeIndexFormat
 	var err error
 	if treeIndex.Source, err = store.PutBlob(source); err != nil {
 		return "", false, fmt.Errorf("the source archive: %w", err)
@@ -688,18 +697,24 @@ func (index TreeIndex) failures() int {
 	return count
 }
 
-// TreeIndexed says whether the bucket holds trees/<treeKey>.json, read from the bucket itself, never an edge's cache:
-// what Workshop's tree builder builds when it doesn't, and what the placer waits for before naming the build on a unit.
+// TreeIndexed says whether the bucket holds an index of the tree this release can read (ParseTree: its format and
+// its names), read from the bucket itself, never an edge's cache: what Workshop's tree builder builds when it doesn't,
+// and what the placer waits for before naming the build on a unit. An index in another format, or one that doesn't
+// parse, is as good as none: the builder builds the tree again, and writeIndex replaces it.
 func (store Store) TreeIndexed(treeKey string) (bool, error) {
 	if !productKeyPattern.MatchString(treeKey) {
 		return false, fmt.Errorf("%q isn't a tree key, 64 lowercase hex digits", treeKey)
 	}
 	store.read()
-	_, err := store.Bucket.Head("trees/" + treeKey + ".json")
+	content, err := store.Bucket.Get("trees/" + treeKey + ".json")
 	if errors.Is(err, r2.ErrNotFound) {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, err
+	}
+	_, err = ParseTree(treeKey, content)
+	return err == nil, nil
 }
 
 // writeIndex writes trees/<treeKey>.json, once every blob and ref it names is up, and reports whether it did. An
@@ -723,8 +738,8 @@ func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error
 		case err != nil:
 			return false, err
 		default:
-			var held TreeIndex
-			if json.Unmarshal(content, &held) == nil && treeIndex.failures() > held.failures() {
+			// Only an index this release reads is kept over this one: one in another format, or unreadable, is replaced.
+			if held, err := ParseTree(treeKey, content); err == nil && treeIndex.failures() > held.failures() {
 				kept, err := store.keep(key, held, content, object)
 				if errors.Is(err, r2.ErrChanged) {
 					continue
@@ -814,6 +829,9 @@ func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 	var index TreeIndex
 	if err := json.Unmarshal(content, &index); err != nil {
 		return TreeIndex{}, fmt.Errorf("tree %s: %w", treeKey, err)
+	}
+	if index.Format != TreeIndexFormat {
+		return TreeIndex{}, fmt.Errorf("tree %s: its index is in format %d, and this release reads format %d: Loom's, until the tree is built again", treeKey, index.Format, TreeIndexFormat)
 	}
 	poisoned := func(format string, arguments ...any) (TreeIndex, error) {
 		return TreeIndex{}, fmt.Errorf("tree %s: %s: the store is poisoned", treeKey, fmt.Sprintf(format, arguments...))
