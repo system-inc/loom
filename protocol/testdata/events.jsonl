@@ -4,7 +4,8 @@
 {"run":"r-fixture","unit":"a","sequence":3,"time":"2026-10-08T19:00:00.003Z","type":"error","phase":"wire","message":"posting to the wire failed, retrying"}
 {"run":"r-fixture","unit":"a","sequence":4,"time":"2026-10-08T19:00:00.004Z","type":"exit","code":0}
 {"run":"r-fixture","unit":"a","sequence":5,"time":"2026-10-08T19:00:00.005Z","type":"uploaded","path":"empty.txt","sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}
-{"run":"r-fixture","unit":"a","sequence":6,"time":"2026-10-08T19:00:00.006Z","type":"finished","status":"passed"}
+{"run":"r-fixture","unit":"a","sequence":6,"time":"2026-10-08T19:00:00.006Z","type":"timing","timing":{"fetchSeconds":1.25,"unpackSeconds":0.5,"prepareSeconds":2,"testSeconds":41.75,"storeBytes":1048576,"cacheBytes":3145728,"peakMegabytes":2048,"shareCpus":8,"shareMemoryMegabytes":16384,"unitsInHand":3,"load":12.5}}
+{"run":"r-fixture","unit":"a","sequence":7,"time":"2026-10-08T19:00:00.007Z","type":"finished","status":"passed"}
 {"run":"r-fixture","unit":"tests[shard=0]","sequence":0,"time":"2026-10-08T19:00:00.000Z","type":"started","machine":"box","runnerVersion":"v0-dev","cpus":4,"memoryMegabytes":16384,"inputs":{"bin/x":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
 {"run":"r-fixture","unit":"tests[shard=0]","sequence":1,"time":"2026-10-08T19:00:00.001Z","type":"exit","signal":"SIGTERM","timedOut":true,"wallSeconds":600.002,"userSeconds":1.5}
 {"run":"r-fixture","unit":"tests[shard=0]","sequence":2,"time":"2026-10-08T19:00:00.002Z","type":"error","phase":"run","message":"a process outside the unit's group held its output open 2s after the command exited; stopped reading"}

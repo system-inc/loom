@@ -462,6 +462,8 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 	add("a", Event{Type: "error", Phase: PhaseWire, Message: "posting to the wire failed, retrying"})
 	add("a", Event{Type: "exit", Code: &zero})
 	add("a", Event{Type: "uploaded", Path: "empty.txt", Sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"})
+	add("a", Event{Type: "timing", Timing: &Timing{FetchSeconds: 1.25, UnpackSeconds: 0.5, PrepareSeconds: 2, TestSeconds: 41.75, StoreBytes: 1 << 20,
+		CacheBytes: 3 << 20, PeakMegabytes: 2048, ShareCpus: 8, ShareMemoryMegabytes: 16384, UnitsInHand: 3, Load: 12.5}})
 	add("a", Event{Type: "finished", Status: StatusPassed})
 	add("tests[shard=0]", Event{Type: "started", Machine: "box", RunnerVersion: "v0-dev", Cpus: 4, MemoryMegabytes: 16384,
 		InputHashes: map[string]string{"bin/x": strings.Repeat("a", 64)}})
