@@ -45,7 +45,9 @@ func TestATestJobIsChecked(t *testing.T) {
 		"a tree that isn't a key":     func(job *TestJob) { job.Tree = "../trees/x" },
 		"an uppercase tree key":       func(job *TestJob) { job.Tree = strings.Repeat("A", 64) },
 		"a runner that isn't a hash":  func(job *TestJob) { job.Runner = "git-1c6a7d5" },
-		"a build job with no tree":    func(job *TestJob) { job.Build = true },
+		"a build phase job": func(job *TestJob) {
+			job.Build, job.Packages, job.Phase, job.Base, job.Tools = true, nil, "vet", job.Sha, job.Sha
+		},
 	}
 	for name, change := range refused {
 		job := testJob()
