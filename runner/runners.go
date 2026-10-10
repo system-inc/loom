@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/housecache"
+	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -50,6 +51,8 @@ type runnerCache struct {
 	houseClient *http.Client
 	// check says whether a binary is a loom-runner for this platform; nil means checkRunnerBinary.
 	check func(path string) error
+	// live is serve's live status, which says when a unit waits on its runner's fetch; nil writes nothing.
+	live *livestatus.Writer
 }
 
 // runnerFetchBound bounds a runner's fetch, and a quarter of the unit's own time bounds it further, so a slow store
@@ -93,9 +96,22 @@ func (cache runnerCache) run(runContext context.Context, unit protocol.Unit, opt
 		named = unit.Test.Runner
 	}
 	if named == "" || named == selfSha256() {
+		cache.live.Update(func(status *livestatus.Status) {
+			if status.Unit != nil {
+				status.Unit.Phase, status.Unit.Runner = livestatus.PhaseOnRunner, shortSum(selfSha256())
+			}
+		})
 		return Run(runContext, unit, options), true
 	}
 	run := begin(unit, options)
+	// The named runner keeps the unit's own live status from here; serve's says it fetches that runner, then runs on it.
+	run.live.Close()
+	run.live = nil
+	cache.live.Update(func(status *livestatus.Status) {
+		if status.Unit != nil {
+			status.Unit.Phase, status.Unit.Runner = livestatus.PhaseFetchingRunner, shortSum(named)
+		}
+	})
 	broken := func(phase string, err error) (Result, bool) {
 		run.fail(phase, err)
 		run.finish(protocol.StatusBroken)
@@ -141,6 +157,11 @@ func (cache runnerCache) run(runContext context.Context, unit protocol.Unit, opt
 		wire.Drain(time.Now().Add(run.options.WireDrainTimeout))
 	}
 	unit.SequenceStart = run.emitter.next()
+	cache.live.Update(func(status *livestatus.Status) {
+		if status.Unit != nil {
+			status.Unit.Phase = livestatus.PhaseOnRunner
+		}
+	})
 	result, started, err := runOn(runContext, binary, unit, options)
 	switch {
 	case err != nil:

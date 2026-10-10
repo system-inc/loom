@@ -17,6 +17,7 @@ import (
 
 	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/housecache"
+	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/poster"
 	"github.com/system-inc/loom/protocol"
 )
@@ -84,6 +85,9 @@ type Options struct {
 	HouseCache string
 	// houseClient asks the house cache; nil means housecache.Client.
 	houseClient *http.Client
+	// LiveStatus is the file `loom top` reads the unit's live state from (livestatus.UnitPath under the root): its
+	// phase, what it fetched and from where, and its tests so far. Empty writes none.
+	LiveStatus string
 	// free reads a filesystem's free bytes; nil means builder.Free. Tests plant a full disk through it.
 	free func(path string) (uint64, error)
 }
@@ -192,6 +196,7 @@ type unitRun struct {
 	directory string // made for this unit; holds the workspace and the staging area for fetched blobs
 	workspace string // where the inputs land and the command runs
 	staging   string // fetched blobs wait here, verified, until they are placed
+	live      *livestatus.Writer
 }
 
 // Run runs one unit and streams its events to options.Events. Every path through it ends with exactly one
@@ -213,6 +218,10 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 func begin(unit protocol.Unit, options Options) *unitRun {
 	options = options.withDefaults()
 	run := &unitRun{unit: unit, options: options}
+	if options.LiveStatus != "" {
+		run.live = livestatus.NewWriter(options.LiveStatus, livestatus.Status{Kind: livestatus.KindUnit, Worker: options.Machine,
+			Unit: liveUnit(unit, livestatus.PhaseStarting, time.Now())})
+	}
 	run.emitter = &emitter{run: unit.Run, unit: unit.Unit, sequence: max(0, unit.SequenceStart), writer: options.Events, now: time.Now}
 	if unit.Wire != nil && unit.Wire.Url != "" {
 		run.emitter.wire = poster.New(unit.Wire.Url, unit.Token, options.Client, options.WireInterval)
@@ -316,6 +325,12 @@ func worse(first, second string) string {
 // finished or an error event on stdout saying it didn't; what it misses after finished can only be told to
 // Diagnostics, because nothing may follow finished on the stream.
 func (run *unitRun) finish(status string) {
+	run.live.Update(func(live *livestatus.Status) {
+		if live.Unit != nil {
+			live.Unit.Phase, live.Unit.Verdict = livestatus.PhaseFinished, status
+		}
+	})
+	defer run.live.Close()
 	wire := run.emitter.wire
 	if wire == nil {
 		run.emitter.emit(protocol.Event{Type: "finished", Status: status})

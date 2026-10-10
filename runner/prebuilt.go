@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/runner/test2json"
@@ -65,6 +66,8 @@ type neededBlob struct {
 	sum   string
 	what  string
 	chunk bool
+	// kind is what `loom top` counts it as: chunks, binaries, products or modules.
+	kind string
 }
 
 // runPrebuilt runs a test job whose tree Workshop built. Failed: a package's tests failed or the unit ran out of time.
@@ -84,6 +87,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		return protocol.StatusBroken
 	}
 	cache, sources := newBlobCache(run.options, root), newSourceCache(root)
+	run.phase(livestatus.PhaseFetching)
 	index, err := run.treeIndex(prepareContext, job.Tree)
 	if err != nil {
 		run.fail(protocol.PhaseFetch, fmt.Errorf("%w: Loom's, never the change's", err))
@@ -127,7 +131,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		fetching, fetchingBytes := 0, int64(0)
 		for _, chunk := range index.Source {
 			if !kept[chunk] {
-				needed = append(needed, neededBlob{sum: chunk.Blob, what: "the tree's source chunk " + strconv.Quote(chunk.First) + " to " + strconv.Quote(chunk.Last), chunk: true})
+				needed = append(needed, neededBlob{sum: chunk.Blob, what: "the tree's source chunk " + strconv.Quote(chunk.First) + " to " + strconv.Quote(chunk.Last), chunk: true, kind: "chunks"})
 				fetching++
 				fetchingBytes += chunk.Bytes
 			}
@@ -148,7 +152,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		}
 		defer modules.release()
 		if !modules.ready {
-			needed = append(needed, neededBlob{sum: index.Modules, what: "the tree's module cache"})
+			needed = append(needed, neededBlob{sum: index.Modules, what: "the tree's module cache", kind: "modules"})
 		}
 	}
 	fetchStarted := time.Now()
@@ -172,6 +176,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		run.say(fmt.Sprintf("trimming the blob cache: %v", err))
 	}
 	unpackStarted := time.Now()
+	run.phase(livestatus.PhaseUnpacking)
 	if !held.ready {
 		open := func(openContext context.Context, sum string) (*os.File, error) {
 			file, _, err := cache.open(openContext, sum)
@@ -215,6 +220,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	files = nil
 	run.say(fmt.Sprintf("ready in %.1f s: fetched in %.1f s, unpacked in %.1f s", time.Since(started).Seconds(), fetchSeconds, time.Since(unpackStarted).Seconds()))
 
+	run.phase(livestatus.PhasePreparing)
 	script := filepath.Join(run.directory, "prepare.sh")
 	environmentFile := filepath.Join(run.directory, "environment")
 	if err := os.WriteFile(script, prepareScript, 0o700); err != nil {
@@ -262,6 +268,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
+	run.phase(livestatus.PhaseTesting)
 	status := run.runPackages(runContext, job, out, started, deadline, func(testContext context.Context, index int, part string) packageResult {
 		if packages[index].built.Error != "" {
 			return buildFailedPackage(packages[index], part)
@@ -297,6 +304,7 @@ func (run *unitRun) treeIndex(runContext context.Context, treeKey string) (build
 		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s: %w", name, err)
 	}
 	run.say(fmt.Sprintf("fetched %s, %d bytes in %.2f s", name, len(content), time.Since(started).Seconds()))
+	run.fetched("index", false, int64(len(content)))
 	index, err := builder.ParseTree(treeKey, content)
 	if err != nil {
 		return builder.TreeIndex{}, err
@@ -313,10 +321,10 @@ func prebuiltPackages(job *protocol.TestJob, index builder.TreeIndex) ([]prebuil
 	packages := make([]prebuiltPackage, len(job.Packages))
 	needed := []neededBlob{}
 	seen := map[string]bool{}
-	add := func(sum, what string) {
+	add := func(sum, what, kind string) {
 		if !seen[sum] {
 			seen[sum] = true
-			needed = append(needed, neededBlob{sum: sum, what: what})
+			needed = append(needed, neededBlob{sum: sum, what: what, kind: kind})
 		}
 	}
 	for position, testPackage := range job.Packages {
@@ -332,9 +340,9 @@ func prebuiltPackages(job *protocol.TestJob, index builder.TreeIndex) ([]prebuil
 			return nil, nil, fmt.Errorf("package %s didn't build on Workshop, for Workshop's reasons: %s", testPackage.Package, strings.TrimSpace(built.Error))
 		}
 		packages[position] = prebuiltPackage{test: testPackage, built: built}
-		add(built.Binary, testPackage.Package+"'s test binary")
+		add(built.Binary, testPackage.Package+"'s test binary", "binaries")
 		for _, product := range built.Products {
-			add(index.Products[product], "product "+product+", which "+testPackage.Package+"'s tests read")
+			add(index.Products[product], "product "+product+", which "+testPackage.Package+"'s tests read", "products")
 		}
 	}
 	return packages, needed, nil
@@ -373,6 +381,7 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 					errs[position] = err
 					continue
 				}
+				run.fetched(blob.kind, fetch.cached, fetch.bytes)
 				if blob.chunk {
 					// Assembly opens it again through the cache, hashed again, fetched again if it went meanwhile.
 					file.Close()
@@ -878,7 +887,7 @@ func (run *unitRun) runBinary(testContext context.Context, prebuilt prebuiltPack
 		return result
 	}
 	defer text.Close()
-	converter := test2json.NewConverter(jsonl, prebuilt.test.Package, test2json.Timestamp)
+	converter := test2json.NewConverter(run.countTests(jsonl), prebuilt.test.Package, test2json.Timestamp)
 	output := &tailWriter{writer: io.MultiWriter(converter, text)}
 	started := time.Now()
 	state, err := run.groupCommand(testContext, testBinaryArguments(binary, prebuilt.test), append(environment, "PWD="+directory), directory, output, output)

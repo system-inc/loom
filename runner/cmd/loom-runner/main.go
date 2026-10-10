@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/housecache"
+	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/runner"
 	"github.com/system-inc/loom/serving"
@@ -112,6 +113,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Tree:            *tree,
 		Machine:         *machine,
 		HouseCache:      *houseCache,
+		LiveStatus:      liveStatus(*root, livestatus.UnitPath),
 	})
 	if *keep && result.Workspace != "" {
 		fmt.Fprintf(stderr, "loom-runner: workspace kept at %s\n", result.Workspace)
@@ -192,16 +194,26 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Worker:   *worker,
 		Deadline: time.Now().Add(*until),
 		Unit: runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr, Strict: *strict, PhaseJobs: *phaseJobs, Exclusive: *exclusive, Root: *root, Tree: *tree,
-			HouseCache: *houseCache},
-		Report:   stderr,
-		Drain:    drain,
-		Releases: *releases,
+			HouseCache: *houseCache, LiveStatus: liveStatus(*root, livestatus.UnitPath)},
+		Report:     stderr,
+		Drain:      drain,
+		Releases:   *releases,
+		LiveStatus: liveStatus(*root, livestatus.ServePath),
 	})
 	fmt.Fprintln(stdout, summary)
 	if err != nil {
 		return 2
 	}
 	return 0
+}
+
+// liveStatus is a live status file under the root, which `loom top` reads; none without a root, so a runner given a
+// unit by hand writes nowhere it wasn't told to.
+func liveStatus(root string, under func(root string) string) string {
+	if root == "" {
+		return ""
+	}
+	return under(root)
 }
 
 // installServe is `loom-runner install-serve`: loom-serve.service rendered from this box's serve.conf, installed as a

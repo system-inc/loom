@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -50,6 +51,10 @@ type ServeOptions struct {
 	// Drain, once it delivers or closes, ends serving as the deadline does: nothing more is asked for, and the unit in
 	// hand runs to its finish. A box's loom-serve unit drains on SIGHUP, so a release restarts serve and breaks nothing.
 	Drain <-chan struct{}
+	// LiveStatus is serve's live status for `loom top` (livestatus.ServePath under the root): the unit in hand, its
+	// phase until its runner takes over Unit.LiveStatus, the totals and the recent units, carried over from the last
+	// serve's file. Empty writes none.
+	LiveStatus string
 	// checkRunner says whether a fetched binary is a loom-runner for this platform; nil means its build information
 	// (runners.go). Tests running a stand-in pass one that takes it.
 	checkRunner func(path string) error
@@ -142,8 +147,15 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	}()
 	summary := ServeSummary{}
 	failures := 0
+	live := startLive(options, started)
+	defer func() {
+		live.Update(func(status *livestatus.Status) {
+			status.Unit, status.Stopped, status.Unfit = nil, summary.Stopped, summary.Unfit
+		})
+		live.Close()
+	}()
 	runners := runnerCache{directory: filepath.Join(unitOptions.testRoot(), runnerDirectoryName), releases: options.Releases, client: unitOptions.Client,
-		house: unitOptions.HouseCache, houseClient: unitOptions.houseClient, check: options.checkRunner}
+		house: unitOptions.HouseCache, houseClient: unitOptions.houseClient, check: options.checkRunner, live: live}
 	// unhad counts the units in a row whose runner couldn't be had: past two, serve waits a little before it asks again,
 	// so a store that is down doesn't void a whole queue in seconds. Any unit whose runner was had starts it over.
 	unhad := 0
@@ -185,6 +197,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 				fmt.Fprintf(options.Report, "loom-runner serve: room again; asking for units\n")
 			}
 			summary.Unfit = unfit
+			live.Update(func(status *livestatus.Status) { status.Unfit = unfit })
 		}
 		if summary.Unfit != "" {
 			pause(drainContext, options.Deadline.Add(-options.Margin), options.UnfitPause)
@@ -205,6 +218,9 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			// The pool took it off its queue and it can't run here; the coordinator sees it dropped.
 			summary.Units++
 			summary.Broken++
+			live.Update(func(status *livestatus.Status) {
+				status.Totals.Units, status.Totals.Broken = status.Totals.Units+1, status.Totals.Broken+1
+			})
 			fmt.Fprintf(options.Report, "loom-runner serve: %v\n", err)
 			continue
 		case err != nil:
@@ -216,12 +232,15 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			continue
 		}
 		failures = 0
+		live.Update(func(status *livestatus.Status) { status.AskedAt = time.Now() })
 		if !found {
 			// The pool waits up to 20 s before it says none; one that answers at once mustn't be asked in a spin.
 			pause(drainContext, options.Deadline.Add(-options.Margin), time.Second-time.Since(asked))
 			continue
 		}
+		live.Update(func(status *livestatus.Status) { status.Unit = liveUnit(unit, livestatus.PhaseStarting, time.Now()) })
 		result, had := runners.run(serveContext, unit, unitOptions)
+		finishLive(live, unit, result.Status, unitOptions.LiveStatus)
 		summary.Units++
 		switch result.Status {
 		case protocol.StatusPassed:

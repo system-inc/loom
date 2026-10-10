@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -106,6 +107,7 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	if run.options.Strict {
 		trim = "trim"
 	}
+	run.phase(livestatus.PhasePreparing)
 	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim, root, owner(run.options)}, run.prepareEnvironment(), run.workspace, time.Until(deadline))
 	switch {
 	case err != nil:
@@ -142,6 +144,7 @@ func (run *unitRun) runTest(runContext context.Context) string {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
+	run.phase(livestatus.PhaseTesting)
 	if job.Phase != "" {
 		return run.runPhase(runContext, job, environment, tree, root, out, deadline)
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/planner"
 )
 
@@ -48,8 +49,20 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 	started := time.Now()
+	// The build's live status, for `loom top`: its tree, its phase, its products built and hit.
+	var live *livestatus.Writer
+	defer func() { live.Close() }()
+	phase := func(phase string, change func(tree *livestatus.Tree)) {
+		live.Update(func(status *livestatus.Status) {
+			status.Tree.Phase = phase
+			if change != nil {
+				change(status.Tree)
+			}
+		})
+	}
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "build-tree:", err)
+		phase("failed", nil)
 		return 1
 	}
 	// The tree's identity, by the one function the planner keys its plan's trees with, read before anything is built.
@@ -57,6 +70,8 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	live = livestatus.NewWriter(livestatus.TreePath(*cache), livestatus.Status{Kind: livestatus.KindTree, StartedAt: started,
+		Tree: &livestatus.Tree{Key: identity.Key(), Future: *future, Phase: "readying", StartedAt: started}})
 	if err = checkTreeKey(identity, *wantKey, *wantGo, runtime.GOOS+"/"+runtime.GOARCH); err != nil {
 		return fail(err)
 	}
@@ -122,6 +137,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return fail(err)
 	}
 	warmStarted := time.Now()
+	phase("warming", func(tree *livestatus.Tree) { tree.Packages, tree.ProductTests = len(packages), len(productTests) })
 	if err = build.Warm(packages); err != nil {
 		// A package that doesn't compile is named again by its own binary below; the rest are warm.
 		fmt.Fprintf(stderr, "loom: warming the tree: %v\n", err)
@@ -138,9 +154,33 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	build.Held = held.Address
 	productsStarted := time.Now()
+	phase("products", nil)
+	// The products the store held count as they are taken, once a second.
+	counted := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-counted:
+				return
+			case <-ticker.C:
+				hit := len(held.Held())
+				phase("products", func(tree *livestatus.Tree) { tree.ProductsHit = hit })
+			}
+		}
+	}()
 	products, productFailures := build.Products(productTests, filepath.Join(directory, "logs"))
+	close(counted)
 	productSeconds := time.Since(productsStarted).Seconds()
 	held.Close()
+	distinct := map[string]bool{}
+	for _, keys := range products {
+		for _, key := range keys {
+			distinct[key] = true
+		}
+	}
+	phase("binaries", func(tree *livestatus.Tree) { tree.Products, tree.ProductsHit = len(distinct), len(held.Held()) })
 	for _, note := range held.Notes() {
 		fmt.Fprintln(stderr, "build-tree:", note)
 	}
@@ -151,6 +191,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	binariesStarted := time.Now()
 	built := build.Binaries(packages)
 	binarySeconds := time.Since(binariesStarted).Seconds()
+	phase("source and modules", nil)
 	source, err := builder.SourceChunks(*tree)
 	if err != nil {
 		return fail(err)
@@ -180,6 +221,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		treeIndex.Packages[result.Package] = result
 	}
 	uploadStarted := time.Now()
+	phase("uploading", nil)
 	treeIndex.Seconds = time.Since(started).Seconds()
 	// The module cache goes up before the index that names it, as every other blob does.
 	if treeIndex.Modules, err = store.PutBlob(modules); err != nil {
@@ -206,6 +248,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"sourceChunksSent": source.Sent, "sourceBytesSent": source.SentBytes,
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
+	phase("built", func(tree *livestatus.Tree) { tree.Failed = failed })
 	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten, treeLock)
 }
 
