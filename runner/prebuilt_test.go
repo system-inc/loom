@@ -1537,3 +1537,29 @@ func TestAModuleOutsideTheTreeIsntForcedIntoItsWorkspace(t *testing.T) {
 		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
 	}
 }
+
+// A test sees the tree's own workspace, as it did on Workshop where adamic keyed its products on go env GOWORK and go
+// work edit -json (#nm31pcn): the stand-in answers with the tree's go.work, never its copy, reads the tree's handed
+// back as the copy, so go writes no go.work.sum into the source every unit shares.
+func TestATestSeesTheTreesOwnWorkspace(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestWorkspace$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+	source := filepath.Join(fixture.directory, "root", sourceDirectoryName, fixture.tree.source, sourceTreeName)
+	if _, err := os.Stat(filepath.Join(source, "go.work.sum")); err == nil {
+		t.Error("go wrote go.work.sum into the tree's source")
+	}
+}
+
+// go work edit that edits writes the workspace, so it is refused, and the red it makes is Loom's.
+func TestAWorkspaceEditIsRefused(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestWorkEdit$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "go work edit -json -use=./elsewhere") {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+}

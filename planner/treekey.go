@@ -74,11 +74,12 @@ func toolchainEnvironment(goos, goarch string) []string {
 
 // UnitEnvironment is the environment a product test runs in on Workshop and a test unit runs in on a runner for
 // goos/goarch, so a product's buildcache key is one key on both (#nm31pcn): adamic's recipes key on what they read of
-// it, GOFLAGS, GOTOOLCHAIN, GOOS and GOARCH among them, and verify run 4 (Oct 10) built them on Workshop under
+// it, GOFLAGS, GOTOOLCHAIN, GOENV, GOOS and GOARCH among them, and verify run 4 (Oct 10) built them on Workshop under
 // GOFLAGS=-p=7 GOTOOLCHAIN=local and asked for them under GOFLAGS= GOTOOLCHAIN=auto, so every unit that read one missed
-// it and built it. GOFLAGS is empty on both: a build's share of the machine is GOMAXPROCS, which no key reads.
+// it and built it. GOFLAGS is empty on both: a build's share of the machine is GOMAXPROCS, which no key reads. GOENV is
+// off on both, as a runner's go has always run (delegatedEnvironment): no go env file decides a build.
 func UnitEnvironment(goos, goarch string) []string {
-	return append(append(GateEnvironmentList(), "GOFLAGS="), toolchainEnvironment(goos, goarch)...)
+	return append(append(GateEnvironmentList(), "GOENV=off", "GOFLAGS="), toolchainEnvironment(goos, goarch)...)
 }
 
 // ReadTreeIdentity reads a checked-out tree's identity: its git tree hash (TreeHash), and go env GOVERSION, GOOS and
