@@ -1,0 +1,40 @@
+ loom top · workshop · 2026-10-10 16:04:05Z                                                                     q quits 
+── machine · 16 threads ────────────────────────────────────────────────────────────────────────────────────────────────
+ cpu  █████████████░░░░░░░░░░░░░░░░░  42%  load 3.10 2.80 2.40
+ mem  ███████████░░░░░░░░░░░░░░░░░░░  38%  24G of 64G
+ disk █████████████████████████████░ 61G free of 1.8T, floor 100G · trees
+ units ● loom-plan running 5h00m ● loom-place running 5h00m ● loom-build-trees running 5h00m ✕ loom-judge failed
+       ● loom-pusher.timer waiting 2d00h ● loom-update.timer waiting 1d02h
+── serve ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ no serve on this box (/home/kirk/loom-serve/root/loom-live/serve.json)
+── tree builder · building ab12ab12ab12 ────────────────────────────────────────────────────────────────────────────────
+ phase       products 4m12s · future 9f8e9f8e9f8e · 312 packages, 52 product tests
+ products    40 hit in the store
+ ✓ built       cd34cd34cd34 future 123412341234   6m02s  15:55:05
+ ✕ failed      ef56ef56ef56 future 567856785678   1m35s  15:33:05  package stage2/x didn't compile
+ ✓ built       0a0b0a0b0a0b future 9abc9abc9abc   6m41s  15:09:05
+── pools ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ box-strict 7 queued · 3 workers
+   cloud-1a2b3c            16 cpus · asked 2m00s ago · took u-0042-lower
+   server-77e01d           32 cpus · asked 41s ago · took u-0043-lower
+   home-c0ffee              8 cpus · asked 9s ago · took nothing yet
+ box-phase 0 queued · 1 workers
+   chonchon-5e5e5e         24 cpus · asked 12s ago · took p-gofmt
+ codex https://runs.loom.system.inc/pools/codex answered 503 Service Unavailable
+── queue · seq 18422 ───────────────────────────────────────────────────────────────────────────────────────────────────
+ main 77aa77aa77aa · 4 changes: 1 testing, 1 building, 1 queued, 1 landed
+ ▶ testing  1a1a1a1a1a1a kirk         6m00s  units 187/240 1✕ 3 void  chg_01k7testing000000000000000
+ ▶ building 2b2b2b2b2b2b loom         4m00s  units 0/0 0✕ 0 void  chg_01k7building00000000000000
+ · queued   3c3c3c3c3c3c fabric       2m00s  units 0/0 0✕ 0 void  chg_01k7queued0000000000000000
+ ✓ landed   4d4d4d4d4d4d release     14m00s  units 120/120 0✕ 0 void  chg_01k7landed0000000000000000
+
+
+
+
+
+
+
+
+
+
+

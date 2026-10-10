@@ -1,0 +1,24 @@
+ loom top · workshop · 2026-10-10 16:04:05Z                             q quits 
+── machine · 16 threads ────────────────────────────────────────────────────────
+ cpu  ████████░░░░░░░░░░░░  42%  load 3.10 2.80 2.40
+ mem  ████████░░░░░░░░░░░░  38%  24G of 64G
+ disk ███████████████████░ 61G free of 1.8T, floor 100G · trees
+ units ● loom-plan running 5h00m ● loom-place running 5h00m
+       ● loom-build-trees running 5h00m ✕ loom-judge failed
+       ● loom-pusher.timer waiting 2d00h ● loom-update.timer waiting 1d02h
+── serve ───────────────────────────────────────────────────────────────────────
+ no serve on this box (/home/kirk/loom-serve/root/loom-live/serve.json)
+── tree builder · building ab12ab12ab12 ────────────────────────────────────────
+ phase       products 4m12s · future 9f8e9f8e9f8e · 312 packages, 52 product te…
+ products    40 hit in the store
+ ✓ built       cd34cd34cd34 future 123412341234   6m02s  15:55:05
+ ✕ failed      ef56ef56ef56 future 567856785678   1m35s  15:33:05  package stag…
+── pools ───────────────────────────────────────────────────────────────────────
+ box-strict 7 queued · 3 workers
+   cloud-1a2b3c            16 cpus · asked 2m00s ago · took u-0042-lower
+   server-77e01d           32 cpus · asked 41s ago · took u-0043-lower
+ box-phase 0 queued · 1 workers
+ codex https://runs.loom.system.inc/pools/codex answered 503 Service Unavailable
+── queue · seq 18422 ───────────────────────────────────────────────────────────
+ main 77aa77aa77aa · 4 changes: 1 testing, 1 building, 1 queued, 1 landed
+ ▶ testing  1a1a1a1a1a1a kirk         6m00s  units 187/240 1✕ 3 void  chg_01k7t…

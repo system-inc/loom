@@ -1,0 +1,24 @@
+ loom top · cloud · 2026-10-10 16:04:05Z                                q quits 
+── machine · 16 threads ────────────────────────────────────────────────────────
+ cpu  ████████░░░░░░░░░░░░  42%  load 3.10 2.80 2.40
+ mem  ████████░░░░░░░░░░░░  38%  24G of 64G
+ disk ██░░░░░░░░░░░░░░░░░░ 412G free of 468G, floor 3.0G · serve
+ kept blobs 2.1G of 4.0G in 830 · sources 2, 1.9G · runners 3
+ units ● loom-serve running 23m00s ● loom-update.timer waiting 1d02h
+── serve box-strict · cloud-1a2b3c · up 23m00s · asked 2m14s ago ───────────────
+ ▶ u-0042-lower w-6f1c2a · stage1/cohere/json +2 ^(TestA|TestB)$
+   testing          2m13s ████░░░░░░░░░░░░░░░░ of 10m00s · runner 9b1d3c5e7f00
+   from the store index 1, 1.2K · chunks 812, 410M · binaries 2, 52M
+   from the cache products 4, 8.0M · binaries 1, 20M
+   tests          1204 passed  2 failed  31 skipped
+ ran  14 units: 12 passed, 1 failed, 1 broken · 1.2G fetched since 15:41Z
+ ✓ u-0041-shard-a                 1m02s      0B  16:01:05  w-6f1c2a
+ ✕ u-0040-shard-b                 1m39s     12M  15:59:05  w-6f1c2a
+ ✓ u-0039-shard-c                 2m16s     24M  15:57:05  w-6f1c2a
+── pools ───────────────────────────────────────────────────────────────────────
+ box-strict 7 queued · 3 workers
+   cloud-1a2b3c            16 cpus · asked 2m00s ago · took u-0042-lower
+   server-77e01d           32 cpus · asked 41s ago · took u-0043-lower
+   home-c0ffee              8 cpus · asked 9s ago · took nothing yet
+── queue ───────────────────────────────────────────────────────────────────────
+ serve's pool token doesn't read Queue; it shows on Workshop

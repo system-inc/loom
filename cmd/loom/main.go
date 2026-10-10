@@ -56,7 +56,8 @@ const usage = `usage:
   loom pool prompt <pool> --runner <sha256> [--until 55m]
   loom gate-lines [--once] [--interval <duration>] [--wire <url>]
   loom owner-bridge [--once] [--interval <duration>] [--pipeline <url>]
-  loom top [--once] [--wire <url>]
+  loom top [--once [--width N] [--height N]] [--serve-root <dir>] [--trees <dir>] [--ledger <file>] [--wire <url>] [--queue <url>]
+  loom top --board [--once] [--wire <url>]
   loom publish-token <name> [--days N] [--candidate]
   loom submit-token [--days N] <owner>
   loom coordinator-token <service> [--days N]

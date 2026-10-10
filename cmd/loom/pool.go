@@ -144,13 +144,15 @@ func (pools poolPlatformFlag) Set(text string) error {
 // poolStatus is what GET /pools/<pool> answers: the queue's length and every worker seen in the last ten
 // minutes. took is the unit a worker last took, shown as the wire gives it.
 type poolStatus struct {
-	Queued  int `json:"queued"`
-	Workers []struct {
-		Worker string          `json:"worker"`
-		Cpus   int             `json:"cpus"`
-		SeenAt string          `json:"seenAt"`
-		Took   json.RawMessage `json:"took"`
-	} `json:"workers"`
+	Queued  int          `json:"queued"`
+	Workers []poolWorker `json:"workers"`
+}
+
+type poolWorker struct {
+	Worker string          `json:"worker"`
+	Cpus   int             `json:"cpus"`
+	SeenAt string          `json:"seenAt"`
+	Took   json.RawMessage `json:"took"`
 }
 
 // pool handles `loom pool status <name>`, read with a board token, which watches and changes nothing.
