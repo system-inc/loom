@@ -264,7 +264,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 			break
 		}
 	}
-	standIn, err := run.standInGo(prepareContext, environment, index, sources, source)
+	standIn, err := run.standInGo(prepareContext, environment, index, sources, source, job.Build)
 	if err != nil {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
@@ -611,6 +611,8 @@ func workspaceCopy(copyContext context.Context, real string, environment []strin
 // each build it refused, each read-only query the runner's go answered (with its exit), each one no go here could.
 type goStandIn struct {
 	refused, answered, unanswered string
+	// build is a build job's: every go command its tests run goes through, and a failed one is theirs (protocol.TestJob.Build).
+	build bool
 }
 
 // standInScript is the stand-in go. A read-only query (version, env, list, each with only the flags on its allow list:
@@ -641,6 +643,8 @@ for flag in $GOFLAGS; do
 	esac
 done
 set +f
+# A build job's tests build (Kirk's build law): every command goes to the runner's go, still of the tree's release.
+[ BUILD = true ] && allowed=yes
 case "${GOTOOLCHAIN:-auto}" in auto | local | RELEASE) ;; *) allowed=no ;; esac
 if [ "$allowed" = no ]; then
 	printf 'go %s (GOFLAGS=%s GOTOOLCHAIN=%s)\n' "$*" "$GOFLAGS" "$GOTOOLCHAIN" >> REFUSED
@@ -667,7 +671,7 @@ exit "$status"
 // GOTOOLCHAIN=local, or the unit is unfit, both named, and every module the tree needs is put in the tree's own
 // GOMODCACHE before the tests run, so none of them sees go fetch one, and a module the cache lacks breaks the unit,
 // named. With no go, the record says so.
-func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, index builder.TreeIndex, sources sourceCache, directory string) (goStandIn, error) {
+func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, index builder.TreeIndex, sources sourceCache, directory string, build bool) (goStandIn, error) {
 	release := strings.Fields(index.Go)
 	if len(release) == 0 {
 		return goStandIn{}, fmt.Errorf("the tree's index names no Go release: the store is poisoned")
@@ -717,7 +721,7 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 		return goStandIn{}, err
 	}
 	standIn := goStandIn{refused: filepath.Join(run.directory, "go-refused"), answered: filepath.Join(run.directory, "go-answered"),
-		unanswered: filepath.Join(run.directory, "go-unanswered")}
+		unanswered: filepath.Join(run.directory, "go-unanswered"), build: build}
 	exports := ""
 	for _, variable := range delegated {
 		name, value, _ := strings.Cut(variable, "=")
@@ -735,7 +739,7 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 		exports += name + "=" + shellQuote(value) + "\nexport " + name + "\n"
 	}
 	script := strings.NewReplacer("REFUSED", shellQuote(standIn.refused), "UNANSWERED", shellQuote(standIn.unanswered),
-		"ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release[0]), "ENVIRONMENT\n", exports).Replace(standInScript)
+		"ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release[0]), "BUILD", strconv.FormatBool(build), "ENVIRONMENT\n", exports).Replace(standInScript)
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
 		return goStandIn{}, err
 	}
@@ -785,7 +789,8 @@ func (run *unitRun) settleGo(standIn goStandIn, status string) string {
 			unanswered[0], len(unanswered)))
 		return protocol.StatusBroken
 	}
-	if status != protocol.StatusFailed {
+	if status != protocol.StatusFailed || standIn.build {
+		// A build job's failed build is what its tests assert on: the change's red, as any test's failure.
 		return status
 	}
 	if len(refused) > 0 {

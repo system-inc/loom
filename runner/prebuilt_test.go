@@ -1065,6 +1065,29 @@ func TestABuildIsRefusedWithAGoHere(t *testing.T) {
 	}
 }
 
+// A build job's tests build (Kirk's build law, #8j1qygw): the go build a test job's stand-in refuses goes through to the
+// real go, of the tree's release, and what it makes is the test's: here the fixture's tree holds no source for the tool,
+// so the build fails, and the build job is the change's red, never Loom's broken. Mutants: the build flag ignored by the
+// stand-in (refused, broken); settleGo turning a build job's failed go command into Loom's broken.
+func TestABuildJobsTestsBuildWithTheRealGo(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	built := fixture.tree.index.Packages[lowerPackage]
+	built.Products = []string{}
+	fixture.tree.index.Packages[lowerPackage] = built
+	fixture.tree.publish(t)
+	unit := fixture.unit("^TestProduct$")
+	unit.Test.Build = true
+	result, events, _ := runUnit(t, unit, fixture.options(t))
+	runner := strings.Join(outputLines(events, "runner"), "\n")
+	if !strings.Contains(runner, "answered for the tests, 1 times: go build -o ") || strings.Contains(runner, "never builds or downloads") {
+		t.Fatalf("the build job's go build wasn't let through:\n%s", runner)
+	}
+	if result.Status != protocol.StatusFailed || strings.Contains(errorPhases(events), "Loom's") || !strings.Contains(testLog(t, result), "building the product") {
+		t.Fatalf("a build job whose build fails: %s; errors %q", result.Status, errorPhases(events))
+	}
+}
+
 // A package whose test code didn't compile on Workshop is the change's red, said as go test -json says it.
 func TestABuildErrorIsTheChangesRed(t *testing.T) {
 	fixture := newPrebuiltFixture(t)

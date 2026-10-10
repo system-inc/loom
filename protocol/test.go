@@ -80,6 +80,11 @@ type TestJob struct {
 	// test job's packages are compiled with go test, as before Workshop built every tree, and a checkout that needs npm
 	// packages can't be readied.
 	Tree string `json:"tree,omitempty"`
+	// Build says the job's tests are builds (Kirk's build law, #8j1qygw): they assert on what the toolchain or adamic's
+	// compiler produces, as the declared list in adamic names them, so their go commands are let through to the real go
+	// under the tree's Go release, on the unit's own empty Go cache. Only on a prebuilt go test job (Tree set, no
+	// Phase); everything else a test job refuses, a build job refuses.
+	Build bool `json:"build,omitempty"`
 }
 
 // A TestPackage is one package's go test: its import path and its -run and -skip patterns.
@@ -109,6 +114,9 @@ func CheckTestJob(job TestJob) error {
 	}
 	if job.Runner != "" && !Sha256Pattern.MatchString(job.Runner) {
 		return fmt.Errorf("runner %q isn't a sha256, 64 lowercase hex digits", job.Runner)
+	}
+	if job.Build && (job.Tree == "" || job.Phase != "") {
+		return fmt.Errorf("a build job is a prebuilt go test job: it names a tree and no phase")
 	}
 	if job.Phase != "" {
 		fields := strings.Fields(job.Phase)
