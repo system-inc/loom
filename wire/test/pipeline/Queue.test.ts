@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { runDurableObjectAlarm, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { call, token } from '../Helpers';
+import { oldQueueLog } from './OldQueueLog';
 import { canonical, futureLandable, GenesisHash, lineRefusalOf, MaximumStackDepth, replay, sha256Text, unitKeyOf, type FutureEntry, type GitFacts, type Queue, type QueueEvent, type UnitVerdict } from '../../source/Queue';
 
 const main = 'a'.repeat(40);
@@ -13,6 +14,11 @@ function sha(seed: number): string {
 // A stand-in for GitHub: every sha exists, descends from main, and touches the paths it's given, unless told otherwise.
 function facts(overrides: Partial<GitFacts> = {}, diffPaths = ['internal/lower/a.go']): GitFacts {
     return { shaExists: true, baseIsAncestor: true, baseOnMain: true, diffPaths: diffPaths, historyPaths: diffPaths, gateNamed: [], ...overrides };
+}
+
+// git's facts for a witness of a main commit, read while main's head was `head` (the commit itself, unless told).
+function headOf(seed: number, head = seed): GitFacts {
+    return facts({ mainHead: sha(head) }, []);
 }
 
 // A fresh queue object per test, with git answered from a table keyed by sha and a pinned clock.
@@ -1001,7 +1007,7 @@ describe('a witness of main', function () {
 
 describe("main's red pause", function () {
     it('holds every green change while the newest decided witness of main is red, but a fix-forward or a revert, and lifts on a later green witness', async function () {
-        const queue = await freshQueue({ [sha(40)]: facts({}, []), [sha(41)]: facts({}, []), [sha(42)]: facts({}, []), [sha(45)]: facts({ revertOf: sha(9) }) });
+        const queue = await freshQueue({ [sha(40)]: headOf(40), [sha(41)]: headOf(41), [sha(42)]: headOf(42), [sha(45)]: facts({ revertOf: sha(9) }) });
         const idOf = async function (request: Record<string, unknown>): Promise<string> {
             const answer = await submit(queue, request);
             expect(answer.status, await answer.clone().text()).toBe(201);
@@ -1098,7 +1104,7 @@ describe('a green witness of main', function () {
     };
 
     it('finishes witnessed, a state of its own the board shows, and records main green on a fresh queue', async function () {
-        const queue = await freshQueue({ [sha(51)]: facts({}, []) });
+        const queue = await freshQueue({ [sha(51)]: headOf(51) });
         const id = await idOf(queue, witnessOf(51));
         await judge(queue, id, sha(51), runOf(sha(51), 1), 'green');
         expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'witnessed', verdict: { status: 'green' } });
@@ -1125,7 +1131,7 @@ describe('a green witness of main', function () {
     });
 
     it('may witness the same sha again once the first is finished, never while it is live, in fresh attempts nothing carries into', async function () {
-        const queue = await freshQueue({ [sha(52)]: facts({}, []) });
+        const queue = await freshQueue({ [sha(52)]: headOf(52) });
         const first = await idOf(queue, witnessOf(52));
         // Live, the sha is in the line once.
         const twice = await submit(queue, witnessOf(52));
@@ -1162,7 +1168,7 @@ describe('a green witness of main', function () {
     });
 
     it("records main green only for main's tip as the log knows it, never for a sha main has moved past", async function () {
-        const queue = await freshQueue({ [sha(61)]: facts({}, []), [sha(62)]: facts({}, []), [sha(63)]: facts({}, []), [sha(80)]: facts({}, []) });
+        const queue = await freshQueue({ [sha(61)]: headOf(61), [sha(62)]: headOf(62), [sha(63)]: headOf(63), [sha(80)]: headOf(80) });
         const stale = await idOf(queue, witnessOf(61));
         const tip = await idOf(queue, witnessOf(62));
         // A witness of a newer main was cleared after it, so main is 62 now: the stale green finishes, and says nothing.
@@ -1190,7 +1196,7 @@ describe('a green witness of main', function () {
     });
 
     it('leaves a log written before witnesses finished to replay exactly as it did', async function () {
-        const queue = await freshQueue({ [sha(71)]: facts({}, []) });
+        const queue = await freshQueue({ [sha(71)]: headOf(71) });
         const witness = await idOf(queue, witnessOf(71));
         await judge(queue, witness, sha(71), runOf(sha(71), 1), 'green');
         // A parity run red, then the same sha as a parity run again (a red one is finished): a future of the same tree.
@@ -1232,6 +1238,214 @@ describe('a green witness of main', function () {
         }
         expect(now.changes.get(red)?.state).toBe('red');
         expect(now.changes.get(again)?.state).toBe('queued');
+    });
+
+    // The review of 844ad60 (#6gj7n9p): each of its findings, as the queue must answer it.
+
+    // A queue whose git facts come from the bridge, as they do today: posted with the queue's seq when git was read.
+    const bridged = async function (): Promise<{
+        queue: DurableObjectStub<Queue>;
+        post: (id: string, body: unknown) => Promise<Response>;
+        seq: () => Promise<number>;
+    }> {
+        const queue = await freshQueue();
+        await runInDurableObject(queue, function (instance: Queue) {
+            instance.history = null;
+        });
+        return {
+            queue: queue,
+            post: function (id: string, body: unknown): Promise<Response> {
+                return queue.fetch(`https://queue/submissions/${id}/facts`, { method: 'POST', body: JSON.stringify(body) });
+            },
+            seq: async function (): Promise<number> {
+                return ((await (await queue.fetch('https://queue/head')).json()) as { seq: number }).seq;
+            },
+        };
+    };
+
+    it("never lets the green of an older main commit clear a red on main's head (F1)", async function () {
+        const queue = await freshQueue({ [sha(161)]: headOf(161, 162), [sha(162)]: headOf(162) });
+        const tip = await idOf(queue, witnessOf(162));
+        await judge(queue, tip, sha(162), runOf(sha(162), 1), 'red');
+        // 161 is on main, behind its head: git read main's head as 162.
+        const older = await idOf(queue, witnessOf(161));
+        await judge(queue, older, sha(161), runOf(sha(161), 1), 'green');
+        expect(await stateOf(queue, older)).toBe('witnessed');
+        expect(await mainEvents(queue)).toEqual([['main.red', tip, sha(162)]]);
+        expect(await (await queue.fetch('https://queue/head')).json()).toMatchObject({ mainRed: { witness: tip, main: sha(162) } });
+    });
+
+    it("says nothing about main for a witness whose git facts never read main's head, even of main's tip", async function () {
+        const queue = await freshQueue({ [sha(165)]: facts({}, []), [sha(166)]: facts({}, []) });
+        // A landing makes 165 main's tip as the log knows it; the witness's own facts, from a bridge before mainHead, don't say.
+        const landing = await idOf(queue, change(164));
+        expect((await postWhole(queue, landing, sha(164), 'passed', null)).status).toBe(200);
+        expect((await report(queue, landing, { main: sha(165), from: main, landed: sha(164) })).status).toBe(200);
+        const red = await idOf(queue, witnessOf(165));
+        await judge(queue, red, sha(165), runOf(sha(165), 1), 'red');
+        const green = await idOf(queue, witnessOf(166));
+        await judge(queue, green, sha(166), runOf(sha(166), 1), 'green');
+        expect([await stateOf(queue, red), await stateOf(queue, green)]).toEqual(['red', 'witnessed']);
+        expect(await mainEvents(queue)).toEqual([]);
+    });
+
+    it("orders readings of main's head by when they began, so facts that arrive late never move the tip back (F2)", async function () {
+        const { queue, post, seq } = await bridged();
+        const stale = await idOf(queue, witnessOf(171));
+        // The bridge began reading 171's facts here, while main's head was 171, and posts them last.
+        const readStale = await seq();
+        const tip = await idOf(queue, witnessOf(172));
+        expect((await post(tip, { ...headOf(172), asOf: await seq() })).status).toBe(200);
+        expect((await post(stale, { ...headOf(171), asOf: readStale })).status).toBe(200);
+        expect((await replay(await logOf(queue))).mainTip).toBe(sha(172));
+        await judge(queue, stale, sha(171), runOf(sha(171), 1), 'green');
+        expect(await mainEvents(queue)).toEqual([]);
+        await judge(queue, tip, sha(172), runOf(sha(172), 1), 'green');
+        expect(await mainEvents(queue)).toEqual([['main.green', tip, sha(172)]]);
+        // mainHead and asOf come together, and asOf is never past the log.
+        const loose = await idOf(queue, witnessOf(173));
+        expect((await post(loose, headOf(173))).status).toBe(400);
+        expect((await post(loose, { ...facts({}, []), asOf: 1 })).status).toBe(400);
+        expect((await post(loose, { ...headOf(173), asOf: -1 })).status).toBe(400);
+        expect((await post(loose, { ...headOf(173), asOf: (await seq()) + 1 })).status).toBe(422);
+        expect((await post(loose, { ...headOf(173), asOf: await seq() })).status).toBe(200);
+    });
+
+    it('leaves the tip unknown when two readings begun at the same seq disagree, until a newer one', async function () {
+        const { queue, post, seq } = await bridged();
+        const first = await idOf(queue, witnessOf(176));
+        const second = await idOf(queue, witnessOf(177));
+        const began = await seq();
+        expect((await post(first, { ...headOf(176), asOf: began })).status).toBe(200);
+        expect((await post(second, { ...headOf(177), asOf: began })).status).toBe(200);
+        expect((await replay(await logOf(queue))).mainTip).toBe(null);
+        await judge(queue, first, sha(176), runOf(sha(176), 1), 'green');
+        await judge(queue, second, sha(177), runOf(sha(177), 1), 'red');
+        expect(await mainEvents(queue)).toEqual([]);
+        const third = await idOf(queue, witnessOf(178));
+        expect((await post(third, { ...headOf(178), asOf: await seq() })).status).toBe(200);
+        await judge(queue, third, sha(178), runOf(sha(178), 1), 'green');
+        expect(await mainEvents(queue)).toEqual([['main.green', third, sha(178)]]);
+    });
+
+    it('never records main green for a head main moved past, whether it landed before git was read or while git answered (F3)', async function () {
+        // Read after the landing, git says main's head is 190: 181 is behind it.
+        const queue = await freshQueue({ [sha(181)]: headOf(181, 190) });
+        const landing = await idOf(queue, change(184));
+        expect((await postWhole(queue, landing, sha(184), 'passed', null)).status).toBe(200);
+        expect((await report(queue, landing, { main: sha(190), from: main, landed: sha(184) })).status).toBe(200);
+        const old = await idOf(queue, witnessOf(181));
+        await judge(queue, old, sha(181), runOf(sha(181), 1), 'green');
+        expect(await mainEvents(queue)).toEqual([]);
+        // Read while a landing is logged: git said 185 was main's head, but the landing after the reading began outranks it.
+        await runInDurableObject(queue, function (instance: Queue) {
+            instance.history = null;
+        });
+        const post = function (id: string, body: unknown): Promise<Response> {
+            return queue.fetch(`https://queue/submissions/${id}/facts`, { method: 'POST', body: JSON.stringify(body) });
+        };
+        const racing = await idOf(queue, witnessOf(185));
+        const began = ((await (await queue.fetch('https://queue/head')).json()) as { seq: number }).seq;
+        const second = await idOf(queue, change(186));
+        expect((await post(second, facts())).status).toBe(200);
+        expect((await postWhole(queue, second, sha(186), 'passed', null)).status).toBe(200);
+        expect((await report(queue, second, { main: sha(191), from: sha(190), landed: sha(186) })).status).toBe(200);
+        expect((await post(racing, { ...headOf(185), asOf: began })).status).toBe(200);
+        await judge(queue, racing, sha(185), runOf(sha(185), 1), 'green');
+        expect(await stateOf(queue, racing)).toBe('witnessed');
+        expect(await mainEvents(queue)).toEqual([]);
+        expect((await replay(await logOf(queue))).mainTip).toBe(sha(191));
+    });
+
+    it("decides main by its tip, never by line positions, which shrink, or the future two witnesses of a sha share (F4)", async function () {
+        const { queue, post, seq } = await bridged();
+        const ahead = [await idOf(queue, change(191)), await idOf(queue, change(192))];
+        const first = await idOf(queue, witnessOf(201));
+        expect((await post(first, { ...headOf(201), asOf: await seq() })).status).toBe(200);
+        await judge(queue, first, sha(201), runOf(sha(201), 1), 'green');
+        // The changes ahead are refused, so the line shrinks and the second witness's position is below the first's.
+        for (const id of ahead) {
+            expect(await (await post(id, facts({ shaExists: false }))).json()).toMatchObject({ state: 'refused' });
+        }
+        const second = await idOf(queue, witnessOf(201));
+        const positions = await replay(await logOf(queue));
+        expect([positions.changes.get(first)?.position, positions.changes.get(second)?.position]).toEqual([2, 1]);
+        expect((await post(second, { ...headOf(201), asOf: await seq() })).status).toBe(200);
+        await judge(queue, second, sha(201), runOf(sha(201), 2), 'red');
+        expect(await mainEvents(queue)).toEqual([
+            ['main.green', first, sha(201)],
+            ['main.red', second, sha(201)],
+        ]);
+        expect(await (await queue.fetch('https://queue/head')).json()).toMatchObject({ mainRed: { witness: second, main: sha(201) } });
+    });
+
+    it("refuses a re-witness's batch that cites an earlier future's run, as a judge that doesn't read firstAttempt would (F5)", async function () {
+        const queue = await freshQueue({ [sha(221)]: headOf(221) });
+        const first = await idOf(queue, witnessOf(221));
+        await judge(queue, first, sha(221), runOf(sha(221), 1), 'green');
+        const second = await idOf(queue, witnessOf(221));
+        const units = await planOf(['w']);
+        const key = units[0]?.unitKey ?? '';
+        expect((await postPlan(queue, sha(221), units)).status).toBe(200);
+        const batchOf = function (run: string, rule = 'judge-v1'): Record<string, unknown> {
+            return batch(second, sha(221), run, [{ ...record(second, key, run, 'passed', null), rule: rule }], 'green');
+        };
+        const refused: [string, string?][] = [
+            // The old run itself, the old judge's run name for this attempt.
+            [runOf(sha(221), 1)],
+            // This attempt's run, carrying the old run's pass.
+            [runOf(sha(221), 2), `judge-v1 carried ${runOf(sha(221), 1)}`],
+            // A run that names no attempt of this tree.
+            ['run-x'],
+            [runOf(sha(222), 2)],
+        ];
+        for (const [run, rule] of refused) {
+            const answer = await postBatch(queue, sha(221), batchOf(run, rule));
+            expect(answer.status, `${run} ${rule ?? ''}`).toBe(422);
+        }
+        expect(await stateOf(queue, second)).toBe('testing');
+        expect((await postBatch(queue, sha(221), batchOf(runOf(sha(221), 2)))).status).toBe(200);
+        expect(await stateOf(queue, second)).toBe('witnessed');
+    });
+
+    it('replays every new event to exactly the live state, and an old log exactly as the queue before them did', async function () {
+        const plain = function (value: unknown): unknown {
+            return JSON.parse(JSON.stringify(value, (_key, inner: unknown) => (inner instanceof Map ? [...inner.entries()] : inner)));
+        };
+        const queue = await freshQueue({ [sha(231)]: headOf(231), [sha(232)]: headOf(232) });
+        const red = await idOf(queue, witnessOf(231));
+        await judge(queue, red, sha(231), runOf(sha(231), 1), 'red');
+        const again = await idOf(queue, witnessOf(231));
+        await judge(queue, again, sha(231), runOf(sha(231), 2), 'void');
+        await judge(queue, again, sha(231), runOf(sha(231), 3), 'green');
+        await idOf(queue, witnessOf(231));
+        const landing = await idOf(queue, change(233));
+        expect((await postWhole(queue, landing, sha(233), 'passed', null)).status).toBe(200);
+        expect((await report(queue, landing, { main: sha(240), from: main, landed: sha(233) })).status).toBe(200);
+        const log = await logOf(queue);
+        const live = await runInDurableObject(queue, (instance: Queue) => plain((instance as unknown as { state: unknown }).state));
+        expect(plain(await replay(log))).toEqual(live);
+        expect(log.map((event) => event.type)).toContain('change.witnessed');
+        // A log with no new event or field (this scenario's, stripped), and its replay by 09bb1dd's apply, pinned: the
+        // new apply reaches the same state, with each new field at its empty value.
+        const older = plain(await replay(oldQueueLog.log as QueueEvent[])) as {
+            mainTip?: unknown;
+            mainTipRank?: unknown;
+            futures: [string, Record<string, unknown>][];
+            changes: [string, Record<string, unknown>][];
+        };
+        expect([older.mainTip, older.mainTipRank]).toEqual([sha(240), 2 * oldQueueLog.log.findIndex((event) => event.type === 'change.landed') + 2]);
+        delete older.mainTip;
+        delete older.mainTipRank;
+        for (const [, future] of older.futures) {
+            expect(future.attemptsBefore).toBe(0);
+            delete future.attemptsBefore;
+        }
+        for (const [, entry] of older.changes) {
+            expect(entry.mainHead).toBe(null);
+            delete entry.mainHead;
+        }
+        expect(older).toEqual(oldQueueLog.state);
     });
 });
 

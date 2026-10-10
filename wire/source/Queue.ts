@@ -155,6 +155,12 @@ export interface GitFacts {
     historyPaths?: string[];
     // Each Python test in the diff that a non-test file names, with those files (#xz7j9ea). Absent, refused too.
     gateNamed?: { path: string; users: string[] }[];
+    // main's head when the facts were read, and asOf, the queue's seq when the reading began (#6gj7n9p): what the queue
+    // knows of main's tip, ordered against its own log. Both or neither. Absent, the facts say nothing about main's
+    // head: the change can still be cleared, but a witness without them is never of main's tip, so it records no
+    // main.green or main.red.
+    mainHead?: string;
+    asOf?: number;
 }
 
 export interface History {
@@ -259,6 +265,9 @@ export interface ChangeEntry {
     block: number | null;
     // The main commit this change reverts, from git's facts, or null: a revert lands while main is red.
     revertOf: string | null;
+    // main's head as the change's own git facts read it, or null when they didn't say: a witness is of main's head only
+    // when this is its sha.
+    mainHead: string | null;
 }
 
 // The rules a rule.changed event moves, each naming the landed commit that changed it (contracts v1, section 4).
@@ -297,9 +306,12 @@ export interface QueueState {
     // Main held red by the newest decided witness of its tip, or null (#3ypyka5): while set, only a fix-forward naming
     // that main or a revert gets a landing order, and every other green change waits.
     mainRed: { witness: string; main: string; units: string[] } | null;
-    // Main's tip as the log knows it (#6gj7n9p): the sha of the newest witness git's facts cleared, or the main of the
-    // newest landing, whichever came later. A green witness records main.green only for this sha, never a stale one.
+    // Main's tip as the log knows it (#6gj7n9p): the head the newest reading of main gave, a git fact's mainHead or a
+    // landing's main, or null when two readings begun at the same seq disagree. A witness records main.green or main.red
+    // only for this sha. mainTipRank orders the readings: a landing at seq s is 2s, a fact read after seq s is 2s + 1, so
+    // a fact read before a landing was logged never displaces it, and one read after does.
     mainTip: string | null;
+    mainTipRank: number;
 }
 
 const shaPattern = /^[0-9a-f]{40}$/;
@@ -626,8 +638,14 @@ export function attemptsBeforeOf(state: QueueState, tree: string): { attemptsBef
     return earlier === undefined ? {} : { attemptsBefore: earlier.attemptsBefore + earlier.voids + 1 };
 }
 
+// The attempt a run of a tree's future is (future-<tree>-<attempt>, coordinator.FutureRun), or null for another name.
+export function attemptOf(tree: string, run: string): number | null {
+    const match = /^future-([0-9a-f]{40})-([1-9][0-9]{0,8})$/.exec(run);
+    return match === null || match[1] !== tree ? null : Number(match[2]);
+}
+
 export function emptyState(): QueueState {
-    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 }, outsideVerdicts: { refused: false } }, blocks: new Map(), mainRed: null, mainTip: null };
+    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 }, outsideVerdicts: { refused: false } }, blocks: new Map(), mainRed: null, mainTip: null, mainTipRank: -1 };
 }
 
 // A whole verdict's decision, by the judge's rule: a failure that is main's red (excused, as Green excuses it) doesn't
@@ -637,6 +655,18 @@ function decisionOf(verdict: Verdict): Decision['status'] {
         return 'green';
     }
     return verdict.status === 'failed' ? 'red' : 'void';
+}
+
+// One reading of main's head, ranked: a newer one moves the tip, an older one is ignored, and two of the same rank that
+// disagree leave the tip unknown until a newer reading.
+function noteMainHead(state: QueueState, head: string, rank: number): void {
+    if (rank > state.mainTipRank) {
+        state.mainTip = head;
+        state.mainTipRank = rank;
+    }
+    else if (rank === state.mainTipRank && state.mainTip !== head) {
+        state.mainTip = null;
+    }
 }
 
 // Applies one event to the state. Replay is this over the log in order; nothing here reads a clock or asks git.
@@ -655,6 +685,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             shas: [record.sha],
             block: null,
             revertOf: ((event.data.facts ?? null) as GitFacts | null)?.revertOf ?? null,
+            mainHead: null,
         });
         state.line.push(record.change);
     }
@@ -731,10 +762,6 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
                 member.checked = true;
                 if (event.data.facts !== undefined) {
                     member.revertOf = ((event.data.facts ?? null) as GitFacts | null)?.revertOf ?? null;
-                }
-                // Git cleared a witness's sha as on main, and witnesses are posted of main's tip.
-                if (member.record.witness === true) {
-                    state.mainTip = member.record.sha;
                 }
             }
         }
@@ -830,6 +857,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
         entry.future = null;
         entry.verdict = null;
         entry.checked = false;
+        entry.mainHead = null;
     }
     else if (event.type === 'change.parked' && entry !== undefined) {
         entry.state = 'parked';
@@ -842,10 +870,19 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
         entry.state = 'landed';
         entry.landed = event.data.main as string;
         state.landedMain = entry.landed;
-        state.mainTip = entry.landed;
+        noteMainHead(state, entry.landed, 2 * event.seq);
         state.line = state.line.filter(function (id) {
             return id !== entry.record.change;
         });
+    }
+    // Any git facts that read main's head: the change's own, and the queue's knowledge of the tip.
+    const facts = (event.data.facts ?? null) as GitFacts | null;
+    if (facts !== null && typeof facts.mainHead === 'string' && typeof facts.asOf === 'number') {
+        noteMainHead(state, facts.mainHead, 2 * facts.asOf + 1);
+        const member = state.changes.get(event.subject.change ?? '');
+        if (member !== undefined) {
+            member.mainHead = facts.mainHead;
+        }
     }
     state.head = hash;
     state.seq = event.seq;
@@ -923,7 +960,17 @@ export class GitHubHistory implements History {
             baseIsAncestor: forward.status === 'ahead' || forward.status === 'identical',
             baseOnMain: onMain !== null && (onMain.status === 'ahead' || onMain.status === 'identical'),
             diffPaths: forward.files.sort(),
+            ...(await this.mainHead()),
         };
+    }
+
+    // main's head now, or nothing when GitHub won't say: the facts then say nothing about it.
+    private async mainHead(): Promise<{ mainHead?: string }> {
+        const response = await fetch(`https://api.github.com/repos/${this.repository}/commits/main`, {
+            headers: { Authorization: `Bearer ${this.token}`, Accept: 'application/vnd.github.sha', 'User-Agent': 'loom-queue' },
+        });
+        const text = response.ok ? (await response.text()).trim() : '';
+        return shaPattern.test(text) ? { mainHead: text } : {};
     }
 }
 
@@ -1371,8 +1418,11 @@ export class Queue extends DurableObject<Env> {
         // the line unchecked and git's facts come from the bridge.
         let facts: GitFacts | null = null;
         if (this.history !== null) {
+            // The seq before git is asked: a landing logged while git answers outranks the head it reads.
+            const asOf = (await this.current()).seq;
             try {
                 facts = await this.history.facts(checked.sha, checked.base);
+                facts = typeof facts.mainHead === 'string' ? { ...facts, asOf: asOf } : facts;
             }
             catch (error) {
                 return jsonResponse(503, { reason: `git facts are unavailable, try again: ${(error as Error).message}` });
@@ -1670,6 +1720,10 @@ export class Queue extends DurableObject<Env> {
         if (parsed.gateNamed !== undefined && !(Array.isArray(parsed.gateNamed) && parsed.gateNamed.every(isNamed))) {
             return jsonResponse(400, { error: 'gateNamed is [{path, users}]: each Python test a non-test file names' });
         }
+        const readsHead = parsed.mainHead !== undefined || parsed.asOf !== undefined;
+        if (readsHead && (typeof parsed.mainHead !== 'string' || !shaPattern.test(parsed.mainHead) || !Number.isSafeInteger(parsed.asOf) || (parsed.asOf as number) < 0)) {
+            return jsonResponse(400, { error: "mainHead and asOf come together: main's head as git read it, and the queue's seq when the reading began" });
+        }
         const facts: GitFacts = {
             shaExists: parsed.shaExists,
             baseIsAncestor: parsed.baseIsAncestor,
@@ -1678,6 +1732,7 @@ export class Queue extends DurableObject<Env> {
             ...(typeof parsed.revertOf === 'string' ? { revertOf: parsed.revertOf } : {}),
             ...(Array.isArray(parsed.historyPaths) ? { historyPaths: [...(parsed.historyPaths as string[])].sort() } : {}),
             ...(Array.isArray(parsed.gateNamed) ? { gateNamed: parsed.gateNamed as { path: string; users: string[] }[] } : {}),
+            ...(readsHead ? { mainHead: parsed.mainHead as string, asOf: parsed.asOf as number } : {}),
         };
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
@@ -1687,6 +1742,9 @@ export class Queue extends DurableObject<Env> {
             }
             if (entry.checked || !isLive(entry)) {
                 return jsonResponse(409, { error: `change ${change} is already ${entry.checked ? 'checked' : entry.state}` });
+            }
+            if (facts.asOf !== undefined && facts.asOf > state.seq) {
+                return jsonResponse(422, { error: `asOf ${facts.asOf} is past the log's seq ${state.seq}` });
             }
             const reason = gitRefusalOf(entry.record, facts);
             if (reason !== null) {
@@ -1946,6 +2004,16 @@ export class Queue extends DurableObject<Env> {
             if (future.empty !== null && batch.rule !== DocsRule) {
                 return jsonResponse(422, { error: `an empty-planned future is decided only by ${DocsRule}, not ${batch.rule}` });
             }
+            // A future built again on its tree starts at its own first attempt (#6gj7n9p): a record from an earlier
+            // future's run, as a judge that doesn't read firstAttempt would carry, decides nothing here.
+            if (future.attemptsBefore > 0) {
+                const first = future.attemptsBefore + 1;
+                const cited = [batch.run, ...batch.verdicts.flatMap((record) => /\bcarried (\S+)/.exec(String(record.rule ?? ''))?.[1] ?? [])];
+                const early = cited.find((run) => (attemptOf(tree, run) ?? 0) < first);
+                if (early !== undefined) {
+                    return jsonResponse(422, { error: `run ${early} isn't one of future ${tree}'s attempts, which start at ${first}; an earlier future of the tree ran it` });
+                }
+            }
             const planned = [...future.units.keys()];
             if (!sortedEqual(batch.plan, planned)) {
                 return jsonResponse(422, { error: `the batch's plan is not the ${planned.length} units the planner planned for future ${tree}` });
@@ -1977,26 +2045,18 @@ export class Queue extends DurableObject<Env> {
         });
     }
 
-    // Main's red pause (#3ypyka5, push-main l.25-31): a decided witness of main that's newer than every other decided one
-    // holds main red when it's red (the judge's red leaves out what it quarantined). A green witness of main's tip as the
-    // log knows it records main.green (#6gj7n9p), clearing a standing red or not, and a stale sha's green says nothing.
+    // Main's red pause (#3ypyka5, push-main l.25-31), on main's tip only (#6gj7n9p): a decided witness whose own git facts
+    // read its sha as main's head, and which is still main's tip as the log knows it, holds main red when it's red (the
+    // judge's red leaves out what it quarantined) and records main.green when it's green, clearing a standing red or not.
+    // A witness of an older commit, or of a head main has moved past, says nothing about main.
     private async witnessMain(change: string, decision: Decision): Promise<void> {
         const state = await this.current();
         const entry = state.changes.get(change);
-        if (entry?.record.witness !== true || decision.status === 'void') {
+        if (entry?.record.witness !== true || decision.status === 'void' || entry.mainHead !== entry.record.sha || state.mainTip !== entry.record.sha) {
             return;
         }
         if (decision.status === 'green') {
-            if (state.mainTip === entry.record.sha) {
-                await this.append('main.green', { change: change }, { witness: change, main: entry.record.sha, cleared: state.mainRed?.witness ?? null });
-            }
-            return;
-        }
-        const newer = [...state.changes.values()].some(function (other) {
-            const decided = state.futures.get(other.future ?? '')?.decided;
-            return other.record.witness === true && other.position > entry.position && decided !== null && decided !== undefined && decided.status !== 'void';
-        });
-        if (newer) {
+            await this.append('main.green', { change: change }, { witness: change, main: entry.record.sha, cleared: state.mainRed?.witness ?? null });
             return;
         }
         const future = state.futures.get(entry.future ?? '');
@@ -2175,7 +2235,9 @@ export class Queue extends DurableObject<Env> {
                     base: future.base,
                     parity: parityOf(state, future),
                     attempt: future.attemptsBefore + future.voids + 1,
-                    // The first attempt that is this future's: the judge carries a pass only from here on.
+                    // The first attempt that is this future's: the judge carries a pass only from here on. A judge or placer
+                    // from before firstAttempt would carry an earlier future's passes, so they deploy first, then the
+                    // Worker; decideBatch refuses such a batch either way.
                     ...(future.attemptsBefore === 0 ? {} : { firstAttempt: future.attemptsBefore + 1 }),
                     ...(future.empty === null ? {} : { empty: true, reason: future.empty.reason, rule: DocsRule }),
                     change: { change: record?.change, sha: record?.sha, base: record?.base, owner: record?.owner },

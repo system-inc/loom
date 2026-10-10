@@ -107,6 +107,35 @@ class Tick(unittest.TestCase):
         queue_bridge.tick(pipeline, FakeGate(), memory())
         self.assertEqual(pipeline.posts(), [("/submissions/%s/facts" % change, {"shaExists": True, "baseIsAncestor": True, "baseOnMain": True, "diffPaths": ["a.go"]})])
 
+    def test_main_s_head_rides_with_the_queue_s_seq_read_before_git_or_not_at_all(self):
+        submitted = [{"change": change, "sha": tree, "base": old, "paths": ["a.go"]}]
+
+        class HeadPipeline(FakePipeline):
+            def __init__(self, head):
+                super().__init__(unchecked=submitted)
+                self.head = head
+
+            def call(self, method, path, body=None):
+                if path == "/head":
+                    self.calls.append((method, path, body))
+                    return self.head
+                return super().call(method, path, body)
+
+        class HeadGate(FakeGate):
+            def facts(self, sha, base):
+                self.askedAfter = [path for method, path, body in pipeline.calls]
+                return {**super().facts(sha, base), "mainHead": new}
+
+        pipeline, gate = HeadPipeline((200, {"seq": 7, "head": "0" * 64})), HeadGate()
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(gate.askedAfter, ["/submissions?state=unchecked", "/head"])
+        self.assertEqual(pipeline.posts()[0][1], {"shaExists": True, "baseIsAncestor": True, "baseOnMain": True, "diffPaths": ["a.go"], "mainHead": new, "asOf": 7})
+        # No seq to order it by: the facts say nothing of main's head.
+        for answer in ((503, {"error": "down"}), (200, {"seq": "7"}), (200, {"seq": True})):
+            pipeline, gate = HeadPipeline(answer), HeadGate()
+            queue_bridge.tick(pipeline, gate, memory())
+            self.assertEqual(pipeline.posts()[0][1], {"shaExists": True, "baseIsAncestor": True, "baseOnMain": True, "diffPaths": ["a.go"]})
+
     def test_a_future_with_no_record_is_queued_once_and_decided_by_nothing(self):
         pipeline, gate, held = FakePipeline([future]), FakeGate(), memory()
         queue_bridge.tick(pipeline, gate, held)
@@ -361,6 +390,13 @@ class Facts(unittest.TestCase):
         self.assertEqual(queue_bridge.revertOf(landed, reverted), landed)
         other = self.commit({"b.go": "package a\n"})
         self.assertIsNone(queue_bridge.revertOf(reverted, other))
+
+    def test_main_s_head_is_origin_main_as_the_fetch_read_it(self):
+        older = self.base
+        tip = self.commit({"b.go": "package a\n"})
+        self.run("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.assertEqual(queue_bridge.Gate().facts(older, older)["mainHead"], tip)
+        self.assertEqual(queue_bridge.Gate().facts("9" * 40, older)["mainHead"], tip)
 
 
 if __name__ == "__main__":

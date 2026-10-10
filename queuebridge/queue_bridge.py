@@ -202,14 +202,17 @@ class Gate:
     def facts(self, sha, base):
         """What git says about a submitted change, read from origin through this clone."""
         git("fetch", "-q", "--no-tags", "origin", "main", sha)
+        # main's head as this fetch read it: a witness is of main's tip only when this is its sha (#6gj7n9p).
+        head = git("rev-parse", "--verify", "-q", "origin/main")
+        mainHead = {"mainHead": head} if shaPattern.match(head) else {}
         exists = subprocess.run(["git", "-C", repository, "cat-file", "-e", sha + "^{commit}"], capture_output=True).returncode == 0
         if not exists:
-            return {"shaExists": False, "baseIsAncestor": False, "baseOnMain": False, "diffPaths": []}
+            return {"shaExists": False, "baseIsAncestor": False, "baseOnMain": False, "diffPaths": [], **mainHead}
         ancestor = lambda older, newer: subprocess.run(["git", "-C", repository, "merge-base", "--is-ancestor", older, newer], capture_output=True).returncode == 0
         diffPaths = sorted(path for path in git("diff", "--no-renames", "--name-only", base, sha).splitlines() if path)
         return {"shaExists": True, "baseIsAncestor": ancestor(base, sha), "baseOnMain": ancestor(base, "origin/main"),
                 "diffPaths": diffPaths, "historyPaths": historyOf(base, sha), "gateNamed": gateNamedOf(sha, diffPaths),
-                "revertOf": revertOf(base, sha)}
+                "revertOf": revertOf(base, sha), **mainHead}
 
     def record(self, tree):
         """The newest finished fast record for tree: {ref, status, gated}, or None while none has finished."""
@@ -407,6 +410,22 @@ def decide(pipeline, gate, memory):
             log("requeued %s after its void: %s" % (tree[:12], "started" if gate.requeue(tree) else "requeue.sh refused"))
 
 
+shaPattern = re.compile(r"^[0-9a-f]{40}$")
+
+
+def withHead(pipeline, read):
+    """git's facts, read after the queue's seq is noted: asOf orders their mainHead against the queue's own log, so a
+    landing logged while git answered outranks the head it read. Without the seq, the facts say nothing of main's head,
+    and a witness cleared by them never records main.green or main.red."""
+    status, head = pipeline.call("GET", "/head")
+    facts = read()
+    seq = head.get("seq") if status == 200 and isinstance(head, dict) else None
+    if "mainHead" in facts and isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0:
+        return {**facts, "asOf": seq}
+    facts.pop("mainHead", None)
+    return facts
+
+
 def tick(pipeline, gate, memory):
     """One pass: git's facts, verdicts for unplanned futures, then every landing order. memory holds what was done or said."""
     status, unchecked = pipeline.call("GET", "/submissions?state=unchecked")
@@ -414,7 +433,7 @@ def tick(pipeline, gate, memory):
         log("submissions: %d %s" % (status, unchecked))
         return
     for submitted in unchecked["changes"]:
-        facts = gate.facts(submitted["sha"], submitted["base"])
+        facts = withHead(pipeline, lambda: gate.facts(submitted["sha"], submitted["base"]))
         status, answer = pipeline.call("POST", "/submissions/%s/facts" % submitted["change"], facts)
         log("facts for %s: %d %s" % (submitted["change"], status, answer))
     # Once outside verdicts are refused, Judge decides every future and this only carries git's facts (#hkmzefm).
