@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -107,7 +108,7 @@ func TestWorkshopBuildsAMissingActionOnceAndARunnerFetchesItIntoItsCache(t *test
 	// The runner fetches into its cache directory, and buildcache would find each product there as a hit.
 	runner := Store{Read: fake.Public()}
 	cache := t.TempDir()
-	if err := runner.FetchProduct(productKey, cache); err != nil {
+	if err := runner.FetchProduct(context.Background(), productKey, cache); err != nil {
 		t.Fatal(err)
 	}
 	for product, files := range products {
@@ -135,13 +136,13 @@ func TestWorkshopBuildsAMissingActionOnceAndARunnerFetchesItIntoItsCache(t *test
 	}
 	// A product directory already in the cache is left as it is.
 	os.WriteFile(filepath.Join(cache, stage0, "stage0.a"), []byte("local"), 0o644)
-	if err := runner.FetchProduct(productKey, cache); err != nil {
+	if err := runner.FetchProduct(context.Background(), productKey, cache); err != nil {
 		t.Fatal(err)
 	}
 	if read, _ := os.ReadFile(filepath.Join(cache, stage0, "stage0.a")); string(read) != "local" {
 		t.Fatalf("a fetch replaced a product already in the cache")
 	}
-	if err := runner.FetchProduct(keyOf("never built"), t.TempDir()); !errors.Is(err, ErrNotStored) {
+	if err := runner.FetchProduct(context.Background(), keyOf("never built"), t.TempDir()); !errors.Is(err, ErrNotStored) {
 		t.Fatalf("a missing action: %v", err)
 	}
 }
@@ -167,7 +168,7 @@ func TestAFailedProductTestUploadsNothingAndAnEmptyOneIsStoredAsEmpty(t *testing
 	if results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_X"}}); results[0].Outcome != "stored" || runs != 1 {
 		t.Fatalf("%+v, runs %d", results, runs)
 	}
-	if err := (Store{Read: fake.Public()}).FetchProduct(keyOf("k"), t.TempDir()); err != nil {
+	if err := (Store{Read: fake.Public()}).FetchProduct(context.Background(), keyOf("k"), t.TempDir()); err != nil {
 		t.Fatalf("an empty action: %v", err)
 	}
 }
@@ -224,7 +225,7 @@ func TestAnUpstreamSharedByTwoActionsBuildsOnceAndGoesUpWithEach(t *testing.T) {
 	}
 	// Each action's archive carries stage0, so a runner fetching only B still gets it.
 	runnerCache := t.TempDir()
-	if err := (Store{Read: fake.Public()}).FetchProduct(keys["TestProduct_B"], runnerCache); err != nil {
+	if err := (Store{Read: fake.Public()}).FetchProduct(context.Background(), keys["TestProduct_B"], runnerCache); err != nil {
 		t.Fatal(err)
 	}
 	for _, product := range []string{stage0, oracleB} {
@@ -279,7 +280,7 @@ func TestAFetchRefusesAPoisonedStore(t *testing.T) {
 	refused := func(t *testing.T, runner Store, key, says string) {
 		t.Helper()
 		cache := t.TempDir()
-		if err := runner.FetchProduct(key, cache); err == nil || !strings.Contains(err.Error(), says) {
+		if err := runner.FetchProduct(context.Background(), key, cache); err == nil || !strings.Contains(err.Error(), says) {
 			t.Fatalf("a poisoned store: %v", err)
 		}
 		if entries, _ := os.ReadDir(cache); len(entries) != 0 {
@@ -350,7 +351,7 @@ func TestAFetchCanLeaveOutWhatClangBuilt(t *testing.T) {
 		t.Fatalf("%+v", results)
 	}
 	runner := t.TempDir()
-	if err := (Store{Read: fake.Public(), SkipNative: true}).FetchProduct(productKey, runner); err != nil {
+	if err := (Store{Read: fake.Public(), SkipNative: true}).FetchProduct(context.Background(), productKey, runner); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(runner, goProduct, "out")); err != nil {
@@ -362,7 +363,7 @@ func TestAFetchCanLeaveOutWhatClangBuilt(t *testing.T) {
 		}
 	}
 	everything := t.TempDir()
-	if err := (Store{Read: fake.Public()}).FetchProduct(productKey, everything); err != nil {
+	if err := (Store{Read: fake.Public()}).FetchProduct(context.Background(), productKey, everything); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(everything, nativeProduct, "out")); err != nil {

@@ -106,7 +106,7 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	if run.options.Strict {
 		trim = "trim"
 	}
-	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim, root, owner(run.options)}, run.environment(), run.workspace, time.Until(deadline))
+	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim, root, owner(run.options)}, run.prepareEnvironment(), run.workspace, time.Until(deadline))
 	switch {
 	case err != nil:
 		run.fail(protocol.PhaseStart, err)

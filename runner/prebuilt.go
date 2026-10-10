@@ -221,7 +221,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
-	prepared, _, _, err := run.stream(runContext, []string{"bash", script, "environment", source, job.GateInputs, environmentFile, root}, run.environment(), run.workspace, time.Until(deadline))
+	prepared, _, _, err := run.stream(runContext, []string{"bash", script, "environment", source, job.GateInputs, environmentFile, root}, run.prepareEnvironment(), run.workspace, time.Until(deadline))
 	switch {
 	case err != nil:
 		run.fail(protocol.PhaseStart, err)

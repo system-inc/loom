@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -111,7 +112,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	blobs := t.TempDir()
 	runner := Store{Read: fake.Public(), Blobs: blobs}
 	unit := t.TempDir()
-	fetched, err := runner.FetchPackage(treeKey, "example.com/tree/a", unit)
+	fetched, err := runner.FetchPackage(context.Background(), treeKey, "example.com/tree/a", unit)
 	if err != nil || !slices.Equal(fetched.Products, []string{product}) {
 		t.Fatal(fetched, err)
 	}
@@ -127,10 +128,10 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		t.Fatalf("the runner read %v", fake.Requests())
 	}
 	// A second unit of the same tree on the same runner reads its blobs from the local cache.
-	if _, err = runner.FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err != nil || fake.Count("PUBLIC", "blobs/") != 2+len(source.Chunks) {
+	if _, err = runner.FetchPackage(context.Background(), treeKey, "example.com/tree/a", t.TempDir()); err != nil || fake.Count("PUBLIC", "blobs/") != 2+len(source.Chunks) {
 		t.Fatalf("a second unit: %v %v", err, fake.Requests())
 	}
-	if _, err = runner.FetchPackage(treeKey, "example.com/tree/a", unit); err == nil {
+	if _, err = runner.FetchPackage(context.Background(), treeKey, "example.com/tree/a", unit); err == nil {
 		t.Fatal("a fetch over a unit that holds the package")
 	}
 
@@ -170,7 +171,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		t.Fatalf("the conflicting ref was overwritten with %q", ref)
 	}
 	// The index a better build wrote stays: package a, which built there, is still what a runner fetches.
-	if _, err = (Store{Read: fake.Public()}).FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err != nil {
+	if _, err = (Store{Read: fake.Public()}).FetchPackage(context.Background(), treeKey, "example.com/tree/a", t.TempDir()); err != nil {
 		t.Fatalf("the better index was replaced: %v", err)
 	}
 	// With no index yet, the worse build's is written, and a runner is told package a didn't build; the better build
@@ -179,14 +180,14 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	if _, written, err = PublishTree(store, &conflicted, build.Out, build.Cache, &source, nil); err != nil || !written {
 		t.Fatalf("a first index with a failure: %v %v", written, err)
 	}
-	if _, err = (Store{Read: fake.Public()}).FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err == nil || !strings.Contains(err.Error(), "didn't build") {
+	if _, err = (Store{Read: fake.Public()}).FetchPackage(context.Background(), treeKey, "example.com/tree/a", t.TempDir()); err == nil || !strings.Contains(err.Error(), "didn't build") {
 		t.Fatalf("a runner fetching a package that didn't build: %v", err)
 	}
 	fake.Set("refs/action/"+product, []byte(stored.Products[product]), time.Now())
 	if _, written, err = PublishTree(store, &again, build.Out, build.Cache, &source, nil); err != nil || !written {
 		t.Fatalf("a better build after a worse one: %v %v", written, err)
 	}
-	if _, err = (Store{Read: fake.Public()}).FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err != nil {
+	if _, err = (Store{Read: fake.Public()}).FetchPackage(context.Background(), treeKey, "example.com/tree/a", t.TempDir()); err != nil {
 		t.Fatalf("the better index didn't take the worse one's place: %v", err)
 	}
 }
@@ -214,7 +215,7 @@ func TestARunnerRefusesATreeThatDoesntCheck(t *testing.T) {
 	refused := func(t *testing.T, runner Store) {
 		t.Helper()
 		unit := t.TempDir()
-		if _, err := runner.FetchPackage("t", "p", unit); err == nil || !strings.Contains(err.Error(), "poisoned") {
+		if _, err := runner.FetchPackage(context.Background(), "t", "p", unit); err == nil || !strings.Contains(err.Error(), "poisoned") {
 			t.Fatalf("%v", err)
 		}
 		if entries, _ := os.ReadDir(filepath.Join(unit, "cache")); len(entries) != 0 {
@@ -227,7 +228,7 @@ func TestARunnerRefusesATreeThatDoesntCheck(t *testing.T) {
 		}
 	}
 	_, runner := plant(t, honest)
-	if _, err := runner.FetchPackage("t", "p", t.TempDir()); err != nil {
+	if _, err := runner.FetchPackage(context.Background(), "t", "p", t.TempDir()); err != nil {
 		t.Fatalf("an honest tree: %v", err)
 	}
 	for name, archive := range map[string][]byte{

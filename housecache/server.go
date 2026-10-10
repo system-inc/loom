@@ -50,7 +50,9 @@ type Server struct {
 	// Fetches counts the fetches from Upstream.
 	Fetches atomic.Int64
 
-	mutex   sync.Mutex
+	mutex sync.Mutex
+	// flights are the fetches in progress by path, never by sha256 alone: blobs/X and releases/blobs/X are two objects
+	// of the store, and one may be gone (the action store's 7 days) while the other stays.
 	flights map[string]*flight
 	// room is held while room is made; reserved, under it, is the length each fetch in flight said its blob has, by
 	// its partial's name, so two fetches at once never count on the same free bytes.
@@ -148,6 +150,11 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	how := "hit"
 	if err != nil {
 		how = "miss"
+		if request.Method == http.MethodHead {
+			// A HEAD says what is held; only a GET fetches.
+			http.Error(writer, "the house cache doesn't hold it; a GET fetches it", http.StatusNotFound)
+			return
+		}
 		if err = server.fill(request.Context(), request.URL.Path, sum); err == nil {
 			file, err = os.Open(path)
 		}
@@ -196,8 +203,8 @@ func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Reques
 	}
 }
 
-// fill has the blob on disk: one fetch from Upstream, which every client asking for it meanwhile waits for. A waiting
-// client that goes away leaves the fetch running for the others.
+// fill has the blob on disk: one fetch from Upstream of its path, which every client asking for that path meanwhile
+// waits for. A waiting client that goes away leaves the fetch running for the others.
 func (server *Server) fill(waitContext context.Context, path, sum string) error {
 	server.mutex.Lock()
 	if _, err := os.Stat(filepath.Join(server.Directory, sum)); err == nil {
@@ -208,14 +215,14 @@ func (server *Server) fill(waitContext context.Context, path, sum string) error 
 	if server.flights == nil {
 		server.flights = map[string]*flight{}
 	}
-	fetching := server.flights[sum]
+	fetching := server.flights[path]
 	if fetching == nil {
 		fetching = &flight{done: make(chan struct{})}
-		server.flights[sum] = fetching
+		server.flights[path] = fetching
 		go func() {
 			fetching.err = server.fetch(path, sum)
 			server.mutex.Lock()
-			delete(server.flights, sum)
+			delete(server.flights, path)
 			server.mutex.Unlock()
 			close(fetching.done)
 		}()

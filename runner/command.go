@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/system-inc/loom/housecache"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -53,6 +54,16 @@ func (run *unitRun) environment() []string {
 	}
 	sort.Strings(result)
 	return result
+}
+
+// prepareEnvironment is what prepare.sh runs with: the unit's environment, and the house cache it asks first for the
+// gate inputs' chunks, unless there is none or this process is leaving it alone (housecache.Skipping).
+func (run *unitRun) prepareEnvironment() []string {
+	environment := run.environment()
+	if run.options.HouseCache != "" && !housecache.Skipping(run.options.HouseCache) {
+		environment = append(environment, housecache.Variable+"="+run.options.HouseCache)
+	}
+	return environment
 }
 
 // lookPath finds a bare command name in the unit's PATH, not the runner's. A name with a slash is used as

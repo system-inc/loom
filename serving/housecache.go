@@ -32,13 +32,15 @@ const HouseCacheUnitName = "loom-house-cache.service"
 const HouseCacheHookName = "40-house-cache"
 
 // A HouseCacheConfig is ~/.loom/house-cache.conf: the address the cache listens on, where it keeps its blobs, how many
-// gigabytes it holds at most, how many it keeps free on its disk, and whether a public address is allowed.
+// gigabytes it holds at most, how many it keeps free on its disk, and whether a tailnet's or a public address is
+// allowed.
 type HouseCacheConfig struct {
 	Listen    string
 	Directory string
 	LimitGB   uint64
 	FloorGB   uint64
 	Public    bool
+	Tailnet   bool
 }
 
 // Defaults: 100 GB of blobs, about 27 cold trees at 3.7 GB each, and 20 GB always free beside them.
@@ -82,22 +84,26 @@ func ReadHouseCacheConfig(content string) (HouseCacheConfig, error) {
 			} else {
 				config.FloorGB = gigabytes
 			}
-		case "public":
+		case "public", "tailnet":
 			switch value {
 			case "yes":
-				config.Public = true
+				if key == "public" {
+					config.Public = true
+				} else {
+					config.Tailnet = true
+				}
 			case "no":
 			default:
-				return HouseCacheConfig{}, fmt.Errorf("house-cache.conf line %d: public is yes or no, not %q", number+1, value)
+				return HouseCacheConfig{}, fmt.Errorf("house-cache.conf line %d: %s is yes or no, not %q", number+1, key, value)
 			}
 		default:
-			return HouseCacheConfig{}, fmt.Errorf("house-cache.conf line %d: no setting %q (listen, directory, limit-gb, floor-gb, public)", number+1, key)
+			return HouseCacheConfig{}, fmt.Errorf("house-cache.conf line %d: no setting %q (listen, directory, limit-gb, floor-gb, tailnet, public)", number+1, key)
 		}
 	}
 	if config.Listen == "" {
 		return HouseCacheConfig{}, errors.New("house-cache.conf names no listen address")
 	}
-	if err := housecache.CheckListen(config.Listen, config.Public); err != nil {
+	if err := housecache.CheckListen(config.Listen, config.Public, config.Tailnet); err != nil {
 		return HouseCacheConfig{}, fmt.Errorf("house-cache.conf: %w", err)
 	}
 	return config, nil
@@ -111,6 +117,9 @@ func HouseCacheUnit(config HouseCacheConfig) string {
 		directory = "%h/loom-house-cache"
 	}
 	flags := fmt.Sprintf("--listen %s --directory %s --limit-gb %d --floor-gb %d", config.Listen, directory, config.LimitGB, config.FloorGB)
+	if config.Tailnet {
+		flags += " --tailnet"
+	}
 	if config.Public {
 		flags += " --public"
 	}

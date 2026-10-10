@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -36,7 +37,7 @@ func fetchActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	failed := 0
 	for _, key := range flags.Args() {
 		started := time.Now()
-		if err := store.FetchProduct(key, *cache); err != nil {
+		if err := store.FetchProduct(context.Background(), key, *cache); err != nil {
 			fmt.Fprintf(stdout, "%s failed %.2f s: %v\n", key, time.Since(started).Seconds(), err)
 			failed++
 			continue

@@ -32,7 +32,7 @@ func (run *unitRun) fetchProducts(runContext context.Context) error {
 			return runContext.Err()
 		}
 		fetched := filepath.Join(run.staging, fmt.Sprintf("product-%d", index))
-		if err := store.FetchProduct(product.Key, fetched); err != nil {
+		if err := store.FetchProduct(runContext, product.Key, fetched); err != nil {
 			return fmt.Errorf("product %s: %w", product.Key, err)
 		}
 		err := filepath.WalkDir(fetched, func(path string, entry fs.DirEntry, err error) error {

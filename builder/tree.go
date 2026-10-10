@@ -2,6 +2,7 @@ package builder
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -837,8 +838,8 @@ func (store Store) keep(key string, held TreeIndex, content []byte, object r2.Ob
 }
 
 // Tree reads trees/<treeKey>.json from the public domain, as ParseTree reads it.
-func (store Store) Tree(treeKey string) (TreeIndex, error) {
-	content, err := store.get("trees/" + treeKey + ".json")
+func (store Store) Tree(readContext context.Context, treeKey string) (TreeIndex, error) {
+	content, err := store.get(readContext, "trees/"+treeKey+".json")
 	if err != nil {
 		return TreeIndex{}, err
 	}
@@ -905,8 +906,8 @@ func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 // kept in Blobs when set), unpacked into a scratch directory, refusing any entry that would land outside it, a
 // chunk's entry outside its range, and a product's entry that isn't that product's. Only when all of it checks does
 // any of it move into place; a product already in cache/ is left as it is.
-func (store Store) FetchPackage(treeKey, importPath, directory string) (TreePackage, error) {
-	index, err := store.Tree(treeKey)
+func (store Store) FetchPackage(fetchContext context.Context, treeKey, importPath, directory string) (TreePackage, error) {
+	index, err := store.Tree(fetchContext, treeKey)
 	if err != nil {
 		return TreePackage{}, err
 	}
@@ -930,7 +931,7 @@ func (store Store) FetchPackage(treeKey, importPath, directory string) (TreePack
 		return TreePackage{}, err
 	}
 	defer os.RemoveAll(scratch)
-	blob, err := store.blob(built.Binary)
+	blob, err := store.blob(fetchContext, built.Binary)
 	if err != nil {
 		return TreePackage{}, fmt.Errorf("package %s's binary: %w", importPath, err)
 	}
@@ -942,7 +943,7 @@ func (store Store) FetchPackage(treeKey, importPath, directory string) (TreePack
 		return TreePackage{}, err
 	}
 	for _, chunk := range index.Source {
-		if blob, err = store.blob(chunk.Blob); err != nil {
+		if blob, err = store.blob(fetchContext, chunk.Blob); err != nil {
 			return TreePackage{}, fmt.Errorf("the source's chunk %s: %w", chunk.Blob, err)
 		}
 		if err = UnpackChunk(bytes.NewReader(blob), filepath.Join(scratch, "source"), chunk); err != nil {
@@ -950,7 +951,7 @@ func (store Store) FetchPackage(treeKey, importPath, directory string) (TreePack
 		}
 	}
 	for _, product := range built.Products {
-		if blob, err = store.blob(index.Products[product]); err != nil {
+		if blob, err = store.blob(fetchContext, index.Products[product]); err != nil {
 			return TreePackage{}, fmt.Errorf("product %s: %w", product, err)
 		}
 		if err = Unpack(bytes.NewReader(blob), filepath.Join(scratch, "cache"), ProductEntries(product)); err != nil {

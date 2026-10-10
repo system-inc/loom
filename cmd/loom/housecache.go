@@ -20,7 +20,7 @@ import (
 )
 
 const houseCacheUsage = `usage:
-  loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--public]
+  loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--tailnet] [--public]
   loom house-cache install
 `
 
@@ -50,12 +50,13 @@ func houseCacheServe(arguments []string, stderr io.Writer) int {
 	limitGB := flags.Uint64("limit-gb", serving.DefaultHouseCacheLimitGB, "the most gigabytes of blobs kept")
 	floorGB := flags.Uint64("floor-gb", serving.DefaultHouseCacheFloorGB, "the gigabytes kept free on the directory's disk")
 	upstream := flags.String("upstream", housecache.DefaultUpstream, "the store the cache fills from")
+	tailnet := flags.Bool("tailnet", false, "allow a tailnet's address, in 100.64.0.0/10")
 	public := flags.Bool("public", false, "allow an address that isn't on a local network")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || *listen == "" || *directory == "" || *limitGB == 0 {
 		fmt.Fprint(stderr, houseCacheUsage)
 		return 2
 	}
-	if err := housecache.CheckListen(*listen, *public); err != nil {
+	if err := housecache.CheckListen(*listen, *public, *tailnet); err != nil {
 		fmt.Fprintf(stderr, "loom house-cache: %v\n", err)
 		return 2
 	}

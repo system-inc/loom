@@ -255,10 +255,17 @@ func (cache runnerCache) path(fetchContext context.Context, sum string) (string,
 	url := strings.TrimSuffix(cache.releases, "/") + "/" + sum
 	err := errors.New("no house cache")
 	if through := housecache.Through(cache.house, url); through != "" {
-		err = cache.download(fetchContext, cache.houseClient, through, sum, path)
+		// Its own context, cut once its answer stalls or trickles, so the house cache never spends the fetch's bound.
+		houseContext, cancelHouse := context.WithCancel(fetchContext)
+		err = cache.download(houseContext, cache.houseClient, through, sum, path, cancelHouse)
+		cancelHouse()
+		var status houseStatus
+		if err != nil && !errors.As(err, &status) {
+			housecache.Unanswered(cache.house)
+		}
 	}
 	if err != nil && fetchContext.Err() == nil {
-		err = cache.download(fetchContext, cache.client, url, sum, path)
+		err = cache.download(fetchContext, cache.client, url, sum, path, nil)
 	}
 	if err != nil {
 		return "", err
@@ -267,9 +274,15 @@ func (cache runnerCache) path(fetchContext context.Context, sum string) (string,
 	return path, nil
 }
 
+// houseStatus is an answer that came whole and wasn't the runner: a status, or bytes that don't hash to its name.
+type houseStatus struct{ error }
+
+func (status houseStatus) Unwrap() error { return status.error }
+
 // download reads runner sum from url into a partial file, and renames it to path, read-only and executable, only when
-// it is whole and hashes to sum.
-func (cache runnerCache) download(fetchContext context.Context, client *http.Client, url, sum, path string) error {
+// it is whole and hashes to sum. With watch, the cancel of fetchContext, the body is cut off once it stalls or
+// trickles (housecache.Watch).
+func (cache runnerCache) download(fetchContext context.Context, client *http.Client, url, sum, path string, watch context.CancelFunc) error {
 	request, err := http.NewRequestWithContext(fetchContext, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -278,9 +291,13 @@ func (cache runnerCache) download(fetchContext context.Context, client *http.Cli
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	body := response.Body
+	if watch != nil {
+		body = housecache.Watch(body, watch)
+	}
+	defer body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", url, response.Status)
+		return houseStatus{fmt.Errorf("GET %s: %s", url, response.Status)}
 	}
 	partial, err := os.CreateTemp(cache.directory, ".partial-"+sum+"-")
 	if err != nil {
@@ -288,7 +305,7 @@ func (cache runnerCache) download(fetchContext context.Context, client *http.Cli
 	}
 	defer os.Remove(partial.Name())
 	hash := sha256.New()
-	written, err := io.Copy(io.MultiWriter(partial, hash), io.LimitReader(response.Body, runnerBytesLimit+1))
+	written, err := io.Copy(io.MultiWriter(partial, hash), io.LimitReader(body, runnerBytesLimit+1))
 	if closeErr := partial.Close(); err == nil {
 		err = closeErr
 	}
@@ -298,7 +315,7 @@ func (cache runnerCache) download(fetchContext context.Context, client *http.Cli
 	case written > runnerBytesLimit:
 		return fmt.Errorf("GET %s: over %d bytes", url, runnerBytesLimit)
 	case hex.EncodeToString(hash.Sum(nil)) != sum:
-		return fmt.Errorf("GET %s: its bytes hash to %s", url, hex.EncodeToString(hash.Sum(nil)))
+		return houseStatus{fmt.Errorf("GET %s: its bytes hash to %s", url, hex.EncodeToString(hash.Sum(nil)))}
 	}
 	if err := os.Chmod(partial.Name(), 0o555); err != nil {
 		return err

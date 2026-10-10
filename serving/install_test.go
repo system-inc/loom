@@ -203,29 +203,29 @@ func TestInstallReloadsServeOnlyWhenItsUnitOrItsRunnerChanged(t *testing.T) {
 // is touched.
 func TestServeAsksTheHouseCacheUpdateConfNames(t *testing.T) {
 	served := newBox(t, "pool = box-strict\n", 0o600)
-	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\nhouse-cache = http://192.168.1.20:7380\n"), 0o644)
+	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\nhouse-cache = http://10.10.102.20:7380\n"), 0o644)
 	if err := served.install(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(served.unit(t), "serve --strict --house-cache http://192.168.1.20:7380 --pool ") {
+	if !strings.Contains(served.unit(t), "serve --strict --house-cache http://10.10.102.20:7380 --pool ") {
 		t.Fatalf("the unit asks no house cache:\n%s", served.unit(t))
 	}
 	// The house cache moves to Server: one line on this box, and serve is reloaded onto it.
 	served.running(t, served.paths.Binary)
-	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\nhouse-cache = http://192.168.1.21:7380\n"), 0o644)
+	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\nhouse-cache = http://10.10.102.21:7380\n"), 0o644)
 	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{reloadCall, enableCall, showCall, reloadUnit}) ||
-		!strings.Contains(served.unit(t), " --house-cache http://192.168.1.21:7380 ") {
+		!strings.Contains(served.unit(t), " --house-cache http://10.10.102.21:7380 ") {
 		t.Fatalf("after the house cache moved: %q, %v", served.calls, err)
 	}
 	// A line that isn't an address refuses the install, and serve keeps running as it is.
-	for _, bad := range []string{"house-cache = 192.168.1.21:7380\n", "house-cache = http://192.168.1.21:7380/blobs\n", "house-cache = http://x:1 --exclusive\n"} {
+	for _, bad := range []string{"house-cache = 10.10.102.21:7380\n", "house-cache = http://10.10.102.21:7380/blobs\n", "house-cache = http://x:1 --exclusive\n"} {
 		os.WriteFile(served.paths.UpdateConfig, []byte(bad), 0o644)
 		if err := served.install(); err == nil || len(served.calls) != 0 {
 			t.Errorf("%q: installed (%v), calls %q", bad, err, served.calls)
 		}
 	}
 	// No line, or no update.conf at all, is no house cache.
-	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\n# house-cache = http://192.168.1.21:7380\n"), 0o644)
+	os.WriteFile(served.paths.UpdateConfig, []byte("base = https://artifacts.loom.system.inc/releases\n# house-cache = http://10.10.102.21:7380\n"), 0o644)
 	if err := served.install(); err != nil || strings.Contains(served.unit(t), "house-cache") {
 		t.Fatalf("with the line gone: %v\n%s", err, served.unit(t))
 	}

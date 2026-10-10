@@ -73,7 +73,7 @@ const usage = `usage:
   loom gate-inputs check [--manifest-file <path>] [<name>]
   loom push [--config <push.conf>]
   loom push install
-  loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--public]
+  loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--tailnet] [--public]
   loom house-cache install
 `
 

@@ -2,12 +2,16 @@ package builder
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/system-inc/loom/housecache"
 )
 
 // publicDomain is the store's public domain with one blob, counting each GET.
@@ -52,25 +56,55 @@ func TestTheStoreReaderTriesTheHouseCacheAndChecksIt(t *testing.T) {
 	dead := "http://" + listener.Addr().String()
 	listener.Close()
 
-	got, err := Store{Read: store.URL, House: honest.URL}.blob(sum)
+	got, err := Store{Read: store.URL, House: honest.URL}.blob(context.Background(), sum)
 	if err != nil || !bytes.Equal(got, content) || storeGets.Load() != 0 || houseGets.Load() != 1 {
 		t.Fatalf("through an honest house cache: %q, %v, store %d", got, err, storeGets.Load())
 	}
 	for name, house := range map[string]string{"lying": liar.URL, "dead": dead} {
 		before := storeGets.Load()
-		got, err := Store{Read: store.URL, House: house}.blob(sum)
+		got, err := Store{Read: store.URL, House: house}.blob(context.Background(), sum)
 		if err != nil || !bytes.Equal(got, content) || storeGets.Load() != before+1 {
 			t.Fatalf("through a %s house cache: %q, %v", name, got, err)
 		}
 	}
 	missing := digest([]byte("never uploaded"))
-	if _, err := (Store{Read: store.URL, House: honest.URL}).blob(missing); err == nil || !strings.Contains(err.Error(), ErrNotStored.Error()) {
+	if _, err := (Store{Read: store.URL, House: honest.URL}).blob(context.Background(), missing); err == nil || !strings.Contains(err.Error(), ErrNotStored.Error()) {
 		t.Fatalf("a blob neither holds: %v", err)
 	}
 	// Only blobs go through the house cache: a ref is mutable, so it is always the store's.
 	before := houseGets.Load()
-	(Store{Read: store.URL, House: honest.URL}).Ref(strings.Repeat("a", 64))
+	(Store{Read: store.URL, House: honest.URL}).Ref(context.Background(), strings.Repeat("a", 64))
 	if houseGets.Load() != before {
 		t.Fatal("a ref was asked of the house cache")
+	}
+}
+
+// The store reader's ask of the house cache is bounded by its caller's context and its own answer and trickle bounds:
+// a frozen house cache never holds a product past the caller's deadline, and within it the store gives the blob.
+func TestTheStoreReadersHouseCacheAskIsBoundedByItsContext(t *testing.T) {
+	content := []byte("a product's archive")
+	sum := digest(content)
+	store, _ := publicDomain(t, content)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close() // never accepted: a frozen house cache
+	frozen := "http://" + listener.Addr().String()
+
+	deadline, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := (Store{Read: store.URL, House: frozen}).blob(deadline, sum); err == nil || time.Since(started) > 2*time.Second {
+		t.Fatalf("past its caller's deadline: %v after %v", err, time.Since(started))
+	}
+
+	header := housecache.HeaderTimeout
+	housecache.HeaderTimeout = time.Second
+	defer func() { housecache.HeaderTimeout = header }()
+	started = time.Now()
+	got, err := Store{Read: store.URL, House: frozen, HouseClient: housecache.Client()}.blob(context.Background(), sum)
+	if err != nil || !bytes.Equal(got, content) || time.Since(started) > 3*time.Second {
+		t.Fatalf("past a frozen house cache: %q, %v after %v", got, err, time.Since(started))
 	}
 }

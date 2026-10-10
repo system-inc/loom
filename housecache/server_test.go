@@ -432,3 +432,54 @@ func TestOpenLocksTheDirectoryAndClearsDeadPartials(t *testing.T) {
 	}
 	second.Close()
 }
+
+// blobs/X and releases/blobs/X are two objects of the store, and the action store's may be gone after its 7 days while
+// the release store's stays: a miss of one never waits on the other's fetch, so the release isn't refused for the
+// expired blob's 404.
+func TestAMissOfOnePathNeverWaitsOnAnothers(t *testing.T) {
+	upstream := newStore(t)
+	content := []byte("a loom-runner, released and since expired from the action store")
+	sum := upstream.put(content)
+	upstream.remove("/blobs/" + sum)
+	upstream.arrived, upstream.gate = make(chan string, 4), make(chan struct{})
+	_, served := newCache(t, upstream, 1<<20, 0, 1<<30)
+	expired := make(chan answer, 1)
+	go func() { expired <- get(t, served.URL+"/blobs/"+sum) }()
+	<-upstream.arrived
+	released := make(chan answer, 1)
+	go func() { released <- get(t, served.URL+"/releases/blobs/"+sum) }()
+	select {
+	case <-upstream.arrived:
+	case <-time.After(2 * time.Second):
+	}
+	close(upstream.gate)
+	if got := <-released; got.status != http.StatusOK || !bytes.Equal(got.body, content) {
+		t.Fatalf("the release answered %d while the expired blob's fetch was in flight", got.status)
+	}
+	if got := <-expired; got.status != http.StatusNotFound {
+		t.Fatalf("the expired blob answered %d", got.status)
+	}
+}
+
+// The gate inputs' chunks are served by their sha256 like any blob; their manifest, named by the tar's sha256 and not
+// its own, never hashes to its name, so it is refused and never kept, and its clients read it from the store.
+func TestGateInputsChunksAreServedAndTheirManifestNever(t *testing.T) {
+	upstream := newStore(t)
+	chunk := []byte("a gate inputs chunk")
+	chunkSum := hashOf(chunk)
+	upstream.set("/gate-inputs/"+chunkSum, chunk)
+	tarSum := hashOf([]byte("the uncompressed tar"))
+	upstream.set("/gate-inputs/"+tarSum, []byte(chunkSum+"\ntotal "+chunkSum+" 19\ntar "+tarSum+" 20\n"))
+	cache, served := newCache(t, upstream, 1<<20, 0, 1<<30)
+	if got := get(t, served.URL+"/gate-inputs/"+chunkSum); got.status != http.StatusOK || !bytes.Equal(got.body, chunk) {
+		t.Fatalf("a chunk answered %d", got.status)
+	}
+	for range 2 {
+		if got := get(t, served.URL+"/gate-inputs/"+tarSum); got.status != http.StatusBadGateway {
+			t.Fatalf("the manifest answered %d: %q", got.status, got.body)
+		}
+	}
+	if got := held(cache); got != chunkSum {
+		t.Fatalf("the cache holds %q, not the chunk alone", got)
+	}
+}

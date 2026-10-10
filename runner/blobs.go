@@ -171,9 +171,16 @@ func (cache blobCache) open(fetchContext context.Context, sum string) (*os.File,
 
 // fetch has blob sum from the house cache when there is one, and otherwise, or when the house cache can't give it
 // whole and hashing to its name (down, slow, missing it, corrupt), from the store. Either way it is checked the same.
+//
+// The house cache never spends the unit's time: its ask has its own context, cut once its answer stalls or trickles
+// (housecache.Watch) and bounded before that by its client's connect and answer timeouts, so a cache that is down,
+// frozen or crawling costs a blob seconds, then the store. One that didn't answer and fails a probe is left alone by
+// the whole process for a while (housecache.Unanswered), so it costs those seconds once, not once per blob.
 func (cache blobCache) fetch(fetchContext context.Context, sum string, fetch *blobFetch) (*os.File, int64, error) {
 	if through := housecache.Through(cache.house, cache.store+"/blobs/"+sum); through != "" {
-		file, size, err := cache.fetchFrom(fetchContext, cache.houseClient, through, sum)
+		houseContext, cancelHouse := context.WithCancel(fetchContext)
+		file, size, err := cache.fetchFrom(houseContext, cache.houseClient, through, sum, cancelHouse)
+		cancelHouse()
 		if err == nil {
 			fetch.house = true
 			return file, size, nil
@@ -183,13 +190,24 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string, fetch *bl
 			return nil, 0, err
 		}
 		fetch.unhoused = err.Error()
+		var answer answered
+		if !errors.As(err, &answer) && !errors.Is(err, builder.ErrNotStored) {
+			housecache.Unanswered(cache.house)
+		}
 	}
-	return cache.fetchFrom(fetchContext, cache.client, cache.store+"/blobs/"+sum, sum)
+	return cache.fetchFrom(fetchContext, cache.client, cache.store+"/blobs/"+sum, sum, nil)
 }
 
+// answered is an answer that came whole and wasn't the blob: a status other than 200 or 404, or bytes that don't hash
+// to its name. It says nothing against the server's health.
+type answered struct{ error }
+
+func (answer answered) Unwrap() error { return answer.error }
+
 // fetchFrom reads blob sum from url into a partial file it holds locked, hashing it as it comes, and renames it to the
-// blob's name, read-only, only when it is whole and hashes to it. It returns the file open at its start.
-func (cache blobCache) fetchFrom(fetchContext context.Context, client *http.Client, url, sum string) (*os.File, int64, error) {
+// blob's name, read-only, only when it is whole and hashes to it. It returns the file open at its start. With watch,
+// the cancel of fetchContext, the body is cut off once it stalls or trickles (housecache.Watch).
+func (cache blobCache) fetchFrom(fetchContext context.Context, client *http.Client, url, sum string, watch context.CancelFunc) (*os.File, int64, error) {
 	if err := os.MkdirAll(cache.directory, 0o755); err != nil {
 		return nil, 0, err
 	}
@@ -201,12 +219,16 @@ func (cache blobCache) fetchFrom(fetchContext context.Context, client *http.Clie
 	if err != nil {
 		return nil, 0, fmt.Errorf("blobs/%s: %w", sum, err)
 	}
-	defer response.Body.Close()
+	body := response.Body
+	if watch != nil {
+		body = housecache.Watch(body, watch)
+	}
+	defer body.Close()
 	switch {
 	case response.StatusCode == http.StatusNotFound:
 		return nil, 0, fmt.Errorf("blobs/%s: %w", sum, builder.ErrNotStored)
 	case response.StatusCode != http.StatusOK:
-		return nil, 0, fmt.Errorf("%s answered %s", url, response.Status)
+		return nil, 0, answered{fmt.Errorf("%s answered %s", url, response.Status)}
 	}
 	partial, err := lockedTemporary(fetchContext, cache.directory, partialPrefix+sum+"-", false)
 	if err != nil {
@@ -220,7 +242,7 @@ func (cache blobCache) fetchFrom(fetchContext context.Context, client *http.Clie
 		}
 	}()
 	hash := sha256.New()
-	size, err := copyBlob(io.MultiWriter(partial, hash), response.Body)
+	size, err := copyBlob(io.MultiWriter(partial, hash), body)
 	if errors.Is(err, syscall.ENOSPC) {
 		return nil, 0, fmt.Errorf("blobs/%s: the disk filled while it was fetched (%d bytes in): %w", sum, size, err)
 	}
@@ -228,7 +250,7 @@ func (cache blobCache) fetchFrom(fetchContext context.Context, client *http.Clie
 		return nil, 0, fmt.Errorf("blobs/%s: %w", sum, err)
 	}
 	if actual := hex.EncodeToString(hash.Sum(nil)); actual != sum {
-		return nil, 0, fmt.Errorf("blob %s hashes to %s: the store is poisoned", sum, actual)
+		return nil, 0, answered{fmt.Errorf("blob %s hashes to %s: the store is poisoned", sum, actual)}
 	}
 	if err = partial.Chmod(0o444); err != nil {
 		return nil, 0, err

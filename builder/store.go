@@ -2,6 +2,7 @@ package builder
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -56,7 +57,7 @@ type Store struct {
 	Client *http.Client
 	Blobs  string
 	House  string
-	// HouseClient asks the house cache; nil means one housecache.Client bounded by houseBound.
+	// HouseClient asks the house cache; nil means housecache.Client.
 	HouseClient *http.Client
 	Now         func() time.Time
 	// SkipNative leaves out of a fetch every product its buildcache description says clang built, so the runner
@@ -119,10 +120,14 @@ func digest(content []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// get reads one object from the public domain.
-func (store Store) get(key string) ([]byte, error) {
+// get reads one object from the public domain, within readContext.
+func (store Store) get(readContext context.Context, key string) ([]byte, error) {
 	store.read()
-	response, err := store.client().Get(store.Read + "/" + key)
+	request, err := http.NewRequestWithContext(readContext, http.MethodGet, store.Read+"/"+key, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := store.client().Do(request)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +143,7 @@ func (store Store) get(key string) ([]byte, error) {
 
 // blob reads one blob and checks it hashes to its name: from the runner's local cache when it holds it, otherwise
 // from the public domain, kept in the local cache once it checks.
-func (store Store) blob(sum string) ([]byte, error) {
+func (store Store) blob(readContext context.Context, sum string) ([]byte, error) {
 	if !productKeyPattern.MatchString(sum) {
 		return nil, fmt.Errorf("%q isn't a blob's sha256: the store is poisoned", sum)
 	}
@@ -152,9 +157,9 @@ func (store Store) blob(sum string) ([]byte, error) {
 		}
 	}
 	// The house cache's copy is used only when it hashes to its name; anything else it gives costs a read of the store.
-	content, err := store.housed(sum)
+	content, err := store.housed(readContext, sum)
 	if err != nil || digest(content) != sum {
-		if content, err = store.get("blobs/" + sum); err != nil {
+		if content, err = store.get(readContext, "blobs/"+sum); err != nil {
 			return nil, err
 		}
 		if actual := digest(content); actual != sum {
@@ -184,18 +189,13 @@ func (store Store) blob(sum string) ([]byte, error) {
 	return content, nil
 }
 
-// houseBound bounds one read of the house cache whole.
-const houseBound = 10 * time.Minute
-
 // houseClient asks the house cache when a Store sets no HouseClient.
-var houseClient = sync.OnceValue(func() *http.Client {
-	client := housecache.Client()
-	client.Timeout = houseBound
-	return client
-})
+var houseClient = sync.OnceValue(housecache.Client)
 
-// housed reads blob sum from the house cache, unchecked; an error when there is none, or it doesn't answer whole.
-func (store Store) housed(sum string) ([]byte, error) {
+// housed reads blob sum from the house cache, unchecked; an error when there is none, or it doesn't answer whole. Its
+// ask has its own context within readContext, cut once its answer stalls or trickles (housecache.Watch), so the house
+// cache never spends the caller's time; one that didn't answer is judged (housecache.Unanswered).
+func (store Store) housed(readContext context.Context, sum string) ([]byte, error) {
 	through := housecache.Through(store.House, store.Read+"/blobs/"+sum)
 	if through == "" {
 		return nil, errors.New("no house cache")
@@ -204,20 +204,34 @@ func (store Store) housed(sum string) ([]byte, error) {
 	if client == nil {
 		client = houseClient()
 	}
-	response, err := client.Get(through)
+	houseContext, cancel := context.WithCancel(readContext)
+	defer cancel()
+	request, err := http.NewRequestWithContext(houseContext, http.MethodGet, through, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	response, err := client.Do(request)
+	if err != nil {
+		if readContext.Err() == nil {
+			housecache.Unanswered(store.House)
+		}
+		return nil, err
+	}
+	body := housecache.Watch(response.Body, cancel)
+	defer body.Close()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s answered %s", through, response.Status)
 	}
-	return io.ReadAll(response.Body)
+	content, err := io.ReadAll(body)
+	if err != nil && readContext.Err() == nil {
+		housecache.Unanswered(store.House)
+	}
+	return content, err
 }
 
 // Ref is the archive refs/action/<key> names, read from the public domain.
-func (store Store) Ref(key string) (string, error) {
-	content, err := store.get("refs/action/" + key)
+func (store Store) Ref(readContext context.Context, key string) (string, error) {
+	content, err := store.get(readContext, "refs/action/"+key)
 	if err != nil {
 		return "", err
 	}
@@ -453,12 +467,12 @@ func (store Store) Stored(key string) (string, bool, error) {
 // path (<key>/<file> or <key>.inputs). Only when the whole archive checks is each product renamed into place whole,
 // as buildcache itself publishes one, so a poisoned store leaves nothing behind. A product already in the cache is
 // left as it is, since its key says what it holds.
-func (store Store) FetchProduct(key, directory string) error {
-	sum, err := store.Ref(key)
+func (store Store) FetchProduct(fetchContext context.Context, key, directory string) error {
+	sum, err := store.Ref(fetchContext, key)
 	if err != nil {
 		return err
 	}
-	archive, err := store.blob(sum)
+	archive, err := store.blob(fetchContext, sum)
 	if err != nil {
 		return fmt.Errorf("action %s: %w", key, err)
 	}

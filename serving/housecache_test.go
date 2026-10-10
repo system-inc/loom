@@ -12,12 +12,16 @@ import (
 )
 
 func TestHouseCacheConfReadsAnAddressOnTheHouseAndRefusesAnythingElse(t *testing.T) {
-	config, err := ReadHouseCacheConfig("# Cloud hosts the big house's cache\nlisten = 192.168.1.20:7380\nlimit-gb = 200\nfloor-gb = 50\ndirectory = /srv/loom-house-cache\n")
-	if err != nil || config != (HouseCacheConfig{Listen: "192.168.1.20:7380", Directory: "/srv/loom-house-cache", LimitGB: 200, FloorGB: 50}) {
+	config, err := ReadHouseCacheConfig("# Cloud hosts the big house's cache\nlisten = 10.10.102.20:7380\nlimit-gb = 200\nfloor-gb = 50\ndirectory = /srv/loom-house-cache\n")
+	if err != nil || config != (HouseCacheConfig{Listen: "10.10.102.20:7380", Directory: "/srv/loom-house-cache", LimitGB: 200, FloorGB: 50}) {
 		t.Fatalf("read %+v, %v", config, err)
 	}
 	if config, err := ReadHouseCacheConfig("listen = 10.0.0.2:7380\n"); err != nil || config.LimitGB != DefaultHouseCacheLimitGB || config.FloorGB != DefaultHouseCacheFloorGB {
 		t.Fatalf("defaults: %+v, %v", config, err)
+	}
+	if config, err := ReadHouseCacheConfig("listen = 100.101.102.103:7380\ntailnet = yes\n"); err != nil || !config.Tailnet ||
+		!strings.Contains(HouseCacheUnit(config), " --tailnet\n") {
+		t.Fatalf("a tailnet's address with tailnet = yes: %+v, %v", config, err)
 	}
 	if _, err := ReadHouseCacheConfig("listen = 8.8.8.8:7380\npublic = yes\n"); err != nil {
 		t.Fatalf("a public address forced: %v", err)
@@ -27,14 +31,16 @@ func TestHouseCacheConfReadsAnAddressOnTheHouseAndRefusesAnythingElse(t *testing
 		"limit-gb = 10\n",
 		"listen = 0.0.0.0:7380\n",
 		"listen = 8.8.8.8:7380\n",
+		"listen = 100.101.102.103:7380\n",
+		"listen = 10.10.102.20:7380\ntailnet = maybe\n",
 		"listen = cloud.local:7380\n",
-		"listen = 192.168.1.20:7380\nlisten = 192.168.1.21:7380\n",
-		"listen = 192.168.1.20:7380\nport = 7380\n",
-		"listen = 192.168.1.20:7380\nlimit-gb = 0\n",
-		"listen = 192.168.1.20:7380\nfloor-gb = lots\n",
-		"listen = 192.168.1.20:7380\ndirectory = loom-house-cache\n",
-		"listen = 192.168.1.20:7380\ndirectory = /srv/house cache\n",
-		"listen = 192.168.1.20:7380\npublic = maybe\n",
+		"listen = 10.10.102.20:7380\nlisten = 10.10.102.21:7380\n",
+		"listen = 10.10.102.20:7380\nport = 7380\n",
+		"listen = 10.10.102.20:7380\nlimit-gb = 0\n",
+		"listen = 10.10.102.20:7380\nfloor-gb = lots\n",
+		"listen = 10.10.102.20:7380\ndirectory = loom-house-cache\n",
+		"listen = 10.10.102.20:7380\ndirectory = /srv/house cache\n",
+		"listen = 10.10.102.20:7380\npublic = maybe\n",
 	} {
 		if config, err := ReadHouseCacheConfig(bad); err == nil {
 			t.Errorf("%q read as %+v", bad, config)
@@ -43,8 +49,8 @@ func TestHouseCacheConfReadsAnAddressOnTheHouseAndRefusesAnythingElse(t *testing
 }
 
 func TestTheHouseCacheUnitServesItsSettings(t *testing.T) {
-	unit := HouseCacheUnit(HouseCacheConfig{Listen: "192.168.1.20:7380", LimitGB: 100, FloorGB: 20})
-	want := "ExecStart=%h/.loom/bin/loom house-cache serve --listen 192.168.1.20:7380 --directory %h/loom-house-cache --limit-gb 100 --floor-gb 20"
+	unit := HouseCacheUnit(HouseCacheConfig{Listen: "10.10.102.20:7380", LimitGB: 100, FloorGB: 20})
+	want := "ExecStart=%h/.loom/bin/loom house-cache serve --listen 10.10.102.20:7380 --directory %h/loom-house-cache --limit-gb 100 --floor-gb 20"
 	if !strings.Contains(unit, "\n"+want+"\n") || strings.Contains(unit, "SETTINGS") || !strings.Contains(unit, "\nRestart=always\n") {
 		t.Fatalf("the unit:\n%s", unit)
 	}
@@ -106,12 +112,12 @@ var (
 // a new release or new settings restart it. The box it leaves stops it and loses the unit and the hook, so it serves
 // nothing; a box that never hosted is left alone.
 func TestTheHouseCacheRunsWhereItsConfIsAndNowhereElse(t *testing.T) {
-	host := newHouse(t, "listen = 192.168.1.20:7380\n")
+	host := newHouse(t, "listen = 10.10.102.20:7380\n")
 	if err := host.install(); err != nil || !reflect.DeepEqual(host.calls, [][]string{reloadCall, houseEnable, houseShow, houseStart}) {
 		t.Fatalf("first install: %q, %v", host.calls, err)
 	}
 	unit := filepath.Join(host.paths.Units, HouseCacheUnitName)
-	if content, _ := os.ReadFile(unit); string(content) != HouseCacheUnit(HouseCacheConfig{Listen: "192.168.1.20:7380", LimitGB: 100, FloorGB: 20}) {
+	if content, _ := os.ReadFile(unit); string(content) != HouseCacheUnit(HouseCacheConfig{Listen: "10.10.102.20:7380", LimitGB: 100, FloorGB: 20}) {
 		t.Fatalf("the unit written:\n%s", content)
 	}
 	if hook, err := os.Stat(host.paths.Hook); err != nil || hook.Mode().Perm() != 0o755 {
@@ -130,7 +136,7 @@ func TestTheHouseCacheRunsWhereItsConfIsAndNowhereElse(t *testing.T) {
 		t.Fatalf("after a release: %q, %v", host.calls, err)
 	}
 	host.running(t, host.paths.Binary)
-	os.WriteFile(host.paths.Config, []byte("listen = 192.168.1.20:7380\nlimit-gb = 300\n"), 0o644)
+	os.WriteFile(host.paths.Config, []byte("listen = 10.10.102.20:7380\nlimit-gb = 300\n"), 0o644)
 	if err := host.install(); err != nil || !reflect.DeepEqual(host.calls, [][]string{reloadCall, houseEnable, houseShow, houseRestart}) {
 		t.Fatalf("after new settings: %q, %v", host.calls, err)
 	}
@@ -139,7 +145,7 @@ func TestTheHouseCacheRunsWhereItsConfIsAndNowhereElse(t *testing.T) {
 	if err := host.install(); err == nil || len(host.calls) != 0 {
 		t.Fatalf("a bind to every address: %q, %v", host.calls, err)
 	}
-	if content, _ := os.ReadFile(unit); !strings.Contains(string(content), "--listen 192.168.1.20:7380 ") {
+	if content, _ := os.ReadFile(unit); !strings.Contains(string(content), "--listen 10.10.102.20:7380 ") {
 		t.Fatalf("a refused install rewrote the unit:\n%s", content)
 	}
 	// The house cache moves away: this box stops it, and its unit and hook go.
@@ -160,7 +166,7 @@ func TestTheHouseCacheRunsWhereItsConfIsAndNowhereElse(t *testing.T) {
 
 // The hook runs `loom house-cache install` from the release just installed, and passes on a release from before it.
 func TestTheHouseCacheHookRunsInstallOrPassesOnARollback(t *testing.T) {
-	host := newHouse(t, "listen = 192.168.1.20:7380\n")
+	host := newHouse(t, "listen = 10.10.102.20:7380\n")
 	if err := host.install(); err != nil {
 		t.Fatal(err)
 	}
