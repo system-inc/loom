@@ -63,6 +63,14 @@ const (
 	// cache, warm from attempt 3, served f5695d12 run -1's units). A warm pass is the stale-green the cold rule stops,
 	// and a warm red is no cleaner: evidence, never the verdict. Void, and placed again on a cold pool.
 	InfraWarmCache = "warmCache"
+	// InfraOverBudget is a unit the runner stopped over its budget, 30 s to ready or 60 s to run (Kirk, Oct 10
+	// 03:0xZ). It's Loom's, not the change's: the unit was planned or built too big. Its future never lands on it,
+	// never green and never a flake, and it isn't retried or rerun alone, since the same unit runs over again; Planner
+	// splits the test and the future reruns.
+	InfraOverBudget = "overBudget"
+
+	OverBudgetReady = "overBudgetReady"
+	OverBudgetRun   = "overBudgetRun"
 )
 
 var infraKinds = map[string]bool{InfraDisk: true, InfraKill: true, InfraNeverPlaced: true, InfraRefused: true, InfraSilent: true}
@@ -206,6 +214,7 @@ type Rerun struct {
 	Infra        string        // the infra kind when Status is broken
 	Tests        []TestOutcome // its test outcomes
 	RunnerSha256 string        // the runner binary it ran on, as its attempt reported it
+	OverBudget   string        // the runner's budget cause when it stopped the rerun over budget
 }
 
 // RunnerUnreported is an attempt's RunnerSha256 when its runner didn't send one.
@@ -256,6 +265,8 @@ type Evidence struct {
 	// NeedGrew says how the unit's declared need now exceeds what its first attempt was placed with; empty when it
 	// doesn't, or before the loop has asked (it asks only when a failure would go to alone reruns).
 	NeedGrew string
+	// FirstOverBudget is the first attempt's budget cause when the runner stopped it over budget.
+	FirstOverBudget string
 	// Warm marks a first attempt listed as run on a warm shared cache; it's placed again before anything decides.
 	Warm bool
 	// BelowNeed says how the unit's declared need exceeds what its first attempt's runner reported it ran with.
@@ -292,6 +303,9 @@ func Decide(evidence Evidence) (Decision, error) {
 	if evidence.Warm {
 		return Decision{Status: Void, Cause: CauseInfra, Infra: InfraWarmCache, Next: "retry",
 			Why: "ran on a warm shared cache: evidence, never the verdict; placed again cold"}, nil
+	}
+	if evidence.FirstOverBudget != "" {
+		return overBudget("the attempt", evidence.FirstOverBudget), nil
 	}
 	if evidence.Phase {
 		switch evidence.First.Status {
@@ -350,6 +364,9 @@ func Decide(evidence Evidence) (Decision, error) {
 		if why := runnerMismatch(evidence.KeyRunner, rerun.RunnerSha256, evidence.RequireRunner); why != "" && rerun.Status != Broken {
 			return Decision{Status: Void, Cause: CauseInfra, Infra: InfraRefused, Next: "retry", Why: "an alone rerun: " + why + ", rerun again"}, nil
 		}
+		if rerun.OverBudget != "" {
+			return overBudget("an alone rerun", rerun.OverBudget), nil
+		}
 		switch rerun.Status {
 		case Passed, Failed:
 		case Broken:
@@ -375,6 +392,12 @@ func Decide(evidence Evidence) (Decision, error) {
 	}
 	return Decision{Decided: true, Status: Failed, Cause: CauseChange,
 		Why: "main fails alone too, but main's record doesn't fail exactly this unit's one failing test, so it's the change's"}, nil
+}
+
+// overBudget is the row for a unit the runner stopped over its budget: void, Loom's, decided with no retry.
+func overBudget(which, cause string) Decision {
+	return Decision{Decided: true, Status: Void, Cause: CauseInfra, Infra: InfraOverBudget,
+		Why: which + " ran over its budget (" + cause + "): Loom's, never the change's; its test is split and the future reruns"}
 }
 
 // excused says whether a failure main shares is main's red: main's latest recorded verdict fails a test, and that

@@ -570,3 +570,67 @@ func TestThePlacersCarriedListAsksTheLoopsWarmRule(t *testing.T) {
 		t.Fatalf("carried %v (%v), want the pass with no warm rule", units, err)
 	}
 }
+
+// Kirk's budget (Oct 10 03:0xZ): the runner stops a unit at 30 s to ready or 60 s to run and reports the cause as an
+// error event, then finished failed. That's Loom's, never the change's: void overBudget, no retry and no alone
+// rerun, nothing quarantined. The cause word in another phase isn't the runner's budget, and is judged as today.
+func TestAnOverBudgetUnitIsVoidNeverRedFlakeOrGreen(t *testing.T) {
+	tree, unit := strings.Repeat("d", 40), strings.Repeat("1", 64)
+	overBudget := func(phase, message string) []protocol.Event {
+		stream := finishedStream(unit, "failed")
+		return append(stream[:len(stream)-1], protocol.Event{Unit: unit, Type: "error", Phase: phase, Message: message}, stream[len(stream)-1])
+	}
+	for _, c := range []struct {
+		name   string
+		first  []protocol.Event
+		alone  []protocol.Event
+		status string
+		infra  string
+		reruns int
+	}{
+		{"over its run budget", overBudget(protocol.PhaseRun, "overBudgetRun: 60 s"), finishedStream("job", "passed"), "void", InfraOverBudget, 0},
+		{"over its ready budget", overBudget(protocol.PhaseStart, "overBudgetReady: 30 s"), finishedStream("job", "passed"), "void", InfraOverBudget, 0},
+		{"the word in another phase", overBudget(protocol.PhaseUpload, "overBudgetRun"), finishedStream("job", "failed"), "red", "", 2},
+		{"a plain failure", finishedStream(unit, "failed"), finishedStream("job", "failed"), "red", "", 2},
+		{"an alone rerun over budget", finishedStream(unit, "failed"), append(finishedStream("job", "failed")[:3], protocol.Event{Unit: "job", Type: "error", Phase: protocol.PhaseRun, Message: "overBudgetRun: 60 s"}, protocol.Event{Unit: "job", Type: "finished", Status: "failed"}), "void", InfraOverBudget, 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			units := []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"package":"p","kind":"test"}`), Decision: "run"}}
+			source := listedFutures{{Future: tree, Base: baseTree, Change: PlannedChange{Change: "chg_A", Sha: tree, Base: baseTree}, Units: units}}
+			reruns := 0
+			queue := &StubQueue{}
+			puller := Puller{
+				Source: source,
+				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
+				Read:   func(string) ([]protocol.Event, error) { return c.first, nil },
+				Rerun: func(_ json.RawMessage, _ protocol.Resources, sha string) ([]protocol.Event, error) {
+					reruns++
+					if sha == baseTree {
+						return finishedStream("job", "passed"), nil
+					}
+					return c.alone, nil
+				},
+				Main:  NoMainRecords{},
+				Queue: queue,
+				Loop:  Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: func() time.Time { return time.Date(2026, 10, 10, 3, 5, 0, 0, time.UTC) }},
+			}
+			if judged, err := puller.PullOnce(); err != nil || judged != 1 {
+				t.Fatalf("judged %d %v", judged, err)
+			}
+			post := queue.Posts[tree][0]
+			var record struct {
+				Infra *string `json:"infra"`
+			}
+			if err := json.Unmarshal(post.Verdicts[0], &record); err != nil {
+				t.Fatal(err)
+			}
+			infra := ""
+			if record.Infra != nil {
+				infra = *record.Infra
+			}
+			if post.Decision.Status != c.status || infra != c.infra || reruns != c.reruns || len(post.Quarantine) != 0 {
+				t.Fatalf("run %s infra %q, %d reruns, quarantine %v; want %s %q, %d", post.Decision.Status, infra, reruns, post.Quarantine, c.status, c.infra, c.reruns)
+			}
+		})
+	}
+}

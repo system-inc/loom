@@ -65,6 +65,14 @@ func FinishedFromEvents(events []protocol.Event) (finished Finished, found bool)
 		case "finished":
 			finishedStatus = event.Status
 			attempt.FinishedAt = event.Time
+		case "error":
+			// The runner's budget (Kirk, Oct 10 03:0xZ): 30 s to ready, 60 s to run, reported as an error event in
+			// the start or run phase whose message begins with the cause, then finished failed (Web: no wire change).
+			for _, cause := range []string{OverBudgetReady, OverBudgetRun} {
+				if (event.Phase == protocol.PhaseStart || event.Phase == protocol.PhaseRun) && strings.HasPrefix(event.Message, cause) {
+					finished.OverBudget = cause
+				}
+			}
 		}
 	}
 	finished.Tests, finished.Events = reader.read()

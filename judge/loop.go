@@ -34,6 +34,9 @@ type Finished struct {
 	// RanWith is the cpus and memory the runner's started event reported for the attempt's slot; zero when it
 	// reported none. Placement evidence only, never part of the verdict record.
 	RanWith protocol.Resources
+	// OverBudget is the runner's budget cause, overBudgetReady or overBudgetRun, when it stopped the attempt over
+	// its 30 s ready or 60 s run budget; empty otherwise.
+	OverBudget string
 }
 
 // Runs reads a run's finished events for one unit; found is false when the unit never reported.
@@ -431,8 +434,8 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 		return err
 	}
 	verdict.Attempts = append(verdict.Attempts, candidate.Attempt, main.Attempt)
-	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256}
-	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256}
+	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256, OverBudget: candidate.OverBudget}
+	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256, OverBudget: main.OverBudget}
 	evidence.MainRecorded = nil
 	if found {
 		evidence.MainRecorded = recorded
@@ -441,7 +444,7 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 }
 
 func (loop Loop) evidenceOf(finished Finished, unit PlanUnit) Evidence {
-	return Evidence{First: finished.Attempt, FirstInfra: finished.Infra, FirstTests: finished.Tests, MissingTools: finished.MissingTools,
+	return Evidence{First: finished.Attempt, FirstInfra: finished.Infra, FirstTests: finished.Tests, MissingTools: finished.MissingTools, FirstOverBudget: finished.OverBudget,
 		Phase: unit.Kind == KindPhase, KeyRunner: unit.Runner, RequireRunner: loop.RequireRunner}
 }
 
