@@ -59,7 +59,7 @@ const usage = `usage:
   loom owner-bridge [--once] [--interval <duration>] [--pipeline <url>]
   loom top [--once] [--wire <url>]
   loom publish-token <name> [--days N] [--candidate]
-  loom submit-token <owner> [--days N]
+  loom submit-token [--days N] <owner>
   loom build-token <builder> [--days N]
   loom coordinator-token <service> [--days N]
   loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--once]
@@ -628,7 +628,7 @@ func submitToken(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("submit-token", flag.ContinueOnError)
 	days := flags.Int("days", 7, "days until the token expires")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 || *days < 1 {
-		fmt.Fprint(stderr, "usage: loom submit-token <owner> [--days N]\n")
+		fmt.Fprint(stderr, "usage: loom submit-token [--days N] <owner>\n")
 		return 3
 	}
 	home, _ := os.UserHomeDir()
