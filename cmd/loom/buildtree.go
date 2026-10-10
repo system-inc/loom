@@ -40,9 +40,9 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	keep := flags.Int("keep", 2, "tree directories kept under --cache, newest first, when a tree's upload fails")
 	jobs := flags.Int("jobs", 8, "packages built at once")
 	compile := flags.Int("compile", 0, "packages compiled at once across every go process (0: every thread but four)")
-	floorGB := flags.Uint64("floor-gb", 200, "free space the cache base and Go's build cache keep, in GB: below it the build doesn't start, and no job starts")
+	floorGB := flags.Uint64("floor-gb", 100, "free space the cache base and Go's build cache keep, in GB: below it the build doesn't start, and no job starts")
 	tempFloorGB := flags.Uint64("temp-floor-gb", 20, "free space the temporary directory keeps, in GB (it may be memory)")
-	goCacheGB := flags.Uint64("go-cache-gb", 150, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
+	goCacheGB := flags.Uint64("go-cache-gb", 500, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
 		return 2

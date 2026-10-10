@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// Workshop is the house's only builder, so it keeps its disk (Kirk, #ckv0pmg): at least 200 GB free on every
+// Workshop is the house's only builder, so it keeps its disk (Kirk, #ckv0pmg): at least 100 GB free on every
 // filesystem a build writes, its Go build cache under a cap, and each tree's working directory gone once the tree is
 // in the store.
 
