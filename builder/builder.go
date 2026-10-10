@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -77,6 +78,14 @@ type Store struct {
 	// SkipNative leaves out of a fetch every product its buildcache description says clang built, so the runner
 	// builds those itself (Judge's ruling until native products are reproducible, #tsn1wp8): Go products serve.
 	SkipNative bool
+	// Requests counts what this store was asked, for measuring a build's cost (#k62gwdt). Shared by copies of the Store.
+	Requests *Requests
+}
+
+// Requests counts a store's calls: reads are GETs of refs and blobs, writes are PUTs of blobs and refs.
+type Requests struct {
+	Reads  atomic.Int64
+	Writes atomic.Int64
 }
 
 // nativeToolLine is how buildcache's description of a product names clang among its tools.
@@ -103,6 +112,9 @@ func (store Store) client() *http.Client {
 }
 
 func (store Store) get(address string) ([]byte, error) {
+	if store.Requests != nil {
+		store.Requests.Reads.Add(1)
+	}
 	response, err := store.client().Get(address)
 	if err != nil {
 		return nil, err
@@ -131,30 +143,35 @@ func (store Store) blob(sum string) ([]byte, error) {
 
 // Manifest reads refs/action/<key> and the manifest it names, checking the manifest is canonical and for key.
 func (store Store) Manifest(key string) (Manifest, error) {
+	manifest, _, err := store.manifestAndSum(key)
+	return manifest, err
+}
+
+func (store Store) manifestAndSum(key string) (Manifest, string, error) {
 	reference, err := store.get(store.Read + "/refs/action/" + key)
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, "", err
 	}
 	target := strings.TrimSpace(string(reference))
 	if !productKeyPattern.MatchString(target) {
-		return Manifest{}, fmt.Errorf("refs/action/%s holds %q, not a manifest's sha256: the store is poisoned", key, target[:min(80, len(target))])
+		return Manifest{}, "", fmt.Errorf("refs/action/%s holds %q, not a manifest's sha256: the store is poisoned", key, target[:min(80, len(target))])
 	}
 	content, err := store.blob(target)
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, "", err
 	}
 	var manifest Manifest
 	if err = json.Unmarshal(content, &manifest); err != nil {
-		return Manifest{}, fmt.Errorf("manifest for %s: %w", key, err)
+		return Manifest{}, "", fmt.Errorf("manifest for %s: %w", key, err)
 	}
 	canonical, err := manifest.Canonical()
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, "", err
 	}
 	if manifest.Key != key || !bytes.Equal(canonical, content) {
-		return Manifest{}, fmt.Errorf("the manifest refs/action/%s names isn't that key's canonical manifest: the store is poisoned", key)
+		return Manifest{}, "", fmt.Errorf("the manifest refs/action/%s names isn't that key's canonical manifest: the store is poisoned", key)
 	}
-	return manifest, nil
+	return manifest, target, nil
 }
 
 // Fetch writes an action's outputs under directory (a runner's ADAMIC_BUILD_CACHE_DIR). Every blob is read and
@@ -326,6 +343,9 @@ func (store Store) put(address string, body []byte) (int, []byte, error) {
 	}
 	request.ContentLength = int64(len(body))
 	request.Header.Set("Authorization", "Bearer "+store.Token)
+	if store.Requests != nil {
+		store.Requests.Writes.Add(1)
+	}
 	response, err := store.client().Do(request)
 	if err != nil {
 		return 0, nil, err
@@ -338,13 +358,32 @@ func (store Store) put(address string, body []byte) (int, []byte, error) {
 // Upload writes an action: each output's blob, then the canonical manifest, then the ref. A ref the store already
 // holds for the same manifest is fine; one naming another manifest is a ConflictError naming both builders.
 func (store Store) Upload(key string, outputs []Output, files map[string]string) (string, error) {
-	for _, output := range outputs {
-		content, err := os.ReadFile(files[output.Path])
-		if err != nil {
-			return "", err
+	return store.UploadWith(key, outputs, files, nil)
+}
+
+// UploadWith is Upload with Workshop's index: a blob the index holds isn't sent, and every blob and ref the store
+// takes is recorded in it.
+func (store Store) UploadWith(key string, outputs []Output, files map[string]string, index *Index) (string, error) {
+	sendBlob := func(sum string, content func() ([]byte, error), name string) error {
+		if index != nil && index.Blob(sum) {
+			return nil
 		}
-		if status, answer, err := store.put(store.Write+"/blobs/"+output.Sha256, content); err != nil || status >= 300 {
-			return "", fmt.Errorf("blob %s (%s): %d %s %v", output.Sha256, output.Path, status, answer, err)
+		body, err := content()
+		if err != nil {
+			return err
+		}
+		if status, answer, err := store.put(store.Write+"/blobs/"+sum, body); err != nil || status >= 300 {
+			return fmt.Errorf("blob %s (%s): %d %s %v", sum, name, status, answer, err)
+		}
+		if index != nil {
+			return index.AddBlob(sum)
+		}
+		return nil
+	}
+	for _, output := range outputs {
+		file := files[output.Path]
+		if err := sendBlob(output.Sha256, func() ([]byte, error) { return os.ReadFile(file) }, output.Path); err != nil {
+			return "", err
 		}
 	}
 	canonical, err := Manifest{Key: key, Outputs: outputs}.Canonical()
@@ -353,8 +392,8 @@ func (store Store) Upload(key string, outputs []Output, files map[string]string)
 	}
 	sum := sha256.Sum256(canonical)
 	manifestSha256 := hex.EncodeToString(sum[:])
-	if status, answer, err := store.put(store.Write+"/blobs/"+manifestSha256, canonical); err != nil || status >= 300 {
-		return "", fmt.Errorf("manifest %s: %d %s %v", manifestSha256, status, answer, err)
+	if err := sendBlob(manifestSha256, func() ([]byte, error) { return canonical, nil }, "manifest"); err != nil {
+		return "", err
 	}
 	status, answer, err := store.put(store.Write+"/"+key, []byte(manifestSha256))
 	if err != nil {
@@ -362,6 +401,11 @@ func (store Store) Upload(key string, outputs []Output, files map[string]string)
 	}
 	switch {
 	case status == http.StatusCreated || status == http.StatusOK:
+		if index != nil {
+			if err := index.AddRef(key, manifestSha256); err != nil {
+				return "", err
+			}
+		}
 		return manifestSha256, nil
 	case status == http.StatusConflict:
 		var conflict ConflictError
@@ -397,6 +441,7 @@ type Builder struct {
 	Scratch string // where each action's build log goes
 	Jobs    int
 	Report  func(Result) // when set, hears each action's result as it finishes, one at a time
+	Index   *Index       // when set, Workshop's record of the store: deciding reads nothing, uploading skips what it holds
 }
 
 // A Result is what happened to one action.
@@ -533,8 +578,30 @@ func (builder Builder) build(action Action) Result {
 		return finish("failed", fmt.Errorf("productKey: %w", err))
 	}
 	result.Key = key
-	switch _, err = builder.Store.Manifest(key); {
+	if builder.Index != nil {
+		if manifest, held := builder.Index.Ref(key); held {
+			result.Manifest = manifest
+			return finish("stored", nil)
+		}
+	}
+	// An index miss (or no index) asks the store once; what it holds goes into the index, so the next build reads
+	// nothing for this key.
+	switch manifest, manifestSum, err := builder.Store.manifestAndSum(key); {
 	case err == nil:
+		if builder.Index != nil {
+			for _, output := range manifest.Outputs {
+				if err = builder.Index.AddBlob(output.Sha256); err != nil {
+					return finish("failed", err)
+				}
+			}
+			if err = builder.Index.AddBlob(manifestSum); err != nil {
+				return finish("failed", err)
+			}
+			if err = builder.Index.AddRef(key, manifestSum); err != nil {
+				return finish("failed", err)
+			}
+		}
+		result.Manifest = manifestSum
 		return finish("stored", nil)
 	case !errors.Is(err, ErrNotStored):
 		return finish("failed", err)
@@ -567,7 +634,7 @@ func (builder Builder) build(action Action) Result {
 		return finish("failed", err)
 	}
 	result.Products, result.Outputs = len(products), len(outputs)
-	manifest, err := builder.Store.Upload(key, outputs, files)
+	manifest, err := builder.Store.UploadWith(key, outputs, files, builder.Index)
 	result.Manifest = manifest
 	if err != nil {
 		return finish("failed", err)

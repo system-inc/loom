@@ -29,12 +29,13 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	scratch := flags.String("scratch", "", "where each action's build log goes (default: the system temporary directory)")
 	cache := flags.String("cache", filepath.Join(home, "loom-builder", "cache"), "the build's buildcache directory, shared by its actions and kept between builds")
 	jobs := flags.Int("jobs", 4, "actions built at once")
+	indexDirectory := flags.String("index", filepath.Join(home, "loom-builder", "index"), "Workshop's index of what the store holds, so deciding reads nothing ('' for none)")
 	list := flags.Bool("list", false, "print each action and its productKey, and build nothing")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		return 2
 	}
 	if *tree == "" || *gateTools == "" || (*write == "" && !*list) {
-		fmt.Fprintln(stderr, "usage: loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--read <url>] [--token-file <path>] [--packages a,b] [--cache <dir>] [--jobs N] [--scratch <dir>] [--list]")
+		fmt.Fprintln(stderr, "usage: loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--read <url>] [--token-file <path>] [--packages a,b] [--cache <dir>] [--jobs N] [--index <dir>] [--scratch <dir>] [--list]")
 		return 2
 	}
 	selected := []string{}
@@ -88,9 +89,19 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "build-actions:", err)
 		return 1
 	}
+	requests := &builder.Requests{}
+	var index *builder.Index
+	if *indexDirectory != "" {
+		if index, err = builder.OpenIndex(*indexDirectory); err != nil {
+			fmt.Fprintln(stderr, "build-actions:", err)
+			return 1
+		}
+		defer index.Close()
+	}
 	work := builder.Builder{
 		Tree:    *tree,
-		Store:   builder.Store{Read: strings.TrimSuffix(*read, "/"), Write: strings.TrimSuffix(*write, "/"), Token: strings.TrimSpace(string(token))},
+		Index:   index,
+		Store:   builder.Store{Read: strings.TrimSuffix(*read, "/"), Write: strings.TrimSuffix(*write, "/"), Token: strings.TrimSpace(string(token)), Requests: requests},
 		Key:     key,
 		Run:     builder.GoTest(*tree),
 		Cache:   *cache,
@@ -106,6 +117,8 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	work.Build(actions)
+	// What this build cost the store, by our own count: reads of refs and blobs, writes of blobs and refs.
+	fmt.Fprintf(stderr, "build-actions: %d actions, %d store reads, %d store writes\n", len(actions), requests.Reads.Load(), requests.Writes.Load())
 	if failed > 0 {
 		fmt.Fprintf(stderr, "build-actions: %d of %d actions failed\n", failed, len(actions))
 		return 1
