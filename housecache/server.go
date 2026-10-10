@@ -26,8 +26,9 @@ import (
 //     one of them as it arrives: each answer starts once the store answers, so no client waits on the whole blob over
 //     a slow link. It goes into a partial file, hashed as it comes, and only a whole blob that hashes to its name is
 //     made read-only and renamed to it, so a name only ever holds the whole, checked blob. Every answer holds back its
-//     last byte until then: a blob that doesn't hash to its name, or a store that fails midway, cuts every answer
-//     short, so each client's own read fails and it reads the store, and nothing is kept.
+//     last byte until the hash checks, never waiting on the disk's sync that follows: a blob that doesn't hash to its
+//     name, or a store that fails midway, cuts every answer short, so each client's own read fails and it reads the
+//     store, and nothing is kept.
 //   - The disk is bounded: before a blob is fetched, and after, the least recently served blobs go until the cache
 //     holds at most Limit bytes, fetches in flight counted, and its disk keeps Floor bytes free. A blob that can't fit
 //     is never fetched, and its clients read from the store.
@@ -48,6 +49,8 @@ type Server struct {
 	Stall time.Duration
 	// Now is the clock a served blob's use is stamped with; nil means time.Now.
 	Now func() time.Time
+	// Sync makes a fetched blob durable before it takes its name; nil means its file's Sync. Tests plant a slow disk.
+	Sync func(file *os.File) error
 
 	// Fetches counts the fetches from Upstream.
 	Fetches atomic.Int64
@@ -82,9 +85,11 @@ type flight struct {
 	partial string
 
 	mutex sync.Mutex
-	// written is how many bytes the partial holds; finished says the fetch ended, and then err says how (nil: the
-	// blob is whole, checked and stored). moved closes and is replaced each time either changes.
+	// written is how many bytes the partial holds; checked says they are the whole blob and hash to its name, so the
+	// answers may send their last byte; finished says the fetch ended, and then err says how (nil: the blob is whole,
+	// checked and stored). moved closes and is replaced each time any of them changes.
 	written  int64
+	checked  bool
 	finished bool
 	err      error
 	moved    chan struct{}
@@ -148,6 +153,13 @@ func (server *Server) now() time.Time {
 		return server.Now()
 	}
 	return time.Now()
+}
+
+func (server *Server) sync(file *os.File) error {
+	if server.Sync != nil {
+		return server.Sync(file)
+	}
+	return file.Sync()
 }
 
 func (server *Server) say(format string, arguments ...any) {
@@ -278,13 +290,14 @@ func (server *Server) stream(writer http.ResponseWriter, request *http.Request, 
 	sent := int64(0)
 	for {
 		fetching.mutex.Lock()
-		written, finished, failed, moved := fetching.written, fetching.finished, fetching.err, fetching.moved
+		written, checked, finished, failed, moved := fetching.written, fetching.checked, fetching.finished, fetching.err, fetching.moved
 		fetching.mutex.Unlock()
-		if finished && failed != nil {
+		// Once checked, the answer is the whole blob, whatever storing it on disk then meets.
+		if finished && failed != nil && !checked {
 			panic(http.ErrAbortHandler)
 		}
 		ready := written
-		if !finished {
+		if !checked {
 			ready--
 		}
 		if ready > sent {
@@ -296,7 +309,7 @@ func (server *Server) stream(writer http.ResponseWriter, request *http.Request, 
 			controller.Flush()
 			continue
 		}
-		if finished {
+		if checked || finished {
 			return
 		}
 		select {
@@ -449,8 +462,11 @@ func (server *Server) fetch(fetching *flight, path, sum string) {
 		finish(fmt.Errorf("the store's bytes hash to %s: refused, nothing kept", actual))
 		return
 	}
+	// Whole and checked: every answer may send its last byte now, never waiting on a slow disk's sync of a large blob
+	// (a hit hashes the stored copy again as it goes out).
+	fetching.note(func() { fetching.checked = true })
 	if err = partial.Chmod(0o444); err == nil {
-		err = partial.Sync()
+		err = server.sync(partial)
 	}
 	if err == nil {
 		err = os.Rename(partial.Name(), filepath.Join(server.Directory, sum))

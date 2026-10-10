@@ -37,6 +37,7 @@ func reviewServer(t *testing.T) (*httptest.Server, *atomic.Int64, string) {
 	}
 	t.Cleanup(func() { server.Close() })
 	served := httptest.NewServer(server)
+	serving.Store(served.URL, server)
 	t.Cleanup(served.Close)
 	return served, &asked, name
 }
@@ -65,6 +66,7 @@ func TestReviewPaths(t *testing.T) {
 	} else {
 		io.ReadAll(response.Body)
 		response.Body.Close()
+		settleFor(t, served.URL+"/")
 	}
 	cases := []struct {
 		path   string
@@ -101,6 +103,7 @@ func TestReviewPaths(t *testing.T) {
 	if response, err := http.Get(fresh.URL + "/blobs/" + freshName); err == nil {
 		io.ReadAll(response.Body)
 		response.Body.Close()
+		settleFor(t, fresh.URL+"/")
 	}
 	if raw(t, fresh.URL, "HEAD /blobs/"+freshName) != "200" || freshAsked.Load() != 1 {
 		t.Fatalf("HEAD of a held blob, or the store asked %d times", freshAsked.Load())

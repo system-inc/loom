@@ -160,7 +160,24 @@ func newCache(t *testing.T, upstream *store, limit int64, floor, capacity uint64
 	t.Cleanup(func() { cache.Close() })
 	served := httptest.NewServer(cache)
 	t.Cleanup(served.Close)
+	serving.Store(served.URL, cache)
 	return cache, served
+}
+
+// serving is each test cache by its address, so a GET waits for the fetch it started to settle: a client reads the
+// whole blob once it checks, a moment before the blob takes its name on disk.
+var serving sync.Map
+
+// settleFor waits for the fetches of the cache serving url to end.
+func settleFor(t *testing.T, url string) {
+	t.Helper()
+	serving.Range(func(address, cache any) bool {
+		if strings.HasPrefix(url, address.(string)+"/") {
+			settled(t, cache.(*Server))
+			return false
+		}
+		return true
+	})
 }
 
 type answer struct {
@@ -204,6 +221,7 @@ func settled(t *testing.T, cache *Server) {
 
 func get(t *testing.T, url string) answer {
 	t.Helper()
+	defer settleFor(t, url)
 	response, err := http.Get(url)
 	if err != nil {
 		t.Fatal(err)
@@ -666,5 +684,42 @@ func TestABlobThatHashesWrongIsCutBeforeItsEnd(t *testing.T) {
 		if held := held(cache); held != "" {
 			t.Fatalf("with length %v: a blob that hashes wrong left %q", !noLength, held)
 		}
+	}
+}
+
+// The held-back last byte goes out once the blob's hash checks, not once a slow disk has synced it: a client reads the
+// whole blob while the sync still runs, and the blob is stored once it ends.
+func TestTheLastByteNeverWaitsOnTheDisksSync(t *testing.T) {
+	upstream := newStore(t)
+	content := bytes.Repeat([]byte("a large blob "), 1<<12)
+	sum := upstream.put(content)
+	cache, served := newCache(t, upstream, 1<<30, 0, 1<<40)
+	syncing, release := make(chan struct{}), make(chan struct{})
+	cache.Sync = func(file *os.File) error {
+		close(syncing)
+		<-release
+		return file.Sync()
+	}
+	read := make(chan error, 1)
+	var body []byte
+	go func() {
+		got, err := try(served.URL + "/blobs/" + sum)
+		body = got.body
+		read <- err
+	}()
+	<-syncing
+	select {
+	case err := <-read:
+		if err != nil || !bytes.Equal(body, content) {
+			t.Fatalf("while the disk syncs: %v, %d bytes", err, len(body))
+		}
+	case <-time.After(3 * time.Second):
+		close(release)
+		t.Fatal("the client waited on the disk's sync for its last byte")
+	}
+	close(release)
+	settled(t, cache)
+	if got := held(cache); got != sum {
+		t.Fatalf("the cache holds %q, not the blob", got)
 	}
 }
