@@ -7,8 +7,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/system-inc/loom/planner"
 )
@@ -167,5 +171,73 @@ func TestWarmCompilesEveryPackageOnceAndNamesOneThatDoesNotCompile(t *testing.T)
 	}
 	if build.perJob() != "1" || (TreeBuild{Compile: 60, Jobs: 8}).perJob() != "7" || (TreeBuild{Compile: 4, Jobs: 8}).perJob() != "1" {
 		t.Fatal("each job's share of the compile limit")
+	}
+}
+
+// most runs count jobs of work, each taking a few milliseconds, under gauge, and returns how many ran at once at most.
+func most(t *testing.T, gauge Gauge) int64 {
+	t.Helper()
+	var now, peak atomic.Int64
+	admitted(12, 4, gauge, 0.8, func(int) {
+		value := now.Add(1)
+		for {
+			old := peak.Load()
+			if value <= old || peak.CompareAndSwap(old, value) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		now.Add(-1)
+	})
+	return peak.Load()
+}
+
+func reading(busy, available float64, ok bool) Gauge {
+	return func() (float64, float64, bool) {
+		time.Sleep(time.Millisecond)
+		return busy, available, ok
+	}
+}
+
+// A build starts no job while the machine reads at or over its target, or short of memory, and always lets one run.
+func TestABuildKeepsTheMachineUnderItsTargetAndAlwaysMovesOneJob(t *testing.T) {
+	if got := most(t, reading(0.1, 0.9, true)); got != 4 {
+		t.Fatalf("a calm machine ran %d at once, not its ceiling of 4", got)
+	}
+	if got := most(t, reading(0.9, 0.9, true)); got != 1 {
+		t.Fatalf("a machine over its target ran %d at once, not 1", got)
+	}
+	if got := most(t, reading(0.1, 0.1, true)); got != 1 {
+		t.Fatalf("a machine short of memory ran %d at once, not 1", got)
+	}
+	if got := most(t, reading(0.9, 0.1, false)); got != 4 {
+		t.Fatalf("a gauge that can't read ran %d at once, not the ceiling of 4", got)
+	}
+	if got := most(t, nil); got != 4 {
+		t.Fatalf("no gauge ran %d at once, not the ceiling of 4", got)
+	}
+}
+
+// ProcGauge reads Linux's own counters as fractions; off Linux it says it can't.
+func TestProcGaugeReadsTheMachine(t *testing.T) {
+	busy, available, ok := ProcGauge()
+	if runtime.GOOS != "linux" {
+		if ok {
+			t.Fatal("read /proc off Linux")
+		}
+		return
+	}
+	if !ok || busy < 0 || busy > 1 || available <= 0 || available > 1 {
+		t.Fatalf("busy %v, available %v, ok %v", busy, available, ok)
+	}
+}
+
+// The tests' own go builds get the build's share of the compile limit through GOFLAGS.
+func TestATestsOwnGoBuildsGetTheirShareOfTheCompileLimit(t *testing.T) {
+	environment := TreeBuild{Compile: 60, Jobs: 8}.shared()
+	if !slices.ContainsFunc(environment, func(entry string) bool {
+		return strings.HasPrefix(entry, "GOFLAGS=") && strings.HasSuffix(entry, "-p=7")
+	}) {
+		t.Fatal("no GOFLAGS -p=7 in a later phase's environment")
 	}
 }

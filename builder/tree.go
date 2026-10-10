@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/system-inc/loom/planner"
@@ -100,6 +101,32 @@ type TreeBuild struct {
 	// go processes compile between them (Workshop, Oct 10: 32 jobs of go test each compiling 64 at once ran 459
 	// compilers on 64 threads, filled 110G of 125G, and starved sshd). Zero means every thread but four.
 	Compile int
+	// Busy is the fraction of the machine a build keeps busy, starting no job above it (zero means 0.8), and Gauge
+	// reads it (nil means ProcGauge).
+	Busy  float64
+	Gauge Gauge
+}
+
+func (build TreeBuild) busy() float64 {
+	if build.Busy > 0 {
+		return build.Busy
+	}
+	return 0.8
+}
+
+func (build TreeBuild) gauge() Gauge {
+	if build.Gauge != nil {
+		return build.Gauge
+	}
+	return ProcGauge
+}
+
+// shared is the environment for a later phase's go processes: GOFLAGS carries each one's share of the compile limit
+// into the go builds its tests run themselves (a product test's go build -buildmode=c-archive, Oct 10), which
+// otherwise compile as many packages at once as the machine has threads.
+func (build TreeBuild) shared(extra ...string) []string {
+	flags := strings.TrimSpace(os.Getenv("GOFLAGS") + " -p=" + build.perJob())
+	return build.environment(append([]string{"GOFLAGS=" + flags}, extra...)...)
 }
 
 // compile is Compile, or every thread but four, so the machine can always answer.
@@ -150,14 +177,14 @@ func (build TreeBuild) environment(extra ...string) []string {
 // Binaries compiles every package's test binary into Out, cold for this tree, Jobs at a time.
 func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 	results := make([]TreePackage, len(packages))
-	parallel(len(packages), build.Jobs, func(index int) {
+	admitted(len(packages), build.Jobs, build.gauge(), build.busy(), func(index int) {
 		test := packages[index]
 		started := time.Now()
 		result := TreePackage{Package: test.Package, Directory: test.Directory, Products: []string{}}
 		binary := filepath.Join(build.Out, strings.ReplaceAll(test.Package, "/", "_")+".test")
 		command := exec.Command("go", "test", "-c", "-p", build.perJob(), "-o", binary, "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
 		command.Dir = build.Tree
-		command.Env = build.environment()
+		command.Env = build.shared()
 		if output, err := command.CombinedOutput(); err != nil {
 			tail := output
 			if len(tail) > 2000 {
@@ -182,12 +209,12 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 	used := map[string]map[string]bool{}
 	failed := map[string]string{}
 	var mutex sync.Mutex
-	parallel(len(tests), build.Jobs, func(index int) {
+	admitted(len(tests), build.Jobs, build.gauge(), build.busy(), func(index int) {
 		test := tests[index]
 		log := filepath.Join(logs, fmt.Sprintf("product-%d.log", index))
 		command := exec.Command("go", "test", "-count=1", "-p", build.perJob(), "-run", "^"+test.Test+"$", "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
 		command.Dir = build.Tree
-		command.Env = build.environment("ADAMIC_BUILD_LOG=" + log)
+		command.Env = build.shared("ADAMIC_BUILD_LOG=" + log)
 		output, err := command.CombinedOutput()
 		products, touchedErr := Touched(log, build.Cache)
 		mutex.Lock()
@@ -300,23 +327,104 @@ func (index TreeIndex) encode() ([]byte, error) {
 }
 
 // parallel runs work for 0..count-1, jobs at a time.
-func parallel(count, jobs int, work func(index int)) {
+// A Gauge reads the machine: the fraction of its CPU busy and of its memory available, ok false when it can't.
+type Gauge func() (busy, available float64, ok bool)
+
+// admitted runs work for each index, at most jobs at once, and while gauge reads the machine at or over target busy,
+// or under a fifth of its memory available, starts no more (Kirk, Oct 10: "target using like 80% of it"). It starts
+// at most one job per reading, so it ramps instead of lunging, and always lets one run, so other load on the machine
+// slows a build and never stops it. A nil gauge, or one that can't read, admits every job up to jobs.
+func admitted(count, jobs int, gauge Gauge, target float64, work func(index int)) {
 	next := make(chan int)
 	var group sync.WaitGroup
+	var running atomic.Int64
 	for range max(1, jobs) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
 			for index := range next {
 				work(index)
+				running.Add(-1)
 			}
 		}()
 	}
 	for index := range count {
+		for gauge != nil && running.Load() > 0 {
+			busy, available, ok := gauge()
+			if !ok || (busy < target && available >= 0.2) {
+				break
+			}
+		}
+		running.Add(1)
 		next <- index
 	}
 	close(next)
 	group.Wait()
+}
+
+// ProcGauge reads Linux's /proc/stat twice, half a second apart, for the CPU busy between, and /proc/meminfo for the
+// memory available. Off Linux it can't read, so a build there admits every job up to its ceiling.
+func ProcGauge() (busy, available float64, ok bool) {
+	first, ok := cpuTimes()
+	if !ok {
+		return 0, 0, false
+	}
+	time.Sleep(500 * time.Millisecond)
+	second, ok := cpuTimes()
+	if !ok {
+		return 0, 0, false
+	}
+	total, idle := second[0]-first[0], second[1]-first[1]
+	if total <= 0 {
+		return 0, 0, false
+	}
+	content, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0, false
+	}
+	var memoryTotal, memoryAvailable float64
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, _ := strconv.ParseFloat(fields[1], 64)
+		switch fields[0] {
+		case "MemTotal:":
+			memoryTotal = value
+		case "MemAvailable:":
+			memoryAvailable = value
+		}
+	}
+	if memoryTotal <= 0 {
+		return 0, 0, false
+	}
+	return 1 - idle/total, memoryAvailable / memoryTotal, true
+}
+
+// cpuTimes is /proc/stat's first line as {total, idle plus iowait}, in clock ticks.
+func cpuTimes() ([2]float64, bool) {
+	content, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return [2]float64{}, false
+	}
+	line, _, _ := strings.Cut(string(content), "\n")
+	fields := strings.Fields(line)
+	if len(fields) < 6 || fields[0] != "cpu" {
+		return [2]float64{}, false
+	}
+	var times [2]float64
+	for index, field := range fields[1:] {
+		value, err := strconv.ParseFloat(field, 64)
+		if err != nil {
+			return [2]float64{}, false
+		}
+		times[0] += value
+		if index == 3 || index == 4 {
+			times[1] += value
+		}
+	}
+	return times, true
 }
 
 // PublishTree uploads a tree's build: each package that built, as its own action (its binary, the shared source
