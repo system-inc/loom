@@ -16,15 +16,16 @@ const AdamicModule = "github.com/system-inc/adamic"
 // MaximumPatternBytes bounds a -run or -skip pattern: a packed unit names its tests in one alternation.
 const MaximumPatternBytes = 64 << 10
 
-var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
+// CommitPattern is a full commit's name, 40 lowercase hex digits.
+var CommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // GofmtPhase is the one phase run.py doesn't hold, which the runner runs itself: gofmt -l over the change's .go files,
 // red on any output (Loom, Oct 10 01:42Z). It names no unit, and it is the only phase job that carries ChangedPaths,
 // since what it checks is exactly them.
 const GofmtPhase = "gofmt"
 
-// goVersionPattern is a Go release as go env GOVERSION names it (go1.27.1, go1.28rc1), with any experiments after it.
-var goVersionPattern = regexp.MustCompile(`^go1\.[0-9]+(\.[0-9]+)?((rc|beta)[0-9]+)?( X:[a-z0-9,]+)?$`)
+// GoVersionPattern is a Go release as go env GOVERSION names it (go1.27.1, go1.28rc1), with any experiments after it.
+var GoVersionPattern = regexp.MustCompile(`^go1\.[0-9]+(\.[0-9]+)?((rc|beta)[0-9]+)?( X:[a-z0-9,]+)?$`)
 
 // phaseNamePattern is a phase of the box fast gate as run.py names it (coverage, vet, wasi, ...).
 var phaseNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -94,13 +95,13 @@ func CheckTestJob(job TestJob) error {
 	if job.Repository != AdamicRepository {
 		return fmt.Errorf("repository %q: a test job runs only %s", job.Repository, AdamicRepository)
 	}
-	if !commitPattern.MatchString(job.Sha) {
+	if !CommitPattern.MatchString(job.Sha) {
 		return fmt.Errorf("sha %q isn't a full commit, 40 lowercase hex digits", job.Sha)
 	}
-	if job.Base != "" && !commitPattern.MatchString(job.Base) {
+	if job.Base != "" && !CommitPattern.MatchString(job.Base) {
 		return fmt.Errorf("base %q isn't a full commit, 40 lowercase hex digits", job.Base)
 	}
-	if job.Sample != "" && !commitPattern.MatchString(job.Sample) {
+	if job.Sample != "" && !CommitPattern.MatchString(job.Sample) {
 		return fmt.Errorf("sample %q isn't a full commit, 40 lowercase hex digits", job.Sample)
 	}
 	if job.GateInputs != "" && !Sha256Pattern.MatchString(job.GateInputs) {
@@ -114,9 +115,9 @@ func CheckTestJob(job TestJob) error {
 		switch {
 		case len(job.Packages) > 0:
 			return fmt.Errorf("a phase job names no packages: it runs a phase, not a go test")
-		case !commitPattern.MatchString(job.Tools):
+		case !CommitPattern.MatchString(job.Tools):
 			return fmt.Errorf("tools %q isn't a full commit, 40 lowercase hex digits", job.Tools)
-		case !commitPattern.MatchString(job.Base):
+		case !CommitPattern.MatchString(job.Base):
 			return fmt.Errorf("a phase job needs its base, the main it was merged onto (run.py --base)")
 		case strings.Join(fields, " ") != job.Phase || len(fields) > 2 || !phaseNamePattern.MatchString(fields[0]):
 			return fmt.Errorf("phase %q isn't run.py's unit line, a phase and at most one unit", job.Phase)
@@ -126,7 +127,7 @@ func CheckTestJob(job TestJob) error {
 			return fmt.Errorf("phase %q: gofmt names no unit, it checks the change's paths", job.Phase)
 		case fields[0] != GofmtPhase && len(job.ChangedPaths) > 0:
 			return fmt.Errorf("phase %q carries changed paths, and only gofmt's phase job checks them", job.Phase)
-		case fields[0] == GofmtPhase && !goVersionPattern.MatchString(job.Go):
+		case fields[0] == GofmtPhase && !GoVersionPattern.MatchString(job.Go):
 			return fmt.Errorf("go %q: a gofmt phase job names the Go release its key holds, as go env GOVERSION says it", job.Go)
 		case fields[0] == GofmtPhase && len(job.ChangedPaths) == 0 && job.Base != job.Sha:
 			// Only a witness, the base run against itself, changes nothing; any other gofmt with no paths checks nothing.
