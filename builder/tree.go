@@ -141,15 +141,93 @@ func (build TreeBuild) compile() int {
 	return max(1, runtime.NumCPU()-4)
 }
 
-// perJob is each later go process's share of compile, so Jobs of them never compile more than compile at once.
+// perJob is each later go process's share of compile, so Jobs of them compile about compile at once, and never fewer
+// than 8 (or compile, when that is less): a product test's own go build at -p 1 compiled typescript-go's chain alone
+// for 6 minutes (Workshop, Oct 10), the build's straggler, while the gauge already keeps the machine near its target.
 func (build TreeBuild) perJob() string {
-	return strconv.Itoa(max(1, build.compile()/max(1, build.Jobs)))
+	return strconv.Itoa(max(min(8, build.compile()), build.compile()/max(1, build.Jobs)))
+}
+
+// ProductBuildFlags are the flags adamic's buildcache.GoBuild gives every Go product build (its reproducible(), in
+// internal/buildcache/gobuild.go): -trimpath changes how each package compiles, so a product build shares nothing
+// with a test build's cache unless Warm compiled the same packages with the same flags.
+var ProductBuildFlags = []string{"-trimpath", "-ldflags=-buildid=", "-buildvcs=false"}
+
+// mainPackages lists every main package of the tree's module and of the modules it replaces (cohere and its
+// submodules, for adamic), which a product's go build builds: GoBuild's products are programs.
+func (build TreeBuild) mainPackages() ([]string, error) {
+	run := func(arguments ...string) ([]string, error) {
+		command := exec.Command("go", arguments...)
+		command.Dir = build.Tree
+		command.Env = build.environment()
+		var stderr bytes.Buffer
+		command.Stderr = &stderr
+		output, err := command.Output()
+		if err != nil {
+			return nil, fmt.Errorf("go %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(stderr.String()))
+		}
+		return strings.Fields(string(output)), nil
+	}
+	replaced, err := run("list", "-m", "-f", "{{if .Replace}}{{.Path}}{{end}}", "all")
+	if err != nil {
+		return nil, err
+	}
+	patterns := []string{"./..."}
+	for _, module := range replaced {
+		patterns = append(patterns, module+"/...")
+	}
+	listed, err := run(append([]string{"list", "-e", "-f", "{{if eq .Name \"main\"}}{{.ImportPath}}{{end}}"}, patterns...)...)
+	if err != nil {
+		return nil, err
+	}
+	seen, mains := map[string]bool{}, []string{}
+	for _, pkg := range listed {
+		if !seen[pkg] {
+			seen[pkg] = true
+			mains = append(mains, pkg)
+		}
+	}
+	sort.Strings(mains)
+	return mains, nil
 }
 
 // Warm compiles every package's tests once, in one go process, compile at a time, running none: each dependency
 // compiles once for the whole tree, and the products and binaries after it start from a warm build cache instead
-// of each compiling the tree's dependencies again at once.
+// of each compiling the tree's dependencies again at once. Then it compiles every main package with
+// ProductBuildFlags, as a product's go build will, so a product test's own build compiles nothing either.
 func (build TreeBuild) Warm(packages []planner.ProductTest) error {
+	if err := build.warmTests(packages); err != nil {
+		return err
+	}
+	return build.warmProducts()
+}
+
+// warmProducts compiles every main package with ProductBuildFlags, compile at a time, linking nothing.
+func (build TreeBuild) warmProducts() error {
+	mains, err := build.mainPackages()
+	if err != nil || len(mains) == 0 {
+		return err
+	}
+	arguments := append([]string{"build", "-p", strconv.Itoa(build.compile())}, ProductBuildFlags...)
+	if len(mains) == 1 {
+		// One main package would be linked into the tree; several are only compiled.
+		arguments = append(arguments, "-o", os.DevNull)
+	}
+	arguments = append(arguments, mains...)
+	command := exec.Command("go", arguments...)
+	command.Dir = build.Tree
+	command.Env = build.environment()
+	if output, err := command.CombinedOutput(); err != nil {
+		tail := output
+		if len(tail) > 4000 {
+			tail = tail[len(tail)-4000:]
+		}
+		return fmt.Errorf("go build %s: %v\n%s", strings.Join(ProductBuildFlags, " "), err, tail)
+	}
+	return nil
+}
+
+func (build TreeBuild) warmTests(packages []planner.ProductTest) error {
 	if len(packages) == 0 {
 		return nil
 	}

@@ -265,8 +265,15 @@ func TestWarmCompilesEveryPackageOnceAndNamesOneThatDoesNotCompile(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "undefinedThing") {
 		t.Fatalf("a package that doesn't compile: %v", err)
 	}
-	if build.perJob() != "1" || (TreeBuild{Compile: 60, Jobs: 8}).perJob() != "7" || (TreeBuild{Compile: 4, Jobs: 8}).perJob() != "1" {
-		t.Fatal("each job's share of the compile limit")
+	// A job's share never drops under 8, or the whole limit when that is less: a product test's own go build at -p 1
+	// was the build's 6-minute straggler.
+	for _, share := range []struct {
+		build TreeBuild
+		want  string
+	}{{build, "1"}, {TreeBuild{Compile: 60, Jobs: 8}, "8"}, {TreeBuild{Compile: 4, Jobs: 8}, "4"}, {TreeBuild{Compile: 60, Jobs: 64}, "8"}, {TreeBuild{Compile: 60, Jobs: 2}, "30"}} {
+		if got := share.build.perJob(); got != share.want {
+			t.Errorf("compile %d, jobs %d: a share of %s, not %s", share.build.Compile, share.build.Jobs, got, share.want)
+		}
 	}
 }
 
@@ -332,8 +339,71 @@ func TestProcGaugeReadsTheMachine(t *testing.T) {
 func TestATestsOwnGoBuildsGetTheirShareOfTheCompileLimit(t *testing.T) {
 	environment := TreeBuild{Compile: 60, Jobs: 8}.shared()
 	if !slices.ContainsFunc(environment, func(entry string) bool {
-		return strings.HasPrefix(entry, "GOFLAGS=") && strings.HasSuffix(entry, "-p=7")
+		return strings.HasPrefix(entry, "GOFLAGS=") && strings.HasSuffix(entry, "-p=8")
 	}) {
-		t.Fatal("no GOFLAGS -p=7 in a later phase's environment")
+		t.Fatal("no GOFLAGS -p=8 in a later phase's environment")
+	}
+}
+
+// compiles is what a product's go build compiles after a warm: it runs go build -x with buildcache.GoBuild's flags
+// and returns the packages it compiled (each compile line's -p).
+func compiles(t *testing.T, build TreeBuild, pkg string) []string {
+	t.Helper()
+	arguments := append(append([]string{"build", "-x"}, ProductBuildFlags...), "-o", filepath.Join(t.TempDir(), "product"), pkg)
+	command := exec.Command("go", arguments...)
+	command.Dir = build.Tree
+	command.Env = build.shared()
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build: %v\n%s", err, output)
+	}
+	compiled := []string{}
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || filepath.Base(fields[0]) != "compile" {
+			continue
+		}
+		for index, field := range fields {
+			if field == "-p" && index+1 < len(fields) {
+				compiled = append(compiled, fields[index+1])
+			}
+		}
+	}
+	return compiled
+}
+
+// After Warm, a product's own go build, with the flags adamic's buildcache gives it, compiles nothing: Warm compiled
+// every main package's closure with those flags too. Warming the tests alone leaves it the whole chain to compile,
+// the straggler of Oct 10.
+func TestAProductBuildAfterWarmCompilesNothing(t *testing.T) {
+	tree := gitTree(t, map[string]string{
+		"go.mod":           "module example.com/warmed\n\ngo 1.22\n",
+		"lib/lib.go":       "package lib\n\nfunc Answer() int { return 42 }\n",
+		"lib/lib_test.go":  "package lib\n\nimport \"testing\"\n\nfunc TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(\"answer\")\n\t}\n}\n",
+		"cmd/tool/main.go": "package main\n\nimport (\n\t\"fmt\"\n\n\t\"example.com/warmed/lib\"\n)\n\nfunc main() { fmt.Println(lib.Answer()) }\n",
+	})
+	packages := []planner.ProductTest{{Package: "example.com/warmed/lib", Directory: "lib"}}
+	warmed := func(full bool) TreeBuild {
+		build := TreeBuild{Tree: tree, Cache: t.TempDir(), Environment: append(GateEnvironment(), "GOCACHE="+t.TempDir()), Jobs: 1}
+		var err error
+		if full {
+			err = build.Warm(packages)
+		} else {
+			err = build.warmTests(packages)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return build
+	}
+	if compiled := compiles(t, warmed(false), "./cmd/tool"); !slices.Contains(compiled, "example.com/warmed/lib") {
+		t.Fatalf("after warming only the tests, the product build compiled %v; the test can't tell a warm cache from a cold one", compiled)
+	}
+	build := warmed(true)
+	if compiled := compiles(t, build, "./cmd/tool"); len(compiled) != 0 {
+		t.Fatalf("after Warm, the product build compiled %v", compiled)
+	}
+	if status, _ := exec.Command("git", "-C", tree, "status", "--porcelain").Output(); len(status) != 0 {
+		t.Fatalf("Warm left files in the tree: %s", status)
 	}
 }
