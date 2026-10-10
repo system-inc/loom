@@ -128,6 +128,9 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Floor:   func() error { return builder.CheckFloor(watched, nil) },
 		Build: func(want treebuilder.Want) error {
 			tree, cleanup, err := checkout(want.Future)
+			if err != nil && runContext.Err() != nil {
+				return fmt.Errorf("%w: checking %s out: %v", treebuilder.ErrStopped, want.Future, err)
+			}
 			if err != nil {
 				return fmt.Errorf("checking %s out keyless: %w", want.Future, err)
 			}
@@ -202,7 +205,8 @@ func buildTreeArguments(settings buildTreesSettings, tree string, want treebuild
 }
 
 // runBuildTree runs binary with arguments, its output to log (mode 600, new each build), in a process group of its own
-// that a stop or the bound kills whole, and says how it ended badly, with the log's last lines, or nil.
+// that a stop or the bound kills whole, and says how it ended badly, with the log's last lines, or nil. Ended by the
+// builder's own stop (runContext's), it's treebuilder.ErrStopped: the builder's, never the tree's failure.
 func runBuildTree(runContext context.Context, binary string, arguments []string, log string, bound time.Duration) error {
 	output, err := os.OpenFile(log, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -221,6 +225,9 @@ func runBuildTree(runContext context.Context, binary string, arguments []string,
 		return nil
 	}
 	content, _ := os.ReadFile(log)
+	if runContext.Err() != nil {
+		return fmt.Errorf("%w (%v): %s", treebuilder.ErrStopped, err, logTail(content, 5))
+	}
 	if boundContext.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("build-tree ran past its %v bound and was killed: %s", bound, logTail(content, 5))
 	}

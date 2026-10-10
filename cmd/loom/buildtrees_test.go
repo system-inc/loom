@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/system-inc/loom/judge"
+	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/treebuilder"
 )
@@ -129,3 +133,48 @@ func TestTheBuildersCloneHasOnlyThePublicOrigin(t *testing.T) {
 		t.Fatalf("a clone with another origin: %v", err)
 	}
 }
+
+// A graceful stop mid-build (SIGTERM: systemd's stop, every update's restart) is the builder's, never the tree's: the
+// build is recorded stopped, nothing stands failed, and the restarted builder builds it again rather than voiding every
+// future waiting on it for RetryAfter (review of tree-wiring, finding 1). Mutant: runBuildTree not telling a stop from a
+// failure.
+func TestAStopMidBuildIsNeverTheTreesFailure(t *testing.T) {
+	key := strings.Repeat("a", 64)
+	parts, _ := json.Marshal(planner.KeyParts{Kind: "test", Package: "x"})
+	source := listedTrees{{Future: strings.Repeat("f", 40), Attempt: 1, Units: []judge.PlannedUnitWire{{UnitKey: strings.Repeat("1", 64), KeyParts: parts, Decision: "run", Tree: key}}}}
+	path := filepath.Join(t.TempDir(), "trees.jsonl")
+	ledger, err := treebuilder.OpenLedger(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runContext, stop := context.WithCancel(context.Background())
+	builds := 0
+	loop := &treebuilder.Builder{Source: source, Indexed: func(string) (bool, error) { return false, nil }, Floor: func() error { return nil },
+		Build: func(want treebuilder.Want) error {
+			builds++
+			time.AfterFunc(300*time.Millisecond, stop) // the SIGTERM
+			return runBuildTree(runContext, "/bin/sleep", []string{"30"}, filepath.Join(t.TempDir(), "b.log"), 2*time.Hour)
+		},
+		Ledger: ledger, Now: time.Now, Log: io.Discard}
+	if _, err := loop.BuildOnce(); err != nil {
+		t.Fatal(err)
+	}
+	ledger.Close()
+	reopened, err := treebuilder.OpenLedger(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	newest, _ := reopened.Newest(key)
+	if newest.Event != treebuilder.Stopped || newest.Standing(time.Now()) {
+		t.Fatalf("a stopped build is recorded %+v, standing %v", newest, newest.Standing(time.Now()))
+	}
+	loop.Ledger, loop.Build = reopened, func(treebuilder.Want) error { builds++; return nil }
+	if built, err := loop.BuildOnce(); err != nil || !built || builds != 2 {
+		t.Fatalf("after the restart: built %v (%v), %d builds; want it built again", built, err, builds)
+	}
+}
+
+type listedTrees []judge.PlannedFuture
+
+func (futures listedTrees) Planned() ([]judge.PlannedFuture, error) { return futures, nil }

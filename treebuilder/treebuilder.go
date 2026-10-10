@@ -8,11 +8,13 @@
 // up; a package that didn't compile for the change's reasons is the change's red through the index, one that failed for
 // Workshop's is broken), failed (no index: Workshop's, void, named, and built again after RetryAfter), refused (the
 // disk is under its floor: nothing is checked out or built until it isn't), or interrupted (the builder stopped
-// mid-build, a restart or a crash, and builds it again).
+// mid-build, a crash, and builds it again), or stopped (the builder was told to stop, a restart or a deploy, and the
+// next one builds it again).
 package treebuilder
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -29,7 +31,12 @@ const (
 	Failed      = "failed"
 	Refused     = "refused"
 	Interrupted = "interrupted"
+	Stopped     = "stopped"
 )
+
+// ErrStopped is a build ended because the builder itself was told to stop (SIGTERM: systemd's stop, every update's
+// restart). The build isn't the tree's failure: it's recorded Stopped, and the next builder builds it again.
+var ErrStopped = errors.New("the builder was stopped mid-build")
 
 // RetryAfter is how long a tree whose build failed stands failed: the builder builds it again after it, and the placer
 // reads the failure as the tree's only while it's younger, holding a later attempt while the next build runs.
@@ -284,6 +291,9 @@ func (builder *Builder) build(want Want) error {
 	indexed, indexErr := builder.Indexed(want.Tree)
 	record.At, record.Seconds = builder.Now().UTC().Format(time.RFC3339), builder.Now().Sub(started).Seconds()
 	switch {
+	case errors.Is(buildErr, ErrStopped) && !(indexErr == nil && indexed):
+		// A stop is the builder's, never the tree's: nothing stands failed, and the next builder builds it again.
+		record.Event, record.Cause = Stopped, buildErr.Error()
 	case indexErr == nil && indexed:
 		// Packages that failed are the index's to say, each the change's red or Workshop's broken.
 		record.Event = Built
