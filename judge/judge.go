@@ -55,6 +55,10 @@ const (
 	// alone reruns would run with more than the failing attempt had, so they can't judge it. Void, and the next
 	// attempt runs whole at the declared need. Never a flake, which would quarantine tests that were only under-placed.
 	InfraNeedChanged = "needChanged"
+	// InfraBelowNeed is a failure that ran on less than its declared need (Loom, Oct 10 02:37Z: a 16-cpu unit placed
+	// on a 4-cpu Codex instance, since the coordinator checked memory and not cpus). Its red proves nothing about the
+	// change, and its reruns can't fix the placement it was judged on. Void, and the next attempt places it right.
+	InfraBelowNeed = "belowNeed"
 )
 
 var infraKinds = map[string]bool{InfraDisk: true, InfraKill: true, InfraNeverPlaced: true, InfraRefused: true, InfraSilent: true}
@@ -247,7 +251,9 @@ type Evidence struct {
 	Phase bool
 	// NeedGrew says how the unit's declared need now exceeds what its first attempt was placed with; empty when it
 	// doesn't, or before the loop has asked (it asks only when a failure would go to alone reruns).
-	NeedGrew  string
+	NeedGrew string
+	// BelowNeed says how the unit's declared need exceeds what its first attempt's runner reported it ran with.
+	BelowNeed string
 	Candidate *Rerun // the unit rerun alone on the candidate; nil until it has run
 	Main      *Rerun // the unit rerun alone on main at the future's base; nil until it has run
 	// MainRecorded is main's latest recorded verdict for this unit at the future's base, its test outcomes; nil when
@@ -318,6 +324,10 @@ func Decide(evidence Evidence) (Decision, error) {
 	case Failed:
 	default:
 		return Decision{}, fmt.Errorf("an attempt's status is passed, failed or broken, not %q", evidence.First.Status)
+	}
+	if evidence.BelowNeed != "" {
+		return Decision{Decided: true, Status: Void, Cause: CauseInfra, Infra: InfraBelowNeed,
+			Why: "failed below its declared need (" + evidence.BelowNeed + "): proves nothing about the change; void, the next attempt places it at its need"}, nil
 	}
 	if evidence.NeedGrew != "" {
 		return Decision{Decided: true, Status: Void, Cause: CauseInfra, Infra: InfraNeedChanged,

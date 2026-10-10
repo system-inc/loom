@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/system-inc/loom/protocol"
 )
 
 // InfraRetries is how many times infra is placed again before a unit's verdict is void.
@@ -29,6 +31,9 @@ type Finished struct {
 	TestLog     *TestLogRef
 	TestLogRead bool
 	NoTestFiles bool
+	// RanWith is the cpus and memory the runner's started event reported for the attempt's slot; zero when it
+	// reported none. Placement evidence only, never part of the verdict record.
+	RanWith protocol.Resources
 }
 
 // Runs reads a run's finished events for one unit; found is false when the unit never reported.
@@ -156,9 +161,10 @@ type Loop struct {
 	// RequireRunner is the logged fail-closed switch (Loom, Oct 10 01:52Z, a cutover condition): an attempt whose
 	// runner reports no sha256 is void, like one whose sha256 differs from its key's. Off, it's accepted, the gap named.
 	RequireRunner bool
-	// NeedGrew, when set, says how a unit's declared need now exceeds what its first attempt was placed with, empty
-	// when it doesn't (Release, Oct 10 02:26Z). Asked only of a failure about to be rerun alone.
-	NeedGrew func(unitKey string) (string, error)
+	// Need, when set, is a unit's placement as its plan listed it and its declared need as of now (NeedOf), asked
+	// only of a failure about to be rerun alone. A need over the listing is needChanged (Release, Oct 10 02:26Z); a
+	// need over what the attempt's runner reported it ran with is belowNeed (Loom, Oct 10 02:37Z).
+	Need func(unitKey string) (listed, need protocol.Resources, err error)
 }
 
 // CensusConfig is what the census step reads: the tools tree's rows, whether an awaited branch is on main, and the
@@ -335,15 +341,18 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 			}
 			continue
 		}
-		// "rerunAlone": a failure is rerun alone on the candidate and on main before its cause is set, unless its
-		// declared need grew since it was placed: then Decide voids it before anything runs.
-		if evidence.NeedGrew == "" && evidence.Candidate == nil && loop.NeedGrew != nil {
-			grew, err := loop.NeedGrew(unit.UnitKey)
+		// "rerunAlone": a failure is rerun alone on the candidate and on main before its cause is set, unless it ran
+		// below its declared need or that need grew since it was placed: then Decide voids it before anything runs.
+		if evidence.NeedGrew == "" && evidence.BelowNeed == "" && evidence.Candidate == nil && loop.Need != nil {
+			listed, need, err := loop.Need(unit.UnitKey)
 			if err != nil {
 				return Verdict{}, nil, err
 			}
-			if grew != "" {
-				evidence.NeedGrew = grew
+			if ranWith := source.RanWith; ranWith != (protocol.Resources{}) {
+				evidence.BelowNeed = NeedGrew(ranWith, need)
+			}
+			evidence.NeedGrew = NeedGrew(listed, need)
+			if evidence.BelowNeed != "" || evidence.NeedGrew != "" {
 				continue
 			}
 		}

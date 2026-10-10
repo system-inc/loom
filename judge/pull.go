@@ -276,12 +276,9 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 		return puller.Rerun(parts[unitKey], resources[unitKey], tree)
 	}, Log: puller.Log}
 	if puller.NeedNow != nil {
-		loop.NeedGrew = func(unitKey string) (string, error) {
+		loop.Need = func(unitKey string) (protocol.Resources, protocol.Resources, error) {
 			need, err := puller.NeedNow(parts[unitKey], resources[unitKey])
-			if err != nil {
-				return "", err
-			}
-			return NeedGrew(resources[unitKey], need), nil
+			return resources[unitKey], need, err
 		}
 	}
 	loop.Main, loop.Queue = puller.Main, puller.Queue

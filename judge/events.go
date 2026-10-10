@@ -40,6 +40,7 @@ func FinishedFromEvents(events []protocol.Event) (finished Finished, found bool)
 		return Finished{}, false
 	}
 	attempt := Attempt{Machine: events[start].Machine, Runner: events[start].RunnerVersion, RunnerSha256: events[start].RunnerSha256, StartedAt: events[start].Time}
+	finished.RanWith = protocol.Resources{Cpus: events[start].Cpus, MemoryMegabytes: events[start].MemoryMegabytes}
 	if attempt.RunnerSha256 == "" {
 		attempt.RunnerSha256 = RunnerUnreported
 	}

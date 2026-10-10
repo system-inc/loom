@@ -451,3 +451,71 @@ func TestNeedGrewIsMoreCpusOrMemoryThanThePlacement(t *testing.T) {
 		t.Fatalf("a smaller need grew: %s", why)
 	}
 }
+
+// Loom's mutant (Oct 10 02:37Z): f7812fff attempt 4 placed ec123b7f, declared at 16 cpus, on a 4-cpu Codex instance,
+// since the coordinator checked memory and not cpus. A failure that ran below its declared need is void, belowNeed,
+// never a red or a flake, and nothing is rerun. At its need, or on a runner that reported no cpus, today's rules
+// stand.
+func TestAFailureThatRanBelowItsNeedIsVoidNeverARed(t *testing.T) {
+	tree := strings.Repeat("d", 40)
+	unit := strings.Repeat("1", 64)
+	need := protocol.Resources{MemoryMegabytes: 9710, Cpus: 16}
+	for _, c := range []struct {
+		name    string
+		ranWith protocol.Resources
+		alone   string
+		status  string
+		infra   string
+		reruns  int
+	}{
+		{"16-cpu unit on a 4-cpu slot: void belowNeed", protocol.Resources{Cpus: 4, MemoryMegabytes: 16384}, "failed", "void", InfraBelowNeed, 0},
+		{"at its need: fails alone, the change's red", protocol.Resources{Cpus: 16, MemoryMegabytes: 65536}, "failed", "red", "", 2},
+		{"cpus unreported: judged as today", protocol.Resources{}, "passed", "green", "", 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			units := []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"package":"p","kind":"test"}`), Decision: "run", Resources: need}}
+			source := listedFutures{{Future: tree, Base: baseTree, Change: PlannedChange{Change: "chg_A", Sha: tree, Base: baseTree}, Units: units}}
+			stream := finishedStream(unit, "failed")
+			stream[0].Cpus, stream[0].MemoryMegabytes = c.ranWith.Cpus, c.ranWith.MemoryMegabytes
+			reruns := 0
+			queue := &StubQueue{}
+			puller := Puller{
+				Source: source,
+				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
+				Read:   func(string) ([]protocol.Event, error) { return stream, nil },
+				Rerun: func(_ json.RawMessage, _ protocol.Resources, sha string) ([]protocol.Event, error) {
+					reruns++
+					if sha == baseTree {
+						return finishedStream("job", "passed"), nil
+					}
+					return finishedStream("job", c.alone), nil
+				},
+				NeedNow: func(_ json.RawMessage, listed protocol.Resources) (protocol.Resources, error) { return listed, nil },
+				Main:    NoMainRecords{},
+				Queue:   queue,
+				Loop:    Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: func() time.Time { return time.Date(2026, 10, 10, 2, 40, 0, 0, time.UTC) }},
+			}
+			if judged, err := puller.PullOnce(); err != nil || judged != 1 {
+				t.Fatalf("judged %d %v", judged, err)
+			}
+			post := queue.Posts[tree][0]
+			if post.Decision.Status != c.status || reruns != c.reruns {
+				t.Fatalf("run %s with %d reruns, want %s with %d", post.Decision.Status, reruns, c.status, c.reruns)
+			}
+			var record struct {
+				Infra *string `json:"infra"`
+			}
+			if err := json.Unmarshal(post.Verdicts[0], &record); err != nil {
+				t.Fatal(err)
+			}
+			if got := ""; record.Infra != nil {
+				got = *record.Infra
+				if got != c.infra {
+					t.Fatalf("infra %q, want %q", got, c.infra)
+				}
+			} else if c.infra != "" {
+				t.Fatalf("no infra, want %q", c.infra)
+			}
+		})
+	}
+}
