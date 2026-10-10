@@ -59,6 +59,10 @@ const (
 	// on a 4-cpu Codex instance, since the coordinator checked memory and not cpus). Its red proves nothing about the
 	// change, and its reruns can't fix the placement it was judged on. Void, and the next attempt places it right.
 	InfraBelowNeed = "belowNeed"
+	// InfraWarmCache is an attempt that ran on a warm shared Go cache (Release, Oct 10 02:43Z: cloud-box-2's per-worker
+	// cache, warm from attempt 3, served f5695d12 run -1's units). A warm pass is the stale-green the cold rule stops,
+	// and a warm red is no cleaner: evidence, never the verdict. Void, and placed again on a cold pool.
+	InfraWarmCache = "warmCache"
 )
 
 var infraKinds = map[string]bool{InfraDisk: true, InfraKill: true, InfraNeverPlaced: true, InfraRefused: true, InfraSilent: true}
@@ -252,6 +256,8 @@ type Evidence struct {
 	// NeedGrew says how the unit's declared need now exceeds what its first attempt was placed with; empty when it
 	// doesn't, or before the loop has asked (it asks only when a failure would go to alone reruns).
 	NeedGrew string
+	// Warm marks a first attempt listed as run on a warm shared cache; it's placed again before anything decides.
+	Warm bool
 	// BelowNeed says how the unit's declared need exceeds what its first attempt's runner reported it ran with.
 	BelowNeed string
 	Candidate *Rerun // the unit rerun alone on the candidate; nil until it has run
@@ -282,6 +288,10 @@ func Decide(evidence Evidence) (Decision, error) {
 		if why := runnerMismatch(evidence.KeyRunner, evidence.First.RunnerSha256, evidence.RequireRunner); why != "" {
 			return Decision{Status: Void, Cause: CauseInfra, Infra: InfraRefused, Next: "retry", Why: why + ": void, placed again"}, nil
 		}
+	}
+	if evidence.Warm {
+		return Decision{Status: Void, Cause: CauseInfra, Infra: InfraWarmCache, Next: "retry",
+			Why: "ran on a warm shared cache: evidence, never the verdict; placed again cold"}, nil
 	}
 	if evidence.Phase {
 		switch evidence.First.Status {

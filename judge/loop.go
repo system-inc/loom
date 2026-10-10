@@ -165,6 +165,9 @@ type Loop struct {
 	// only of a failure about to be rerun alone. A need over the listing is needChanged (Release, Oct 10 02:26Z); a
 	// need over what the attempt's runner reported it ran with is belowNeed (Loom, Oct 10 02:37Z).
 	Need func(unitKey string) (listed, need protocol.Resources, err error)
+	// Warm, when set, says whether a run's attempt of a unit ran on a warm shared cache (Release, Oct 10 02:43Z), from
+	// a list Fabric reads off the worker's serve log; such an attempt is placed again cold before it decides anything.
+	Warm func(run, unitKey string) (bool, error)
 }
 
 // CensusConfig is what the census step reads: the tools tree's rows, whether an awaited branch is on main, and the
@@ -306,6 +309,17 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		first = Finished{Attempt: Attempt{Status: Broken}, Infra: InfraSilent}
 	}
 	evidence := loop.evidenceOf(first, unit)
+	if found && loop.Warm != nil {
+		run := job.Run
+		if carried != "" {
+			run = carried
+		}
+		warm, err := loop.Warm(run, unit.UnitKey)
+		if err != nil {
+			return Verdict{}, nil, err
+		}
+		evidence.Warm = warm
+	}
 	verdict.Attempts = append(verdict.Attempts, first.Attempt)
 	verdict.Tests, verdict.Outputs = nonNil(first.Tests), nonNilStrings(first.Outputs)
 	source := first // the attempt whose tests the verdict carries

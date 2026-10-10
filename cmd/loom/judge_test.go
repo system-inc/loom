@@ -190,3 +190,21 @@ func TestTheJudgeReadsThePoolTableFreshForEachRerun(t *testing.T) {
 		t.Fatal("read a table whose pool has no cpus")
 	}
 }
+
+func TestTheWarmAttemptsFileNamesARunAndAUnitPerLine(t *testing.T) {
+	path := t.TempDir() + "/warm.txt"
+	content := "# cloud-box-2, warm per-worker cache\nfuture-f-1 c5e5 2026-10-10T02:19:58.842Z Cloud\n\nfuture-f-1 d922\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := readWarmAttempts(path)
+	if err != nil || len(listed) != 2 || !listed["future-f-1 c5e5"] || !listed["future-f-1 d922"] || listed["future-f-2 c5e5"] {
+		t.Fatalf("listed %v (%v), want run-1's c5e5 and d922 only", listed, err)
+	}
+	if err := os.WriteFile(path, []byte("future-f-1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readWarmAttempts(path); err == nil {
+		t.Fatal("read a line with a run and no unit key")
+	}
+}

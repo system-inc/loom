@@ -543,3 +543,59 @@ func TestTheRecordNamesAnUnreportedRunner(t *testing.T) {
 		t.Fatalf("record %s doesn't name the gap", encoded)
 	}
 }
+
+// Release's ruling (Oct 10 02:43Z): an attempt that ran on a warm shared cache is evidence, never the verdict. It's
+// placed again before the run decides, and the cold attempt decides by the same rules: a cold pass passes, and a
+// cold red goes to the alone reruns. An attempt not on the warm list is judged as today.
+func TestAWarmAttemptIsPlacedAgainColdBeforeItDecides(t *testing.T) {
+	cases := []struct {
+		name   string
+		warm   bool
+		setup  func(harness)
+		status string
+		cause  string
+		asked  int
+		run    string
+	}{
+		{"a warm pass is placed again and its cold pass decides", true, func(h harness) {
+			h.runs["u"] = passed()
+			h.script("u", futureTree, passed())
+		}, Passed, "", 1, "green"},
+		{"a warm pass whose cold run fails goes to the alone reruns", true, func(h harness) {
+			h.runs["u"] = passed()
+			h.script("u", futureTree, failedWith("TestB"), failedWith("TestB"))
+			h.script("u", baseTree, passed())
+		}, Failed, CauseChange, 3, "red"},
+		{"a warm red is placed again, and a cold pass is a pass, not a flake", true, func(h harness) {
+			h.runs["u"] = failedWith("TestB")
+			h.script("u", futureTree, passed())
+		}, Passed, "", 1, "green"},
+		{"an attempt off the list is judged as today", false, func(h harness) { h.runs["u"] = passed() }, Passed, "", 0, "green"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			c.setup(h)
+			asked := []string{}
+			loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now,
+				Warm: func(run, unitKey string) (bool, error) {
+					asked = append(asked, run+" "+unitKey)
+					return c.warm, nil
+				}}
+			post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: baseTree}, Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1", Plan: []PlanUnit{{UnitKey: "u"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := recordOf(t, post, "u")
+			if record.Status != c.status || record.Cause != c.cause || len(h.fabric.Asked) != c.asked || post.Decision.Status != c.run {
+				t.Fatalf("record %+v, %d placements, run %s; want %s %s, %d, %s", record, len(h.fabric.Asked), post.Decision.Status, c.status, c.cause, c.asked, c.run)
+			}
+			if len(asked) != 1 || asked[0] != "run-1 u" {
+				t.Fatalf("warm asked %v, want once for run-1's attempt of u", asked)
+			}
+			if c.warm && len(post.Quarantine) != 0 {
+				t.Fatalf("quarantined %v after a warm attempt", post.Quarantine)
+			}
+		})
+	}
+}

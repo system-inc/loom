@@ -56,6 +56,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	cause := flags.String("cause", "", "with --void, why the run is void, which leads the decision's problems")
 	poolsPath := flags.String("pools", "", "the pool table, workshop's ~/.loom/pools.json: a rerun goes only to a pool serving its key's runner whose workers hold its declared need")
 	needsGit := flags.String("needs-git", "", "with --pools, a clone of Adamic whose origin's loom/planner-reads holds unit-needs.json, for a unit whose plan carried no need")
+	warmAttempts := flags.String("warm-attempts", "", "a file of attempts that ran on a warm shared cache, one '<run> <unitKey>' per line, read on every pass: each is void warmCache and placed again cold (Release, Oct 10 02:43Z)")
 	requireRunner := flags.Bool("require-runner", false, "void an attempt whose runner reports no sha256 (the logged fail-closed switch, a cutover condition, once every pool's runner sends it); a mismatch is void either way")
 	censusRows := flags.String("census-rows", "", "the skip census's rows, comma-separated files (the tools tree's skips.json and census-extra.json); every unit whose tests pass is held to it")
 	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
@@ -179,6 +180,12 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Stale: judge.StaleAfter,
 	})
 	puller.Loop.RequireRunner = *requireRunner
+	if *warmAttempts != "" {
+		puller.Loop.Warm = func(run, unitKey string) (bool, error) {
+			listed, err := readWarmAttempts(*warmAttempts)
+			return listed[run+" "+unitKey], err
+		}
+	}
 	if *poolsPath != "" {
 		// A failure is rerun with the need NeedOf reads now; when that's more than its attempt was placed with, it's
 		// void, need changed, never judged by reruns placed with more (Release, Oct 10 02:26Z).
@@ -558,6 +565,27 @@ func gateReport(suiteText string, events []judge.LogEvent, canaryTree string) ([
 // strictSilence is how long a strict rerun may go silent before its worker counts as gone: the unit's 1800 s ceiling,
 // since a strict runner says nothing while a package's go test runs (Loom, Oct 10 01:57Z).
 const strictSilence = 1800 * time.Second
+
+// readWarmAttempts reads the warm-attempts file: each line's first two fields, a run and a unit key, name one attempt
+// that ran on a warm shared cache; blank lines and lines starting with # are skipped.
+func readWarmAttempts(path string) (map[string]bool, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	listed := map[string]bool{}
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "#") {
+			continue
+		}
+		if len(fields) < 2 {
+			return nil, fmt.Errorf("%s: %q names a run but no unit key", path, line)
+		}
+		listed[fields[0]+" "+fields[1]] = true
+	}
+	return listed, nil
+}
 
 // readPools reads the pool table at path (workshop's ~/.loom/pools.json).
 func readPools(path string) ([]judge.PoolEntry, error) {
