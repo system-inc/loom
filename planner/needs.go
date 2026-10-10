@@ -30,8 +30,8 @@ type NeedTier struct {
 type UnitNeed struct {
 	Package         string `json:"package"` // directory, repo-relative
 	Run             string `json:"run,omitempty"`
-	MemoryMegabytes int    `json:"memoryMegabytes,omitempty"`
-	Cpus            int    `json:"cpus,omitempty"`
+	MemoryMegabytes int    `json:"memoryMegabytes"`
+	Cpus            int    `json:"cpus"`
 	Record          string `json:"record"`
 }
 
@@ -55,8 +55,9 @@ func LoadUnitNeeds(gateTools string) (UnitNeeds, error) {
 		}
 	}
 	for _, need := range needs.Units {
-		if need.Package == "" || need.Record == "" || need.MemoryMegabytes < 0 || need.Cpus < 0 || need.MemoryMegabytes+need.Cpus == 0 {
-			return UnitNeeds{}, fmt.Errorf("unit-needs.json: unit %+v needs a package, a positive need and the record that measured it", need)
+		// Queue takes a unit's resources only as both keys, each a positive whole number (18e6bb6).
+		if need.Package == "" || need.Record == "" || need.MemoryMegabytes <= 0 || need.Cpus <= 0 {
+			return UnitNeeds{}, fmt.Errorf("unit-needs.json: unit %+v needs a package, positive memoryMegabytes and cpus, and the record that measured them", need)
 		}
 	}
 	if len(needs.Units) > 0 && len(needs.Tiers) == 0 {

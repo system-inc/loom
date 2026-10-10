@@ -1,6 +1,7 @@
 package planner
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -41,5 +42,13 @@ func TestADeclaredNeedIsStampedNeverKeyedAndRefusedWhenNoTierMeetsIt(t *testing.
 	}
 	if _, err := plan(`{"version": 1, ` + tiers + `, "units": [{"package": "a", "memoryMegabytes": 20480}]}`); err == nil {
 		t.Error("a need without the record that measured it was planned")
+	}
+	// Queue refuses a unit's resources without both keys, so a need without cpus would refuse the whole plan there.
+	if _, err := plan(`{"version": 1, ` + tiers + `, "units": [{"package": "a", "memoryMegabytes": 20480, "record": "gate-logs/x/fast"}]}`); err == nil {
+		t.Error("a need without cpus was planned")
+	}
+	encoded, _ := json.Marshal(a.Resources)
+	if string(encoded) != `{"cpus":4,"memoryMegabytes":20480}` {
+		t.Errorf("a's resources encode as %s, not Queue's two keys", encoded)
 	}
 }
