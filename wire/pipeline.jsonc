@@ -18,12 +18,15 @@
         "bindings": [
             { "name": "ChangeBoard", "class_name": "ChangeBoard" },
             // The queue: one object, idFromName('main'), the single writer of main's future and the only writer of main.
-            { "name": "Queue", "class_name": "Queue" }
+            { "name": "Queue", "class_name": "Queue" },
+            // The page's headline (#lmboard): one object, idFromName('headline'), following the Queue's log.
+            { "name": "Headline", "class_name": "Headline" }
         ]
     },
     "migrations": [
         { "tag": "changeboard-v1", "new_sqlite_classes": ["ChangeBoard"] },
-        { "tag": "queue-v1", "new_sqlite_classes": ["Queue"] }
+        { "tag": "queue-v1", "new_sqlite_classes": ["Queue"] },
+        { "tag": "headline-v1", "new_sqlite_classes": ["Headline"] }
     ]
     // GITHUB_TOKEN reads git facts at submit; GITHUB_LANDER_TOKEN moves main, minted by Kirk at cutover.
 }
