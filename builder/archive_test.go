@@ -104,7 +104,7 @@ func TestAProductArchiveIsTheSameBytesFromTheSameFiles(t *testing.T) {
 	}
 	// And it unpacks to the same files, executable where they were.
 	unpacked := t.TempDir()
-	if err = Unpack(one, unpacked, buildcachePath); err != nil {
+	if err = Unpack(bytes.NewReader(one), unpacked, buildcachePath); err != nil {
 		t.Fatal(err)
 	}
 	if content, _ := os.ReadFile(filepath.Join(unpacked, keyOf("a"), "data", "case.json")); string(content) != "{}\n" {
@@ -161,7 +161,7 @@ func TestUnpackRefusesAnEntryThatWouldLandOutsideItsDirectory(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			parent := t.TempDir()
 			directory := filepath.Join(parent, "one", "two", "unpacked")
-			if err := Unpack(tarGzip(t, entries...), directory, nil); err == nil {
+			if err := Unpack(bytes.NewReader(tarGzip(t, entries...)), directory, nil); err == nil {
 				t.Fatalf("%+v unpacked", entries)
 			}
 			filepath.WalkDir(parent, func(path string, found os.DirEntry, err error) error {
@@ -181,17 +181,17 @@ func TestUnpackRefusesAnEntryThatWouldLandOutsideItsDirectory(t *testing.T) {
 		entry{name: "evidence/followup/before.jsonl.gz", link: "../cumulative/after.jsonl.gz"},
 	)
 	directory := t.TempDir()
-	if err := Unpack(honest, directory, nil); err != nil {
+	if err := Unpack(bytes.NewReader(honest), directory, nil); err != nil {
 		t.Fatal(err)
 	}
 	if content, err := os.ReadFile(filepath.Join(directory, "evidence", "followup", "before.jsonl.gz")); err != nil || string(content) != "z" {
 		t.Fatalf("an honest link: %q %v", content, err)
 	}
 	// What allowed refuses is refused.
-	if err := Unpack(honest, t.TempDir(), buildcachePath); err == nil {
+	if err := Unpack(bytes.NewReader(honest), t.TempDir(), buildcachePath); err == nil {
 		t.Fatal("a tree's files unpacked as a product")
 	}
-	if err := Unpack([]byte("not gzip"), t.TempDir(), nil); err == nil {
+	if err := Unpack(bytes.NewReader([]byte("not gzip")), t.TempDir(), nil); err == nil {
 		t.Fatal("bytes that aren't gzip unpacked")
 	}
 }
@@ -221,7 +221,7 @@ func TestTheSourceArchiveKeepsLinksAndRefusesOneThatLeaves(t *testing.T) {
 		t.Fatal("two archives of one tree differ")
 	}
 	directory := t.TempDir()
-	if err = Unpack(archive, directory, nil); err != nil {
+	if err = Unpack(bytes.NewReader(archive), directory, nil); err != nil {
 		t.Fatal(err)
 	}
 	if target, err := os.Readlink(filepath.Join(directory, "a", "link")); err != nil || target != "B.txt" {
@@ -265,7 +265,7 @@ func TestUnpackLooksUpParentsOnDiskWhereTheFilesystemFoldsNames(t *testing.T) {
 				t.Skipf("this filesystem keeps %q and %q apart", folded.written, folded.spelling)
 			}
 			archive := tarGzip(t, entry{name: "sub/kept", body: "x"}, entry{name: folded.written, link: "sub"}, entry{name: folded.spelling + "/through", body: "x"})
-			if err := Unpack(archive, directory, nil); err == nil || !strings.Contains(err.Error(), "under the link") {
+			if err := Unpack(bytes.NewReader(archive), directory, nil); err == nil || !strings.Contains(err.Error(), "under the link") {
 				t.Fatalf("an entry under %q spelled %q: %v", folded.written, folded.spelling, err)
 			}
 			if _, err := os.Lstat(filepath.Join(directory, "sub", "through")); err == nil {

@@ -19,7 +19,7 @@ type storeFlags struct {
 
 func addStoreFlags(flags *flag.FlagSet) storeFlags {
 	return storeFlags{
-		read:        flags.String("read", "https://artifacts.loom.system.inc", "the public store, read direct"),
+		read:        flags.String("read", builder.PublicRead, "the public store, read direct"),
 		credentials: flags.String("r2", r2.DefaultCredentialsPath(), "the R2 key pair that writes the store: account_id, access_key_id, secret_access_key"),
 		bucket:      flags.String("bucket", "loom-artifacts", "the store's R2 bucket"),
 	}

@@ -736,15 +736,21 @@ func (store Store) keep(key string, held TreeIndex, content []byte, object r2.Ob
 	return true, nil
 }
 
-// Tree reads trees/<treeKey>.json from the public domain, refusing an index that names anything but a sha256 for a
-// blob or a buildcache key for a product, or a package that reads a product the index doesn't name.
+// Tree reads trees/<treeKey>.json from the public domain, as ParseTree reads it.
 func (store Store) Tree(treeKey string) (TreeIndex, error) {
 	content, err := store.get("trees/" + treeKey + ".json")
 	if err != nil {
 		return TreeIndex{}, err
 	}
+	return ParseTree(treeKey, content)
+}
+
+// ParseTree reads the index trees/<treeKey>.json holds, refusing one that names anything but a sha256 for a blob or a
+// buildcache key for a product, a package that reads a product the index doesn't name, or a built package whose
+// directory isn't a local path, where its tests would run outside the tree's source.
+func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 	var index TreeIndex
-	if err = json.Unmarshal(content, &index); err != nil {
+	if err := json.Unmarshal(content, &index); err != nil {
 		return TreeIndex{}, fmt.Errorf("tree %s: %w", treeKey, err)
 	}
 	poisoned := func(format string, arguments ...any) (TreeIndex, error) {
@@ -764,6 +770,9 @@ func (store Store) Tree(treeKey string) (TreeIndex, error) {
 		}
 		if !productKeyPattern.MatchString(built.Binary) {
 			return poisoned("package %s's binary is %q", name, built.Binary)
+		}
+		if built.Directory != "" && !filepath.IsLocal(filepath.FromSlash(built.Directory)) {
+			return poisoned("package %s's directory is %q", name, built.Directory)
 		}
 		for _, product := range built.Products {
 			if _, named := index.Products[product]; !named {
@@ -819,17 +828,14 @@ func (store Store) FetchPackage(treeKey, importPath, directory string) (TreePack
 	if blob, err = store.blob(index.Source); err != nil {
 		return TreePackage{}, fmt.Errorf("the source archive: %w", err)
 	}
-	if err = Unpack(blob, filepath.Join(scratch, "source"), nil); err != nil {
+	if err = Unpack(bytes.NewReader(blob), filepath.Join(scratch, "source"), nil); err != nil {
 		return TreePackage{}, fmt.Errorf("the source archive: %w: the store is poisoned", err)
 	}
 	for _, product := range built.Products {
 		if blob, err = store.blob(index.Products[product]); err != nil {
 			return TreePackage{}, fmt.Errorf("product %s: %w", product, err)
 		}
-		own := func(name string) bool {
-			return name == product+".inputs" || (strings.HasPrefix(name, product+"/") && len(name) > len(product)+1)
-		}
-		if err = Unpack(blob, filepath.Join(scratch, "cache"), own); err != nil {
+		if err = Unpack(bytes.NewReader(blob), filepath.Join(scratch, "cache"), ProductEntries(product)); err != nil {
 			return TreePackage{}, fmt.Errorf("product %s: %w: the store is poisoned", product, err)
 		}
 	}

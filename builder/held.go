@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -179,10 +180,7 @@ func (held *HeldProducts) prepare(key string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	own := func(name string) bool {
-		return name == key+".inputs" || (strings.HasPrefix(name, key+"/") && len(name) > len(key)+1)
-	}
-	if err = Unpack(archive, directory, own); err != nil {
+	if err = Unpack(bytes.NewReader(archive), directory, ProductEntries(key)); err != nil {
 		return "", fmt.Errorf("%w: the store is poisoned", err)
 	}
 	if err = held.store.refreshRef(key, ref); err != nil {

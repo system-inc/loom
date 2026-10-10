@@ -215,9 +215,10 @@ var errOutside = errors.New("outside its directory")
 // Unpack gunzips and untars archive into directory, which it creates, writing through an os.Root on it. It refuses
 // (with nothing promised about what it already wrote, so a caller unpacks into scratch) an entry whose name isn't
 // a clean local path, one whose parents on disk pass through a link, one named twice, a link checkLink refuses, any
-// entry but a file or a link, and one allowed rejects (nil allows every name).
-func Unpack(archive []byte, directory string, allowed func(name string) bool) error {
-	reader, err := gzip.NewReader(bytes.NewReader(archive))
+// entry but a file or a link, and one allowed rejects (nil allows every name). It reads archive as a stream, so a
+// tree's source (450 MB gzipped, Oct 10) needn't be held in memory.
+func Unpack(archive io.Reader, directory string, allowed func(name string) bool) error {
+	reader, err := gzip.NewReader(archive)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package builder
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -36,6 +37,9 @@ import (
 // FreshFor is how recently a blob or ref must have been uploaded for a builder to rely on it without writing it
 // again, leaving two of the lifecycle's 7 days for the runners that read it.
 const FreshFor = 5 * 24 * time.Hour
+
+// PublicRead is the action store's public domain, which anyone reads with no credentials.
+const PublicRead = "https://artifacts.loom.system.inc"
 
 // ImmutableBlob is a blob's Cache-Control: named by its hash, its bytes never change, so the edge may keep it.
 const ImmutableBlob = "public, max-age=31536000, immutable"
@@ -420,7 +424,7 @@ func (store Store) FetchProduct(key, directory string) error {
 		return err
 	}
 	defer os.RemoveAll(scratch)
-	if err = Unpack(archive, scratch, buildcachePath); err != nil {
+	if err = Unpack(bytes.NewReader(archive), scratch, buildcachePath); err != nil {
 		return fmt.Errorf("action %s: %w: the store is poisoned", key, err)
 	}
 	return store.place(scratch, directory)

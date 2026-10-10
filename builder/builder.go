@@ -64,6 +64,14 @@ func buildcachePath(path string) bool {
 	return strings.HasSuffix(first, ".inputs") && productKeyPattern.MatchString(strings.TrimSuffix(first, ".inputs"))
 }
 
+// ProductEntries is what one product's archive may hold, for Unpack: that product's files, <key>/<file>, and its
+// description, <key>.inputs, and nothing of any other product's.
+func ProductEntries(key string) func(name string) bool {
+	return func(name string) bool {
+		return name == key+".inputs" || (strings.HasPrefix(name, key+"/") && len(name) > len(key)+1)
+	}
+}
+
 // Outputs lists every file under directory (a fresh ADAMIC_BUILD_CACHE_DIR after one product test) as the action's
 // outputs, skipping buildcache's own bookkeeping: lock files and unfinished .building- directories.
 func Outputs(directory string) ([]Output, map[string]string, error) {
