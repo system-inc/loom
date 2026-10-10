@@ -140,11 +140,22 @@ func (build TreeBuild) compile() int {
 	return max(1, runtime.NumCPU()-4)
 }
 
-// perJob is each later go process's share of compile, so Jobs of them compile about compile at once, and never fewer
-// than 8 (or compile, when that is less): a product test's own go build at -p 1 compiled typescript-go's chain alone
-// for 6 minutes (Workshop, Oct 10), the build's straggler, while the gauge already keeps the machine near its target.
+// share is each later go process's share of compile: compile/Jobs, and never under 2 (or compile, when that is
+// less), so no product build compiles alone at -p 1.
+func (build TreeBuild) share() int {
+	return max(min(2, build.compile()), build.compile()/max(1, build.Jobs))
+}
+
+// perJob is share as go's -p takes it.
 func (build TreeBuild) perJob() string {
-	return strconv.Itoa(max(min(8, build.compile()), build.compile()/max(1, build.Jobs)))
+	return strconv.Itoa(build.share())
+}
+
+// jobs is how many later go processes run at once: Jobs, but never so many that their shares add up to more than
+// compile (--jobs 32 at the floor of 2 would otherwise compile 64 at once on a limit of 60). Warm's build of every
+// main package, not a larger share, is what keeps a product build from compiling a chain alone.
+func (build TreeBuild) jobs() int {
+	return min(max(1, build.Jobs), max(1, build.compile()/build.share()))
 }
 
 // ProductBuildFlags are the flags adamic's buildcache.GoBuild gives every Go product build (its reproducible(), in
@@ -272,7 +283,7 @@ func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 	refuse := func(index int, err error) {
 		results[index] = TreePackage{Package: packages[index].Package, Directory: packages[index].Directory, Products: []string{}, Error: "not started: " + err.Error()}
 	}
-	admitted(len(packages), build.Jobs, build.gauge(), build.busy(), build.disk(), func(index int) {
+	admitted(len(packages), build.jobs(), build.gauge(), build.busy(), build.disk(), func(index int) {
 		test := packages[index]
 		started := time.Now()
 		result := TreePackage{Package: test.Package, Directory: test.Directory, Products: []string{}}
@@ -308,7 +319,7 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 		defer mutex.Unlock()
 		failed[tests[index].Package] += fmt.Sprintf("%s: not started: %v\n", tests[index].Test, err)
 	}
-	admitted(len(tests), build.Jobs, build.gauge(), build.busy(), build.disk(), func(index int) {
+	admitted(len(tests), build.jobs(), build.gauge(), build.busy(), build.disk(), func(index int) {
 		test := tests[index]
 		log := filepath.Join(logs, fmt.Sprintf("product-%d.log", index))
 		command := exec.Command("go", "test", "-count=1", "-p", build.perJob(), "-run", "^"+test.Test+"$", "./"+filepath.ToSlash(filepath.Clean(test.Directory)))

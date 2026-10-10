@@ -265,14 +265,24 @@ func TestWarmCompilesEveryPackageOnceAndNamesOneThatDoesNotCompile(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "undefinedThing") {
 		t.Fatalf("a package that doesn't compile: %v", err)
 	}
-	// A job's share never drops under 8, or the whole limit when that is less: a product test's own go build at -p 1
-	// was the build's 6-minute straggler.
+	// A job's share never drops under 2 (or the whole limit, when that is less), and the jobs running at once never
+	// add up to more than the limit: --jobs 32 at the floor would otherwise compile 64 at once on 60 threads.
 	for _, share := range []struct {
-		build TreeBuild
-		want  string
-	}{{build, "1"}, {TreeBuild{Compile: 60, Jobs: 8}, "8"}, {TreeBuild{Compile: 4, Jobs: 8}, "4"}, {TreeBuild{Compile: 60, Jobs: 64}, "8"}, {TreeBuild{Compile: 60, Jobs: 2}, "30"}} {
-		if got := share.build.perJob(); got != share.want {
-			t.Errorf("compile %d, jobs %d: a share of %s, not %s", share.build.Compile, share.build.Jobs, got, share.want)
+		build      TreeBuild
+		share      string
+		concurrent int
+	}{{build, "1", 1}, {TreeBuild{Compile: 60, Jobs: 8}, "7", 8}, {TreeBuild{Compile: 4, Jobs: 8}, "2", 2}, {TreeBuild{Compile: 60, Jobs: 32}, "2", 30},
+		{TreeBuild{Compile: 60, Jobs: 64}, "2", 30}, {TreeBuild{Compile: 60, Jobs: 2}, "30", 2}, {TreeBuild{Compile: 3, Jobs: 8}, "2", 1}} {
+		if got := share.build.perJob(); got != share.share || share.build.jobs() != share.concurrent {
+			t.Errorf("compile %d, jobs %d: a share of %s, %d at once; want %s, %d", share.build.Compile, share.build.Jobs, got, share.build.jobs(), share.share, share.concurrent)
+		}
+	}
+	for compile := 1; compile <= 128; compile++ {
+		for jobs := 1; jobs <= 128; jobs++ {
+			build := TreeBuild{Compile: compile, Jobs: jobs}
+			if build.share() < min(2, compile) || build.jobs()*build.share() > compile {
+				t.Fatalf("compile %d, jobs %d: %d jobs of %d compile %d at once", compile, jobs, build.jobs(), build.share(), build.jobs()*build.share())
+			}
 		}
 	}
 }
@@ -339,9 +349,9 @@ func TestProcGaugeReadsTheMachine(t *testing.T) {
 func TestATestsOwnGoBuildsGetTheirShareOfTheCompileLimit(t *testing.T) {
 	environment := TreeBuild{Compile: 60, Jobs: 8}.shared()
 	if !slices.ContainsFunc(environment, func(entry string) bool {
-		return strings.HasPrefix(entry, "GOFLAGS=") && strings.HasSuffix(entry, "-p=8")
+		return strings.HasPrefix(entry, "GOFLAGS=") && strings.HasSuffix(entry, "-p=7")
 	}) {
-		t.Fatal("no GOFLAGS -p=8 in a later phase's environment")
+		t.Fatal("no GOFLAGS -p=7 in a later phase's environment")
 	}
 }
 
