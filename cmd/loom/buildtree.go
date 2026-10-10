@@ -63,7 +63,11 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if trimmed > 0 {
 		fmt.Fprintf(stderr, "build-tree: trimmed %.1f GB from Go's build cache, least recently used first\n", float64(trimmed)/float64(builder.GB))
 	}
-	watched := map[string]string{"the cache base": *cache, "Go's build cache": strings.TrimSpace(string(goCache)), "the temporary directory": os.TempDir()}
+	watched := map[string]string{"the cache base": *cache, "the temporary directory": os.TempDir()}
+	// GOCACHE=off has no cache to trim or watch, and stops nothing.
+	if strings.TrimSpace(string(goCache)) != "off" {
+		watched["Go's build cache"] = strings.TrimSpace(string(goCache))
+	}
 	if err = builder.CheckFloor(watched, *floorGB*builder.GB, nil); err != nil {
 		return fail(fmt.Errorf("not starting: %w", err))
 	}

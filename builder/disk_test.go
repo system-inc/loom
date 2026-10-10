@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -126,9 +127,10 @@ func TestATreesDirectoryIsRemovedOnceItsIndexIsUp(t *testing.T) {
 	}
 }
 
-// Go's build cache over its cap loses its least recently used entries until it is at three quarters of the cap,
-// and nothing but cache entries.
-func TestGoCacheTrimsTheLeastRecentlyUsedFirst(t *testing.T) {
+// goCache writes a cache of ten 100-byte entries used an hour apart from Oct 1, and one used just now, with go's own
+// README and trim.txt beside them, and returns it and the old entries, oldest first.
+func goCache(t *testing.T) (string, []string, string) {
+	t.Helper()
 	cache := t.TempDir()
 	os.MkdirAll(filepath.Join(cache, "ab"), 0o755)
 	os.WriteFile(filepath.Join(cache, "README"), make([]byte, 5000), 0o644)
@@ -142,22 +144,63 @@ func TestGoCacheTrimsTheLeastRecentlyUsedFirst(t *testing.T) {
 		os.Chtimes(name, used, used)
 		entries = append(entries, name)
 	}
-	if removed, err := TrimGoCache(cache, 1000); err != nil || removed != 0 {
+	recent := filepath.Join(cache, "ab", fmt.Sprintf("%064x-d", 99))
+	os.WriteFile(recent, make([]byte, 100), 0o644)
+	return cache, entries, recent
+}
+
+// Go's build cache over its cap loses its least recently used entries until it is at three quarters of the cap,
+// and nothing but cache entries, and nothing used in the last day, which a running go may be about to read.
+func TestGoCacheTrimsTheLeastRecentlyUsedFirst(t *testing.T) {
+	cache, entries, recent := goCache(t)
+	if removed, err := TrimGoCache(cache, 1100); err != nil || removed != 0 {
 		t.Fatalf("a cache at its cap: %d %v", removed, err)
 	}
 	removed, err := TrimGoCache(cache, 500)
-	if err != nil || removed != 700 {
-		t.Fatalf("a cache of 1000 over a cap of 500: removed %d, %v", removed, err)
+	if err != nil || removed != 800 {
+		t.Fatalf("a cache of 1100 over a cap of 500: removed %d, %v", removed, err)
 	}
 	for index, entry := range entries {
-		if _, err := os.Stat(entry); (err == nil) != (index >= 7) {
+		if _, err := os.Stat(entry); (err == nil) != (index >= 8) {
 			t.Errorf("entry %d (used hour %d) kept %v", index, index, err == nil)
 		}
 	}
-	for _, own := range []string{"README", "trim.txt"} {
-		if _, err := os.Stat(filepath.Join(cache, own)); err != nil {
-			t.Errorf("go's own %s was removed", own)
+	for _, kept := range []string{"README", "trim.txt", recent} {
+		if _, err := os.Stat(filepath.Join(cache, strings.TrimPrefix(kept, cache))); err != nil {
+			t.Errorf("%s was removed", kept)
 		}
+	}
+	// Over its cap with only recent entries left above the target, it stops at them.
+	if removed, err = TrimGoCache(cache, 100); err != nil || removed != 200 {
+		t.Fatalf("a cap under what was used today: removed %d, %v", removed, err)
+	}
+	if _, err = os.Stat(recent); err != nil {
+		t.Fatal("an entry used just now was removed")
+	}
+}
+
+// GOCACHE is often a link, and the trim follows it; GOCACHE=off has nothing to trim; and a trim that finds another
+// one's lock leaves the cache alone.
+func TestGoCacheTrimFollowsALinkAndNeverRunsTwice(t *testing.T) {
+	cache, entries, _ := goCache(t)
+	link := filepath.Join(t.TempDir(), "go-build")
+	os.Symlink(cache, link)
+	lock, _ := os.OpenFile(filepath.Join(cache, "loom-trim.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := TrimGoCache(link, 500); err != nil || removed != 0 {
+		t.Fatalf("a trim while another holds the lock: removed %d, %v", removed, err)
+	}
+	lock.Close()
+	if removed, err := TrimGoCache(link, 500); err != nil || removed != 800 {
+		t.Fatalf("a trim through a link: removed %d, %v", removed, err)
+	}
+	if _, err := os.Stat(entries[0]); !os.IsNotExist(err) {
+		t.Fatal("the oldest entry behind the link is still there")
+	}
+	if removed, err := TrimGoCache("off", 1); err != nil || removed != 0 {
+		t.Fatalf("GOCACHE=off: %d %v", removed, err)
 	}
 }
 

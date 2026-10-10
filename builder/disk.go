@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Workshop is the house's only builder, so it keeps its disk (Kirk, #ckv0pmg): at least 200 GB free on every
@@ -142,19 +143,45 @@ func TreeDone(base, directory string, published bool) error {
 // goCacheEntry is a file of Go's build cache: an action or an output, <two hex>/<64 hex>-a or -d.
 var goCacheEntry = regexp.MustCompile(`^[0-9a-f]{64}-[ad]$`)
 
+// recentlyUsed is how recently an entry of Go's build cache must have been used to be left alone by a trim: go
+// marks an entry used by touching it at most hourly, so one used in the last day may be what a running go process is
+// about to read.
+const recentlyUsed = 24 * time.Hour
+
 // TrimGoCache keeps Go's build cache under limit bytes: when its entries add up to more, the least recently used go
 // first, oldest modification time first (go marks an entry used by touching it), until they are at three quarters
 // of limit, so a trim isn't due again on the next build. Only cache entries are removed, never Go's own bookkeeping,
-// and go treats an entry whose action or output is gone as a miss. It returns the bytes removed.
+// and never one used in the last day, and go treats an entry whose action or output is gone as a miss. directory may
+// be a link (GOCACHE often is), and "off" (GOCACHE=off) has nothing to trim. Two trims never run at once: each holds
+// an exclusive lock on loom-trim.lock in the cache, and a trim that finds it held leaves the cache to the other. It
+// returns the bytes removed.
 func TrimGoCache(directory string, limit uint64) (uint64, error) {
+	if directory == "off" || directory == "" {
+		return 0, nil
+	}
+	directory, err := filepath.EvalSymlinks(directory)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	lock, err := os.OpenFile(filepath.Join(directory, "loom-trim.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer lock.Close()
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return 0, nil
+	}
 	type entry struct {
 		path     string
 		size     uint64
-		modified int64
+		modified time.Time
 	}
 	entries := []entry{}
 	total := uint64(0)
-	err := filepath.WalkDir(directory, func(path string, found fs.DirEntry, err error) error {
+	err = filepath.WalkDir(directory, func(path string, found fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -165,17 +192,17 @@ func TrimGoCache(directory string, limit uint64) (uint64, error) {
 		if err != nil {
 			return err
 		}
-		entries = append(entries, entry{path, uint64(info.Size()), info.ModTime().UnixNano()})
+		entries = append(entries, entry{path, uint64(info.Size()), info.ModTime()})
 		total += uint64(info.Size())
 		return nil
 	})
 	if err != nil || total <= limit {
 		return 0, err
 	}
-	sort.Slice(entries, func(left, right int) bool { return entries[left].modified < entries[right].modified })
+	sort.Slice(entries, func(left, right int) bool { return entries[left].modified.Before(entries[right].modified) })
 	target, removed := limit/4*3, uint64(0)
 	for _, old := range entries {
-		if total-removed <= target {
+		if total-removed <= target || time.Since(old.modified) < recentlyUsed {
 			break
 		}
 		if err = os.Remove(old.path); err != nil && !os.IsNotExist(err) {
