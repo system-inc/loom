@@ -80,12 +80,17 @@ func (run *unitRun) checkToolchains(checkContext context.Context) bool {
 	if len(required) == 0 {
 		return true
 	}
-	checks := run.options.toolchainChecks
-	if checks == nil {
-		checks = sharedToolchainChecks
-	}
 	home, _ := os.UserHomeDir()
-	failures := checks.failures(checkContext, required, toolchains.Environment(home))
+	var failures []toolchains.Failure
+	if run.options.Probe != nil {
+		failures = run.options.Probe(checkContext, required, toolchains.Environment(home))
+	} else {
+		checks := run.options.toolchainChecks
+		if checks == nil {
+			checks = sharedToolchainChecks
+		}
+		failures = checks.failures(checkContext, required, toolchains.Environment(home))
+	}
 	if len(failures) == 0 {
 		return true
 	}

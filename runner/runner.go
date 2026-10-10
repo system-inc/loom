@@ -20,6 +20,7 @@ import (
 	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/poster"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/toolchains"
 )
 
 // Version is what started events report as runnerVersion. A release build sets it with
@@ -91,8 +92,11 @@ type Options struct {
 	LiveStatus string
 	// free reads a filesystem's free bytes; nil means builder.Free. Tests plant a full disk through it.
 	free func(path string) (uint64, error)
-	// toolchainChecks probes the toolchains a unit requires; nil means the process's own (sharedToolchainChecks).
-	// Tests plant one.
+	// Probe checks the toolchains a unit requires in an environment, as toolchains.Check does; nil means
+	// toolchains.Check, each pass trusted across the process for ToolchainsTrusted. A planted one is asked at every unit:
+	// a coordinator's tests stand a machine with the toolchains its Has claims in for one without them.
+	Probe func(checkContext context.Context, claims []string, environment string) []toolchains.Failure
+	// toolchainChecks remembers the passes; nil means the process's own (sharedToolchainChecks). Tests plant one.
 	toolchainChecks *toolchainChecks
 }
 
