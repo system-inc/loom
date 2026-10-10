@@ -45,11 +45,13 @@ var (
 
 // TracedAccesses is every path a trace shows a run reaching, absolute. Reads are what it opened for reading or
 // executed and got; Lookups every other path it named, stat'ed, probed or missed (a failed open of any kind but a
-// write); Listings every directory it listed.
+// write); Listings every directory it listed. Present is the lookups that found the path there before the run made
+// anything of it: with the reads and the listings, what the run saw exist.
 type TracedAccesses struct {
 	Reads    []string
 	Lookups  []string
 	Listings []string
+	Present  []string
 }
 
 // TracedReads is every file a trace shows read: a successful open, openat or openat2 that isn't write-only, or a
@@ -77,7 +79,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 	if err != nil {
 		return TracedAccesses{}, err
 	}
-	reads, lookups, listings := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	reads, lookups, listings, present := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	working := map[string]string{}
 	workingOf := func(pid string) string {
 		if cwd, found := working[pid]; found {
@@ -100,9 +102,12 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			}
 		}
 	}
-	lookup := func(path string) {
+	lookup := func(path string, found bool) {
 		if !madeByRun(path) {
 			lookups[path] = true
+			if found {
+				present[path] = true
+			}
 		}
 	}
 	for _, event := range events {
@@ -154,7 +159,12 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			}
 			if !change.two {
 				if !change.target {
-					lookup(first)
+					// A removal that worked found the path; a mkdir found it only when it was already there.
+					found := event.result == 0
+					if strings.HasPrefix(event.call, "mkdir") {
+						found = strings.Contains(event.line, "EEXIST")
+					}
+					lookup(first, found)
 				}
 				if event.result == 0 {
 					made[first] = true
@@ -165,7 +175,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			if err != nil {
 				return failed(err)
 			}
-			lookup(first)
+			lookup(first, event.result == 0)
 			if event.result == 0 {
 				if change.moves {
 					made[first] = true
@@ -185,7 +195,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			}
 			switch {
 			case event.call == "chdir":
-				lookup(path)
+				lookup(path, event.result == 0)
 				if event.result == 0 {
 					working[event.pid] = path
 				}
@@ -198,7 +208,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			case opened && strings.Contains(flags, "O_WRONLY"):
 				// A write is never a read; one that opened a file says it was there (or that the run made it).
 				if event.result >= 0 {
-					lookup(path)
+					lookup(path, false)
 				}
 			case (opened || executed) && event.result >= 0 && !strings.Contains(flags, "O_PATH"):
 				if !madeByRun(path) {
@@ -210,11 +220,11 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 					reads[decoded] = true
 				}
 			default:
-				lookup(path)
+				lookup(path, event.result >= 0)
 			}
 		}
 	}
-	return TracedAccesses{Reads: sortedKeys(reads), Lookups: sortedKeys(lookups), Listings: sortedKeys(listings)}, nil
+	return TracedAccesses{Reads: sortedKeys(reads), Lookups: sortedKeys(lookups), Listings: sortedKeys(listings), Present: sortedKeys(present)}, nil
 }
 
 // A pathChange is a call that changes the tree's paths: whether its paths follow directory descriptors, whether it

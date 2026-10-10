@@ -339,3 +339,61 @@ func TestAReadThroughASymlinkKeysWhereItLeads(t *testing.T) {
 		})
 	}
 }
+
+// The review's proof (finding 3): a file a submodule doesn't track, found there by the run (what an install put in
+// cohere), has no tracked state, so the set names the submodule and the key holds its commit, as it did before read
+// sets; a bump of the submodule (its lockfile, outside the set) then moves the key. A run keyed on a set that doesn't
+// hold that commit and finds such a file is beyond its key. Keeping the commit is the sounder choice than voiding every
+// such read: a void would recur on every run of a unit that reads installed files and never key it, where the commit
+// keys it exactly as soundly as the submodule's key always did. Mutants that each fail it: a found lookup not counted
+// as found; the submodule's commit left out of the key; an untracked file a set without the commit holds as absent.
+func TestAnUntrackedSubmoduleFileKeysTheSubmodulesCommit(t *testing.T) {
+	useReadSets(t)
+	fixture := newReadSetFixture(t)
+	fixture.bump(t, map[string]string{".gitignore": "node_modules/\n"})
+	writeFiles(t, filepath.Join(fixture.tree, "sub"), map[string]string{"node_modules/x/index.js": "v1\n"})
+	trace := `9 newfstatat(AT_FDCWD<` + filepath.Join(fixture.tree, "p") + `>, "../sub/node_modules/x/index.js", {st_mode=S_IFREG|0644, ...}, 0) = 0` + "\n" +
+		`9 openat(AT_FDCWD<` + filepath.Join(fixture.tree, "p") + `>, "../sub/data.txt", O_RDONLY) = 3` + "\n"
+	check := func(parts KeyParts) TraceCheck {
+		t.Helper()
+		result, err := CheckTrace(fixture.tree, fixture.gateTools, parts, strings.NewReader(trace))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	coarse, _ := fixture.key(t)
+	first := check(coarse)
+	if want := []string{"sub"}; !reflect.DeepEqual(first.Measured.Gitlinks, want) {
+		t.Fatalf("measured %+v, want the submodule named for its untracked file", first.Measured)
+	}
+	if _, err := RecordReadSet(ReadSetsDirectory, first.CodeKey, coarse, first.Measured); err != nil {
+		t.Fatal(err)
+	}
+	keyed, before := fixture.key(t)
+	if again := check(keyed); len(again.Findings) != 0 {
+		t.Fatalf("a run keyed on its submodule's commit is beyond it: %+v", again.Findings)
+	}
+	fixture.bump(t, map[string]string{"package-lock.json": "x@2\n"})
+	if _, after := fixture.key(t); after == before {
+		t.Fatal("a submodule bump that changes what it installs left the key of a unit reading an installed file")
+	}
+	// Another selection is another code key, here keyed on a set that names the path but not the commit.
+	fixture.unit.Run = "^TestP$"
+	parts, pairs, err := baseKey(fixture.tree, fixture.gateTools, fixture.unit, Tools{Go: "go1.27.0"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codeKey, err := CodeKey(parts, pairs.files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordReadSet(ReadSetsDirectory, codeKey, parts, ReadSet{Paths: []string{"sub/data.txt", "sub/node_modules/x/index.js"}}); err != nil {
+		t.Fatal(err)
+	}
+	narrow, _ := fixture.key(t)
+	beyond := check(narrow).Beyond()
+	if len(beyond) != 1 || beyond[0].Path != "sub/node_modules/x/index.js" || !strings.HasPrefix(beyond[0].State, "untracked in sub") {
+		t.Fatalf("an untracked file read on a key without its submodule's commit: beyond %+v", beyond)
+	}
+}

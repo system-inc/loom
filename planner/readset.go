@@ -27,12 +27,15 @@ import (
 // key's set breaks that (a run that isn't deterministic, or a read the trace couldn't see): that is Loom's void, named,
 // and the set grows by what the run read (CheckTrace, `loom reads-check`).
 //
-// Only tracked state is keyed: a path is its content when a submodule tracks it, "directory" when a tracked file sits
-// under it, and "absent" otherwise, and a listing is its tracked children's names. So a file a run made inside a
-// submodule keys as absent, as it is on every fresh checkout.
+// Only tracked state is keyed: a path is its content when the tree tracks it, "directory" when a tracked file sits
+// under it, and "absent" otherwise, and a listing is its tracked children's names. What a run made itself is never
+// its input (TraceAccesses). A file the run found in a submodule that the submodule doesn't track (what an install put
+// there, say) has no tracked state, so Gitlinks names that submodule and the key holds its commit, as it did before
+// read sets: the files an install puts in cohere follow from cohere's commit as far as any key could say.
 type ReadSet struct {
 	Paths    []string `json:"paths"`
 	Listings []string `json:"listings"`
+	Gitlinks []string `json:"gitlinks,omitempty"`
 }
 
 // Id is the set's name, the sha256 of its canonical JSON: a key part (KeyParts.ReadSet), so the check knows exactly
@@ -48,14 +51,15 @@ func (set ReadSet) Id() (string, error) {
 
 // Empty says whether the set names nothing.
 func (set ReadSet) Empty() bool {
-	return len(set.Paths) == 0 && len(set.Listings) == 0
+	return len(set.Paths) == 0 && len(set.Listings) == 0 && len(set.Gitlinks) == 0
 }
 
 // Union is both sets' paths and listings. A set only grows at its code key: a run whose reads depend on data it read
 // on another tree is keyed soundly by either set, and by both.
 func (set ReadSet) Union(other ReadSet) ReadSet {
 	return ReadSet{Paths: append(append([]string{}, set.Paths...), other.Paths...),
-		Listings: append(append([]string{}, set.Listings...), other.Listings...)}.normal()
+		Listings: append(append([]string{}, set.Listings...), other.Listings...),
+		Gitlinks: append(append([]string{}, set.Gitlinks...), other.Gitlinks...)}.normal()
 }
 
 // normal is the set sorted and without repeats, never nil.
@@ -72,7 +76,11 @@ func (set ReadSet) normal() ReadSet {
 		sort.Strings(out)
 		return out
 	}
-	return ReadSet{Paths: unique(set.Paths), Listings: unique(set.Listings)}
+	normal := ReadSet{Paths: unique(set.Paths), Listings: unique(set.Listings)}
+	if len(set.Gitlinks) > 0 {
+		normal.Gitlinks = unique(set.Gitlinks)
+	}
+	return normal
 }
 
 // ReadSetsDirectory is where read sets are kept, ~/.loom/read-sets unless a command names another (--read-sets):
@@ -251,6 +259,14 @@ func readSetReads(tree string, files [][2]string, set ReadSet) (string, error) {
 		}
 		pairs = append(pairs, [2]string{name + "/", state})
 	}
+	for _, gitlink := range set.Gitlinks {
+		// A submodule a run found untracked files in keys at its commit; a NUL can't start a path's name.
+		commit, found := index.gitlinks[gitlink]
+		if !found {
+			commit = "absent"
+		}
+		pairs = append(pairs, [2]string{"\x00gitlink " + gitlink, commit})
+	}
 	sort.Slice(pairs, func(left, right int) bool {
 		if pairs[left][0] != pairs[right][0] {
 			return pairs[left][0] < pairs[right][0]
@@ -366,14 +382,19 @@ func (index *submoduleIndex) add(mode, object, name string) {
 	}
 }
 
-// inSubmodule says whether a tree-relative path sits inside one of the tree's submodules.
+// inSubmodule says whether a tree-relative path is one of the tree's submodules or sits inside one.
 func (index *submoduleIndex) inSubmodule(name string) bool {
+	return index.submoduleOf(name) != ""
+}
+
+// submoduleOf is the superproject's gitlink a tree-relative path is or sits inside, or "".
+func (index *submoduleIndex) submoduleOf(name string) string {
 	for gitlink := range index.gitlinks {
-		if strings.HasPrefix(name, gitlink+"/") {
-			return true
+		if name == gitlink || strings.HasPrefix(name, gitlink+"/") {
+			return gitlink
 		}
 	}
-	return false
+	return ""
 }
 
 // maxSymlinks is how many symlinks a resolution follows before it's refused, as the kernel's ELOOP.

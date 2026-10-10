@@ -73,8 +73,15 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 	if err != nil {
 		return nil, ReadSet{}, err
 	}
-	inKey := map[string]bool{}
+	present := map[string]bool{}
+	for _, path := range accesses.Present {
+		present[path] = true
+	}
+	inKey, keyedGitlinks := map[string]bool{}, map[string]bool{}
 	if keyed != nil {
+		for _, gitlink := range keyed.Gitlinks {
+			keyedGitlinks[gitlink] = true
+		}
 		for _, name := range keyed.Paths {
 			inKey[name] = true
 		}
@@ -126,8 +133,24 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 				} else {
 					measured.Paths = append(measured.Paths, relative)
 				}
+				// A path the run found that the submodule doesn't track (and the run didn't make) has no state a key
+				// can hold but the submodule's commit.
+				untracked := ""
+				if _, isTracked := index.entries[resolved.resolved]; (group.read || group.listing || present[path]) && !resolved.outside &&
+					!isTracked && index.children[resolved.resolved] == nil {
+					untracked = index.submoduleOf(resolved.resolved)
+				}
+				if untracked != "" {
+					measured.Gitlinks = append(measured.Gitlinks, untracked)
+				}
 				if keyed != nil {
-					if err := beyond(relative, group.listing); err != nil {
+					if untracked != "" {
+						if !keyedGitlinks[untracked] && !seen["\x00"+relative] {
+							seen["\x00"+relative] = true
+							findings = append(findings, Finding{Package: unit.Package, Path: relative, BeyondKey: true, ReadSet: keyedId,
+								Listing: group.listing, State: "untracked in " + untracked + ", whose commit the key doesn't hold"})
+						}
+					} else if err := beyond(relative, group.listing); err != nil {
 						return nil, ReadSet{}, err
 					}
 					continue
