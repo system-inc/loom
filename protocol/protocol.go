@@ -256,6 +256,9 @@ func Expand(job Job) ([]PlannedUnit, error) {
 		if unit.TimeoutSeconds <= 0 {
 			return nil, fmt.Errorf("unit %s needs a positive timeoutSeconds", unit.Id)
 		}
+		if unit.Test != nil && unit.Test.Phase != "" && unit.Kind != "phase" {
+			return nil, fmt.Errorf("unit %s is a phase job, so its kind is phase, not %q", unit.Id, unit.Kind)
+		}
 		if unit.Kind != "" {
 			ceiling, known := KindCeilings[unit.Kind]
 			switch {
@@ -263,8 +266,8 @@ func Expand(job Job) ([]PlannedUnit, error) {
 				return nil, fmt.Errorf("unit %s's kind %q isn't test, product or phase", unit.Id, unit.Kind)
 			case unit.TimeoutSeconds > ceiling:
 				return nil, fmt.Errorf("unit %s is a %s with a %d s timeout, over its kind's ceiling of %d s", unit.Id, unit.Kind, unit.TimeoutSeconds, ceiling)
-			case unit.Test != nil && unit.Kind == "phase":
-				return nil, fmt.Errorf("unit %s is a test job, so it's a test or a product, not a phase", unit.Id)
+			case unit.Test != nil && unit.Kind == "phase" && unit.Test.Phase == "":
+				return nil, fmt.Errorf("unit %s is a go test job, so it's a test or a product, not a phase", unit.Id)
 			}
 		}
 		for _, toolchain := range unit.Requires {

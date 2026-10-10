@@ -94,6 +94,18 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 		"a phase over an hour": func(j *Job) {
 			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "phase", 3601
 		},
+		"a go test job of kind phase": func(j *Job) {
+			j.Units[0].Argv, j.Units[0].Kind, j.Units[0].TimeoutSeconds = nil, "phase", 60
+			j.Units[0].Test = &TestJob{Repository: AdamicRepository, Sha: strings.Repeat("a", 40), Packages: []TestPackage{{Package: AdamicModule}}}
+		},
+		"a phase job of kind test": func(j *Job) {
+			j.Units[0].Argv, j.Units[0].Kind, j.Units[0].TimeoutSeconds = nil, "test", 60
+			j.Units[0].Test = &TestJob{Repository: AdamicRepository, Sha: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), Phase: "vet", Tools: strings.Repeat("e", 40)}
+		},
+		"a phase job of no kind": func(j *Job) {
+			j.Units[0].Argv, j.Units[0].TimeoutSeconds = nil, 60
+			j.Units[0].Test = &TestJob{Repository: AdamicRepository, Sha: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), Phase: "vet", Tools: strings.Repeat("e", 40)}
+		},
 		"bad hash": func(j *Job) { j.Units[0].Inputs = []Input{{Path: "x", Sha256: "abc"}} },
 		"bad archive": func(j *Job) {
 			j.Units[0].Inputs = []Input{{Path: "x", Sha256: strings.Repeat("a", 64), Archive: "zip"}}
@@ -111,6 +123,13 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 	required.Units[0].Requires = []string{"wasiSdk", "clang"}
 	if _, err := Expand(required); err != nil {
 		t.Fatalf("a unit requiring known toolchains is refused: %v", err)
+	}
+	// A phase job (d6c44b8) is a unit of kind phase, the planner's phase units placed as they're planned.
+	phase := good()
+	phase.Units[0].Argv, phase.Units[0].Kind, phase.Units[0].TimeoutSeconds = nil, "phase", 3600
+	phase.Units[0].Test = &TestJob{Repository: AdamicRepository, Sha: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), Phase: "wasi fixture-07", Tools: strings.Repeat("e", 40)}
+	if _, err := Expand(phase); err != nil {
+		t.Fatalf("a phase job of kind phase is refused: %v", err)
 	}
 	// Each kind at its ceiling exactly is taken; one second over is refused above.
 	for kind, ceiling := range KindCeilings {
