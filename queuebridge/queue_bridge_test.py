@@ -95,6 +95,11 @@ class Tick(unittest.TestCase):
             self.assertEqual(pipeline.posts(), [("/verdicts", {"change": change, "verdict": {
                 "future": tree, "run": "gate-logs/r/fast", "status": verdict, "cause": cause, "rule": "todays-gate-v0"}})])
 
+    def test_a_parity_run_is_never_sent_through_todays_gate(self):
+        pipeline, gate = FakePipeline([dict(future, parity=True)]), FakeGate({"ref": "gate-logs/r/fast", "status": "green", "gated": tree})
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual((gate.queued, pipeline.posts()), ([], []))
+
     def test_a_void_is_served_once_more_and_only_once(self):
         pipeline, held = FakePipeline([future]), memory()
         gate = FakeGate({"ref": "gate-logs/r1/fast", "status": "void", "gated": tree})

@@ -64,6 +64,15 @@ describe('submitting a change', function () {
         expect(queue.received).toHaveLength(0);
     });
 
+    it("passes a parity run on to the queue, and nothing but true as parity", async function () {
+        const queue = new MemoryQueue();
+        expect((await submit(queue, body({ parity: true }))).status).toBe(201);
+        expect(await queue.received[0]?.text()).toContain('"parity":true');
+        expect((await submit(queue, body({ parity: 'yes' }))).status).toBe(400);
+        expect((await submit(queue, body({ parity: false }))).status).toBe(201);
+        expect(await queue.received[1]?.text()).not.toContain('parity');
+    });
+
     it('takes a change only from a submit token', async function () {
         const queue = new MemoryQueue();
         for (const scope of ['coordinator', 'board'] as const) {

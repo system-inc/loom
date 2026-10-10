@@ -25,6 +25,8 @@ export interface ChangeRequest {
     paths: string[];
     parent: string | null;
     fixesRed: string | null;
+    // Release's parity runs only (Queue, #6c3xkws): tested on exactly merge(base, sha), never landed.
+    parity?: true;
 }
 
 // The three calls Web makes, as internal requests; Queue's object and the stand-in both answer them.
@@ -56,7 +58,7 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
         return 'the change is a JSON object';
     }
     const fields = parsed as Record<string, unknown>;
-    const allowed = ['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed'];
+    const allowed = ['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity'];
     const unknown = Object.keys(fields).filter(function (key) {
         return !allowed.includes(key);
     });
@@ -96,7 +98,18 @@ export function checkChangeRequest(body: string, owner: string): ChangeRequest |
     if (fixesRed !== null && (typeof fixesRed !== 'string' || !ShaPattern.test(fixesRed))) {
         return 'fixesRed is the red main commit it fixes, 40 lowercase hex digits, or null';
     }
-    return { sha: fields.sha, base: fields.base, owner: owner, paths: fields.paths as string[], parent: parent, fixesRed: fixesRed };
+    if (fields.parity !== undefined && typeof fields.parity !== 'boolean') {
+        return 'parity is true for a parity run, or absent';
+    }
+    return {
+        sha: fields.sha,
+        base: fields.base,
+        owner: owner,
+        paths: fields.paths as string[],
+        parent: parent,
+        fixesRed: fixesRed,
+        ...(fields.parity === true ? { parity: true as const } : {}),
+    };
 }
 
 // The Queue object when it is on the wire, else null.

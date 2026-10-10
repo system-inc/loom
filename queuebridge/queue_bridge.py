@@ -167,6 +167,9 @@ def tick(pipeline, gate, memory):
         return
     for future in listed["futures"]:
         tree, change = future["tree"], future["changes"][0]
+        # A parity run is Release's proof of the new path against a box record: today's gate never decides it.
+        if future.get("parity"):
+            continue
         record = gate.record(tree)
         if record is None:
             if tree not in memory["queued"] and gate.queue(tree):

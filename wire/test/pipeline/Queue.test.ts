@@ -266,7 +266,7 @@ describe('the queue', function () {
         const queue = await freshQueue();
         const id = ((await (await submit(queue, change(1))).json()) as { change: string }).change;
         const listed = (await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: unknown[] };
-        expect(listed.futures).toEqual([{ future: sha(1), tree: sha(1), base: main, changes: [id] }]);
+        expect(listed.futures).toEqual([{ future: sha(1), tree: sha(1), base: main, changes: [id], parity: false }]);
         const units = await planOf(['a', 'b']);
         const forged = [{ ...units[0], unitKey: 'f'.repeat(64) }, units[1]];
         const refused = await postPlan(queue, sha(1), forged);
@@ -284,6 +284,7 @@ describe('the queue', function () {
                 {
                     future: sha(1),
                     base: main,
+                    parity: false,
                     attempt: 1,
                     change: { change: id, sha: sha(1), base: main, owner: 'system_adamic_compiler' },
                     units: units.map(function (unit) {
@@ -516,6 +517,35 @@ describe('a stack', function () {
         ]);
         expect(await (await queue.fetch(`https://queue/changes/${c}`)).json()).toMatchObject({ state: 'queued' });
         expect(await (await queue.fetch(`https://queue/changes/${other}`)).json()).toMatchObject({ state: 'queued' });
+    });
+});
+
+describe('a parity run', function () {
+    it("is tested on exactly merge(base, sha), its records logged whole, and never gets a landing order", async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(1, { parity: true }))).json()) as { change: string }).change;
+        expect((await submit(queue, change(2, { parity: true, parent: id }))).status).toBe(422);
+        expect((await submit(queue, change(3, { parity: 'yes' }))).status).toBe(422);
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ record: { parity: true }, future: sha(1) });
+        // Nothing moves it to a newer main: a gate merge is refused for it.
+        const moved = await queue.fetch('https://queue/verdicts', {
+            method: 'POST',
+            body: JSON.stringify({ change: id, verdict: { future: sha(60), run: 'm', status: 'passed', cause: null, rule: 'todays-gate-v0' }, gateMerge: { base: sha(61) } }),
+        });
+        expect(moved.status).toBe(409);
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: { parity: boolean }[] }).futures).toMatchObject([{ future: sha(1), parity: true }]);
+        const units = await planOf(['a']);
+        await postPlan(queue, sha(1), units);
+        expect(((await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: { parity: boolean }[] }).futures).toMatchObject([{ future: sha(1), parity: true }]);
+        const records = [{ ...record(id, units[0]?.unitKey ?? '', 'run-p', 'passed', null), tests: [{ package: 'p', test: 'TestA', outcome: 'pass' }] }];
+        expect((await postBatch(queue, sha(1), batch(id, sha(1), 'run-p', records, 'green'))).status).toBe(200);
+        // Green, and still no landing order, and the pusher's report is refused.
+        expect(await landings(queue)).toEqual([]);
+        expect((await report(queue, id, { main: sha(50), from: main, landed: sha(1) })).status).toBe(409);
+        const decided = (await logOf(queue)).find(function (event) {
+            return event.type === 'verdict.decided' && event.subject.unitKey !== undefined;
+        });
+        expect(decided?.data.verdict).toMatchObject({ tests: [{ package: 'p', test: 'TestA', outcome: 'pass' }], future: sha(1) });
     });
 });
 

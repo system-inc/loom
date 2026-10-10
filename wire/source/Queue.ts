@@ -49,6 +49,9 @@ export interface ChangeRecord {
     paths: string[];
     parent: string | null;
     fixesRed: string | null;
+    // A parity run (Release's proofs 1 and 2, #6c3xkws): its future is exactly merge(base, sha), the tree the box
+    // record tested, it never joins a block with real changes, and no landing order is ever written for it.
+    parity?: true;
     submittedAt: string;
 }
 
@@ -247,8 +250,8 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
         return 'the change is a JSON object';
     }
     for (const key of Object.keys(parsed)) {
-        if (!['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed'].includes(key)) {
-            return `unknown field ${JSON.stringify(key)}; a change is sha, base, owner, paths, and optionally parent and fixesRed`;
+        if (!['sha', 'base', 'owner', 'paths', 'parent', 'fixesRed', 'parity'].includes(key)) {
+            return `unknown field ${JSON.stringify(key)}; a change is sha, base, owner, paths, and optionally parent, fixesRed and parity`;
         }
     }
     if (typeof parsed.sha !== 'string' || !shaPattern.test(parsed.sha)) {
@@ -277,6 +280,12 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
     if (fixesRed !== null && (typeof fixesRed !== 'string' || !shaPattern.test(fixesRed))) {
         return 'fixesRed is a main sha (40 lowercase hex digits) or null';
     }
+    if (parsed.parity !== undefined && typeof parsed.parity !== 'boolean') {
+        return 'parity is true for a parity run, or absent';
+    }
+    if (parsed.parity === true && parent !== null) {
+        return 'a parity run tests one tree alone, so it has no parent';
+    }
     return {
         sha: parsed.sha,
         base: parsed.base,
@@ -284,6 +293,7 @@ export function checkChangeRequest(body: string): Omit<ChangeRecord, 'change' | 
         paths: [...(parsed.paths as string[])].sort(),
         parent: parent,
         fixesRed: fixesRed,
+        ...(parsed.parity === true ? { parity: true as const } : {}),
     };
 }
 
@@ -419,6 +429,13 @@ export function unitCounts(future: FutureEntry | undefined): { planned: number; 
         }
     }
     return counts;
+}
+
+// Whether a future is a parity run's: tested on exactly its tree, never landed.
+export function parityOf(state: QueueState, future: FutureEntry): boolean {
+    return future.changes.some(function (change) {
+        return state.changes.get(change)?.record.parity === true;
+    });
 }
 
 export function emptyState(): QueueState {
@@ -1101,7 +1118,8 @@ export class Queue extends DurableObject<Env> {
                 // while the future it replaces is still undecided (the builder's job, stubbed by today's gate).
                 const replaced = state.futures.get(entry.future ?? '');
                 const open = replaced !== undefined && replaced.units === null && (replaced.decided === null || replaced.decided.status === 'void');
-                if (checked.gateMerge === null || !open || !isLive(entry)) {
+                // A parity run is pinned to merge(base, sha), so nothing moves it to a newer main.
+                if (checked.gateMerge === null || !open || !isLive(entry) || entry.record.parity === true) {
                     return jsonResponse(409, { error: `change ${checked.change} is tested in ${String(entry.future)}, not ${checked.verdict.future}` });
                 }
                 await this.append(
@@ -1264,6 +1282,10 @@ export class Queue extends DurableObject<Env> {
             if (entry.record.parent !== null && state.changes.get(entry.record.parent)?.state !== 'landed') {
                 return [];
             }
+            // A parity run is tested, never landed: no landing order is ever written for one.
+            if (entry.record.parity === true) {
+                return [];
+            }
             const future = state.futures.get(entry.future);
             return [{ change: change, future: entry.future, base: future?.base ?? entry.record.base, owner: entry.record.owner, run: future?.decided?.run ?? '' }];
         });
@@ -1289,8 +1311,8 @@ export class Queue extends DurableObject<Env> {
             if (entry.state === 'landed') {
                 return jsonResponse(entry.landed === parsed.main ? 200 : 409, { change: change, state: 'landed', landed: entry.landed });
             }
-            if (!isLive(entry) || entry.future === null || !futureLandable(state.futures.get(entry.future))) {
-                return jsonResponse(409, { error: `change ${change} has no landing order` });
+            if (!isLive(entry) || entry.future === null || entry.record.parity === true || !futureLandable(state.futures.get(entry.future))) {
+                return jsonResponse(409, { error: `change ${change} has no landing order${entry.record.parity === true ? ': it is a parity run' : ''}` });
             }
             if (typeof parsed.refused === 'string' && parsed.refused !== '') {
                 await this.append(
@@ -1341,7 +1363,7 @@ export class Queue extends DurableObject<Env> {
                     return future.units === null && future.decided === null;
                 })
                 .map(function (future) {
-                    return { future: future.tree, tree: future.tree, base: future.base, changes: future.changes };
+                    return { future: future.tree, tree: future.tree, base: future.base, changes: future.changes, parity: parityOf(state, future) };
                 });
             return jsonResponse(200, { futures: futures });
         }
@@ -1354,6 +1376,7 @@ export class Queue extends DurableObject<Env> {
                 return {
                     future: future.tree,
                     base: future.base,
+                    parity: parityOf(state, future),
                     attempt: future.voids + 1,
                     change: { change: record?.change, sha: record?.sha, base: record?.base, owner: record?.owner },
                     units: [...(future.units?.values() ?? [])].map(function (unit) {
