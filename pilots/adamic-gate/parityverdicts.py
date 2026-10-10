@@ -7,9 +7,10 @@ each decided unit as a verdict.decided event with the record under data.verdict.
 line, the latest per unitKey when a unit was decided twice (a rerun alone replaces the first attempt's record), so
 boxparity.py reads exactly one verdict per unit.
 
-A record's tests come by reference (Loom's ruling, 01:17Z): tests is the sha256 of the canonical tests list, a blob in
-the action store, which adamic-store.kirkouimet.com/blobs/<sha256> serves with no token. This fetches each list,
-checks the bytes hash to the name the hash-chained event committed to, and puts the list back inline. A list that
+A record's tests come by reference (Loom's ruling, 01:17Z; contract 3's shape, #sf8tgvh): tests is {sha256, passed,
+failed, skipped, inline}, where sha256 names the canonical tests list, a blob in the action store, which adamic-store.kirkouimet.com/blobs/<sha256> serves with no token. This fetches each list,
+checks the bytes hash to the name the hash-chained event committed to, checks the counts and the inline failed and
+never-ended rows agree with the list, and puts the list back inline. A list that
 can't be fetched, or whose bytes hash to anything else, fails the run (exit 1): a parity side with a list nobody
 checked proves nothing. A record whose tests are already a list is taken as it is.
 
@@ -45,13 +46,25 @@ def resolved(verdict, store):
     tests = verdict.get("tests")
     if isinstance(tests, list) or tests is None:
         return verdict
-    name = tests if isinstance(tests, str) else (tests or {}).get("hash", "")
+    summary = tests if isinstance(tests, dict) else {}
+    name = tests if isinstance(tests, str) else summary.get("sha256", "")
     if not hashPattern.match(name or ""):
         raise ValueError("unit %s: tests is neither a list nor a sha256 (%r)" % (verdict.get("unitKey"), tests))
     body = fetch(store, name)
     if hashlib.sha256(body).hexdigest() != name:
         raise ValueError("unit %s: tests blob %s hashes to %s" % (verdict.get("unitKey"), name, hashlib.sha256(body).hexdigest()))
-    return dict(verdict, tests=json.loads(body))
+    rows = json.loads(body)
+    if summary:
+        # The record's counts and inline rows must agree with the list it names (contract 3, #sf8tgvh).
+        outcomes = [row.get("outcome") for row in rows]
+        for field, outcome in (("passed", "pass"), ("failed", "fail"), ("skipped", "skip")):
+            if summary.get(field) != outcomes.count(outcome):
+                raise ValueError("unit %s: tests.%s is %r, the list holds %d" % (verdict.get("unitKey"), field, summary.get(field), outcomes.count(outcome)))
+        unfinished = sorted((row["package"], row["test"], row["outcome"]) for row in rows if row.get("outcome") in ("fail", "run"))
+        inline = sorted((row.get("package"), row.get("test"), row.get("outcome")) for row in summary.get("inline") or [])
+        if inline != unfinished:
+            raise ValueError("unit %s: tests.inline doesn't match the list's failed and never-ended rows" % verdict.get("unitKey"))
+    return dict(verdict, tests=rows)
 
 
 def main():

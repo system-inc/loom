@@ -72,6 +72,17 @@ check("a blob whose bytes hash to another name fails, exit 1", code == 1 and "ha
 code, output, error = run(events(root, [{"unitKey": "k1", "status": "passed", "tests": "e" * 64}]), store)
 check("a missing blob fails, exit 1", code == 1, output + error)
 
+shaped = {"sha256": good, "passed": 2, "failed": 0, "skipped": 0, "inline": []}
+code, output, error = run(events(root, [{"unitKey": "k1", "status": "passed", "tests": shaped}]), store)
+check("contract 3's shape {sha256, counts, inline} resolves", code == 0 and json.loads(output)["tests"] == tests, output + error)
+
+code, output, error = run(events(root, [{"unitKey": "k1", "status": "passed", "tests": dict(shaped, passed=3)}]), store)
+check("counts that disagree with the list fail, exit 1", code == 1 and "tests.passed" in error, output + error)
+
+failing = blob(store, tests + [{"outcome": "fail", "package": "github.com/system-inc/adamic/internal/oracle", "test": "TestB"}])
+code, output, error = run(events(root, [{"unitKey": "k1", "status": "failed", "tests": {"sha256": failing, "passed": 2, "failed": 1, "skipped": 0, "inline": []}}]), store)
+check("inline missing a failed row fails, exit 1", code == 1 and "tests.inline" in error, output + error)
+
 code, output, error = run(events(root, []), store)
 check("a slice with no verdict fails, exit 1", code == 1 and "no verdict.decided" in error, output + error)
 
