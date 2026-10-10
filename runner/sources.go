@@ -16,8 +16,9 @@ import (
 	"github.com/system-inc/loom/protocol"
 )
 
-// A tree's source unpacks to 98,381 files, 1.06 GB (adamic, Oct 10), which took 41 s on a Mac: far over the 30 s a
-// unit has to be ready, so it isn't unpacked once a unit. A runner keeps each tree's source unpacked under its root,
+// A tree's source unpacks to 98,381 files, 1.06 GB (adamic, Oct 10), which takes 8.7 s on a Mac (41 s before Unpack
+// kept its directories open) after a 23 s fetch: too much of the 30 s a unit has to be ready to spend on every unit,
+// so it isn't unpacked once a unit. A runner keeps each tree's source unpacked under its root,
 // <root>/loom-sources/<source sha256>, for every unit of that tree, as the go test path keeps its checkout:
 //
 //   - A source is unpacked into .unpacking-<sha256>-<random>, which its unpacker holds locked, gets its completion

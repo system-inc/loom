@@ -4,10 +4,12 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -274,6 +276,104 @@ func TestUnpackLooksUpParentsOnDiskWhereTheFilesystemFoldsNames(t *testing.T) {
 				t.Fatal("an entry was written through the link")
 			}
 		})
+	}
+}
+
+// Unpack keeps the last entry's directories open, so every entry must still land in its own directory however the
+// archive leaves and comes back to one: a sibling whose name sorts between (a/b-c between a/b/x and a/b/z, as
+// writeArchive's order puts it), a deeper one, the top, a link, and an order no sort gives.
+// Mutants: a directory kept open by its depth rather than its name; the open directories never cut back.
+func TestUnpackPutsEveryEntryInItsOwnDirectoryWhereverTheLastOneWas(t *testing.T) {
+	files := []entry{
+		{name: "a/b/x", body: "1"},
+		{name: "a/b-c/y", body: "2"},
+		{name: "a/b/z", body: "3"},
+		{name: "a/bb/q", body: "4"},
+		{name: "a/c/w", body: "5"},
+		{name: "top", body: "6"},
+		{name: "a/b/deep/er/v", body: "7"},
+		{name: "a/b/u", body: "8"},
+		{name: "d/e", body: "9"},
+		{name: "a/b/deep/f", body: "10"},
+		{name: "a/b/link", link: "x"},
+	}
+	directory := t.TempDir()
+	if err := Unpack(bytes.NewReader(tarGzip(t, files...)), directory, nil); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{}
+	for _, file := range files {
+		want[file.name] = file.body
+	}
+	got := map[string]string{}
+	filepath.WalkDir(directory, func(path string, found os.DirEntry, err error) error {
+		if err != nil || found.IsDir() {
+			return err
+		}
+		name, _ := filepath.Rel(directory, path)
+		if found.Type()&os.ModeSymlink != 0 {
+			got[filepath.ToSlash(name)] = ""
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		got[filepath.ToSlash(name)] = string(content)
+		return err
+	})
+	if len(got) != len(want) {
+		t.Errorf("unpacked %d names, want %d: %v", len(got), len(want), got)
+	}
+	for name, body := range want {
+		if content, found := got[name]; !found || content != body {
+			t.Errorf("%s: %q (there: %v), want %q", name, content, found, body)
+		}
+	}
+	if content, err := os.ReadFile(filepath.Join(directory, "a", "b", "link")); err != nil || string(content) != "1" {
+		t.Errorf("a/b/link: %q %v", content, err)
+	}
+}
+
+// Unpack closes every directory it opened, whether the archive unpacks or is refused partway: a tree's source opens
+// thousands of them, and a runner unpacks one per tree.
+// Mutant: a directory left behind closed by no one.
+func TestUnpackClosesTheDirectoriesItOpened(t *testing.T) {
+	descriptors := func() int {
+		entries, err := os.ReadDir("/dev/fd")
+		if err != nil {
+			t.Skipf("no /dev/fd: %v", err)
+		}
+		return len(entries)
+	}
+	many := []entry{}
+	for index := range 300 {
+		many = append(many, entry{name: fmt.Sprintf("d%03d/e/f", index), body: "x"})
+	}
+	refused := append(append([]entry{}, many...), entry{name: "d299", body: "twice"})
+	before := descriptors()
+	if err := Unpack(bytes.NewReader(tarGzip(t, many...)), t.TempDir(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := Unpack(bytes.NewReader(tarGzip(t, refused...)), t.TempDir(), nil); err == nil {
+		t.Fatal("a file at a directory's name unpacked")
+	}
+	if after := descriptors(); after > before+20 {
+		t.Fatalf("%d descriptors open before two unpacks of 900 directories, %d after", before, after)
+	}
+}
+
+// A file's mode is its executable bit's, 0755 or 0644, whatever umask the runner runs under.
+// Mutant: the mode left as the umask narrowed it.
+func TestUnpackSetsAFilesModeWhateverTheUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	directory := t.TempDir()
+	archive := tarGzip(t, entry{name: "a/run.sh", body: "#!/bin/sh\n", mode: 0o700}, entry{name: "a/data", body: "x", mode: 0o600})
+	if err := Unpack(bytes.NewReader(archive), directory, nil); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]os.FileMode{"a/run.sh": 0o755, "a/data": 0o644} {
+		if info, err := os.Stat(filepath.Join(directory, filepath.FromSlash(name))); err != nil || info.Mode().Perm() != want {
+			t.Errorf("%s: %v %v, want %v", name, info.Mode().Perm(), err, want)
+		}
 	}
 }
 

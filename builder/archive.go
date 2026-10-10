@@ -242,31 +242,75 @@ func checkLink(name, target string) error {
 	return nil
 }
 
-// checkParents refuses an entry whose parent directories, as the filesystem resolves them (case and normalization
-// folded where it folds them), pass through a link: each one is looked up on disk through root, never by name.
-func checkParents(root *os.Root, name string) error {
-	parts := strings.Split(path.Dir(name), "/")
-	for index := range parts {
-		if parts[0] == "." {
-			return nil
-		}
-		parent := path.Join(parts[:index+1]...)
-		info, err := root.Lstat(filepath.FromSlash(parent))
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&fs.ModeSymlink != 0 {
-			return fmt.Errorf("entry %q is under the link %s: %w", name, parent, errOutside)
-		}
-	}
-	return nil
-}
-
 // errOutside is an archive entry that would land outside its directory.
 var errOutside = errors.New("outside its directory")
+
+// Unpacking a tree's source (98,381 files, Oct 10) through an os.Root walked every entry's path from the top three
+// times, to look its parents up, to make them and to open the file, and a fourth time to set its mode: 98.6% of the
+// 42 s it took on a Mac was those walks' system calls, against 8.5 s for tar -xzf. A parentChain keeps the last
+// entry's directories open instead, each one looked up on disk once, so an entry beside the last one is one openat:
+// 8.7 s for the same archive, the same 101,536 names, modes, links and bytes.
+
+// A parentChain is the directories of the last entry unpacked, open, top first: names[index] is the directory
+// roots[index+1] holds, as the archive spelled it, and roots[0] is the directory unpacked into.
+type parentChain struct {
+	names []string
+	roots []*os.Root
+}
+
+// close closes every directory the chain opened, never the top.
+func (chain *parentChain) close() {
+	chain.cut(0)
+}
+
+// cut keeps the first count directories below the top open and closes the rest.
+func (chain *parentChain) cut(count int) {
+	for _, root := range chain.roots[count+1:] {
+		root.Close()
+	}
+	chain.names, chain.roots = chain.names[:count], chain.roots[:count+1]
+}
+
+// parent opens the directory entry name goes in and returns it with name's last element. Each directory on the way
+// that isn't already open is looked up on disk in the one above it (with case and normalization folded where the
+// filesystem folds them), made when it is missing, and refused when it is a link (or, by the open, not a directory).
+// A directory once open stays one: Unpack removes nothing, and a later file or link at its name, however spelled,
+// finds it there, so the chain is never looked up again while it stays open.
+func (chain *parentChain) parent(name string) (*os.Root, string, error) {
+	directory, base := path.Split(name)
+	parts := []string{}
+	if directory != "" {
+		parts = strings.Split(strings.TrimSuffix(directory, "/"), "/")
+	}
+	kept := 0
+	for kept < len(parts) && kept < len(chain.names) && chain.names[kept] == parts[kept] {
+		kept++
+	}
+	chain.cut(kept)
+	for index := kept; index < len(parts); index++ {
+		above, part := chain.roots[index], parts[index]
+		spelled := path.Join(parts[:index+1]...)
+		info, err := above.Lstat(part)
+		if errors.Is(err, fs.ErrNotExist) {
+			if err = above.Mkdir(part, 0o755); err == nil {
+				info, err = above.Lstat(part)
+			}
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return nil, "", fmt.Errorf("entry %q is under the link %s: %w", name, spelled, errOutside)
+		}
+		// Opened through the one above, it is inside the top whatever is at its name now.
+		opened, err := above.OpenRoot(part)
+		if err != nil {
+			return nil, "", err
+		}
+		chain.names, chain.roots = append(chain.names, part), append(chain.roots, opened)
+	}
+	return chain.roots[len(parts)], base, nil
+}
 
 // Unpack gunzips and untars archive into directory, which it creates, writing through an os.Root on it. It refuses
 // (with nothing promised about what it already wrote, so a caller unpacks into scratch) an entry whose name isn't
@@ -287,6 +331,8 @@ func Unpack(archive io.Reader, directory string, allowed func(name string) bool)
 		return err
 	}
 	defer root.Close()
+	chain := &parentChain{roots: []*os.Root{root}}
+	defer chain.close()
 	entries := tar.NewReader(reader)
 	seen := map[string]bool{}
 	for {
@@ -301,9 +347,6 @@ func Unpack(archive io.Reader, directory string, allowed func(name string) bool)
 		if !filepath.IsLocal(filepath.FromSlash(name)) || path.Clean(name) != name {
 			return fmt.Errorf("entry %q: %w", name, errOutside)
 		}
-		if err = checkParents(root, name); err != nil {
-			return err
-		}
 		if seen[name] {
 			return fmt.Errorf("entry %q is in the archive twice", name)
 		}
@@ -311,41 +354,42 @@ func Unpack(archive io.Reader, directory string, allowed func(name string) bool)
 		if allowed != nil && !allowed(name) {
 			return fmt.Errorf("entry %q isn't one this archive may hold", name)
 		}
-		file := filepath.FromSlash(name)
-		if parent := filepath.Dir(file); parent != "." {
-			if err = root.MkdirAll(parent, 0o755); err != nil {
-				return err
-			}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeSymlink {
+			return fmt.Errorf("entry %q is neither a file nor a link (type %q)", name, header.Typeflag)
 		}
-		switch header.Typeflag {
-		case tar.TypeReg:
-			mode := os.FileMode(0o644)
-			if header.Mode&0o111 != 0 {
-				mode = 0o755
-			}
-			output, err := root.OpenFile(file, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
-			if err != nil {
-				return err
-			}
-			_, err = io.Copy(output, entries)
-			if closeErr := output.Close(); err == nil {
-				err = closeErr
-			}
-			if err != nil {
-				return fmt.Errorf("entry %q: %w", name, err)
-			}
-			if err = root.Chmod(file, mode); err != nil {
-				return err
-			}
-		case tar.TypeSymlink:
+		if header.Typeflag == tar.TypeSymlink {
 			if err = checkLink(name, header.Linkname); err != nil {
 				return fmt.Errorf("%w: %w", err, errOutside)
 			}
-			if err = root.Symlink(header.Linkname, file); err != nil {
+		}
+		parent, base, err := chain.parent(name)
+		if err != nil {
+			return err
+		}
+		if header.Typeflag == tar.TypeSymlink {
+			if err = parent.Symlink(header.Linkname, base); err != nil {
 				return err
 			}
-		default:
-			return fmt.Errorf("entry %q is neither a file nor a link (type %q)", name, header.Typeflag)
+			continue
+		}
+		mode := os.FileMode(0o644)
+		if header.Mode&0o111 != 0 {
+			mode = 0o755
+		}
+		output, err := parent.OpenFile(base, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(output, entries)
+		if err == nil {
+			// The file it just made, by its descriptor: the mode the umask may have narrowed.
+			err = output.Chmod(mode)
+		}
+		if closeErr := output.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return fmt.Errorf("entry %q: %w", name, err)
 		}
 	}
 }
