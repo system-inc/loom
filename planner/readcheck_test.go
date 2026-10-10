@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -170,8 +171,8 @@ func packageOf(t *testing.T, tree string) string {
 }
 
 // A read set's trace: a stat, a stat of a descriptor (AT_EMPTY_PATH), a missed path, an O_PATH probe and a failed
-// open are lookups; a listing names its decoded directory; a write names nothing. A listing whose directory wasn't
-// decoded is refused, since the set can't name it.
+// open are lookups, and so is a directory the run made (it was absent); a listing names its decoded directory; a file
+// the run created names nothing. A listing whose directory wasn't decoded is refused, since the set can't name it.
 func TestTraceAccessesReadsLookupsAndListings(t *testing.T) {
 	t.Parallel()
 	trace := strings.Join([]string{
@@ -194,7 +195,7 @@ func TestTraceAccessesReadsLookupsAndListings(t *testing.T) {
 	}
 	want := TracedAccesses{
 		Reads: []string{"/work/p/testdata/case.txt"},
-		Lookups: []string{"/work/sub/bin/tool", "/work/sub/data.txt", "/work/sub/dir", "/work/sub/gone.txt", "/work/sub/link",
+		Lookups: []string{"/work/sub/bin/tool", "/work/sub/data.txt", "/work/sub/dir", "/work/sub/gone.txt", "/work/sub/link", "/work/sub/made",
 			"/work/sub/missing.txt", "/work/sub/probe", "/work/sub/x"},
 		Listings: []string{"/work/sub/dir"},
 	}
@@ -242,6 +243,76 @@ func TestTraceAccessesFollowEachProcesssWorkingDirectory(t *testing.T) {
 	}
 	if _, err := TraceAccesses(strings.NewReader(`7 openat(5, "x", O_RDONLY) = 3`), "/work"); err == nil {
 		t.Fatal("a call by a numbered descriptor with no decoded directory was read")
+	}
+}
+
+// What the run made itself is never its input (unit-reads review, finding 5): after it creates or empties a file,
+// makes a directory, renames or links onto a path, or renames or removes one, accesses there read the run's own doing.
+// Accesses before that call still count: a miss before a create, the source a rename moved, what a removal found. An
+// append that opened a file says it was there, and a file read through a link the run made is still read. Mutants
+// that each fail it: a created file read back as an input; a directory the run made not covering what it then made
+// inside; a rename's target read as an input; what the run made counted from the trace's start rather than from the
+// call that made it; a read through a link the run made dropped.
+func TestTraceAccessesLeaveOutWhatTheRunMade(t *testing.T) {
+	t.Parallel()
+	trace := strings.Join([]string{
+		`9 newfstatat(AT_FDCWD</w>, "sub/out.txt", 0x7ffd, 0) = -1 ENOENT (No such file or directory)`,
+		`9 openat(AT_FDCWD</w>, "sub/out.txt", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644) = 3</w/sub/out.txt>`,
+		`9 openat(AT_FDCWD</w>, "sub/out.txt", O_RDONLY|O_CLOEXEC) = 3</w/sub/out.txt>`,
+		`9 mkdir("sub/cache", 0755) = 0`,
+		`9 openat(AT_FDCWD</w>, "sub/cache/entry", O_WRONLY|O_CREAT|O_APPEND, 0600) = 4</w/sub/cache/entry>`,
+		`9 openat(AT_FDCWD</w>, "sub/lock", O_RDWR|O_CREAT|O_EXCL, 0600) = 4</w/sub/lock>`,
+		`9 newfstatat(AT_FDCWD</w>, "sub/lock", {st_mode=S_IFREG|0600, ...}, 0) = 0`,
+		`9 openat(AT_FDCWD</w>, "sub/cache/entry", O_RDONLY) = 3</w/sub/cache/entry>`,
+		`9 getdents64(5</w/sub/cache>, 0x55 /* 3 entries */, 32768) = 72`,
+		`9 renameat2(AT_FDCWD</w>, "sub/input.txt", AT_FDCWD</w>, "sub/moved.txt", RENAME_NOREPLACE) = 0`,
+		`9 openat(AT_FDCWD</w>, "sub/moved.txt", O_RDONLY) = 3</w/sub/moved.txt>`,
+		`9 newfstatat(AT_FDCWD</w>, "sub/input.txt", 0x7ffd, 0) = -1 ENOENT (No such file or directory)`,
+		`9 unlink("/w/sub/old.txt") = 0`,
+		`9 openat(AT_FDCWD</w>, "sub/old.txt", O_RDONLY) = -1 ENOENT (No such file or directory)`,
+		`9 symlinkat("data.txt", AT_FDCWD</w>, "sub/alias") = 0`,
+		`9 openat(AT_FDCWD</w>, "sub/alias", O_RDONLY) = 3</w/sub/data.txt>`,
+		`9 openat(AT_FDCWD</w>, "sub/log.txt", O_WRONLY|O_CREAT|O_APPEND, 0644) = 3</w/sub/log.txt>`,
+	}, "\n")
+	accesses, err := TraceAccesses(strings.NewReader(trace), "/w")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TracedAccesses{
+		Reads:    []string{"/w/sub/data.txt"},
+		Lookups:  []string{"/w/sub/cache", "/w/sub/input.txt", "/w/sub/log.txt", "/w/sub/old.txt", "/w/sub/out.txt"},
+		Listings: []string{},
+	}
+	if !reflect.DeepEqual(accesses, want) {
+		t.Fatalf("accesses\n%q\nwant\n%q", accesses, want)
+	}
+}
+
+// The review's proof (finding 5): a unit whose test writes a fresh-named file inside the submodule and reads it back
+// is clean on its second traced run, where every run was beyond its key and its set grew forever.
+func TestARunReadingWhatItWroteIsntBeyondItsKey(t *testing.T) {
+	useReadSets(t)
+	fixture := newReadSetFixture(t)
+	parts, _ := fixture.key(t)
+	for run := 0; run < 3; run++ {
+		name := "sub/tmp-" + strconv.Itoa(run)
+		trace := `9 openat(AT_FDCWD<` + fixture.tree + `>, "` + name + `", O_WRONLY|O_CREAT|O_TRUNC, 0644) = 3` + "\n" +
+			`9 openat(AT_FDCWD<` + fixture.tree + `>, "` + name + `", O_RDONLY) = 3` + "\n" +
+			`9 openat(AT_FDCWD<` + fixture.tree + `>, "sub/data.txt", O_RDONLY) = 3` + "\n"
+		check, err := CheckTrace(fixture.tree, fixture.gateTools, parts, strings.NewReader(trace))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run > 0 && len(check.Findings) > 0 {
+			t.Fatalf("run %d: findings %+v for a file the run wrote itself", run, check.Findings)
+		}
+		if want := []string{"sub/data.txt"}; !reflect.DeepEqual(check.Measured.Paths, want) {
+			t.Fatalf("run %d measured %v, want %v", run, check.Measured.Paths, want)
+		}
+		if _, err := RecordReadSet(ReadSetsDirectory, check.CodeKey, parts, check.Measured); err != nil {
+			t.Fatal(err)
+		}
+		parts, _ = fixture.key(t)
 	}
 }
 

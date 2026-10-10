@@ -17,10 +17,12 @@ import (
 //
 // so a directory descriptor prints as 5</abs/dir> and AT_FDCWD as AT_FDCWD</abs/cwd>. The forks, chdir and fchdir are
 // there so a call that names a relative path without a directory descriptor (open, stat, execve) resolves against its
-// own process's working directory. A trace of only open, openat, openat2 and execve serves the declared-reads check,
-// never a read set: it can't show a run that stat'ed, missed or listed a path.
+// own process's working directory; the calls that create, move and remove paths so what the run made itself is never
+// its input. A trace of only open, openat, openat2 and execve serves the declared-reads check, never a read set: it
+// can't show a run that stat'ed, missed or listed a path.
 const TraceCalls = "open,openat,openat2,execve,execveat,stat,lstat,newfstatat,fstatat64,statx,access,faccessat,faccessat2," +
-	"readlink,readlinkat,getdents,getdents64,chdir,fchdir,clone,clone3,fork,vfork"
+	"readlink,readlinkat,getdents,getdents64,chdir,fchdir,clone,clone3,fork,vfork," +
+	"mkdir,mkdirat,unlink,unlinkat,rmdir,rename,renameat,renameat2,link,linkat,symlink,symlinkat"
 
 // traceCall is one strace-format syscall line: an optional pid ("123 " or "[pid 123] "), the call, its arguments and
 // its result.
@@ -83,10 +85,33 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 		}
 		return directory
 	}
+	// made is every path whose state the run itself set, from the call that set it on: a file it created or truncated,
+	// a directory it made (and so everything under it), a rename's or a link's target, and what it renamed away or
+	// removed. A later access to one reads the run's own doing, never the tree, so it isn't the run's input. An access
+	// before that call still is: a miss before a create keys that the path was absent.
+	made := map[string]bool{}
+	madeByRun := func(path string) bool {
+		for candidate := path; ; candidate = filepath.Dir(candidate) {
+			if made[candidate] {
+				return true
+			}
+			if parent := filepath.Dir(candidate); parent == candidate {
+				return false
+			}
+		}
+	}
+	lookup := func(path string) {
+		if !madeByRun(path) {
+			lookups[path] = true
+		}
+	}
 	for _, event := range events {
 		if match := descriptor.FindStringSubmatch(event.arguments); match != nil && strings.HasPrefix(match[0], "AT_FDCWD<") {
 			// strace decodes AT_FDCWD as the process's working directory as it is: the truth, whatever came before.
 			working[event.pid] = filepath.Clean(match[1])
+		}
+		failed := func(err error) (TracedAccesses, error) {
+			return TracedAccesses{}, fmt.Errorf("trace line %q: %w", event.line, err)
 		}
 		switch {
 		case forkCalls[event.call]:
@@ -97,7 +122,7 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			if event.result == 0 {
 				match := descriptor.FindStringSubmatch(event.arguments + ", ")
 				if match == nil || match[1] == "" {
-					return TracedAccesses{}, fmt.Errorf("trace line %q: an fchdir whose directory wasn't decoded (--decode-fds=path)", event.line)
+					return failed(fmt.Errorf("an fchdir whose directory wasn't decoded (--decode-fds=path)"))
 				}
 				working[event.pid] = filepath.Clean(match[1])
 			}
@@ -107,37 +132,108 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 			}
 			match := descriptor.FindStringSubmatch(event.arguments + ", ")
 			if match == nil || match[1] == "" {
-				return TracedAccesses{}, fmt.Errorf("trace line %q: a listing whose directory wasn't decoded (--decode-fds=path)", event.line)
+				return failed(fmt.Errorf("a listing whose directory wasn't decoded (--decode-fds=path)"))
 			}
-			listings[filepath.Clean(match[1])] = true
-		case pathCalls[event.call] || directoryCalls[event.call]:
-			path, write, err := callPath(event.call, event.arguments, workingOf(event.pid))
+			if listed := filepath.Clean(match[1]); !madeByRun(listed) {
+				listings[listed] = true
+			}
+		case changeCalls[event.call] != nil:
+			change := changeCalls[event.call]
+			arguments := event.arguments
+			if change.target {
+				// symlink and symlinkat name the link's target first: text the link holds, never a path read.
+				_, rest, err := quoted(arguments)
+				if err != nil {
+					return failed(err)
+				}
+				arguments = nextArgument(rest)
+			}
+			first, rest, err := pathArgument(arguments, workingOf(event.pid), change.descriptors)
 			if err != nil {
-				return TracedAccesses{}, fmt.Errorf("trace line %q: %w", event.line, err)
+				return failed(err)
+			}
+			if !change.two {
+				if !change.target {
+					lookup(first)
+				}
+				if event.result == 0 {
+					made[first] = true
+				}
+				continue
+			}
+			second, _, err := pathArgument(nextArgument(rest), workingOf(event.pid), change.descriptors)
+			if err != nil {
+				return failed(err)
+			}
+			lookup(first)
+			if event.result == 0 {
+				if change.moves {
+					made[first] = true
+				}
+				made[second] = true
+			}
+		case pathCalls[event.call] || directoryCalls[event.call]:
+			path, flags, err := pathArgument(event.arguments, workingOf(event.pid), directoryCalls[event.call])
+			if err != nil {
+				return failed(err)
 			}
 			opened := event.call == "open" || event.call == "openat" || event.call == "openat2"
 			executed := event.call == "execve" || event.call == "execveat"
+			decoded := ""
+			if match := openedPath.FindStringSubmatch(event.line); match != nil {
+				decoded = filepath.Clean(match[1])
+			}
 			switch {
 			case event.call == "chdir":
-				lookups[path] = true
+				lookup(path)
 				if event.result == 0 {
 					working[event.pid] = path
 				}
-			case write:
-				// A write is never a read, and a failed one names nothing the run read either.
-			case (opened || executed) && event.result >= 0 && !strings.Contains(event.arguments, "O_PATH"):
-				reads[path] = true
+			case opened && event.result >= 0 && (strings.Contains(flags, "O_TRUNC") || strings.Contains(flags, "O_CREAT") && strings.Contains(flags, "O_EXCL")):
+				// A file the run created or emptied holds only what the run writes into it.
+				made[path] = true
+				if decoded != "" {
+					made[decoded] = true
+				}
+			case opened && strings.Contains(flags, "O_WRONLY"):
+				// A write is never a read; one that opened a file says it was there (or that the run made it).
+				if event.result >= 0 {
+					lookup(path)
+				}
+			case (opened || executed) && event.result >= 0 && !strings.Contains(flags, "O_PATH"):
+				if !madeByRun(path) {
+					reads[path] = true
+				}
 				// The descriptor's decoded path is the file the kernel opened, every symlink resolved: that read is
-				// the run's too, wherever the name it opened by led.
-				if opened := openedPath.FindStringSubmatch(event.line); opened != nil {
-					reads[filepath.Clean(opened[1])] = true
+				// the run's too, wherever the name it opened by led, a link the run made itself included.
+				if decoded != "" && !madeByRun(decoded) {
+					reads[decoded] = true
 				}
 			default:
-				lookups[path] = true
+				lookup(path)
 			}
 		}
 	}
 	return TracedAccesses{Reads: sortedKeys(reads), Lookups: sortedKeys(lookups), Listings: sortedKeys(listings)}, nil
+}
+
+// A pathChange is a call that changes the tree's paths: whether its paths follow directory descriptors, whether it
+// names two (a source and a target), whether it moves the source away, and whether it starts with a symlink's target.
+type pathChange struct {
+	descriptors, two, moves, target bool
+}
+
+// changeCalls are the calls that create, move or remove a path. Each is in TraceCalls.
+var changeCalls = map[string]*pathChange{
+	"mkdir": {}, "mkdirat": {descriptors: true}, "unlink": {}, "unlinkat": {descriptors: true}, "rmdir": {},
+	"rename": {two: true, moves: true}, "renameat": {descriptors: true, two: true, moves: true},
+	"renameat2": {descriptors: true, two: true, moves: true}, "link": {two: true}, "linkat": {descriptors: true, two: true},
+	"symlink": {target: true}, "symlinkat": {descriptors: true, target: true},
+}
+
+// nextArgument is what follows an argument's separating comma.
+func nextArgument(rest string) string {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(rest), ","))
 }
 
 // traceEvents reads a trace's finished calls in order, joining each call strace split around another process's.
@@ -205,35 +301,35 @@ var openedPath = regexp.MustCompile(`\)\s+=\s+\d+<(.+)>$`)
 // descriptor is a decoded directory argument: AT_FDCWD</dir> or 5</dir>.
 var descriptor = regexp.MustCompile(`^(?:AT_FDCWD|\d+)(?:<(.*?)>)?,\s*`)
 
-// callPath is the absolute path a call named, and whether it was an open for writing only. A relative path resolves
-// against the call's directory descriptor, decoded, or the process's working directory for AT_FDCWD and for a call
-// that takes none. An empty path after a descriptor (AT_EMPTY_PATH) is the descriptor's own.
-func callPath(call, arguments, working string) (string, bool, error) {
+// pathArgument reads a call's next path argument, absolute, and what follows it. With descriptor, a directory
+// descriptor comes first and a relative path resolves against it, decoded, or against the process's working directory
+// for AT_FDCWD; without, against the working directory. An empty path after a descriptor (AT_EMPTY_PATH) is the
+// descriptor's own.
+func pathArgument(arguments, working string, withDescriptor bool) (string, string, error) {
 	base := working
-	if directoryCalls[call] {
+	if withDescriptor {
 		match := descriptor.FindStringSubmatch(arguments)
 		if match == nil {
-			return "", false, fmt.Errorf("no directory argument")
+			return "", "", fmt.Errorf("no directory argument")
 		}
 		if match[1] != "" {
 			base = match[1]
 		} else if !strings.HasPrefix(match[0], "AT_FDCWD") {
-			return "", false, fmt.Errorf("a directory descriptor that wasn't decoded (--decode-fds=path)")
+			return "", "", fmt.Errorf("a directory descriptor that wasn't decoded (--decode-fds=path)")
 		}
 		arguments = arguments[len(match[0]):]
 	}
 	name, rest, err := quoted(arguments)
 	if err != nil {
-		return "", false, err
+		return "", "", err
 	}
-	write := (call == "open" || call == "openat" || call == "openat2") && strings.Contains(rest, "O_WRONLY")
 	if name == "" {
 		name = base
 	}
 	if !filepath.IsAbs(name) {
 		name = filepath.Join(base, name)
 	}
-	return filepath.Clean(name), write, nil
+	return filepath.Clean(name), rest, nil
 }
 
 // quoted reads strace's leading C string argument and returns it with what follows.

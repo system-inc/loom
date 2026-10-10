@@ -1,0 +1,274 @@
+804277 execve("../../prog", ["../../prog"], 0x7fffd7088da0 /* 17 vars */) = 0
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/sys/kernel/mm/transparent_hugepage/hpage_pmd_size", O_RDONLY) = 3</sys/kernel/mm/transparent_hugepage/hpage_pmd_size>
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/proc/self/cgroup", O_RDONLY|O_CLOEXEC) = 3</proc/804277/cgroup>
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/proc/self/mountinfo", O_RDONLY|O_CLOEXEC) = 3</proc/804277/mountinfo>
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/sys/fs/cgroup/user.slice/user-1000.slice/session-4233.scope/cpu.max", O_RDONLY|O_CLOEXEC) = 3</sys/fs/cgroup/user.slice/user-1000.slice/session-4233.scope/cpu.max>
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/data.txt", O_RDONLY|O_CLOEXEC) = 3</home/ahra/review-unit-reads/tree/sub/data.txt>
+804277 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=804277, si_uid=1000} ---
+804277 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=804277, si_uid=1000} ---
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/link", O_RDONLY|O_CLOEXEC) = 3</home/ahra/review-unit-reads/tree/sub/data.txt>
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/dl/a.txt", O_RDONLY|O_CLOEXEC) = 3</home/ahra/review-unit-reads/tree/sub/dir/a.txt>
+804277 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/missing.txt", 0x3475f42042a8, 0) = -1 ENOENT (No such file or directory)
+804277 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/link", {st_mode=S_IFLNK|0777, st_size=8, ...}, AT_SYMLINK_NOFOLLOW) = 0
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/dir", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 3</home/ahra/review-unit-reads/tree/sub/dir>
+804277 getdents64(3</home/ahra/review-unit-reads/tree/sub/dir>, 0x3475f4224000 /* 3 entries */, 8192) = 80
+804277 getdents64(3</home/ahra/review-unit-reads/tree/sub/dir>, 0x3475f4224000 /* 0 entries */, 8192) = 0
+804277 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/dir", {st_mode=S_IFDIR|0775, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/dir", O_RDONLY|O_CLOEXEC|O_DIRECTORY) = 3</home/ahra/review-unit-reads/tree/sub/dir>
+804277 getdents64(3</home/ahra/review-unit-reads/tree/sub/dir>, 0x3475f4224000 /* 3 entries */, 8192) = 80
+804277 getdents64(3</home/ahra/review-unit-reads/tree/sub/dir>, 0x3475f4224000 /* 0 entries */, 8192) = 0
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/out.txt", O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644) = 3</home/ahra/review-unit-reads/tree/sub/out.txt>
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "../sub/out.txt", O_RDONLY|O_CLOEXEC) = 3</home/ahra/review-unit-reads/tree/sub/out.txt>
+804277 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=804277, si_uid=1000} ---
+804277 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/dev/null", O_RDONLY|O_CLOEXEC) = 3</dev/null>
+804283 +++ exited with 0 +++
+804284 execve("/bin/bash", ["/bin/bash", "-c", "cd ../sub && cat data.txt && ./s"...], 0x3475f4234000 /* 17 vars */ <unfinished ...>
+804277 --- SIGURG {si_signo=SIGURG, si_code=SI_TKILL, si_pid=804277, si_uid=1000} ---
+804284 <... execve resumed>)            = 0
+804284 access("/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/lib/x86_64-linux-gnu/libtinfo.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libtinfo.so.6.4>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libc.so.6>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/dev/tty", O_RDWR|O_NONBLOCK) = -1 ENXIO (No such device or address)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/locale-archive", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/share/locale/locale.alias", O_RDONLY|O_CLOEXEC) = 3</etc/locale.alias>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_IDENTIFICATION>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MEASUREMENT>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TELEPHONE>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_ADDRESS>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_NAME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_NAME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NAME>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_PAPER", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_PAPER", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_PAPER>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MONETARY>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_COLLATE>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_TIME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_TIME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TIME>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NUMERIC>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.UTF-8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/usr/lib/locale/C.utf8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_CTYPE>
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads/tree/p", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, ".", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra", {st_mode=S_IFDIR|0750, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads/tree", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads/tree/p", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra", {st_mode=S_IFDIR|0750, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra", {st_mode=S_IFDIR|0750, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads/tree", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads/tree/p", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads/tree/p", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/p>, "/home/ahra/review-unit-reads/tree/sub", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, ".", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/local/sbin/cat", 0x7ffcea66f4f0, 0) = -1 ENOENT (No such file or directory)
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/local/bin/cat", 0x7ffcea66f4f0, 0) = -1 ENOENT (No such file or directory)
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/sbin/cat", 0x7ffcea66f4f0, 0) = -1 ENOENT (No such file or directory)
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/bin/cat", {st_mode=S_IFREG|0755, st_size=39384, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/bin/cat", {st_mode=S_IFREG|0755, st_size=39384, ...}, 0) = 0
+804284 access("/usr/bin/cat", X_OK)     = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/bin/cat", {st_mode=S_IFREG|0755, st_size=39384, ...}, 0) = 0
+804284 access("/usr/bin/cat", R_OK)     = 0
+804288 execve("/usr/bin/cat", ["cat", "data.txt"], 0x606a8d9102c0 /* 17 vars */) = 0
+804288 access("/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libc.so.6>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/locale-archive", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/share/locale/locale.alias", O_RDONLY|O_CLOEXEC) = 3</etc/locale.alias>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_IDENTIFICATION>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MEASUREMENT>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TELEPHONE>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_ADDRESS>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_NAME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_NAME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NAME>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_PAPER", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_PAPER", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_PAPER>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MONETARY>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_COLLATE>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_TIME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_TIME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TIME>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NUMERIC>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_CTYPE>
+804288 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "data.txt", O_RDONLY) = 3</home/ahra/review-unit-reads/tree/sub/data.txt>
+804288 +++ exited with 0 +++
+804284 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=804288, si_uid=1000, si_status=0, si_utime=0, si_stime=1 /* 0.01 s */} ---
+804289 execve("./script.sh", ["./script.sh"], 0x606a8d9102c0 /* 17 vars */) = 0
+804289 access("/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+804289 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+804289 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libc.so.6>
+804289 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/home/ahra/review-unit-reads/tree/sub", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804289 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, ".", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804289 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "./script.sh", O_RDONLY) = 3</home/ahra/review-unit-reads/tree/sub/script.sh>
+804289 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/local/sbin/cat", 0x7ffd3da61070, 0) = -1 ENOENT (No such file or directory)
+804289 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/local/bin/cat", 0x7ffd3da61070, 0) = -1 ENOENT (No such file or directory)
+804289 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/sbin/cat", 0x7ffd3da61070, 0) = -1 ENOENT (No such file or directory)
+804289 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/bin/cat", {st_mode=S_IFREG|0755, st_size=39384, ...}, 0) = 0
+804290 execve("/usr/bin/cat", ["cat", "dir/a.txt"], 0x5943abcd5578 /* 17 vars */) = 0
+804290 access("/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libc.so.6>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/locale-archive", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/share/locale/locale.alias", O_RDONLY|O_CLOEXEC) = 3</etc/locale.alias>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_IDENTIFICATION>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MEASUREMENT>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TELEPHONE>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_ADDRESS>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_NAME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_NAME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NAME>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_PAPER", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_PAPER", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_PAPER>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MONETARY>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_COLLATE>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_TIME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_TIME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TIME>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NUMERIC>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_CTYPE>
+804290 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "dir/a.txt", O_RDONLY) = 3</home/ahra/review-unit-reads/tree/sub/dir/a.txt>
+804290 +++ exited with 0 +++
+804289 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=804290, si_uid=1000, si_status=0, si_utime=0, si_stime=1 /* 0.01 s */} ---
+804289 +++ exited with 0 +++
+804284 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=804289, si_uid=1000, si_status=0, si_utime=0, si_stime=2 /* 0.02 s */} ---
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "miss", 0x7ffcea66f9a0, 0) = -1 ENOENT (No such file or directory)
+804284 faccessat2(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "script.sh", X_OK, AT_EACCESS) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, ".", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/local/sbin/ls", 0x7ffcea66fa20, 0) = -1 ENOENT (No such file or directory)
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/local/bin/ls", 0x7ffcea66fa20, 0) = -1 ENOENT (No such file or directory)
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/sbin/ls", 0x7ffcea66fa20, 0) = -1 ENOENT (No such file or directory)
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/bin/ls", {st_mode=S_IFREG|0755, st_size=142312, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/bin/ls", {st_mode=S_IFREG|0755, st_size=142312, ...}, 0) = 0
+804284 access("/usr/bin/ls", X_OK)      = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/bin/ls", {st_mode=S_IFREG|0755, st_size=142312, ...}, 0) = 0
+804284 access("/usr/bin/ls", R_OK)      = 0
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/dev/null", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3</dev/null>
+804293 execve("/usr/bin/ls", ["ls", "dir"], 0x606a8d9102c0 /* 17 vars */) = 0
+804293 access("/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/lib/x86_64-linux-gnu/libselinux.so.1", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libselinux.so.1>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libc.so.6>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/lib/x86_64-linux-gnu/libpcre2-8.so.0", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libpcre2-8.so.0.11.2>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/proc/filesystems", O_RDONLY|O_CLOEXEC) = 3</proc/filesystems>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/proc/mounts", O_RDONLY|O_CLOEXEC) = 3</proc/804293/mounts>
+804293 access("/etc/selinux/config", F_OK) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/locale-archive", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/share/locale/locale.alias", O_RDONLY|O_CLOEXEC) = 3</etc/locale.alias>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_IDENTIFICATION>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MEASUREMENT>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TELEPHONE>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_ADDRESS>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_NAME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_NAME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NAME>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_PAPER", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_PAPER", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_PAPER>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MONETARY>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_COLLATE>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_TIME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_TIME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TIME>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NUMERIC>
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.UTF-8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/usr/lib/locale/C.utf8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_CTYPE>
+804293 statx(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "dir", AT_STATX_SYNC_AS_STAT|AT_NO_AUTOMOUNT, STATX_MODE, {stx_mask=STATX_TYPE|STATX_MODE|STATX_NLINK|STATX_UID|STATX_GID|STATX_ATIME|STATX_INO|STATX_SIZE|STATX_BLOCKS|STATX_MNT_ID, stx_attributes=0, stx_mode=S_IFDIR|0775, stx_size=4096, ...}) = 0
+804293 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "dir", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = 3</home/ahra/review-unit-reads/tree/sub/dir>
+804293 getdents64(3</home/ahra/review-unit-reads/tree/sub/dir>, 0x590fdb5be910 /* 3 entries */, 32768) = 80
+804293 getdents64(3</home/ahra/review-unit-reads/tree/sub/dir>, 0x590fdb5be910 /* 0 entries */, 32768) = 0
+804293 +++ exited with 0 +++
+804284 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=804293, si_uid=1000, si_status=0, si_utime=0, si_stime=1 /* 0.01 s */} ---
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/dev/null", O_WRONLY|O_CREAT|O_TRUNC, 0666) = 3</dev/null>
+804284 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "./dir/a.sh", O_RDONLY) = -1 ENOENT (No such file or directory)
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/home", {st_mode=S_IFDIR|0755, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/home/ahra", {st_mode=S_IFDIR|0750, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/home/ahra/review-unit-reads", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/home/ahra/review-unit-reads/tree", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/home/ahra/review-unit-reads/tree/sub", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804284 newfstatat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub>, "/home/ahra/review-unit-reads/tree/sub/dir", {st_mode=S_IFDIR|0775, st_size=4096, ...}, 0) = 0
+804300 execve("/usr/bin/cat", ["cat", "../data.txt"], 0x606a8d9102c0 /* 17 vars */) = 0
+804300 access("/etc/ld.so.preload", R_OK) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/lib/x86_64-linux-gnu/libc.so.6", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/libc.so.6>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/locale-archive", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/share/locale/locale.alias", O_RDONLY|O_CLOEXEC) = 3</etc/locale.alias>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_IDENTIFICATION", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_IDENTIFICATION>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache", O_RDONLY|O_CLOEXEC) = 3</usr/lib/x86_64-linux-gnu/gconv/gconv-modules.cache>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_MEASUREMENT", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MEASUREMENT>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_TELEPHONE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TELEPHONE>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_ADDRESS", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_ADDRESS>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_NAME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_NAME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NAME>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_PAPER", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_PAPER", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_PAPER>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MESSAGES/SYS_LC_MESSAGES>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_MONETARY", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_MONETARY>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_COLLATE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_COLLATE>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_TIME", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_TIME", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_TIME>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_NUMERIC", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_NUMERIC>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.UTF-8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "/usr/lib/locale/C.utf8/LC_CTYPE", O_RDONLY|O_CLOEXEC) = 3</usr/lib/locale/C.utf8/LC_CTYPE>
+804300 openat(AT_FDCWD</home/ahra/review-unit-reads/tree/sub/dir>, "../data.txt", O_RDONLY) = 3</home/ahra/review-unit-reads/tree/sub/data.txt>
+804300 +++ exited with 0 +++
+804284 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=804300, si_uid=1000, si_status=0, si_utime=0, si_stime=0} ---
+804284 +++ exited with 0 +++
+804277 --- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, si_pid=804284, si_uid=1000, si_status=0, si_utime=0, si_stime=3 /* 0.03 s */} ---
+804278 ???( <unfinished ...>
+804282 +++ exited with 0 +++
+804281 +++ exited with 0 +++
+804280 +++ exited with 0 +++
+804279 +++ exited with 0 +++
+804278 +++ exited with 0 +++
+804277 +++ exited with 0 +++
