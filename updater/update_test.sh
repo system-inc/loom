@@ -197,10 +197,11 @@ update home Home /report
 check report-retried 'code 0 && grep -q "\"version\":\"${b}\"" ${T}/home/.loom/reported &&[ "$(tail -1 ${T}/reports | python3 -c "import json,sys; print(json.load(sys.stdin)[\"host\"])")" = Home ]'
 
 # A report is signed with the machine's own report token: one signed with another token is refused, and the run logs
-# the receiver's answer; with no token none is sent, and the log says how to mint one.
+# the receiver's answer; with no token (here a file holding something else) none is sent, and the log says how to mint
+# one.
 mkdir -p "${T}/forged/.loom" "${T}/untokened/.loom"
 printf '%s\n' "${token%?}x" > "${T}/forged/.loom/report-token"
-: > "${T}/untokened/.loom/report-token"
+printf 'no-dot-in-this-token\n' > "${T}/untokened/.loom/report-token"
 sent=$(reports)
 update forged Forged /report
 check report-signed-by-another-token-refused 'code 0 && [ "$(reports)" = "${sent}" ] && grep -q "report of ${b} to .* failed (401: not signed by its report token); the next run tries again" ${T}/forged/.loom/update.log && [ ! -e ${T}/forged/.loom/reported ]'

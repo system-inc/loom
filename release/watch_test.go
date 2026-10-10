@@ -44,8 +44,10 @@ type world struct {
 	uploads    atomic.Int32
 	promoted   []string
 	remote     string
-	// uploadError fails the next uploads, and lost has them succeed with nothing reaching the boxes.
+	// uploadError fails the next uploads (after current.txt reached the boxes, with landed), and lost has them succeed
+	// with nothing reaching the boxes.
 	uploadError error
+	landed      bool
 	lost        bool
 	log         bytes.Buffer
 	mutex       sync.Mutex
@@ -113,7 +115,7 @@ func (w *world) steps() Steps {
 		},
 		Upload: func(_ context.Context, current string) error {
 			w.uploads.Add(1)
-			if w.uploadError != nil {
+			if w.uploadError != nil && !w.landed {
 				return w.uploadError
 			}
 			if current == "" {
@@ -123,7 +125,7 @@ func (w *world) steps() Steps {
 			if !w.lost {
 				w.remote = string(content)
 			}
-			return err
+			return errors.Join(err, w.uploadError)
 		},
 		Published: func(context.Context) (Manifest, error) { return ParseManifest(w.remote) },
 		PoolSeen: func(context.Context, string) (time.Time, error) {
@@ -513,6 +515,35 @@ func TestAPromotionIsKeptOnlyOnceTheBoxesReadIt(t *testing.T) {
 			}
 		})
 	}
+	t.Run("upload.sh fails after current.txt reached the boxes", func(t *testing.T) {
+		w := soaked(t)
+		w.uploadError, w.landed = errors.New("upload: current.txt failed"), true
+		w.soakHealthy(commit("b"))
+		if state := w.state(); state.Phase != PhaseFleet || len(w.promoted) != 1 || !Alone(w.published(), commit("b")) {
+			t.Fatalf("the boxes read the promotion: %+v, promoted %q\n%s", state, w.promoted, w.log.String())
+		}
+	})
+	t.Run("the upload fails and nothing can be read back", func(t *testing.T) {
+		w := soaked(t)
+		w.advance(5 * time.Minute)
+		w.report("Cloud", commit("b"), commit("b"), serveUp)
+		w.tick()
+		w.advance(5*time.Minute + 30*time.Second)
+		w.report("Cloud", commit("b"), commit("b"), serveUp)
+		w.uploadError = errors.New("upload: current.txt failed")
+		watcher := w.watcher()
+		published := watcher.Steps.Published
+		watcher.Steps.Published = func(callContext context.Context) (Manifest, error) {
+			if w.uploads.Load() == 2 {
+				return Manifest{}, errors.New("GET current.txt: 503")
+			}
+			return published(callContext)
+		}
+		watcher.Tick(context.Background())
+		if state := w.state(); state.Phase != PhaseStopped || !strings.Contains(state.Why, "may follow either") || len(w.promoted) != 0 {
+			t.Fatalf("%+v, promoted %q", state, w.promoted)
+		}
+	})
 	t.Run("the read back fails", func(t *testing.T) {
 		w := soaked(t)
 		w.advance(5 * time.Minute)
@@ -535,8 +566,10 @@ func TestAPromotionIsKeptOnlyOnceTheBoxesReadIt(t *testing.T) {
 		if state := w.state(); state.Phase != PhaseSoak || len(w.promoted) != 0 || w.published().CanaryVersion() != commit("b") {
 			t.Fatalf("after a failed read back: %+v, promoted %q", state, w.promoted)
 		}
+		// The boxes follow the promotion now, so Cloud faltering since doesn't stop it half done: it is finished.
 		uploads := w.uploads.Load()
 		w.advance(30 * time.Second)
+		w.report("Cloud", commit("b"), commit("b"), "loom-serve.service failed failed restarts=9")
 		w.tick()
 		if state := w.state(); state.Phase != PhaseFleet || len(w.promoted) != 1 || !Alone(w.published(), commit("b")) || w.uploads.Load() != uploads {
 			t.Fatalf("the next pass: %+v, promoted %q, %d uploads (was %d)\n%s", state, w.promoted, w.uploads.Load(), uploads, w.log.String())

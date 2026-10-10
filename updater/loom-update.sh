@@ -218,7 +218,12 @@ post() {
 		"$(printf '%s' "${1:-}" | cut -c1-400 | quoted)" "$(services)")
 	[ "$(cat "${root}/reported" 2> /dev/null)" = "${state}" ] && [ -z "$(find "${root}/reported" -mmin +4 2> /dev/null)" ] && return 0
 	token=$(LC_ALL=C tr -d ' \t\r\n' < "${root}/report-token" 2> /dev/null)
-	case "${token}" in *[!A-Za-z0-9_.-]* | "" | *.*.* | .* | *.) say "report of $(current version) to ${report} not sent: no report token in ${root}/report-token (on Workshop: loom release report-token ${host})"; return 0 ;; esac
+	# A token is <claims>.<signature>, base64url both: anything else is no token.
+	case "${token}" in *[!A-Za-z0-9_.-]* | *.*.* | .* | *.) token= ;; *.*) ;; *) token= ;; esac
+	if [ -z "${token}" ]; then
+		say "report of $(current version) to ${report} not sent: no report token in ${root}/report-token (on Workshop: loom release report-token ${host})"
+		return 0
+	fi
 	body=${root}/report.$$
 	printf '%s,"at":"%s"}' "${state}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${body}"
 	code=$(curl -sS -m 20 -o "${body}.answer" -w '%{http_code}' -X POST -H 'content-type: application/json' -H "X-Loom-Report-Claims: ${token%%.*}" \
