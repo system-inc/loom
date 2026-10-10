@@ -110,6 +110,7 @@ func keyCheckFixture(t *testing.T, workshopFlags string) (builder.TreeBuild, bui
 		t.Fatal(err)
 	}
 	os.WriteFile(filepath.Join(build.Cache, key, "thing"), []byte("the product\n"), 0o644)
+	os.WriteFile(filepath.Join(build.Cache, key+".inputs"), []byte("name thing\nflag GOFLAGS="+workshopFlags+"\n"), 0o644)
 	source, err := builder.SourceChunks(tree, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -143,7 +144,9 @@ func TestTheKeyCheckNamesAKeyThatMovesBetweenWorkshopAndARunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	moved := strings.Join(checked.Moved["example.com/keys/p"], "\n")
-	if !strings.Contains(moved, "thing "+productKeyUnder("")[:12]+" miss") || !strings.Contains(moved, "a test ran go build") {
+	// Workshop's key beside the runner's: the pair says which side drifted.
+	want := "thing workshop " + productKeyUnder("-p=3")[:12] + " runner " + productKeyUnder("")[:12] + " miss"
+	if !strings.Contains(moved, want) || !strings.Contains(moved, "a test ran go build") {
 		t.Fatalf("moved %q, failed %v", moved, checked.Failed)
 	}
 }
