@@ -1382,10 +1382,13 @@ export class Queue extends DurableObject<Env> {
             if (entry.state === 'landed') {
                 return jsonResponse(entry.landed === parsed.main ? 200 : 409, { change: change, state: 'landed', landed: entry.landed });
             }
-            if (!isLive(entry) || entry.future === null || entry.record.parity === true || !futureLandable(state.futures.get(entry.future))) {
+            // A change parked by a push the pusher misread (it landed, and a retry said main already holds it) still takes
+            // the landing report: git, through the pusher, is the record of what main holds.
+            const misread = entry.state === 'parked' && typeof parsed.landed === 'string';
+            if ((!isLive(entry) && !misread) || entry.future === null || entry.record.parity === true || !futureLandable(state.futures.get(entry.future))) {
                 return jsonResponse(409, { error: `change ${change} has no landing order${entry.record.parity === true ? ': it is a parity run' : ''}` });
             }
-            if (typeof parsed.refused === 'string' && parsed.refused !== '') {
+            if (typeof parsed.refused === 'string' && parsed.refused !== '' && !misread) {
                 await this.append(
                     'change.parked',
                     { change: change, future: entry.future },

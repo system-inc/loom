@@ -240,6 +240,7 @@ describe('the queue', function () {
         expect((await postWhole(queue, ids[0] ?? '', sha(1), 'passed', null, 'second')).status).toBe(409);
         // main moved past change 4's base, so the fast-forward was refused: parked, its owner told.
         expect((await report(queue, ids[3] ?? '', { main: sha(77), refused: 'not a fast-forward' })).status).toBe(200);
+        expect((await report(queue, ids[3] ?? '', { main: sha(77), refused: 'again' })).status).toBe(409);
         const feed = (await (await queue.fetch('https://queue/events?owners=1')).text())
             .trim()
             .split('\n')
@@ -260,6 +261,12 @@ describe('the queue', function () {
                 return order.change;
             }),
         ).toEqual([ids[2]]);
+        // A push the pusher misread: git shows change 4's tree on main after all, so the landing is recorded.
+        expect((await report(queue, ids[3] ?? '', { main: sha(78), from: sha(77), landed: sha(5) })).status).toBe(409);
+        expect((await report(queue, ids[3] ?? '', { main: sha(78), from: sha(77), landed: sha(4) })).status).toBe(200);
+        expect(await (await queue.fetch(`https://queue/changes/${ids[3]}`)).json()).toMatchObject({ state: 'landed', landed: sha(78) });
+        // A red change is never landed by a report.
+        expect((await report(queue, ids[0] ?? '', { main: sha(79), from: sha(78), landed: sha(1) })).status).toBe(409);
     });
 
     it('lists unplanned futures for the planner and takes its plan only with keys computed from their parts', async function () {

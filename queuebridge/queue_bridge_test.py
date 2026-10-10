@@ -70,6 +70,9 @@ class FakeGate:
     def contains(self, main, tree):
         return self.holds
 
+    def landedAt(self, tree):
+        return (new, old) if self.holds else None
+
 
 def memory():
     return {"queued": [], "posted": [], "held": [], "requeued": [], "ruled": []}
@@ -158,6 +161,13 @@ class Tick(unittest.TestCase):
         pipeline, gate = FakePipeline(landings=[order]), FakeGate(landing=pushed, holds=False)
         queue_bridge.tick(pipeline, gate, memory())
         self.assertEqual(pipeline.posts(), [])
+        # push-main prints 8-character shas, and a retry after a landing answers "already holds": git decides.
+        pipeline, gate = FakePipeline(landings=[order]), FakeGate(landing=(0, "Pushed main aaaaaaaa..bbbbbbbb, 2 commits\n", ""))
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(pipeline.posts(), [("/landings/" + change, {"main": new, "from": old, "landed": tree})])
+        pipeline, gate = FakePipeline(landings=[order]), FakeGate(landing=(1, "", "refused: main %s already holds %s" % (new[:8], tree[:8])))
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual(pipeline.posts(), [("/landings/" + change, {"main": new, "from": old, "landed": tree})])
 
     def test_a_hold_or_a_pause_waits_and_a_refusal_is_reported(self):
         for landing in ((3, "", "held: rerun pending"), (1, "", "refused: landings are paused, main's newest finished whole gate is red")):

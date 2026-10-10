@@ -153,6 +153,18 @@ class Gate:
     def contains(self, main, tree):
         return subprocess.run(["git", "-C", repository, "merge-base", "--is-ancestor", tree, main]).returncode == 0
 
+    def landedAt(self, tree):
+        """The first-parent commit on origin/main that brought tree in: (that commit, the main it moved from), or None.
+        Git is the record of a landing; push-main's own words (8-character shas) are only a hint."""
+        main = self.main()
+        if not self.contains(main, tree):
+            return None
+        for line in git("log", "--first-parent", "--format=%H %P", "-n", "200", main).splitlines():
+            fields = line.split()
+            if len(fields) >= 2 and not self.contains(fields[1], tree):
+                return fields[0], fields[1]
+        return None
+
 
 def verdictOf(record, tree, gate, served=False):
     """The body today's record gives the change at tree: its whole verdict, and gateMerge when it gated a merge of tree.
@@ -226,15 +238,17 @@ def tick(pipeline, gate, memory):
             code, out, err = gate.landRuled(docsRuling, tree, "queue %s (%s)" % (change, order["owner"]))
         else:
             code, out, err = gate.land(order["run"], tree, "queue %s (%s)" % (change, order["owner"]))
-        pushed = re.search(r"Pushed main ([0-9a-f]{40})\.\.([0-9a-f]{40})", out)
-        if code == 0 and pushed and gate.contains(pushed.group(2), tree):
-            status, answer = pipeline.call("POST", "/landings/" + change, {"main": pushed.group(2), "from": pushed.group(1), "landed": tree})
-            log("landed %s: main %s..%s, %d %s" % (change, pushed.group(1)[:12], pushed.group(2)[:12], status, answer))
+        reason = ([line for line in err.splitlines() if line.startswith("refused")] or err.splitlines()[-1:] or ["exit %d" % code])[0]
+        # Whatever push-main said, git says whether the tree is on main now (a retry after a landing it printed in a
+        # form this missed answers "already holds").
+        landed = gate.landedAt(tree) if code == 0 or "already holds" in reason else None
+        if landed is not None:
+            status, answer = pipeline.call("POST", "/landings/" + change, {"main": landed[0], "from": landed[1], "landed": tree})
+            log("landed %s: main %s..%s, %d %s" % (change, landed[1][:12], landed[0][:12], status, answer))
             continue
         if code == 0:
             log("push-main exited 0 for %s without a main that holds %s; holding: %s" % (change, tree[:12], out.strip()[-300:]))
             continue
-        reason = ([line for line in err.splitlines() if line.startswith("refused")] or err.splitlines()[-1:] or ["exit %d" % code])[0]
         if code == 3 or "landings are paused" in reason:
             if "%s %s" % (change, reason) not in memory["held"]:
                 memory["held"].append("%s %s" % (change, reason))
