@@ -9,12 +9,13 @@ A push that lands is reported as {main, from, landed} (main is then the tree its
 fast-forward is reported as {refused, main}, which parks the change; any other failure (the network, GitHub) is left for
 the next tick. The queue decided the tree; this only moves main to it.
 
-usage: queuebridge/pusher.py    (systemd user timer loom-pusher on workshop, every 30 s; queue_bridge.py beside it)
+usage: queuebridge/pusher.py    (systemd user timer loom-pusher on workshop, every 30 s; queue_bridge.py and blocks.py beside
+it, and each pass builds any block the queue opened, through blocks.py, before it lands)
 """
 import fcntl, json, os, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import queue_bridge
+import blocks, queue_bridge
 
 lander = os.environ.get("LANDER_REPOSITORY", os.path.expanduser("~/loom-lander/adamic.git"))
 state = os.environ.get("LANDER_STATE", os.path.expanduser("~/loom-lander/state"))
@@ -79,7 +80,10 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         return
-    tick(queue_bridge.Pipeline(queue_bridge.pipeline, queue_bridge.token()), Hands(lander))
+    pipeline = queue_bridge.Pipeline(queue_bridge.pipeline, queue_bridge.token())
+    # Blocks first (a no-op while their switch is off), then the landing orders.
+    blocks.tick(pipeline, blocks.Chain(lander), log)
+    tick(pipeline, Hands(lander))
 
 
 if __name__ == "__main__":

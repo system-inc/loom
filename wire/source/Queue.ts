@@ -29,6 +29,8 @@ export type EventType =
     | 'change.checked'
     | 'change.refused'
     | 'block.opened'
+    // The workshop builder wrote a block's merge chain: its prefixes are futures and its conflicts are parked.
+    | 'block.built'
     | 'future.built'
     | 'unit.planned'
     // A plan withdrawn by a ruling before anything judged it, so the planner can plan the future again.
@@ -585,6 +587,12 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             }
         }
     }
+    else if (event.type === 'block.built') {
+        const block = state.blocks.get(event.data.block as number);
+        if (block !== undefined) {
+            block.built = true;
+        }
+    }
     else if (event.type === 'change.refused') {
         state.refused++;
         // A change refused once git's facts arrived leaves the line.
@@ -600,7 +608,9 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
         const tree = event.subject.future ?? '';
         const changes = event.data.changes as string[];
         state.futures.set(tree, { tree: tree, base: event.data.base as string, changes: changes, units: null, whole: null, decided: null, voids: 0, judged: false });
-        for (const change of changes) {
+        // A block's prefix future (main, +A, +B) is the newest change's own; the changes ahead of it keep theirs.
+        const tested = event.data.block === undefined ? changes : changes.slice(-1);
+        for (const change of tested) {
             const member = state.changes.get(change);
             if (member !== undefined) {
                 member.future = tree;
@@ -990,6 +1000,10 @@ export class Queue extends DurableObject<Env> {
         if (path === '/blocks' && method === 'GET') {
             return this.unbuiltBlocks(url);
         }
+        const builtMatch = /^\/blocks\/([1-9][0-9]{0,8})\/built$/.exec(path);
+        if (builtMatch !== null && method === 'POST') {
+            return this.blockBuilt(request, Number(builtMatch[1]));
+        }
         if (path === '/head' && method === 'GET') {
             return this.readHead();
         }
@@ -1286,6 +1300,52 @@ export class Queue extends DurableObject<Env> {
         });
     }
 
+    // The workshop builder's chain for a block (#7hn5em0): {base, prefixes: [{tree, change}], conflicts: [{change, paths}]}.
+    // Each prefix adds one change onto the one before it, starting from main at base, in the block's order; a change that
+    // conflicts with those ahead of it is parked with the paths and left out. Each prefix becomes the newest change's
+    // future, carrying every change ahead of it.
+    private async blockBuilt(request: Request, block: number): Promise<Response> {
+        const parsed = parseJson((await readBodyText(request, MaximumChangeBodyBytes)) ?? '');
+        if (!isPlainObject(parsed) || typeof parsed.base !== 'string' || !shaPattern.test(parsed.base) || !Array.isArray(parsed.prefixes) || !Array.isArray(parsed.conflicts)) {
+            return jsonResponse(400, { error: 'the body is {base, prefixes: [{tree, change}], conflicts: [{change, paths}]}' });
+        }
+        const prefixes = parsed.prefixes as { tree?: unknown; change?: unknown }[];
+        const conflicts = parsed.conflicts as { change?: unknown; paths?: unknown }[];
+        const base = parsed.base;
+        return this.ctx.blockConcurrencyWhile(async () => {
+            const state = await this.current();
+            const entry = state.blocks.get(block);
+            if (entry === undefined) {
+                return jsonResponse(404, { error: `no block ${block}` });
+            }
+            if (entry.built) {
+                return jsonResponse(409, { error: `block ${block} is built` });
+            }
+            const conflicted = conflicts.map((conflict) => String(conflict.change));
+            const added = prefixes.map((prefix) => String(prefix.change));
+            const expected = entry.changes.filter((change) => !conflicted.includes(change));
+            if (canonical(added) !== canonical(expected) || !conflicted.every((change) => entry.changes.includes(change))) {
+                return jsonResponse(422, { error: `block ${block}'s prefixes add exactly its changes in order, less the conflicts` });
+            }
+            if (!prefixes.every((prefix) => typeof prefix.tree === 'string' && shaPattern.test(prefix.tree)) || !conflicts.every((conflict) => Array.isArray(conflict.paths))) {
+                return jsonResponse(422, { error: 'each prefix names its tree, each conflict its paths' });
+            }
+            for (const conflict of conflicts) {
+                const change = String(conflict.change);
+                await this.append('change.parked', { change: change }, {
+                    reason: `it conflicts with the changes ahead of it in block ${block}: ${(conflict.paths as string[]).join(', ')}. Resubmit on main.`,
+                    block: block,
+                });
+                await this.parkDependents(change);
+            }
+            for (const [index, prefix] of prefixes.entries()) {
+                await this.append('future.built', { change: added[index], future: String(prefix.tree) }, { base: base, changes: added.slice(0, index + 1), block: block });
+            }
+            await this.append('block.built', {}, { block: block, base: base });
+            return jsonResponse(200, { block: block, futures: prefixes.length, parked: conflicts.length });
+        });
+    }
+
     // The blocks the workshop builder hasn't built, each with its changes in order.
     private async unbuiltBlocks(url: URL): Promise<Response> {
         if (url.searchParams.get('state') !== 'unbuilt') {
@@ -1376,7 +1436,7 @@ export class Queue extends DurableObject<Env> {
         if (future === undefined) {
             return jsonResponse(404, { error: `no future ${tree}` });
         }
-        const superseded = future.changes.find(function (change) {
+        const superseded = future.changes.slice(-1).find(function (change) {
             return state.changes.get(change)?.future !== tree;
         });
         if (superseded !== undefined) {
@@ -1695,11 +1755,13 @@ export class Queue extends DurableObject<Env> {
             return jsonResponse(400, { error: 'state is unplanned (for the planner) or planned (for the judge)' });
         }
         const state = await this.current();
+        // Current: every change in it on its way, and the newest tested in it (a block prefix carries the changes ahead).
         const current = [...state.futures.values()].filter(function (future) {
-            return future.changes.every(function (change) {
-                const entry = state.changes.get(change);
-                return isLive(entry) && entry?.future === future.tree;
-            });
+            return (
+                future.changes.every(function (change) {
+                    return isLive(state.changes.get(change));
+                }) && state.changes.get(future.changes[future.changes.length - 1] ?? '')?.future === future.tree
+            );
         });
         if (wanted === 'unplanned') {
             const futures = current

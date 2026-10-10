@@ -604,6 +604,30 @@ describe('blocks, behind their switch', function () {
         expect(replayed.changes.get(second)?.block).toBe(null);
         expect(replayed.changes.get(first)?.block).toBe(1);
         expect(await landings(queue)).toEqual([]);
+        // The builder's chain: a prefix that adds any other change is refused; the right one becomes the change's future.
+        const built = function (body: unknown): Promise<Response> {
+            return queue.fetch('https://queue/blocks/1/built', { method: 'POST', body: JSON.stringify(body) });
+        };
+        expect((await built({ base: main, prefixes: [{ tree: sha(70), change: second }], conflicts: [] })).status).toBe(422);
+        expect((await built({ base: main, prefixes: [], conflicts: [] })).status).toBe(422);
+        expect((await built({ base: main, prefixes: [{ tree: sha(70), change: first }], conflicts: [] })).status).toBe(200);
+        expect((await built({ base: main, prefixes: [{ tree: sha(70), change: first }], conflicts: [] })).status).toBe(409);
+        expect(await (await queue.fetch(`https://queue/changes/${first}`)).json()).toMatchObject({ future: sha(70) });
+        expect(((await (await queue.fetch('https://queue/blocks?state=unbuilt')).json()) as { blocks: unknown[] }).blocks).toEqual([]);
+        expect(((await (await queue.fetch('https://queue/futures?state=unplanned')).json()) as { futures: { future: string; changes: string[] }[] }).futures).toContainEqual(
+            expect.objectContaining({ future: sha(70), base: main, changes: [first] }),
+        );
+    });
+
+    it("parks a change that conflicts with the ones ahead of it in its block, with the paths", async function () {
+        const queue = await freshQueue();
+        await queue.fetch('https://queue/rules', { method: 'POST', body: JSON.stringify({ rule: 'blocks', value: { on: true, budget: 4 }, commit: sha(99) }) });
+        const id = ((await (await submit(queue, change(61))).json()) as { change: string }).change;
+        const response = await queue.fetch('https://queue/blocks/1/built', { method: 'POST', body: JSON.stringify({ base: main, prefixes: [], conflicts: [{ change: id, paths: ['x.go'] }] }) });
+        expect(response.status, await response.clone().text()).toBe(200);
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'parked', future: null });
+        const feed = (await (await queue.fetch('https://queue/events?owners=1')).text()).trim();
+        expect(feed).toContain('conflicts with the changes ahead of it in block 1: x.go');
     });
 });
 
