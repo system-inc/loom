@@ -477,3 +477,26 @@ func TestAStrictPoolsUnitSilentPastThreeHeartbeatsIsNotDropped(t *testing.T) {
 		t.Fatalf("a silent unit that passed was dropped: %+v", inRecord)
 	}
 }
+
+// A unit whose worker goes silent twice is placed again once and then closed broken, its drops named, never left for the
+// judge's backstop (#ravqt9s), each drop after two of its runner's heartbeats. Mutants: placed again without end, or
+// the second drop left open; three heartbeats waited for.
+func TestAPoolUnitSilentTwiceIsClosedBrokenNamed(t *testing.T) {
+	wire := newFakeWire(t)
+	wire.ghosts = 2
+	servePool(t, wire, "codex", 1)
+	pool := &PoolMachine{Pool: "codex", Wire: wire.server.URL, Secret: testSecret, Version: runner.Version,
+		GoPlatform: runtime.GOOS + "/" + runtime.GOARCH, QueueCheck: 50 * time.Millisecond}
+	unit := poolUnit("orphaned", "echo finished")
+	unit.TimeoutSeconds = 30
+	started := time.Now()
+	result := run(t, config(wire, pool), unit)
+	inRecord := unitEventsOf(result.Events, "orphaned")
+	last := inRecord[len(inRecord)-1]
+	if result.Verdict.Status == "green" || last.Type != "finished" || last.Status != protocol.StatusBroken || time.Since(started) > 20*time.Second {
+		t.Fatalf("verdict %+v, last event %+v after %v", result.Verdict, last, time.Since(started))
+	}
+	if gone := strings.Count(fmt.Sprint(inRecord), "2 of its runner's"); gone != 2 || startedCounts(inRecord)["orphaned"] != 2 {
+		t.Fatalf("%d drops named and %d starts: %+v", gone, startedCounts(inRecord)["orphaned"], inRecord)
+	}
+}

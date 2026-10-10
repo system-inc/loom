@@ -192,7 +192,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.Var(poolPlatforms, "pool-platform", "the platform a pool's workers run when it isn't Linux's, <name>=<goos>/<goarch>; repeatable")
 	poolHas := poolHasFlag{}
 	flags.Var(poolHas, "pool-has", "the toolchains every worker of a pool has, <name>=<toolchain>,...: units that require one go only there; repeatable")
-	silenceDrop := flags.Int("silence-drop", 0, "seconds a strict pool's started unit may go silent before its worker counts as gone; 0 means three of its runner's heartbeats")
+	silenceDrop := flags.Int("silence-drop", 0, "seconds a strict pool's started unit may go silent before its worker counts as gone; 0 means two of its runner's heartbeats")
 	poolKinds := poolKindsFlag{}
 	flags.Var(poolKinds, "pool-kinds", "the only unit kinds a pool takes, <name>=<kind>,... (box-phase=phase); a pool without it takes test and product units; repeatable")
 	poolCpus := poolMemoryFlag{}

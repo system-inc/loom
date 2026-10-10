@@ -205,7 +205,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				rerunConfig.Slots = nil
 				for _, pool := range fit {
 					rerunConfig.Slots = append(rerunConfig.Slots, &coordinator.PoolMachine{Pool: pool.Name, Has: poolHas[pool.Name], Wire: *wire, Secret: secret,
-						Version: version, GoPlatform: poolPlatform, Log: stdout, MemoryMegabytes: pool.MemoryMegabytes, SilenceDrop: strictSilence})
+						Version: version, GoPlatform: poolPlatform, Log: stdout, MemoryMegabytes: pool.MemoryMegabytes})
 				}
 			}
 			result, err := coordinator.RerunAlone(runContext, rerunConfig, unit)
@@ -616,10 +616,6 @@ func gateReport(suiteText string, events []judge.LogEvent, canaryTree string) ([
 	}
 	return lines, false, nil
 }
-
-// strictSilence is how long a strict rerun may go silent before its worker counts as gone: the unit's 1800 s ceiling,
-// since a strict runner says nothing while a package's go test runs (Loom, Oct 10 01:57Z).
-const strictSilence = 1800 * time.Second
 
 // warmRule is the judge's warm-cache rule, the one the steady loop and `loom judge carried` both apply, so the
 // placer's carried list and the verdict agree: an attempt on the warm-attempts list is warm, and a test attempt keyed

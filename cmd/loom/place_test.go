@@ -26,7 +26,7 @@ func TestAPlacementRunsOnItsPoolsUnderTheFuturesRunId(t *testing.T) {
 	codex := placer.RunPool{Pool: placer.Pool{PoolEntry: judge.PoolEntry{Name: "codex-strict", MemoryMegabytes: 16384, Cpus: 4}}, Slots: 3}
 	arguments := strings.Join(runArguments(placer.Placement{Run: "future-" + tree + "-2", Pools: []placer.RunPool{phase, codex}},
 		runOptions{runs: "/runs", wire: "https://wire", source: "/loom", priority: 40}), " ")
-	for _, want := range []string{"run --uncached --slots none --run-id future-" + tree + "-2 ", "--priority 40", "--silence-drop 1800",
+	for _, want := range []string{"run --uncached --slots none --run-id future-" + tree + "-2 ", "--priority 40",
 		"--strict-pool box-phase=1 --pool-cpus box-phase=8 --pool-memory box-phase=65536 --pool-has box-phase=go,clang --pool-kinds box-phase=phase",
 		"--strict-pool codex-strict=3 --pool-cpus codex-strict=4 --pool-memory codex-strict=16384 /runs/future-" + tree + "-2.json"} {
 		if !strings.Contains(arguments, want) {
@@ -35,6 +35,11 @@ func TestAPlacementRunsOnItsPoolsUnderTheFuturesRunId(t *testing.T) {
 	}
 	if strings.Contains(arguments, "--pool-has codex-strict") {
 		t.Errorf("a pool with no toolchains was given some: %s", arguments)
+	}
+	// A silent worker's unit is placed again after two of its runner's heartbeats, not after the unit's ceiling
+	// (#ravqt9s): the placer passes no silence window.
+	if strings.Contains(arguments, "--silence-drop") {
+		t.Errorf("a placement waits out a silence window: %s", arguments)
 	}
 }
 

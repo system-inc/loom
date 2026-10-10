@@ -79,10 +79,10 @@ type PoolMachine struct {
 	// MemoryMegabytes is each worker's memory, 0 when unknown: a unit declaring more (its Resources) is never placed
 	// here (Oct 10: f7812fff's typeaware products took two 16 GB Codex instances down, so they go to a box).
 	MemoryMegabytes int
-	// SilenceDrop is how long a started unit may go silent before its worker counts as gone; 0 means silentBeats of
-	// its runner's heartbeats. A strict runner says nothing while a package's go test runs (Oct 10: live units over
-	// 360 s were dropped all night, ec123b7f three times), so a strict pool's units get their ceiling instead: a worker
-	// that really died then costs more time, never a looser verdict.
+	// SilenceDrop is how long a started unit may go silent before its worker counts as gone; 0, what the placer and the
+	// judge's reruns use, means silentBeats of its runner's heartbeats. It was the unit's ceiling while strict runners
+	// said nothing during a package's go test (Oct 10: live units over 360 s were dropped all night); a runner now beats
+	// through every phase, so it is left for an operator's own `loom run --silence-drop`.
 	SilenceDrop time.Duration
 	// Kinds, when set, are the only unit kinds the pool takes (box-phase: phase), since its workers' runner serves
 	// them (--phase-jobs) and their keys name that runner. A phase unit goes only to a pool whose Kinds hold phase.
@@ -116,8 +116,11 @@ type poolBatch struct {
 	Priority int             `json:"priority,omitempty"`
 }
 
-// silentBeats is how many of its runner's heartbeats a started unit may go silent before its worker counts as gone.
-const silentBeats = 3
+// silentBeats is how many of its runner's heartbeats a started unit may go silent before its worker counts as gone: a
+// runner beats through every phase of a unit (runner.Run), so two silent beats is a worker gone (#ravqt9s: Chonchon
+// slept mid-unit, and its unit waited 23 minutes for the judge's backstop). The unit is placed again once; a second
+// silence closes it broken, named.
+const silentBeats = 2
 
 // maximumRequeues bounds how often one attempt queues its unit again before it gives the unit up as dropped.
 const maximumRequeues = 5
@@ -209,8 +212,8 @@ func (machine *PoolMachine) Run(runContext context.Context, unit protocol.Unit, 
 		select {
 		case <-stream.signal:
 		case <-check.C:
-			// A runner that beats says something at least every heartbeat; three beats of silence is a worker
-			// gone mid-unit (its turn ended). The unit is given up here and placed again, its stream continued.
+			// A runner that beats says something at least every heartbeat; two beats of silence is a worker gone
+			// mid-unit (its turn ended, its box slept). The unit is given up here and placed again, its stream continued.
 			if heard && heartbeat > 0 && machine.SilenceDrop > 0 && time.Since(lastHeard) >= machine.SilenceDrop {
 				return fmt.Errorf("silent for %.0f s, past the pool's %.0f s window: its worker is gone", time.Since(lastHeard).Seconds(), machine.SilenceDrop.Seconds())
 			}
