@@ -571,6 +571,42 @@ describe("today's gate and main's own red", function () {
     });
 });
 
+describe('blocks, behind their switch', function () {
+    it('are off until a rule.changed turns them on; then a cleared change waits and one block takes what waits, one in flight', async function () {
+        const queue = await freshQueue();
+        const idOf = async function (fields: Record<string, unknown>, seed: number): Promise<string> {
+            return ((await (await submit(queue, change(seed, fields))).json()) as { change: string }).change;
+        };
+        // Off: a change is its own future, as tonight.
+        const before = await idOf({}, 51);
+        expect(await (await queue.fetch(`https://queue/changes/${before}`)).json()).toMatchObject({ future: sha(51) });
+        const rules = function (body: unknown): Promise<Response> {
+            return queue.fetch('https://queue/rules', { method: 'POST', body: JSON.stringify(body) });
+        };
+        expect((await rules({ rule: 'blocks', value: { on: true, budget: 2 } })).status).toBe(400);
+        expect((await rules({ rule: 'blocks', value: { on: true, budget: 2 }, commit: sha(99) })).status).toBe(200);
+        const first = await idOf({}, 52);
+        expect(await (await queue.fetch(`https://queue/changes/${first}`)).json()).toMatchObject({ future: null });
+        const second = await idOf({}, 53);
+        const third = await idOf({}, 54);
+        // A parity run never joins a block.
+        const parity = await idOf({ parity: true }, 55);
+        expect(await (await queue.fetch(`https://queue/changes/${parity}`)).json()).toMatchObject({ future: sha(55) });
+        // One block in flight: the first change opened it the instant it cleared; the rest wait for its slot.
+        const unbuilt = (await (await queue.fetch('https://queue/blocks?state=unbuilt')).json()) as { blocks: { block: number; changes: { change: string }[] }[] };
+        expect(unbuilt.blocks.map((block) => [block.block, block.changes.map((item) => item.change)])).toEqual([[1, [first]]]);
+        const log = await logOf(queue);
+        expect(log.filter((event) => event.type === 'block.opened')).toHaveLength(1);
+        expect(log.filter((event) => event.type === 'change.checked').map((event) => event.subject.change)).toEqual([first, second, third]);
+        expect(log.find((event) => event.type === 'rule.changed')).toMatchObject({ data: { rule: 'blocks', value: { on: true, budget: 2 }, commit: sha(99) } });
+        const replayed = await replay(log);
+        expect(replayed.rules.blocks).toEqual({ on: true, budget: 2 });
+        expect(replayed.changes.get(second)?.block).toBe(null);
+        expect(replayed.changes.get(first)?.block).toBe(1);
+        expect(await landings(queue)).toEqual([]);
+    });
+});
+
 describe('a resubmit', function () {
     it('moves a red or parked change to a new sha under the same id, rechecked by git, and never back to a tested sha', async function () {
         const queue = await freshQueue();
@@ -754,6 +790,8 @@ describe("loom-pipeline's queue seams", function () {
             ['GET', '/submissions?state=unchecked'],
             ['GET', '/log?after=0'],
             ['GET', '/head'],
+            ['POST', '/rules'],
+            ['GET', '/blocks?state=unbuilt'],
             ['POST', `/submissions/chg_${'q'.repeat(26)}/facts`],
         ];
         const board = await token('system_adamic_loom_release', 'board');

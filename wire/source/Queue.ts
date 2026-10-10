@@ -25,6 +25,8 @@ export const OwnerEventTypes: readonly EventType[] = ['change.landed', 'change.r
 
 export type EventType =
     | 'change.submitted'
+    // git's facts cleared a change that waits for a block (the blocks switch on), rather than becoming its own future.
+    | 'change.checked'
     | 'change.refused'
     | 'block.opened'
     | 'future.built'
@@ -217,6 +219,21 @@ export interface ChangeEntry {
     checked: boolean;
     // Every sha the change was ever tested on, so a red one never returns (#qvcm8ez).
     shas: string[];
+    // The block it joined, or null: with blocks on, a cleared change waits for the next block.
+    block: number | null;
+}
+
+// The rules a rule.changed event moves, each naming the landed commit that changed it (contracts v1, section 4).
+export interface Rules {
+    // Blocks (#j3t4qbg), off until after cutover: with them on, a cleared change waits, and the instant no block is in
+    // flight the queue opens one with every waiting change in line order, up to the budget. No clock.
+    blocks: { on: boolean; budget: number };
+}
+
+export interface BlockEntry {
+    block: number;
+    changes: string[];
+    built: boolean;
 }
 
 export interface QueueState {
@@ -231,6 +248,8 @@ export interface QueueState {
     seq: number;
     // main as the lander last reported it (the newest change.landed's main), or null before any landing.
     landedMain: string | null;
+    rules: Rules;
+    blocks: Map<number, BlockEntry>;
 }
 
 const shaPattern = /^[0-9a-f]{40}$/;
@@ -518,7 +537,7 @@ export function parityOf(state: QueueState, future: FutureEntry): boolean {
 }
 
 export function emptyState(): QueueState {
-    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null };
+    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 } }, blocks: new Map() };
 }
 
 // A whole verdict's decision, by the judge's rule: a failure that is main's red (excused, as Green excuses it) doesn't
@@ -544,8 +563,27 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             landed: null,
             checked: event.data.facts !== null,
             shas: [record.sha],
+            block: null,
         });
         state.line.push(record.change);
+    }
+    else if (event.type === 'change.checked' && entry !== undefined) {
+        entry.checked = true;
+    }
+    else if (event.type === 'rule.changed') {
+        if (event.data.rule === 'blocks') {
+            state.rules.blocks = event.data.value as Rules['blocks'];
+        }
+    }
+    else if (event.type === 'block.opened') {
+        const changes = event.data.changes as string[];
+        state.blocks.set(event.data.block as number, { block: event.data.block as number, changes: changes, built: false });
+        for (const change of changes) {
+            const member = state.changes.get(change);
+            if (member !== undefined) {
+                member.block = event.data.block as number;
+            }
+        }
     }
     else if (event.type === 'change.refused') {
         state.refused++;
@@ -946,6 +984,12 @@ export class Queue extends DurableObject<Env> {
         if (path === '/verdicts' && method === 'POST') {
             return this.decideWhole(request);
         }
+        if (path === '/rules' && method === 'POST') {
+            return this.changeRule(request);
+        }
+        if (path === '/blocks' && method === 'GET') {
+            return this.unbuiltBlocks(url);
+        }
         if (path === '/head' && method === 'GET') {
             return this.readHead();
         }
@@ -1145,7 +1189,7 @@ export class Queue extends DurableObject<Env> {
             const record: ChangeRecord = { change: newChangeId(), submittedAt: this.now(), ...checked };
             await this.append('change.submitted', { change: record.change }, { record: record, facts: facts });
             if (facts !== null) {
-                await this.buildFuture(record, facts);
+                await this.clear(record, facts);
             }
             const entry = state.changes.get(record.change);
             return jsonResponse(201, { change: record.change, state: entry?.state ?? 'queued', position: entry?.position ?? 0 });
@@ -1188,6 +1232,80 @@ export class Queue extends DurableObject<Env> {
             await this.append('change.restacked', { change: change }, { from: entry.record.sha, to: checked.sha, base: checked.base, paths: checked.paths });
             return jsonResponse(200, { change: change, state: 'queued', sha: checked.sha });
         });
+    }
+
+    // A change git's facts cleared: its own future (blocks off, or a parity run), or it waits for the next block.
+    private async clear(record: ChangeRecord, facts: GitFacts): Promise<void> {
+        const state = await this.current();
+        if (!state.rules.blocks.on || record.parity === true) {
+            await this.buildFuture(record, facts);
+            return;
+        }
+        await this.append('change.checked', { change: record.change }, { facts: facts });
+        await this.openBlock();
+    }
+
+    // The instant no block is in flight, every waiting change in line order, up to the budget, becomes one block. A
+    // waiting change is checked, on its way, in no block and no future yet.
+    private async openBlock(): Promise<void> {
+        const state = await this.current();
+        if (!state.rules.blocks.on || state.blocks.size > 0) {
+            return;
+        }
+        const waiting = state.line.filter(function (change) {
+            const entry = state.changes.get(change);
+            return entry !== undefined && isLive(entry) && entry.checked && entry.future === null && entry.block === null && entry.record.parity !== true;
+        });
+        if (waiting.length === 0) {
+            return;
+        }
+        await this.append('block.opened', {}, { block: state.blocks.size + 1, changes: waiting.slice(0, state.rules.blocks.budget) });
+    }
+
+    // A rule moves only by a rule.changed naming the landed commit that changed it. Blocks is the one rule tonight.
+    private async changeRule(request: Request): Promise<Response> {
+        const parsed = parseJson((await readBodyText(request, MaximumChangeBodyBytes)) ?? '');
+        if (
+            !isPlainObject(parsed) ||
+            parsed.rule !== 'blocks' ||
+            !isPlainObject(parsed.value) ||
+            typeof parsed.value.on !== 'boolean' ||
+            !Number.isSafeInteger(parsed.value.budget) ||
+            (parsed.value.budget as number) < 1 ||
+            typeof parsed.commit !== 'string' ||
+            !shaPattern.test(parsed.commit)
+        ) {
+            return jsonResponse(400, { error: 'the body is {rule: blocks, value: {on, budget}, commit: the landed commit that changed it}' });
+        }
+        const value = { on: parsed.value.on, budget: parsed.value.budget as number };
+        const commit = parsed.commit;
+        return this.ctx.blockConcurrencyWhile(async () => {
+            await this.append('rule.changed', {}, { rule: 'blocks', value: value, commit: commit });
+            await this.openBlock();
+            return jsonResponse(200, { rules: (await this.current()).rules });
+        });
+    }
+
+    // The blocks the workshop builder hasn't built, each with its changes in order.
+    private async unbuiltBlocks(url: URL): Promise<Response> {
+        if (url.searchParams.get('state') !== 'unbuilt') {
+            return jsonResponse(400, { error: 'state=unbuilt is the one listing' });
+        }
+        const state = await this.current();
+        const blocks = [...state.blocks.values()]
+            .filter(function (block) {
+                return !block.built;
+            })
+            .map(function (block) {
+                return {
+                    block: block.block,
+                    changes: block.changes.map(function (change) {
+                        const record = state.changes.get(change)?.record;
+                        return { change: change, sha: record?.sha, base: record?.base, owner: record?.owner };
+                    }),
+                };
+            });
+        return jsonResponse(200, { blocks: blocks });
     }
 
     // Slice 1: a checked change is its own future, its tree its sha. Speculation (#j3t4qbg) builds main+A+B instead.
@@ -1247,8 +1365,8 @@ export class Queue extends DurableObject<Env> {
                 await this.parkDependents(change);
                 return jsonResponse(200, { change: change, state: 'refused', reason: reason });
             }
-            await this.buildFuture(entry.record, facts);
-            return jsonResponse(200, { change: change, state: entry.state, future: entry.future });
+            await this.clear(entry.record, facts);
+            return jsonResponse(200, { change: change, state: entry.state, future: entry.future, block: entry.block });
         });
     }
 
