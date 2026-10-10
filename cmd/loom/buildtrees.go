@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -130,13 +131,17 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		},
 		Indexed: store.TreeIndexed,
 		Floor:   func() error { return builder.CheckFloor(watched, nil) },
-		Build: func(want treebuilder.Want) error {
-			return buildWant(runContext, checkout, binary, settings, want)
+		Build: func(want treebuilder.Want, running func(pid int) error) error {
+			return buildWant(runContext, checkout, binary, settings, want, running)
 		},
-		Ledger: ledger,
-		Keep:   *settings.keep,
-		Now:    time.Now,
-		Log:    stdout,
+		Alive:    buildAlive,
+		Kill:     killGroup,
+		Bound:    *settings.bound,
+		Stopping: func() bool { return runContext.Err() != nil },
+		Ledger:   ledger,
+		Keep:     *settings.keep,
+		Now:      time.Now,
+		Log:      stdout,
 	}
 	var prunedAt time.Time
 	for runContext.Err() == nil {
@@ -170,7 +175,7 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 
 // buildWant checks the wanted future out and runs build-tree on it. A checkout that fails is transient (GitHub's 5xx,
 // the network), retried soon and never the tree's failure; one the builder's stop cut short is a stop.
-func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want) error {
+func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want, running func(pid int) error) error {
 	tree, cleanup, err := checkout(want.Future)
 	if err != nil && runContext.Err() != nil {
 		return fmt.Errorf("%w: checking %s out: %v", treebuilder.ErrStopped, want.Future, err)
@@ -179,7 +184,7 @@ func buildWant(runContext context.Context, checkout planner.Checkout, binary str
 		return fmt.Errorf("%w: checking %s out keyless: %v", treebuilder.ErrTransient, want.Future, err)
 	}
 	defer cleanup()
-	return runBuildTree(runContext, binary, buildTreeArguments(settings, tree, want), filepath.Join(*settings.logs, want.Tree+".log"), *settings.bound)
+	return runBuildTree(runContext, binary, buildTreeArguments(settings, tree, want), filepath.Join(*settings.logs, want.Tree+".log"), *settings.bound, running)
 }
 
 // readyClone makes the builder's clone when it's missing, an empty repository whose origin is the public adamic
@@ -214,34 +219,64 @@ func buildTreeArguments(settings buildTreesSettings, tree string, want treebuild
 		"--go-cache-gb", strconv.FormatUint(*settings.goCacheGB, 10)}
 }
 
-// runBuildTree runs binary with arguments, its output to log (mode 600, new each build), in a process group of its own
-// that a stop or the bound kills whole, and says how it ended badly, with the log's last lines, or nil. Ended by the
-// builder's own stop (runContext's), it's treebuilder.ErrStopped: the builder's, never the tree's failure.
-func runBuildTree(runContext context.Context, binary string, arguments []string, log string, bound time.Duration) error {
+// runBuildTree runs binary with arguments, its output to log (mode 600, new each build), in a process group of its own,
+// calls running with its pid once it runs, and says how it ended badly, with the log's last lines, or nil. Past bound
+// its group is killed. Told to stop meanwhile (runContext's: a release's restart, #apsj7zp), it leaves the child
+// running and returns treebuilder.ErrDetached: the unit's KillMode=process spares the child, and the next builder
+// adopts it through its running record.
+func runBuildTree(runContext context.Context, binary string, arguments []string, log string, bound time.Duration, running func(pid int) error) error {
 	output, err := os.OpenFile(log, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer output.Close()
-	boundContext, cancel := context.WithTimeout(runContext, bound)
-	defer cancel()
-	command := exec.CommandContext(boundContext, binary, arguments...)
+	command := exec.Command(binary, arguments...)
 	command.Stdout, command.Stderr = output, output
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Cancel = func() error { return syscall.Kill(-command.Process.Pid, syscall.SIGKILL) }
-	command.WaitDelay = 10 * time.Second
-	err = command.Run()
+	if err = command.Start(); err != nil {
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	if err = running(command.Process.Pid); err != nil {
+		// Unrecorded, it could never be adopted: it goes now, and the build with it.
+		killGroup(command.Process.Pid)
+		<-done
+		return fmt.Errorf("recording the build running: %w", err)
+	}
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case err = <-done:
+	case <-runContext.Done():
+		return fmt.Errorf("%w: pid %d", treebuilder.ErrDetached, command.Process.Pid)
+	case <-timer.C:
+		killGroup(command.Process.Pid)
+		<-done
+		content, _ := os.ReadFile(log)
+		return fmt.Errorf("build-tree ran past its %v bound and was killed: %s", bound, logTail(content, 5))
+	}
 	if err == nil {
 		return nil
 	}
 	content, _ := os.ReadFile(log)
-	if runContext.Err() != nil {
-		return fmt.Errorf("%w (%v): %s", treebuilder.ErrStopped, err, logTail(content, 5))
-	}
-	if boundContext.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("build-tree ran past its %v bound and was killed: %s", bound, logTail(content, 5))
-	}
 	return fmt.Errorf("build-tree: %v: %s", err, logTail(content, 5))
+}
+
+// killGroup kills the process group pid leads, everything a build started.
+func killGroup(pid int) {
+	syscall.Kill(-pid, syscall.SIGKILL)
+}
+
+// buildAlive says whether pid is still the `loom build-tree` of tree, by its command line: a pid reused by another
+// process since is no build to wait for.
+func buildAlive(pid int, tree string) bool {
+	content, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return false
+	}
+	arguments := strings.Split(string(content), "\x00")
+	return slices.Contains(arguments, "build-tree") && slices.Contains(arguments, tree)
 }
 
 // pruneBuildLogs removes each build's log under directory last written over keep ago, by name.
