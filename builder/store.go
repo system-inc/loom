@@ -22,11 +22,11 @@ import (
 // https://artifacts.loom.system.inc): no Worker is in the data path. It holds three kinds of object:
 //
 //	blobs/<sha256>            gzipped bytes, named by their own sha256: a test binary, a product's archive, or a
-//	                          tree's source archive
+//	                          chunk of a tree's source
 //	refs/action/<productKey>  the sha256 of that product's archive, as text, never changed (only rewritten with its
 //	                          own bytes, to keep it fresh)
 //	trees/<treeKey>.json      a tree's index (TreeIndex): each package's binary, the products its tests read, the
-//	                          source archive
+//	                          source's chunks
 //
 // The bucket's lifecycle deletes every blob, ref and tree index 7 days after its upload (trees/ by Loom's own rule,
 // Oct 10, so old indexes naming expired blobs don't pile up). So a blob or ref the store holds is relied on as it is
@@ -249,16 +249,22 @@ func (store Store) putBlob(sum string, content []byte) error {
 // PutBlob makes the bucket hold content, fresh, at blobs/<its sha256>, and returns that sha256. A blob the bucket
 // holds from within FreshFor isn't sent again; one older, or missing, goes up, which starts its 7 days over.
 func (store Store) PutBlob(content []byte) (string, error) {
+	_, err := store.sendBlob(content)
+	return digest(content), err
+}
+
+// sendBlob is PutBlob, reporting whether content went up.
+func (store Store) sendBlob(content []byte) (bool, error) {
 	sum := digest(content)
 	store.read()
 	object, err := store.Bucket.Head("blobs/" + sum)
 	switch {
 	case err == nil && !store.stale(object.Modified):
-		return sum, nil
+		return false, nil
 	case err != nil && !errors.Is(err, r2.ErrNotFound):
-		return sum, err
+		return false, err
 	}
-	return sum, store.putBlob(sum, content)
+	return true, store.putBlob(sum, content)
 }
 
 // heldBlob reads blob sum from the bucket, checked against its hash, and sends it again, the same bytes, when it was

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,7 +20,9 @@ import (
 // A tree's source unpacks to 98,381 files, 1.06 GB (adamic, Oct 10), which takes 8.7 s on a Mac (41 s before Unpack
 // kept its directories open) after a 23 s fetch: too much of the 30 s a unit has to be ready to spend on every unit,
 // so it isn't unpacked once a unit. A runner keeps each tree's source unpacked under its root,
-// <root>/loom-sources/<source sha256>, for every unit of that tree, as the go test path keeps its checkout:
+// <root>/loom-sources/<source sha256>, for every unit of that tree, as the go test path keeps its checkout. A tree's
+// source is assembled from its chunks (assemble.go) and named by builder.SourceSum; its module cache is one archive,
+// named by its blob's sha256:
 //
 //   - A source is unpacked into .unpacking-<sha256>-<random>, which its unpacker holds locked, gets its completion
 //     marker (sourceMarker, holding its sha256), is synced once, and only then is renamed to its name. A directory at a
@@ -297,6 +300,10 @@ func (cache sourceCache) remove(sum string) {
 	}
 	waitContext, cancel := context.WithTimeout(context.Background(), removalWait)
 	defer cancel()
+	// Its state first, so no state outlives the tree it describes.
+	if err := os.Remove(cache.statePath(sum)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return
+	}
 	if cache.moveAway(waitContext, filepath.Join(cache.directory, sum)) == nil {
 		if _, err := os.Lstat(cache.moduleCache(sum)); err == nil {
 			cache.moveAway(waitContext, cache.moduleCache(sum))

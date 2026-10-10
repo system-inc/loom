@@ -2,6 +2,7 @@ package builder
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,7 +73,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	if len(failed) != 0 || len(products["example.com/tree/a"]) != 1 || products["example.com/tree/a"][0] != product {
 		t.Fatalf("products %v, failed %v", products, failed)
 	}
-	source, err := SourceArchive(tree)
+	source, err := SourceChunks(tree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,18 +87,20 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		index.Packages[result.Package] = result
 	}
 	fake, store := serve(t)
-	treeKey, written, err := PublishTree(store, &index, build.Out, build.Cache, source, nil)
+	treeKey, written, err := PublishTree(store, &index, build.Out, build.Cache, &source, nil)
 	if err != nil || !written || treeKey != planner.TreeKey(index.Tree, index.Go, index.Goos, index.Goarch) {
 		t.Fatal(treeKey, err)
 	}
-	// The layout: the tree's index, one ref (the product), and four blobs (the source, the product, two binaries).
+	// The layout: the tree's index, one ref (the product), and its blobs: the source's chunks, the product, two
+	// binaries.
 	if trees, refs, blobs := fake.Keys("trees/"), fake.Keys("refs/"), fake.Keys("blobs/"); !slices.Equal(trees, []string{"trees/" + treeKey + ".json"}) ||
-		!slices.Equal(refs, []string{"refs/action/" + product}) || len(blobs) != 4 {
+		!slices.Equal(refs, []string{"refs/action/" + product}) || len(blobs) != 3+len(source.Chunks) || source.Sent != len(source.Chunks) {
 		t.Fatalf("the store holds %v %v %v", trees, refs, blobs)
 	}
 	var stored TreeIndex
 	content, _ := fake.Object("trees/" + treeKey + ".json")
-	if err = json.Unmarshal(content, &stored); err != nil || stored.Source != digest(source) || stored.Products[product] == "" || stored.Packages["example.com/tree/a"].Binary == "" {
+	if err = json.Unmarshal(content, &stored); err != nil || stored.Format != TreeIndexFormat || !slices.Equal(stored.Source, source.Chunks) || stored.Products[product] == "" ||
+		stored.Packages["example.com/tree/a"].Binary == "" {
 		t.Fatalf("the index %s %v", content, err)
 	}
 	if ref, _ := fake.Object("refs/action/" + product); string(ref) != stored.Products[product] {
@@ -118,12 +121,13 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "--- PASS: TestUsesTheProductAndTestdata") {
 		t.Fatalf("the fetched binary: %v\n%s", err, output)
 	}
-	// It read the index and only package a's three blobs; package b's binary stayed where it was.
-	if reads := fake.Count("PUBLIC", "blobs/"); reads != 3 || fake.Count("PUBLIC", "blobs/"+stored.Packages["example.com/tree/b"].Binary) != 0 {
+	// It read the index and only package a's blobs, its binary, its product and the source's chunks; package b's binary
+	// stayed where it was.
+	if reads := fake.Count("PUBLIC", "blobs/"); reads != 2+len(source.Chunks) || fake.Count("PUBLIC", "blobs/"+stored.Packages["example.com/tree/b"].Binary) != 0 {
 		t.Fatalf("the runner read %v", fake.Requests())
 	}
 	// A second unit of the same tree on the same runner reads its blobs from the local cache.
-	if _, err = runner.FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err != nil || fake.Count("PUBLIC", "blobs/") != 3 {
+	if _, err = runner.FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err != nil || fake.Count("PUBLIC", "blobs/") != 2+len(source.Chunks) {
 		t.Fatalf("a second unit: %v %v", err, fake.Requests())
 	}
 	if _, err = runner.FetchPackage(treeKey, "example.com/tree/a", unit); err == nil {
@@ -137,10 +141,10 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		result.Binary = ""
 		again.Packages[name] = result
 	}
-	if _, written, err = PublishTree(store, &again, build.Out, build.Cache, source, nil); err != nil || !written {
+	if _, written, err = PublishTree(store, &again, build.Out, build.Cache, &source, nil); err != nil || !written {
 		t.Fatal(err)
 	}
-	if fake.Count("PUT", "blobs/") != 0 || fake.Count("PUT", "refs/") != 0 || fake.Count("PUT", "trees/") != 1 {
+	if fake.Count("PUT", "blobs/") != 0 || fake.Count("PUT", "refs/") != 0 || fake.Count("PUT", "trees/") != 1 || source.Sent != 0 {
 		t.Fatalf("an unchanged tree: %v", fake.Requests())
 	}
 
@@ -153,7 +157,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		result.Binary = ""
 		conflicted.Packages[name] = result
 	}
-	if _, written, err = PublishTree(store, &conflicted, build.Out, build.Cache, source, nil); err != nil || written {
+	if _, written, err = PublishTree(store, &conflicted, build.Out, build.Cache, &source, nil); err != nil || written {
 		t.Fatal(err)
 	}
 	if broke := conflicted.Packages["example.com/tree/a"].Error; !strings.Contains(broke, digest(other)) || !strings.Contains(broke, stored.Products[product]) {
@@ -172,14 +176,14 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	// With no index yet, the worse build's is written, and a runner is told package a didn't build; the better build
 	// then takes its place, over the ETag it read.
 	fake.Delete("trees/" + treeKey + ".json")
-	if _, written, err = PublishTree(store, &conflicted, build.Out, build.Cache, source, nil); err != nil || !written {
+	if _, written, err = PublishTree(store, &conflicted, build.Out, build.Cache, &source, nil); err != nil || !written {
 		t.Fatalf("a first index with a failure: %v %v", written, err)
 	}
 	if _, err = (Store{Read: fake.Public()}).FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err == nil || !strings.Contains(err.Error(), "didn't build") {
 		t.Fatalf("a runner fetching a package that didn't build: %v", err)
 	}
 	fake.Set("refs/action/"+product, []byte(stored.Products[product]), time.Now())
-	if _, written, err = PublishTree(store, &again, build.Out, build.Cache, source, nil); err != nil || !written {
+	if _, written, err = PublishTree(store, &again, build.Out, build.Cache, &source, nil); err != nil || !written {
 		t.Fatalf("a better build after a worse one: %v %v", written, err)
 	}
 	if _, err = (Store{Read: fake.Public()}).FetchPackage(treeKey, "example.com/tree/a", t.TempDir()); err != nil {
@@ -197,7 +201,8 @@ func TestARunnerRefusesATreeThatDoesntCheck(t *testing.T) {
 	plant := func(t *testing.T, archive []byte) (*r2test.Fake, Store) {
 		fake, _ := serve(t)
 		source := tarGzip(t, entry{name: "p/case.txt", body: "case"})
-		index := TreeIndex{Format: TreeIndexFormat, Source: digest(source), Products: map[string]string{product: digest(archive)},
+		index := TreeIndex{Format: TreeIndexFormat, Source: []SourceChunk{{Blob: digest(source), First: "p/case.txt", Last: "p/case.txt", Files: 1, Bytes: int64(len(source))}},
+			Products: map[string]string{product: digest(archive)},
 			Packages: map[string]TreePackage{"p": {Package: "p", Directory: "p", Binary: digest(binary), Products: []string{product}}}}
 		encoded, _ := index.encode()
 		for _, blob := range [][]byte{binary, archive, source} {
@@ -321,8 +326,9 @@ func TestATreeIsIndexedOnlyByAnIndexThisReleaseReads(t *testing.T) {
 	}
 	source := []byte("source")
 	fake.Set("blobs/"+digest(source), source, time.Now())
+	chunks := []SourceChunk{{Blob: digest(source), First: "a", Last: "a", Files: 1, Bytes: int64(len(source))}}
 	index := func(format int, failed bool) []byte {
-		held := TreeIndex{Format: format, Tree: "t", Source: digest(source), Products: map[string]string{}, Packages: map[string]TreePackage{}}
+		held := TreeIndex{Format: format, Tree: "t", Source: chunks, Products: map[string]string{}, Packages: map[string]TreePackage{}}
 		if failed {
 			held.Packages["p"] = TreePackage{Package: "p", Error: "go test -c: exit status 1", Failure: WorkshopFailure}
 		}
@@ -330,7 +336,7 @@ func TestATreeIsIndexedOnlyByAnIndexThisReleaseReads(t *testing.T) {
 		return encoded
 	}
 	for name, content := range map[string][]byte{"an older format's": index(TreeIndexFormat-1, false), "a newer format's": index(TreeIndexFormat+1, false),
-		"one that doesn't parse": []byte("{\"format\": 1, \"source\": \"not a sha256\"}\n")} {
+		"one that doesn't parse": []byte(fmt.Sprintf("{\"format\": %d, \"source\": \"not a chunk list\"}\n", TreeIndexFormat))} {
 		fake.Set("trees/"+key+".json", content, time.Now())
 		if indexed, err := store.TreeIndexed(key); err != nil || indexed {
 			t.Fatalf("%s index read as built: %v %v", name, indexed, err)
@@ -344,7 +350,7 @@ func TestATreeIsIndexedOnlyByAnIndexThisReleaseReads(t *testing.T) {
 		t.Fatal("a path that isn't a tree key was asked")
 	}
 	fake.Set("trees/"+key+".json", index(TreeIndexFormat-1, false), time.Now())
-	rebuilt := TreeIndex{Format: TreeIndexFormat, Tree: "t", Source: digest(source), Products: map[string]string{},
+	rebuilt := TreeIndex{Format: TreeIndexFormat, Tree: "t", Source: chunks, Products: map[string]string{},
 		Packages: map[string]TreePackage{"p": {Package: "p", Error: "go test -c: exit status 1", Failure: WorkshopFailure}}}
 	if written, err := store.writeIndex(key, &rebuilt); err != nil || !written {
 		t.Fatalf("a rebuild over an older format's index with fewer failures: written %v (%v)", written, err)

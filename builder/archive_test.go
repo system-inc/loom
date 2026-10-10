@@ -210,37 +210,6 @@ func gitCommit(t *testing.T, tree string) {
 	}
 }
 
-// A tree's source archive keeps its tracked links, and a link Unpack would refuse fails the build.
-func TestTheSourceArchiveKeepsLinksAndRefusesOneThatLeaves(t *testing.T) {
-	tree := gitTree(t, map[string]string{"go.mod": "module m\n", "a/B.txt": "b\n", "run.sh": "#!/bin/sh\n"})
-	os.Chmod(filepath.Join(tree, "run.sh"), 0o755)
-	os.Symlink("B.txt", filepath.Join(tree, "a", "link"))
-	gitCommit(t, tree)
-	archive, err := SourceArchive(tree)
-	if err != nil {
-		t.Fatal(err)
-	}
-	again, _ := SourceArchive(tree)
-	if !bytes.Equal(archive, again) {
-		t.Fatal("two archives of one tree differ")
-	}
-	directory := t.TempDir()
-	if err = Unpack(bytes.NewReader(archive), directory, nil); err != nil {
-		t.Fatal(err)
-	}
-	if target, err := os.Readlink(filepath.Join(directory, "a", "link")); err != nil || target != "B.txt" {
-		t.Fatalf("the link: %q %v", target, err)
-	}
-	if info, err := os.Stat(filepath.Join(directory, "run.sh")); err != nil || info.Mode().Perm() != 0o755 {
-		t.Fatalf("run.sh: %v %v", info, err)
-	}
-	os.Symlink("../../outside", filepath.Join(tree, "a", "out"))
-	gitCommit(t, tree)
-	if _, err = SourceArchive(tree); err == nil || !strings.Contains(err.Error(), "outside") {
-		t.Fatalf("a link out of the tree: %v", err)
-	}
-}
-
 // folds reports whether the filesystem under a test's temporary directories takes spelling for the same name as written.
 func folds(t *testing.T, written, spelling string) bool {
 	t.Helper()

@@ -77,16 +77,22 @@ Workshop built and builds nothing (`runner/prebuilt.go`, #pcn6prz). In place of 
    under its floor free (3 GiB by default), it removes more, then the unpacked sources no unit holds; a disk still short,
    or a short disk the caches aren't on, refuses the unit as unfit, broken, never failed (serve itself keeps today's
    1500 MB floor);
-2. reads `trees/<tree>.json` from the store (the runner's own setting, never the unit's), holds it to its key and its format (`builder.TreeIndexFormat`: an index in another format is as good as none, and Workshop builds the tree again), refuses a
-   tree built for another platform (the key and index name `GOOS`/`GOARCH`) before fetching anything, and fetches each
-   package's test binary, the products its tests read, and the tree's source, every one checked against its sha256 as
-   it arrives and again when read from the cache, each fetch's bytes and seconds on the unit's record; a fetch is
+2. reads `trees/<tree>.json` from the store (the runner's own setting, never the unit's), holds it to its key and its
+   format (`builder.TreeIndexFormat`: an index in another format is unfit, as good as none, and Workshop builds the tree
+   again), refuses a tree built for another platform (the key and index name `GOOS`/`GOARCH`) before fetching anything,
+   and fetches each package's test binary, the products its tests read, and the chunks of the tree's source it doesn't
+   already hold (step 3), every one checked against its sha256 as it arrives and again when read from the cache, each
+   fetch's bytes and seconds on the unit's record (the chunks' in a sum); a fetch is
    written to a locked `.partial-` and renamed only when whole, so a kill or a full disk never leaves a blob's name on
    anything else; the index, every fetch and every wait on another unit's fetch end at the unit's deadline; whatever
    the store lacks or can't give whole is named, and the unit is broken, never red;
-3. keeps each tree's source unpacked at `<root>/loom-sources/<sha256>` for every unit of the tree (98,381 files took
-   41 s to unpack on a Mac), unpacked beside it under a lock, marked complete, synced once and only then renamed, never
-   trusted without its marker, at most two kept, held by a lock while a unit runs in it;
+3. keeps each tree's source at `<root>/loom-sources/<sum of its chunk list>` for every unit of the tree, assembled from
+   its chunks (each a gzipped tar of a run of its paths, named by its sha256, its range in the index; 836 for adamic's
+   98,459 files) beside it under a lock, every entry in its chunk's range, marked complete, synced once and only then
+   renamed, never trusted without its marker, held by a lock while a unit runs in it. A tree sharing at least half its
+   bytes with a kept tree no unit holds, unchanged since it was assembled (every entry's change time, which no test can
+   set back), is made from that tree: renamed in, the entries of its chunks the new tree lacks removed, the rest of the
+   chunks unpacked in, so a one-file change costs about one chunk (`runner/assemble.go`);
 4. readies the environment with `prepare.sh environment` (the instance's adamic toolchain, which must already be set
    up, stage3/api's npm packages and the gate inputs; no git, no setup, no Go), with the products in the unit's own
    `ADAMIC_BUILD_CACHE_DIR`;

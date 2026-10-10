@@ -28,9 +28,10 @@ import (
 
 // A prebuilt test job (job.Tree set) runs what Workshop built for its tree and builds nothing (Kirk's law, Oct 10,
 // #pcn6prz). The job names its tree's build by key; trees/<key>.json in the action store names, by sha256, each
-// package's test binary, the tree's source archive and the products each package's tests read. The runner fetches
-// those blobs through its blob cache (blobs.go), every hash checked, keeps the tree's source unpacked for every unit
-// of the tree (sources.go), unpacks the products and binaries into the unit's own directory, and runs each package's
+// package's test binary, the chunks of the tree's source and the products each package's tests read. The runner
+// fetches those blobs through its blob cache (blobs.go), every hash checked, only the chunks it doesn't already hold,
+// keeps the tree's source assembled for every unit of the tree (sources.go, assemble.go), unpacks the products and
+// binaries into the unit's own directory, and runs each package's
 // binary in its directory of that source as go test -json would: the
 // binary's output, through the same test2json conversion go test applies (runner/test2json, vendored), is the event
 // stream the Judge reads. Whatever the store can't give whole (an index, a binary, the source, a product: never built,
@@ -44,8 +45,12 @@ import (
 //
 // Everything before the tests is held to the unit's time, so a store that stalls breaks a unit, never wedges it.
 
-// blobFetchJobs is how many blobs a unit fetches at once.
-const blobFetchJobs = 4
+// blobFetchJobs is how many blobs a unit fetches at once, and chunkFetchJobs how many when it fetches its tree's
+// source: hundreds of chunks, most of them small, each a round trip.
+const (
+	blobFetchJobs  = 4
+	chunkFetchJobs = 16
+)
 
 // A prebuiltPackage is one of the job's packages and what its tree's build holds for it. One whose test binary
 // didn't compile on Workshop for the change's reasons (built.Error, builder.ChangeFailure) is the change's red.
@@ -54,10 +59,12 @@ type prebuiltPackage struct {
 	built builder.TreePackage
 }
 
-// A neededBlob is one blob a unit reads, and what it is, for the record and any error.
+// A neededBlob is one blob a unit reads, and what it is, for the record and any error. A chunk of the tree's source
+// is only had in the blob cache, and said in a sum, not a line of its own.
 type neededBlob struct {
-	sum  string
-	what string
+	sum   string
+	what  string
+	chunk bool
 }
 
 // runPrebuilt runs a test job whose tree Workshop built. Failed: a package's tests failed or the unit ran out of time.
@@ -93,16 +100,44 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		run.fail(protocol.PhaseFetch, fmt.Errorf("%w: Loom's, never the change's", err))
 		return protocol.StatusBroken
 	}
-	held, err := sources.hold(index.Source)
+	sourceSum := builder.SourceSum(index.Source)
+	held, err := sources.hold(sourceSum)
 	if err != nil {
 		run.fail(protocol.PhaseStart, fmt.Errorf("holding the tree's source: %w (the instance's, never the change's)", err))
 		return protocol.StatusBroken
 	}
 	defer held.release()
+	// The kept tree the source is made from, when one is near: only the chunks it lacks are fetched.
+	var base *sourceBase
 	if held.ready {
-		run.say("the tree's source, blob " + index.Source + ", is already unpacked here")
+		run.say("the tree's source, " + sourceSum + ", is already assembled here")
 	} else {
-		needed = append([]neededBlob{{sum: index.Source, what: "the tree's source"}}, needed...)
+		var passed []string
+		base, passed = sources.nearest(index.Source)
+		defer base.release()
+		for _, note := range passed {
+			run.say(note)
+		}
+		kept := map[string]bool{}
+		if base != nil {
+			for _, chunk := range base.state.Chunks {
+				kept[chunk.Blob] = true
+			}
+		}
+		fetching, fetchingBytes := 0, int64(0)
+		for _, chunk := range index.Source {
+			if !kept[chunk.Blob] {
+				needed = append(needed, neededBlob{sum: chunk.Blob, what: "the tree's source chunk " + strconv.Quote(chunk.First) + " to " + strconv.Quote(chunk.Last), chunk: true})
+				fetching++
+				fetchingBytes += chunk.Bytes
+			}
+		}
+		from := "no kept tree"
+		if base != nil {
+			from = "kept tree " + base.sum
+		}
+		run.say(fmt.Sprintf("the tree's source, %s: %d chunks, %d bytes; from %s, %d chunks to have, %d bytes", sourceSum, len(index.Source),
+			sourceBytes(index.Source), from, fetching, fetchingBytes))
 	}
 	// The tree's module cache, unpacked once like its source: the only place the tests' go queries read a module.
 	var modules *heldSource
@@ -138,9 +173,23 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	}
 	unpackStarted := time.Now()
 	if !held.ready {
-		if err := sources.unpack(prepareContext, held, files[index.Source]); err != nil {
-			run.fail(protocol.PhaseStart, fmt.Errorf("unpacking the tree's source: %w (Loom's, never the change's)", err))
+		open := func(openContext context.Context, sum string) (*os.File, error) {
+			file, _, err := cache.open(openContext, sum)
+			return file, err
+		}
+		done, err := sources.assemble(prepareContext, held, index.Source, base, open)
+		if err != nil {
+			run.fail(protocol.PhaseStart, fmt.Errorf("assembling the tree's source: %w (Loom's, never the change's)", err))
 			return protocol.StatusBroken
+		}
+		if done.base != "" {
+			run.say(fmt.Sprintf("assembled the tree's source in %.1f s from kept tree %s: %d chunks kept, %d entries removed, %d chunks unpacked",
+				time.Since(unpackStarted).Seconds(), done.base, done.kept, done.removed, done.unpacked))
+		} else {
+			run.say(fmt.Sprintf("assembled the tree's source in %.1f s: %d chunks unpacked", time.Since(unpackStarted).Seconds(), done.unpacked))
+		}
+		if done.stateErr != nil {
+			run.say(fmt.Sprintf("the tree's state wasn't written, so it is never made into another: %v", done.stateErr))
 		}
 	}
 	if modules != nil && !modules.ready {
@@ -288,17 +337,24 @@ func prebuiltPackages(job *protocol.TestJob, index builder.TreeIndex) ([]prebuil
 	return packages, needed, nil
 }
 
-// fetchBlobs has every needed blob open, blobFetchJobs at a time, each fetch's bytes and seconds said on the unit's
-// record. A blob that can't be had is named with what it is.
+// fetchBlobs has every needed blob open, blobFetchJobs at a time (chunkFetchJobs with any of the source's chunks
+// among them), each fetch's bytes and seconds said on the unit's record, and every chunk of the source in the blob
+// cache, closed, their fetches said in a sum. A blob that can't be had is named with what it is.
 func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, needed []neededBlob) (map[string]*os.File, error) {
 	files := map[string]*os.File{}
 	var mutex sync.Mutex
-	var fetched, cached int64
-	var cachedCount int
+	var fetched, cached, chunksFetched, chunksCached int64
+	var cachedCount, chunksFetchedCount, chunksCachedCount, chunksCorrupt int
 	errs := make([]error, len(needed))
 	next := make(chan int)
 	var group sync.WaitGroup
-	for range blobFetchJobs {
+	jobs := blobFetchJobs
+	for _, blob := range needed {
+		if blob.chunk {
+			jobs = chunkFetchJobs
+		}
+	}
+	for range jobs {
 		group.Add(1)
 		go func() {
 			defer group.Done()
@@ -312,6 +368,23 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 				}
 				if err != nil {
 					errs[position] = err
+					continue
+				}
+				if blob.chunk {
+					// Assembly opens it again through the cache, hashed again, fetched again if it went meanwhile.
+					file.Close()
+					mutex.Lock()
+					if fetch.cached {
+						chunksCached += fetch.bytes
+						chunksCachedCount++
+					} else {
+						chunksFetched += fetch.bytes
+						chunksFetchedCount++
+					}
+					if fetch.corrupt {
+						chunksCorrupt++
+					}
+					mutex.Unlock()
 					continue
 				}
 				from := "the store"
@@ -339,7 +412,15 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 	}
 	close(next)
 	group.Wait()
-	run.say(fmt.Sprintf("%d blobs: %d bytes from the store, %d bytes in %d blobs from the cache", len(needed), fetched, cached, cachedCount))
+	if chunks := chunksFetchedCount + chunksCachedCount; chunks > 0 {
+		corrupt := ""
+		if chunksCorrupt > 0 {
+			corrupt = fmt.Sprintf(", %d of them in place of a cached copy that didn't hash to its name", chunksCorrupt)
+		}
+		run.say(fmt.Sprintf("the tree's source chunks: %d bytes in %d chunks from the store%s, %d bytes in %d chunks from the cache",
+			chunksFetched, chunksFetchedCount, corrupt, chunksCached, chunksCachedCount))
+	}
+	run.say(fmt.Sprintf("%d blobs: %d bytes from the store, %d bytes in %d blobs from the cache", len(needed), fetched+chunksFetched, cached+chunksCached, cachedCount+chunksCachedCount))
 	return files, errors.Join(errs...)
 }
 

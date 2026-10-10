@@ -151,11 +151,11 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	binariesStarted := time.Now()
 	built := build.Binaries(packages)
 	binarySeconds := time.Since(binariesStarted).Seconds()
-	source, err := builder.SourceArchive(*tree)
+	source, err := builder.SourceChunks(*tree)
 	if err != nil {
 		return fail(err)
 	}
-	// The tree's modules, after its source is archived (go may write go.sum), from Workshop's own module cache first.
+	// The tree's modules, after its source is chunked (go may write go.sum), from Workshop's own module cache first.
 	proxy, err := exec.Command("go", "env", "GOMODCACHE", "GOPROXY").Output()
 	if err != nil {
 		return fail(err)
@@ -185,7 +185,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if treeIndex.Modules, err = store.PutBlob(modules); err != nil {
 		return fail(fmt.Errorf("the tree's modules: %w", err))
 	}
-	treeKey, indexWritten, err := builder.PublishTree(store, &treeIndex, build.Out, build.Cache, source, held.Held())
+	treeKey, indexWritten, err := builder.PublishTree(store, &treeIndex, build.Out, build.Cache, &source, held.Held())
 	if err != nil {
 		return fail(err)
 	}
@@ -202,7 +202,8 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"tree": identity.Tree, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json", "indexWritten": indexWritten,
 		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products), "productsFetched": len(held.Held()),
 		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
-		"seconds": time.Since(started).Seconds(), "sourceBytes": len(source),
+		"seconds": time.Since(started).Seconds(), "sourceChunks": len(source.Chunks), "sourceBytes": source.Bytes(),
+		"sourceChunksSent": source.Sent, "sourceBytesSent": source.SentBytes,
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
 	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten, treeLock)

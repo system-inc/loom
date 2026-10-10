@@ -219,7 +219,8 @@ func TestThePlacerReadsATreesBuildFromTheBucketAndTheBuildersLedger(t *testing.T
 	if state, err = read(other); err != nil || state.Found || state.Indexed {
 		t.Fatalf("a tree the builder never saw: %+v %v", state, err)
 	}
-	index, _ := json.Marshal(builder.TreeIndex{Format: builder.TreeIndexFormat, Tree: "t", Source: strings.Repeat("d", 64)})
+	index, _ := json.Marshal(builder.TreeIndex{Format: builder.TreeIndexFormat, Tree: "t",
+		Source: []builder.SourceChunk{{Blob: strings.Repeat("d", 64), First: "a", Last: "a", Files: 1, Bytes: 1}}})
 	bucket.Put("trees/"+key+".json", index, r2.PutOptions{ContentType: "application/json"})
 	if state, err = read(key); err != nil || !state.Indexed {
 		t.Fatalf("a tree whose index is up: %+v %v", state, err)

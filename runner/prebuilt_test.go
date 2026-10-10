@@ -42,7 +42,9 @@ import (
 //	a fetch written straight to the blob's name: TestTwoFetchesOfOneBlob
 //	no per-blob lock, so one runner fetches a blob twice at once: TestTwoFetchesOfOneBlob
 //	the index not held to its key: TestWhatTheStoreLacksIsLoomsAndNamed
-//	a source unpacked straight at its name, or a dead runner's unpacking never swept: TestASourceUnpackedPartwayIsNeverTrusted
+//	a dead runner's unpacking never swept: TestASourceUnpackedPartwayIsNeverTrusted
+//	a module cache unpacked straight at its name: TestAModuleCacheUnpackedPartwayIsNeverTrusted (a source assembled at
+//	its name: assemble_test.go)
 //	a source a unit holds removed, or sources kept oldest first: TestSourcesAreBoundedAndAHeldOneStays
 //	prepare.sh's environment mode reaching the checkout, or taking an instance with no toolchain:
 //	TestPrepareEnvironmentNeedsNoGitAndNoGo
@@ -230,26 +232,81 @@ type prebuiltTree struct {
 	key     string
 	index   builder.TreeIndex
 	binary  string
-	source  string
+	source  string // the source's sum, its directory's name
 	modules string
 	store   *prebuiltStore
+}
+
+// fixtureCuts are where the fixture's source is cut into chunks: three, the second holding testdata alone.
+var fixtureCuts = []string{"internal/lower/testdata/", "internal/uses/"}
+
+// putChunks stores files as chunks, in name order, a new one starting at the first name at or after each cut, and
+// returns them as an index lists them.
+func (store *prebuiltStore) putChunks(t *testing.T, files []tarEntry, cuts ...string) []builder.SourceChunk {
+	t.Helper()
+	chunks, blobs := makeChunks(t, files, cuts...)
+	for _, blob := range blobs {
+		store.putBlob(blob)
+	}
+	return chunks
+}
+
+// makeChunks makes files chunks, in name order, a new one starting at the first name at or after each cut, and
+// returns them as an index lists them, and their blobs.
+func makeChunks(t *testing.T, files []tarEntry, cuts ...string) ([]builder.SourceChunk, map[string][]byte) {
+	t.Helper()
+	files = sortedEntries(files)
+	chunks, blobs := []builder.SourceChunk{}, map[string][]byte{}
+	start := 0
+	for index := range files {
+		last := index == len(files)-1
+		if !last && !slices.ContainsFunc(cuts, func(cut string) bool { return files[index].name < cut && files[index+1].name >= cut }) {
+			continue
+		}
+		run := files[start : index+1]
+		blob := makeTar(t, run, true)
+		blobs[hashOf(blob)] = blob
+		chunks = append(chunks, builder.SourceChunk{Blob: hashOf(blob), First: run[0].name, Last: run[len(run)-1].name, Files: len(run), Bytes: int64(len(blob))})
+		start = index + 1
+	}
+	return chunks, blobs
+}
+
+// sortedEntries is files in name order, as an archive holds them.
+func sortedEntries(files []tarEntry) []tarEntry {
+	files = append([]tarEntry{}, files...)
+	slices.SortFunc(files, func(left, right tarEntry) int { return strings.Compare(left.name, right.name) })
+	return files
+}
+
+// fixtureFiles are the fixture tree's files as tar entries.
+func fixtureFiles() []tarEntry {
+	files := []tarEntry{}
+	for name, content := range fixtureBinary.files {
+		files = append(files, tarEntry{name: name, kind: tar.TypeReg, content: content})
+	}
+	return files
+}
+
+// setSource makes chunks the tree's source and publishes its index.
+func (tree *prebuiltTree) setSource(t *testing.T, chunks []builder.SourceChunk) {
+	tree.index.Source, tree.source = chunks, builder.SourceSum(chunks)
+	tree.publish(t)
 }
 
 func newPrebuiltTree(t *testing.T, store *prebuiltStore) *prebuiltTree {
 	t.Helper()
 	tree := &prebuiltTree{store: store}
 	tree.binary = store.putBlob(gzipped(t, prebuiltBinary(t)))
-	files := []tarEntry{}
-	for name, content := range fixtureBinary.files {
-		files = append(files, tarEntry{name: name, kind: tar.TypeReg, content: content})
-	}
-	tree.source = store.putBlob(makeTar(t, files, true))
+	chunks := store.putChunks(t, fixtureFiles(), fixtureCuts...)
+	tree.source = builder.SourceSum(chunks)
 	tree.modules = store.putBlob(fixtureBinary.modules)
 	product := store.putBlob(makeTar(t, []tarEntry{
 		{name: fixtureProductKey + ".inputs", kind: tar.TypeReg, content: "{}\n"},
 		{name: fixtureProductKey + "/tool", kind: tar.TypeReg, content: "the product\n", mode: 0o755},
 	}, true))
-	tree.index = builder.TreeIndex{Format: builder.TreeIndexFormat, Tree: strings.Repeat("7", 40), Go: fixtureBinary.goVersion, Goos: runtime.GOOS, Goarch: runtime.GOARCH, Source: tree.source, Modules: tree.modules,
+	tree.index = builder.TreeIndex{Format: builder.TreeIndexFormat, Tree: strings.Repeat("7", 40), Go: fixtureBinary.goVersion, Goos: runtime.GOOS, Goarch: runtime.GOARCH,
+		Source: chunks, Modules: tree.modules,
 		Products: map[string]string{fixtureProductKey: product},
 		Packages: map[string]builder.TreePackage{lowerPackage: {Package: lowerPackage, Directory: "internal/lower", Binary: tree.binary, Products: []string{fixtureProductKey}}}}
 	tree.rekey(t)
@@ -406,11 +463,14 @@ func TestAPrebuiltUnitRunsGreenWithNoGo(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(fixture.directory, "checkout")); err == nil {
 		t.Error("a prebuilt unit prepared a checkout")
 	}
-	// Every fetch is on the record, with its bytes and seconds.
-	for _, blob := range []string{fixture.tree.source, fixture.tree.binary, fixture.tree.index.Products[fixtureProductKey]} {
+	// Every fetch is on the record, with its bytes and seconds, and the source's chunks in a sum.
+	for _, blob := range []string{fixture.tree.binary, fixture.tree.index.Products[fixtureProductKey]} {
 		if !strings.Contains(runner, "blob "+blob+", ") || !strings.Contains(runner, " from the store") {
 			t.Errorf("no fetch of %s on the record:\n%s", blob, runner)
 		}
+	}
+	if !strings.Contains(runner, "the tree's source chunks: ") || !strings.Contains(runner, " in 3 chunks from the store, 0 bytes in 0 chunks from the cache") {
+		t.Errorf("the source's chunks aren't on the record:\n%s", runner)
 	}
 	if !strings.Contains(runner, "fetched trees/"+fixture.tree.key+".json, ") || !strings.Contains(runner, "ready in ") {
 		t.Errorf("the index's fetch and the time to be ready aren't on the record:\n%s", runner)
@@ -470,7 +530,8 @@ func TestWhatTheStoreLacksIsLoomsAndNamed(t *testing.T) {
 		"the index": {func(t *testing.T, tree *prebuiltTree) { tree.store.remove("trees/" + tree.key + ".json") }, "trees/"},
 		"the binary": {func(t *testing.T, tree *prebuiltTree) { tree.store.remove("blobs/" + tree.binary) },
 			lowerPackage + "'s test binary, blob "},
-		"the source": {func(t *testing.T, tree *prebuiltTree) { tree.store.remove("blobs/" + tree.source) }, "the tree's source, blob "},
+		"a chunk of the source": {func(t *testing.T, tree *prebuiltTree) { tree.store.remove("blobs/" + tree.index.Source[1].Blob) },
+			"the tree's source chunk \"internal/lower/testdata/fixture.txt\" to \"internal/lower/testdata/fixture.txt\", blob "},
 		"a product": {func(t *testing.T, tree *prebuiltTree) {
 			tree.store.remove("blobs/" + tree.index.Products[fixtureProductKey])
 		},
@@ -823,19 +884,13 @@ func TestPrepareEnvironmentNeedsNoGitAndNoGo(t *testing.T) {
 // the next unit of the tree unpacks it again, and what a dead runner's unpacking left is swept, never used.
 func TestASourceUnpackedPartwayIsNeverTrusted(t *testing.T) {
 	fixture := newPrebuiltFixture(t)
-	files := []tarEntry{}
-	for _, name := range []string{"go.mod", "internal/lower/lower_test.go", "internal/lower/testdata/fixture.txt"} {
-		content, _ := os.ReadFile(filepath.Join("testdata", "prebuilt", filepath.FromSlash(name)))
-		files = append(files, tarEntry{name: name, kind: tar.TypeReg, content: string(content)})
-	}
-	files = append(files, tarEntry{name: "../outside", kind: tar.TypeReg, content: "x"})
-	fixture.tree.index.Source = fixture.store.putBlob(makeTar(t, files, true))
-	fixture.tree.publish(t)
+	files := append(fixtureFiles(), tarEntry{name: "../outside", kind: tar.TypeReg, content: "x"})
+	fixture.tree.setSource(t, fixture.store.putChunks(t, files, fixtureCuts...))
 	sources := filepath.Join(fixture.directory, "root", sourceDirectoryName)
 	// A dead runner's unpacking, whose lock is free, and a live one's, holding it.
-	leftover := filepath.Join(sources, unpackingPrefix+fixture.tree.index.Source+"-dead")
+	leftover := filepath.Join(sources, unpackingPrefix+fixture.tree.source+"-dead")
 	os.MkdirAll(leftover, 0o755)
-	live := filepath.Join(sources, unpackingPrefix+fixture.tree.index.Source+"-live")
+	live := filepath.Join(sources, unpackingPrefix+fixture.tree.source+"-live")
 	os.MkdirAll(live, 0o755)
 	holder, err := os.Open(live)
 	if err != nil {
@@ -847,10 +902,10 @@ func TestASourceUnpackedPartwayIsNeverTrusted(t *testing.T) {
 	}
 	for range 2 {
 		result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
-		if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "unpacking the tree's source") {
+		if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "assembling the tree's source") {
 			t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
 		}
-		if _, err := os.Stat(filepath.Join(sources, fixture.tree.index.Source)); err == nil {
+		if _, err := os.Stat(filepath.Join(sources, fixture.tree.source)); err == nil {
 			t.Fatal("a source refused partway is at its name")
 		}
 	}
@@ -862,6 +917,25 @@ func TestASourceUnpackedPartwayIsNeverTrusted(t *testing.T) {
 	}
 	if _, err := os.Stat(live); err != nil {
 		t.Error("a live runner's unpacking was removed")
+	}
+}
+
+// A tree's module cache refused partway leaves nothing at its name either: it is one archive, unpacked whole, never
+// at its name until it is.
+func TestAModuleCacheUnpackedPartwayIsNeverTrusted(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.tree.modules = fixture.store.putBlob(makeTar(t, []tarEntry{
+		{name: "cache/download/a/@v/list", kind: tar.TypeReg, content: "v1.0.0\n"},
+		{name: "../outside", kind: tar.TypeReg, content: "x"},
+	}, true))
+	fixture.tree.index.Modules = fixture.tree.modules
+	fixture.tree.publish(t)
+	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "unpacking the tree's module cache") {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+	if _, err := os.Lstat(filepath.Join(fixture.directory, "root", sourceDirectoryName, fixture.tree.modules)); err == nil {
+		t.Fatal("a module cache refused partway is at its name")
 	}
 }
 
@@ -1107,7 +1181,7 @@ func TestAnUnmarkedSourceIsUnpackedAgain(t *testing.T) {
 	os.WriteFile(filepath.Join(hollow, "junk"), []byte("x"), 0o644)
 	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
 	runner := strings.Join(outputLines(events, "runner"), "\n")
-	if result.Status != protocol.StatusPassed || strings.Contains(runner, "already unpacked") {
+	if result.Status != protocol.StatusPassed || strings.Contains(runner, "already assembled") {
 		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), runner)
 	}
 	if _, err := os.Stat(filepath.Join(hollow, "junk")); err == nil {

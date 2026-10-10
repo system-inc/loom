@@ -19,9 +19,9 @@ import (
 
 // Everything the store holds for a build is gzip, Go's own (Workshop, Oct 10: a 3,789-case corpus is 39 MB as a tar
 // and 1 MB gzipped, a 26 MB test binary 8 MB, each unpacked in 0.13 s), so a runner needs nothing but loom-runner.
-// A product is one archive, a gzipped tar of its files, and a tree's source is another. Both are deterministic:
-// entries sorted by name, every time the epoch, no owner, a file's mode 0644 or 0755 by its executable bit, and a
-// gzip header with no name and no time, so the same files always make the same bytes and the same sha256.
+// A product is one archive, a gzipped tar of its files, and each chunk of a tree's source another (chunks.go). All are
+// deterministic: entries sorted by name, every time the epoch, no owner, a file's mode 0644 or 0755 by its executable
+// bit, and a gzip header with no name and no time, so the same files always make the same bytes and the same sha256.
 
 // An archiveEntry is a regular file read from File, or, with Link set, a symbolic link to Link.
 type archiveEntry struct {
@@ -121,42 +121,6 @@ func ProductArchive(cache string, products []string) ([]byte, int, error) {
 	return archive, len(entries), err
 }
 
-// SourceArchive is the archive of the tree's tracked files, submodules included (git ls-files --recurse-submodules).
-// A tracked symbolic link goes in as a link, and one Unpack would refuse fails here, at build time.
-func SourceArchive(tree string) ([]byte, error) {
-	command := exec.Command("git", "ls-files", "--recurse-submodules", "-z")
-	command.Dir = tree
-	listing, err := command.Output()
-	if err != nil {
-		return nil, fmt.Errorf("git ls-files in %s: %w", tree, err)
-	}
-	entries := []archiveEntry{}
-	for _, name := range strings.Split(strings.TrimRight(string(listing), "\x00"), "\x00") {
-		if name == "" {
-			continue
-		}
-		full := filepath.Join(tree, filepath.FromSlash(name))
-		info, err := os.Lstat(full)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
-		}
-		switch {
-		case info.Mode()&os.ModeSymlink != 0:
-			target, err := os.Readlink(full)
-			if err != nil {
-				return nil, err
-			}
-			if err = checkLink(name, target); err != nil {
-				return nil, err
-			}
-			entries = append(entries, archiveEntry{Name: name, Link: target})
-		case info.Mode().IsRegular():
-			entries = append(entries, archiveEntry{Name: name, File: full, Executable: info.Mode()&0o111 != 0})
-		}
-	}
-	return writeArchive(entries)
-}
-
 // ModuleCacheArchive is the archive of a tree's module download cache: every module in its build graph (go mod download
 // all, run in the tree, workspace and all, into a scratch GOMODCACHE), as GOMODCACHE/cache/download lays them out,
 // which is what GOPROXY=file:// reads, without its sumdb answers or lock files. A runner's read-only go queries read
@@ -244,6 +208,13 @@ func checkLink(name, target string) error {
 
 // errOutside is an archive entry that would land outside its directory.
 var errOutside = errors.New("outside its directory")
+
+// maxEntryName and maxEntryDepth bound an entry's name, in bytes, and its levels: Linux's PATH_MAX, and far deeper
+// than a tree's (2016af55's deepest is 13 levels, its longest name 196 bytes).
+const (
+	maxEntryName  = 4096
+	maxEntryDepth = 256
+)
 
 // Unpacking a tree's source (98,381 files, Oct 10) through an os.Root walked every entry's path from the top three
 // times, to look its parents up, to make them and to open the file, and a fourth time to set its mode: 98.6% of the
@@ -344,6 +315,11 @@ func Unpack(archive io.Reader, directory string, allowed func(name string) bool)
 			return err
 		}
 		name := header.Name
+		// Before any parent is opened: the chain holds a descriptor for every level (a review, Oct 10: a name 2,000
+		// deep ran out a 512-descriptor limit).
+		if depth := strings.Count(name, "/") + 1; len(name) > maxEntryName || depth > maxEntryDepth {
+			return fmt.Errorf("entry %q is %d bytes and %d levels deep, over the %d and %d an archive may hold", name[:min(len(name), 200)], len(name), depth, maxEntryName, maxEntryDepth)
+		}
 		if !filepath.IsLocal(filepath.FromSlash(name)) || path.Clean(name) != name {
 			return fmt.Errorf("entry %q: %w", name, errOutside)
 		}

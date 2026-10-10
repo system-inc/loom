@@ -30,9 +30,9 @@ import (
 // hash, the Go version, the platform the binaries were built for (GOOS/GOARCH: a Linux binary is no use to a Mac
 // runner) and the gate env. Its index is trees/<T>.json in the store (store.go): each package's test binary, gzipped,
 // as a blob; the buildcache products its tests read, each its own archive under refs/action/<buildcache key>, so a
-// product no tree changed is built and goes up once and later trees fetch it (held.go); and the tree's source archive,
-// one blob every package shares. A runner reads the index, then only its own package's binary, products and the
-// source, each by sha256.
+// product no tree changed is built and goes up once and later trees fetch it (held.go); and the tree's source as chunks
+// (chunks.go), every package's, each chunk a blob that goes up once for every tree holding it. A runner reads the
+// index, then only its own package's binary, products and the source's chunks it doesn't already hold, each by sha256.
 
 // A package's build failure is the change's (ChangeFailure: go test -c exited normally with its diagnostics, a compile
 // or vet error, which go test reports as the package's red) or Workshop's (WorkshopFailure: anything else, a kill, a
@@ -395,13 +395,15 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 	return byPackage, failed
 }
 
-// TreeIndexFormat is the shape of tree index this release writes and reads (TreeIndex.Format). A change to what an
-// index holds or how a runner reads it is a new format: indexes in the old one stay at their keys, read as missing, so
-// the tree builder builds them again and the placer releases no unit to a runner that would refuse them.
-const TreeIndexFormat = 1
+// TreeIndexFormat is the shape of tree index this release writes and reads (TreeIndex.Format): 2, whose source is
+// chunks (1, and no format at all, named one whole archive). A change to what an index holds or how a runner reads it
+// is a new format: indexes in the old one stay at their keys, read as missing (ParseTree reads an index for its format
+// first, so one of another shape is ErrIndexFormat, never misread), so the tree builder builds them again and the
+// placer releases no unit to a runner that would refuse them.
+const TreeIndexFormat = 2
 
-// A TreeIndex is trees/<treeKey>.json, a tree's build: the source archive's blob, each product's archive by its key,
-// and each package with its binary's blob and the products its tests read.
+// A TreeIndex is trees/<treeKey>.json, a tree's build: the source's chunks, each product's archive by its key, and
+// each package with its binary's blob and the products its tests read.
 type TreeIndex struct {
 	// Format is the index's shape, TreeIndexFormat for what this release writes and reads: an index in another (an
 	// older release's, or a newer one's) is one this release can't read, so it counts as no index at all.
@@ -412,7 +414,8 @@ type TreeIndex struct {
 	// Goos and Goarch are the platform the binaries were built for, go env GOOS and GOARCH on Workshop.
 	Goos   string `json:"goos"`
 	Goarch string `json:"goarch"`
-	Source string `json:"source"`
+	// Source is the tree's source as chunks, in path order, their ranges never meeting (CheckChunks).
+	Source []SourceChunk `json:"source"`
 	// Modules is the blob of the tree's module download cache (ModuleCacheArchive): the only place a runner's go
 	// reads a module from. Empty: none published.
 	Modules  string                 `json:"modules,omitempty"`
@@ -584,20 +587,37 @@ func each(count, jobs int, work func(index int) error) error {
 	return errors.Join(errs...)
 }
 
-// PublishTree uploads a tree's build and returns its tree key: the source archive, then each product a built
-// package's tests read, once each, as its own archive under its buildcache key, then each built package's binary,
-// gzipped, and the index last, so no index names what the store lacks. A product whose ref names another archive (a
+// PublishTree uploads a tree's build and returns its tree key: each of the source's chunks the store lacks (or holds
+// from more than FreshFor ago; source.Sent and SentBytes count them), then each product a built package's tests read,
+// once each, as its own archive under its buildcache key, then each built package's binary, gzipped, and the index
+// last, so no index names what the store lacks. A product whose ref names another archive (a
 // ConflictError) fails every package that reads it, named in each one's error, and the rest of the tree still goes
 // up. A product in held (HeldProducts.Held) came from the store this build, its blob already fresh, so it is named
 // in the index and nothing more. It fills in treeIndex's blobs as it goes, and reports whether it wrote the index
 // (writeIndex keeps one with fewer failed packages).
-func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte, held map[string]string) (string, bool, error) {
+func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source *Source, held map[string]string) (string, bool, error) {
 	treeKey := planner.TreeKey(treeIndex.Tree, treeIndex.Go, treeIndex.Goos, treeIndex.Goarch)
-	treeIndex.Format = TreeIndexFormat
-	var err error
-	if treeIndex.Source, err = store.PutBlob(source); err != nil {
-		return "", false, fmt.Errorf("the source archive: %w", err)
+	if err := CheckChunks(source.Chunks); err != nil {
+		return "", false, fmt.Errorf("the source: %w", err)
 	}
+	var sent, sentBytes atomic.Int64
+	err := each(len(source.Chunks), publishJobs, func(index int) error {
+		chunk := source.Chunks[index]
+		went, err := store.sendBlob(source.Blobs[chunk.Blob])
+		if err != nil {
+			return fmt.Errorf("the source's chunk %s: %w", chunk.Blob, err)
+		}
+		if went {
+			sent.Add(1)
+			sentBytes.Add(chunk.Bytes)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	source.Sent, source.SentBytes = int(sent.Load()), sentBytes.Load()
+	treeIndex.Format, treeIndex.Source = TreeIndexFormat, source.Chunks
 	names := make([]string, 0, len(treeIndex.Packages))
 	read := map[string]bool{}
 	for name, built := range treeIndex.Packages {
@@ -759,9 +779,12 @@ func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error
 	return false, fmt.Errorf("%s kept changing while it was written", key)
 }
 
-// blobs are every blob the index names: the source archive, each product's archive, each built package's binary.
+// blobs are every blob the index names: the source's chunks, each product's archive, each built package's binary.
 func (index TreeIndex) blobs() []string {
-	named := map[string]bool{index.Source: true, index.Modules: true}
+	named := map[string]bool{index.Modules: true}
+	for _, chunk := range index.Source {
+		named[chunk.Blob] = true
+	}
 	for _, sum := range index.Products {
 		named[sum] = true
 	}
@@ -822,22 +845,32 @@ func (store Store) Tree(treeKey string) (TreeIndex, error) {
 	return ParseTree(treeKey, content)
 }
 
-// ParseTree reads the index trees/<treeKey>.json holds, refusing one that names anything but a sha256 for a blob or a
-// buildcache key for a product, a package that reads a product the index doesn't name, or a built package whose
-// directory isn't a local path, where its tests would run outside the tree's source.
+// ErrIndexFormat is a tree's index of a format other than TreeIndexFormat: another Loom's, unfit for this one.
+var ErrIndexFormat = errors.New("an index format this Loom doesn't read: unfit")
+
+// ParseTree reads the index trees/<treeKey>.json holds. One of another format is ErrIndexFormat, read for its format
+// alone. It refuses an index that names anything but a sha256 for a blob or a buildcache key for a product, source
+// chunks out of order or whose ranges meet (CheckChunks), a package that reads a product the index doesn't name, or a
+// built package whose directory isn't a local path, where its tests would run outside the tree's source.
 func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
+	var format struct {
+		Format int `json:"format"`
+	}
+	if err := json.Unmarshal(content, &format); err != nil {
+		return TreeIndex{}, fmt.Errorf("tree %s: %w", treeKey, err)
+	}
+	if format.Format != TreeIndexFormat {
+		return TreeIndex{}, fmt.Errorf("tree %s: its index is in format %d, and this release reads format %d: %w, Loom's until the tree is built again", treeKey, format.Format, TreeIndexFormat, ErrIndexFormat)
+	}
 	var index TreeIndex
 	if err := json.Unmarshal(content, &index); err != nil {
 		return TreeIndex{}, fmt.Errorf("tree %s: %w", treeKey, err)
 	}
-	if index.Format != TreeIndexFormat {
-		return TreeIndex{}, fmt.Errorf("tree %s: its index is in format %d, and this release reads format %d: Loom's, until the tree is built again", treeKey, index.Format, TreeIndexFormat)
-	}
 	poisoned := func(format string, arguments ...any) (TreeIndex, error) {
 		return TreeIndex{}, fmt.Errorf("tree %s: %s: the store is poisoned", treeKey, fmt.Sprintf(format, arguments...))
 	}
-	if !productKeyPattern.MatchString(index.Source) {
-		return poisoned("its source archive is %q", index.Source)
+	if err := CheckChunks(index.Source); err != nil {
+		return poisoned("%v", err)
 	}
 	if index.Modules != "" && !productKeyPattern.MatchString(index.Modules) {
 		return poisoned("its module cache is %q", index.Modules)
@@ -867,11 +900,11 @@ func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 }
 
 // FetchPackage readies one package of a tree's build under directory, which must not hold it yet: test, its binary;
-// source/, the tree's files; and cache/, a buildcache directory (ADAMIC_BUILD_CACHE_DIR) holding each product its
-// tests read. It reads the tree's index, then only those blobs, each checked against its hash (and kept in Blobs
-// when set), unpacked into a scratch directory, refusing any entry that would land outside it, and a product's entry
-// that isn't that product's. Only when all of it checks does any of it move into place; a product already in cache/
-// is left as it is.
+// source/, the tree's files, every chunk of them; and cache/, a buildcache directory (ADAMIC_BUILD_CACHE_DIR) holding
+// each product its tests read. It reads the tree's index, then only those blobs, each checked against its hash (and
+// kept in Blobs when set), unpacked into a scratch directory, refusing any entry that would land outside it, a
+// chunk's entry outside its range, and a product's entry that isn't that product's. Only when all of it checks does
+// any of it move into place; a product already in cache/ is left as it is.
 func (store Store) FetchPackage(treeKey, importPath, directory string) (TreePackage, error) {
 	index, err := store.Tree(treeKey)
 	if err != nil {
@@ -908,11 +941,13 @@ func (store Store) FetchPackage(treeKey, importPath, directory string) (TreePack
 	if err = os.WriteFile(filepath.Join(scratch, "test"), binary, 0o755); err != nil {
 		return TreePackage{}, err
 	}
-	if blob, err = store.blob(index.Source); err != nil {
-		return TreePackage{}, fmt.Errorf("the source archive: %w", err)
-	}
-	if err = Unpack(bytes.NewReader(blob), filepath.Join(scratch, "source"), nil); err != nil {
-		return TreePackage{}, fmt.Errorf("the source archive: %w: the store is poisoned", err)
+	for _, chunk := range index.Source {
+		if blob, err = store.blob(chunk.Blob); err != nil {
+			return TreePackage{}, fmt.Errorf("the source's chunk %s: %w", chunk.Blob, err)
+		}
+		if err = UnpackChunk(bytes.NewReader(blob), filepath.Join(scratch, "source"), chunk); err != nil {
+			return TreePackage{}, fmt.Errorf("the source: %w: the store is poisoned", err)
+		}
 	}
 	for _, product := range built.Products {
 		if blob, err = store.blob(index.Products[product]); err != nil {

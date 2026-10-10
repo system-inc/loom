@@ -38,10 +38,11 @@ import (
 //     Removing a blob another unit holds open takes only its name: that unit reads its whole bytes, and the room comes
 //     back when it closes it.
 
-// DefaultBlobCacheBytes bounds a runner's blob cache. Measured Oct 10: adamic's source archive is 449 MB gzipped
-// (98,381 files, 1.06 GB unpacked), a test binary about 8 MB gzipped (26 MB as built), and adamic has 74 test
+// DefaultBlobCacheBytes bounds a runner's blob cache. Measured Oct 10: adamic's source is 450 MB gzipped in 836 chunks
+// (98,459 files, 1.06 GB unpacked), a test binary about 8 MB gzipped (26 MB as built), and adamic has 74 test
 // packages, so one tree's whole build is about 1.2 GB; 4 GiB holds three trees, a future and the mains it is stacked
-// on, so a runner fetches a tree's source once, not once a unit.
+// on. A tree assembled is kept whole beside the cache, so its chunks may go and a tree near it still needs only the
+// chunks it changed.
 const DefaultBlobCacheBytes int64 = 4 << 30
 
 // DefaultFreeFloorBytes is the free room a prebuilt unit needs before it starts: the 1.06 GB its tree's source
