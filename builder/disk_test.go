@@ -3,8 +3,11 @@ package builder
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -42,8 +45,27 @@ func TestTheFloorNamesTheFilesystemUnderIt(t *testing.T) {
 	if err = CheckFloor(watched, freeing(free)); err == nil || !strings.Contains(err.Error(), "the temporary directory (/tmp) has 19.0 GB free, under its 20 GB floor") {
 		t.Fatalf("a short temporary directory: %v", err)
 	}
-	if free, err := Free(t.TempDir()); err != nil || free == 0 {
-		t.Fatalf("this machine's temporary directory: %d %v", free, err)
+}
+
+// Free agrees with df about this machine's temporary directory, to within what a second of other writes moves.
+func TestFreeAgreesWithDf(t *testing.T) {
+	directory := t.TempDir()
+	free, err := Free(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command("df", "-Pk", directory).Output()
+	if err != nil {
+		t.Skipf("no df: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	fields := strings.Fields(lines[len(lines)-1])
+	kilobytes, err := strconv.ParseUint(fields[3], 10, 64)
+	if err != nil {
+		t.Fatalf("df said %q", output)
+	}
+	if difference := math.Abs(float64(free) - float64(kilobytes*1024)); difference > float64(free)/100+1<<20 {
+		t.Fatalf("Free says %d bytes, df %d", free, kilobytes*1024)
 	}
 }
 

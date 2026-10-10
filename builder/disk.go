@@ -27,7 +27,7 @@ func Free(path string) (uint64, error) {
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return 0, err
 	}
-	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
+	return uint64(stat.Bavail) * blockSize(&stat), nil
 }
 
 // A Watch is a filesystem a build writes, by a path on it, and the free bytes it keeps.
