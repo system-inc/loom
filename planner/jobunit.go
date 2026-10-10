@@ -146,31 +146,55 @@ func sortedCopy(paths []string) []string {
 // KeyAt keys a planned unit's identity (its kind, package, selection, env, gate inputs and tools) on another tree, as
 // PlanTree would key it there: Judge reruns a failed unit on main's base, whose closure, reads and products differ.
 func KeyAt(tree, gateTools string, parts KeyParts) (KeyParts, string, error) {
-	module, err := modulePath(tree)
+	at, err := baseKeyAt(tree, gateTools, parts)
 	if err != nil {
 		return KeyParts{}, "", err
 	}
+	// Keyed on its read set after the env carries over, since the env is part of the code key a set is recorded under.
+	if _, err := withReadSet(tree, &at.parts, at.pairs); err != nil {
+		return KeyParts{}, "", err
+	}
+	key, err := UnitKey(at.parts)
+	return at.parts, key, err
+}
+
+// unitAt is a planned unit keyed on a tree with no read set (baseKey), with what keyed it.
+type unitAt struct {
+	parts     KeyParts
+	pairs     readPairs
+	unit      Unit
+	compilers []string
+}
+
+func baseKeyAt(tree, gateTools string, parts KeyParts) (unitAt, error) {
+	module, err := modulePath(tree)
+	if err != nil {
+		return unitAt{}, err
+	}
 	declared, err := compilerDeclarations(tree)
 	if err != nil {
-		return KeyParts{}, "", err
+		return unitAt{}, err
 	}
 	directory := strings.TrimPrefix(strings.TrimPrefix(parts.Package, module), "/")
 	compilers := []string{}
 	for _, input := range declared[directory] {
 		compilers = append(compilers, module+"/"+input)
 	}
-	productKeys, err := TestProductKeys(tree, gateTools, parts.Tools)
-	if err != nil {
-		return KeyParts{}, "", err
-	}
 	unit := Unit{Kind: parts.Kind, Package: parts.Package, Directory: directory, Run: parts.Select.Run, Skip: parts.Select.Skip,
-		GateInputs: parts.GateInputs, Products: UnitProducts(productKeys, parts.Package, compilers)}
-	keyed, err := KeyFor(tree, gateTools, unit, parts.Tools, compilers)
+		GateInputs: parts.GateInputs}
+	if parts.Kind != "product" {
+		// A product's products are its compilers' closures (ProductStub); a test unit's are Builder's product keys.
+		productKeys, err := TestProductKeys(tree, gateTools, parts.Tools)
+		if err != nil {
+			return unitAt{}, err
+		}
+		unit.Products = UnitProducts(productKeys, parts.Package, compilers)
+	}
+	keyed, pairs, err := baseKey(tree, gateTools, unit, parts.Tools, compilers)
 	if err != nil {
-		return KeyParts{}, "", err
+		return unitAt{}, err
 	}
 	// The env part is already a key's (ADAMIC_GATE_CHANGED as a sha256), so it carries over as it is.
 	keyed.Env = parts.Env
-	key, err := UnitKey(keyed)
-	return keyed, key, err
+	return unitAt{parts: keyed, pairs: pairs, unit: unit, compilers: compilers}, nil
 }

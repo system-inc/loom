@@ -28,6 +28,10 @@ type KeyParts struct {
 	// tools, so the key commits to the commit itself (Loom, Oct 10 02:09Z). Empty, and so absent, on every other kind,
 	// whose keys stay where they were.
 	GateTools string `json:"gateTools,omitempty"`
+	// ReadSet is the id of the read set a test or product unit is keyed on (readset.go): its reads part then holds the
+	// submodule paths that set names, each by its content, in place of the submodules' commits. Empty, and so absent,
+	// until one is recorded for the unit, whose key is then what it was.
+	ReadSet string `json:"readSet,omitempty"`
 }
 
 // Select is which of the package's tests the unit runs.

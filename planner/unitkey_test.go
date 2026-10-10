@@ -78,6 +78,7 @@ var keyPartMutants = map[string]func(*KeyParts){
 	"env":           func(parts *KeyParts) { parts.Env["ADAMIC_GATE_UNCACHED"] = "0" },
 	"gateInputs":    func(parts *KeyParts) { parts.GateInputs = strings.Repeat("e", 64) },
 	"gateTools":     func(parts *KeyParts) { parts.GateTools = strings.Repeat("f", 40) },
+	"readSet":       func(parts *KeyParts) { parts.ReadSet = strings.Repeat("f", 64) },
 }
 
 // Contract section 2: every part has a mutant that changes only that part, and it must change the key.

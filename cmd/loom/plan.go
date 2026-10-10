@@ -36,6 +36,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	read := flags.String("read", builder.PublicRead, "the public store, where a runner reads the gate inputs")
 	poolsFile := flags.String("pools", planner.PoolsFile, "the pool table, for declared needs' plan-time check")
 	noReuseFile := flags.String("no-reuse", planner.NoReuseFile, "unit keys whose passed verdicts may not be reused, one per line with why")
+	readSets := flags.String("read-sets", planner.ReadSetsDirectory, "the read sets `loom reads-check` records: a unit with one keys the submodule files it reads, not the submodules' commits")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -56,6 +57,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	planner.PoolsFile = *poolsFile
 	planner.NoReuseFile = *noReuseFile
 	gateInputsPin := &gateinputs.Pin{File: *gateInputsFile, Read: strings.TrimSuffix(*read, "/")}
+	planner.ReadSetsDirectory = *readSets
 	client := planner.QueueClient{Base: *queue, Token: strings.TrimSpace(string(token))}
 	for {
 		if *gateToolsRef != "" {

@@ -63,7 +63,7 @@ const usage = `usage:
   loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--once] [--dry-run]
   loom place --queue <url> --token-file <path> --pool-has <name>=<toolchains>... [--pools <file>] [--once] [--dry-run]
   loom unit-needs --gate-tools <dir> --package <directory> [--run <pattern>]
-  loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>]
+  loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>] [--key-parts <file> [--read-sets <dir>] [--no-reuse <file>]]
   loom build-actions --tree <dir> --gate-tools <dir> [--r2 <key file>] [--packages a,b] [--list]
   loom fetch-actions --cache <dir> [--read <url>] [--skip-native] <productKey>...
   loom store-audit [--r2 <key file>]

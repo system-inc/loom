@@ -28,7 +28,7 @@ Type=simple
 WorkingDirectory=%h/loom-planner
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=GOTOOLCHAIN=local
-ExecStart=/bin/bash -c '. %h/adamic-tools/env.sh && exec %h/.loom/bin/loom plan --queue https://loom.system.inc --token-file %h/.loom/planner-token --repository %h/loom-planner/adamic --gate-tools %h/loom-planner/tools --gate-tools-ref loom/planner-reads --runner-sha-file %h/.loom/runner-pin --gate-inputs-file %h/.loom/gate-inputs-manifest --pools %h/.loom/pools.json --no-reuse %h/.loom/no-reuse --interval 10s'
+ExecStart=/bin/bash -c '. %h/adamic-tools/env.sh && exec %h/.loom/bin/loom plan --queue https://loom.system.inc --token-file %h/.loom/planner-token --repository %h/loom-planner/adamic --gate-tools %h/loom-planner/tools --gate-tools-ref loom/planner-reads --runner-sha-file %h/.loom/runner-pin --gate-inputs-file %h/.loom/gate-inputs-manifest --pools %h/.loom/pools.json --no-reuse %h/.loom/no-reuse --read-sets %h/.loom/read-sets --interval 10s'
 Restart=on-failure
 RestartSec=10
 

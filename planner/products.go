@@ -114,9 +114,13 @@ func ProductKey(tree, gateTools string, tools Tools, test ProductTest, compilers
 func ProductKeys(tree, gateTools string, tools Tools, tests []ProductTest, declared map[string][]string) (map[ProductTest]string, error) {
 	tools.Runner = ""
 	keys := map[ProductTest]string{}
-	parts := map[string]KeyParts{}
+	type keyed struct {
+		parts KeyParts
+		pairs readPairs
+	}
+	parts := map[string]keyed{}
 	for _, test := range tests {
-		packageParts, known := parts[test.Package]
+		packageKeyed, known := parts[test.Package]
 		if !known {
 			module := strings.TrimSuffix(test.Package, "/"+test.Directory)
 			if test.Directory == "" || test.Directory == "." {
@@ -128,13 +132,18 @@ func ProductKeys(tree, gateTools string, tools Tools, tests []ProductTest, decla
 			}
 			unit := Unit{Kind: "product", Package: test.Package, Directory: test.Directory, Environment: GateEnvironment}
 			var err error
-			if packageParts, err = KeyFor(tree, gateTools, unit, tools, compilerPackages); err != nil {
+			if packageKeyed.parts, packageKeyed.pairs, err = baseKey(tree, gateTools, unit, tools, compilerPackages); err != nil {
 				return nil, fmt.Errorf("%s: %w", test.Package, err)
 			}
-			parts[test.Package] = packageParts
+			parts[test.Package] = packageKeyed
 		}
-		packageParts.Select = Select{Run: "^" + test.Test + "$"}
-		key, err := UnitKey(packageParts)
+		// Each product test is its own unit, so each is keyed on its own read set.
+		testParts := packageKeyed.parts
+		testParts.Select = Select{Run: "^" + test.Test + "$"}
+		if _, err := withReadSet(tree, &testParts, packageKeyed.pairs); err != nil {
+			return nil, fmt.Errorf("%s %s: %w", test.Package, test.Test, err)
+		}
+		key, err := UnitKey(testParts)
 		if err != nil {
 			return nil, err
 		}

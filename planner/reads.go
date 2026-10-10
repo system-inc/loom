@@ -94,24 +94,51 @@ func fnmatch(pattern, name string) bool {
 // ReadsHash is the contract's reads part over the given files: a hash of their sorted (path, sha256). A tracked
 // symlink is its target, as git records it ("symlink <target>"), so a dangling one a test walks still keys. A read that
 // names a submodule (executors.txt names cohere by its gitlink's exact path) is the submodule at its recorded commit,
-// so it hashes as "gitlink <commit>".
+// so it hashes as "gitlink <commit>". That is a unit's reads part until a read set is recorded for it (readset.go):
+// then its key holds the submodule paths its runs read, each by its content, in place of every gitlink.
 func ReadsHash(tree string, reads []string) (string, error) {
 	gitlinks, err := Gitlinks(tree)
 	if err != nil {
 		return "", err
 	}
-	pairs := make([][2]string, 0, len(reads))
+	pairs, err := readPairsOf(tree, reads, gitlinks)
+	if err != nil {
+		return "", err
+	}
+	return pairs.all, nil
+}
+
+// readPairs is a unit's declared reads as its key holds them: all is ReadsHash, every gitlink read at its commit;
+// files is the (path, sha256) of each read that isn't a gitlink; gitlinks counts the reads that are.
+type readPairs struct {
+	all      string
+	files    [][2]string
+	gitlinks int
+}
+
+func readPairsOf(tree string, reads []string, gitlinks map[string]string) (readPairs, error) {
+	all := make([][2]string, 0, len(reads))
+	pairs := readPairs{files: [][2]string{}}
 	for _, read := range reads {
 		if commit, found := gitlinks[read]; found {
-			pairs = append(pairs, [2]string{read, "gitlink " + commit})
+			all = append(all, [2]string{read, "gitlink " + commit})
+			pairs.gitlinks++
 			continue
 		}
 		digest, err := fileDigest(filepath.Join(tree, filepath.FromSlash(read)))
 		if err != nil {
-			return "", fmt.Errorf("read %s: %w", read, err)
+			return readPairs{}, fmt.Errorf("read %s: %w", read, err)
 		}
-		pairs = append(pairs, [2]string{read, digest})
+		all = append(all, [2]string{read, digest})
+		pairs.files = append(pairs.files, [2]string{read, digest})
 	}
+	var err error
+	pairs.all, err = pairsHash(all)
+	return pairs, err
+}
+
+// pairsHash is the sha256 of the pairs' canonical JSON, in the order given.
+func pairsHash(pairs [][2]string) (string, error) {
 	canonical, err := Canonical(pairs)
 	if err != nil {
 		return "", err

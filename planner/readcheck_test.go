@@ -168,3 +168,113 @@ func packageOf(t *testing.T, tree string) string {
 	}
 	return module + "/p"
 }
+
+// A read set's trace: a stat, a stat of a descriptor (AT_EMPTY_PATH), a missed path, an O_PATH probe and a failed
+// open are lookups; a listing names its decoded directory; a write names nothing. A listing whose directory wasn't
+// decoded is refused, since the set can't name it.
+func TestTraceAccessesReadsLookupsAndListings(t *testing.T) {
+	t.Parallel()
+	trace := strings.Join([]string{
+		`201 openat(AT_FDCWD</work/p>, "testdata/case.txt", O_RDONLY|O_CLOEXEC) = 3</work/p/testdata/case.txt>`,
+		`202 newfstatat(AT_FDCWD</work/p>, "../sub/data.txt", {st_mode=S_IFREG|0644, st_size=5, ...}, 0) = 0`,
+		`203 newfstatat(3</work/sub/dir>, "", {st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_EMPTY_PATH) = 0`,
+		`204 stat("/work/sub/missing.txt", 0x7ffd) = -1 ENOENT (No such file or directory)`,
+		`205 openat(AT_FDCWD</work>, "sub/gone.txt", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)`,
+		`206 openat(AT_FDCWD</work>, "sub/probe", O_RDONLY|O_PATH) = 4</work/sub/probe>`,
+		`207 getdents64(5</work/sub/dir>, 0x55d0 /* 4 entries */, 32768) = 112`,
+		`208 openat(AT_FDCWD</work>, "sub/out.txt", O_WRONLY|O_CREAT|O_TRUNC, 0644) = 6</work/sub/out.txt>`,
+		`[pid   209] faccessat2(AT_FDCWD</work>, "sub/bin/tool", X_OK, AT_EACCESS) = 0`,
+		`210 readlinkat(AT_FDCWD</work>, "sub/link", "data.txt", 4095) = 8`,
+		`211 statx(AT_FDCWD</work>, "sub/x", AT_STATX_SYNC_AS_STAT, STATX_ALL, {stx_mask=STATX_ALL, ...}) = 0`,
+		`212 mkdir("/work/sub/made", 0755) = 0`,
+	}, "\n")
+	accesses, err := TraceAccesses(strings.NewReader(trace), "/work/default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TracedAccesses{
+		Reads: []string{"/work/p/testdata/case.txt"},
+		Lookups: []string{"/work/sub/bin/tool", "/work/sub/data.txt", "/work/sub/dir", "/work/sub/gone.txt", "/work/sub/link",
+			"/work/sub/missing.txt", "/work/sub/probe", "/work/sub/x"},
+		Listings: []string{"/work/sub/dir"},
+	}
+	if !reflect.DeepEqual(accesses, want) {
+		t.Fatalf("accesses\n%q\nwant\n%q", accesses, want)
+	}
+	if _, err := TraceAccesses(strings.NewReader(`7 getdents64(5, 0x55d0 /* 4 entries */, 32768) = 112`), "/work"); err == nil {
+		t.Fatal("a listing with no decoded directory was read")
+	}
+}
+
+// subTrace is a trace of p's run reading each of the submodule paths given from the package's directory, a name
+// ending in / listed.
+func subTrace(fixture readSetFixture, paths ...string) string {
+	lines := []string{}
+	for _, name := range paths {
+		if directory, listed := strings.CutSuffix(name, "/"); listed {
+			lines = append(lines, `9 getdents64(5<`+filepath.Join(fixture.tree, directory)+`>, 0x55 /* 3 entries */, 32768) = 72`)
+			continue
+		}
+		lines = append(lines, `9 openat(AT_FDCWD<`+filepath.Join(fixture.tree, "p")+`>, "../`+name+`", O_RDONLY|O_CLOEXEC) = 3`)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+// The check of a traced run measures what it read in the submodules and, on a key with a read set, names every path
+// beyond it as Loom's void. Keyed on the gitlink (no set yet), the declared submodule covers every read and the run
+// measures the unit's first set; keyed on that set, a run that reads only it is clean, and one that reads another
+// path, misses one or lists another directory is beyond its key, each named, and the measured set grows by them. Parts
+// this tree doesn't key are refused. Mutants that each fail it: a read beyond the set that isn't a finding; lookups or
+// listings left out of the check; the measured set not grown from the keyed one; the parts not keyed again on the tree.
+func TestCheckTraceNamesReadsBeyondTheKeysReadSet(t *testing.T) {
+	useReadSets(t)
+	fixture := newReadSetFixture(t)
+	check := func(parts KeyParts, trace string) TraceCheck {
+		t.Helper()
+		result, err := CheckTrace(fixture.tree, fixture.gateTools, parts, strings.NewReader(trace))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	coarse, _ := fixture.key(t)
+	first := check(coarse, subTrace(fixture, "sub/data.txt", "sub/shim.go", "sub/dir/"))
+	if len(first.Findings) != 0 {
+		t.Fatalf("keyed on the declared gitlink, the run has findings %+v", first.Findings)
+	}
+	if want := (ReadSet{Paths: []string{"sub/data.txt"}, Listings: []string{"sub/dir"}}); !reflect.DeepEqual(first.Measured, want) {
+		t.Fatalf("measured %+v, want %+v (sub/shim.go is the closure's)", first.Measured, want)
+	}
+	id, err := RecordReadSet(ReadSetsDirectory, first.CodeKey, coarse, first.Measured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyed, _ := fixture.key(t)
+	if keyed.ReadSet != id {
+		t.Fatalf("the next key holds read set %q, want the measured %s", keyed.ReadSet, id)
+	}
+	if clean := check(keyed, subTrace(fixture, "sub/data.txt", "sub/dir/")); len(clean.Findings) != 0 || clean.CodeKey != first.CodeKey {
+		t.Fatalf("a run that read only its set: findings %+v, code key %s (want %s)", clean.Findings, clean.CodeKey, first.CodeKey)
+	}
+	beyond := check(keyed, subTrace(fixture, "sub/data.txt", "sub/other.txt", "sub/deep/")+
+		`9 newfstatat(AT_FDCWD<`+fixture.tree+`>, "sub/nothing.txt", 0x7ffd, 0) = -1 ENOENT (No such file or directory)`+"\n")
+	named := []string{}
+	for _, finding := range beyond.Beyond() {
+		if finding.ReadSet != id || finding.Package != fixture.unit.Package || finding.State == "" {
+			t.Errorf("finding %+v doesn't name the set, the unit and the path's state", finding)
+		}
+		named = append(named, finding.Path)
+	}
+	if want := []string{"sub/deep", "sub/nothing.txt", "sub/other.txt"}; !reflect.DeepEqual(named, want) || len(beyond.Findings) != 3 {
+		t.Fatalf("beyond the key: %v (of %d findings), want %v", named, len(beyond.Findings), want)
+	}
+	want := ReadSet{Paths: []string{"sub/data.txt", "sub/nothing.txt", "sub/other.txt"}, Listings: []string{"sub/deep", "sub/dir"}}
+	if !reflect.DeepEqual(beyond.Measured, want) {
+		t.Fatalf("the refreshed set is %+v, want %+v", beyond.Measured, want)
+	}
+	stale := keyed
+	stale.Closure = strings.Repeat("e", 64)
+	if _, err := CheckTrace(fixture.tree, fixture.gateTools, stale, strings.NewReader("")); err == nil {
+		t.Fatal("parts this tree doesn't key were checked")
+	}
+}

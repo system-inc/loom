@@ -77,23 +77,39 @@ func ProductStub(tree string, compilerPackages []string) ([]string, error) {
 // reads: adamic's declared compilers (internal/native, lower, ir and the rest) have no product tests of their own, so
 // product keys alone would leave them out. A product's products part stays its compilers' closures (ProductStub), so a
 // product key never keys itself.
+//
+// A unit whose code key has a recorded read set is keyed on it (withReadSet): the submodule paths its runs read, by
+// their content, in place of each declared submodule's commit.
 func KeyFor(tree, gateTools string, unit Unit, tools Tools, compilerPackages []string) (KeyParts, error) {
-	closure, err := Closure(tree, unit.Package)
+	parts, pairs, err := baseKey(tree, gateTools, unit, tools, compilerPackages)
 	if err != nil {
 		return KeyParts{}, err
 	}
+	if _, err := withReadSet(tree, &parts, pairs); err != nil {
+		return KeyParts{}, fmt.Errorf("unit %s: %w", unit.Package, err)
+	}
+	return parts, nil
+}
+
+// baseKey is a unit's key parts with no read set, its reads part holding each declared submodule at its commit, and
+// its declared reads' pairs, which withReadSet keys a read set from.
+func baseKey(tree, gateTools string, unit Unit, tools Tools, compilerPackages []string) (KeyParts, readPairs, error) {
+	closure, err := Closure(tree, unit.Package)
+	if err != nil {
+		return KeyParts{}, readPairs{}, err
+	}
 	reads, err := DeclaredReads(tree, gateTools, unit.Directory)
 	if err != nil {
-		return KeyParts{}, err
+		return KeyParts{}, readPairs{}, err
 	}
 	var products []string
 	if unit.Kind == "product" {
 		if products, err = ProductStub(tree, compilerPackages); err != nil {
-			return KeyParts{}, err
+			return KeyParts{}, readPairs{}, err
 		}
 	} else {
 		if unit.Products == nil {
-			return KeyParts{}, fmt.Errorf("unit %s: a %s unit's products weren't computed (UnitProducts)", unit.Package, unit.Kind)
+			return KeyParts{}, readPairs{}, fmt.Errorf("unit %s: a %s unit's products weren't computed (UnitProducts)", unit.Package, unit.Kind)
 		}
 		products = append([]string{}, unit.Products...)
 		sort.Strings(products)
@@ -104,7 +120,7 @@ func KeyFor(tree, gateTools string, unit Unit, tools Tools, compilerPackages []s
 		for _, importPath := range compilerPackages {
 			files, err := ClosureFiles(tree, importPath)
 			if err != nil {
-				return KeyParts{}, fmt.Errorf("compiler %s: %w", importPath, err)
+				return KeyParts{}, readPairs{}, fmt.Errorf("compiler %s: %w", importPath, err)
 			}
 			for _, file := range files {
 				read[file] = true
@@ -116,16 +132,20 @@ func KeyFor(tree, gateTools string, unit Unit, tools Tools, compilerPackages []s
 		}
 		sort.Strings(reads)
 	}
-	readsHash, err := ReadsHash(tree, reads)
+	gitlinks, err := Gitlinks(tree)
 	if err != nil {
-		return KeyParts{}, err
+		return KeyParts{}, readPairs{}, err
+	}
+	pairs, err := readPairsOf(tree, reads, gitlinks)
+	if err != nil {
+		return KeyParts{}, readPairs{}, err
 	}
 	env, err := KeyEnv(unit.Environment)
 	if err != nil {
-		return KeyParts{}, err
+		return KeyParts{}, readPairs{}, err
 	}
 	return KeyParts{
 		Kind: unit.Kind, Package: unit.Package, Select: Select{Run: unit.Run, Skip: unit.Skip},
-		Closure: closure, Reads: readsHash, Products: products, Tools: tools, Env: env, GateInputs: unit.GateInputs,
-	}, nil
+		Closure: closure, Reads: pairs.all, Products: products, Tools: tools, Env: env, GateInputs: unit.GateInputs,
+	}, pairs, nil
 }
