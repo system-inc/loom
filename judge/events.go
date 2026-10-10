@@ -47,10 +47,12 @@ func FinishedFromEvents(events []protocol.Event) (finished Finished, found bool)
 					Action  string
 					Package string
 					Test    string
+					Output  string
 				}
 				if json.Unmarshal([]byte(line), &action) != nil || action.Test == "" {
 					continue
 				}
+				finished.Events = append(finished.Events, TestEvent{Action: action.Action, Package: action.Package, Test: action.Test, Output: action.Output})
 				name := action.Package + " " + action.Test
 				if _, seen := tests[name]; !seen {
 					order = append(order, name)

@@ -22,6 +22,8 @@ type Finished struct {
 	Tests        []TestOutcome
 	MissingTools []string
 	Outputs      []string
+	// Events are the attempt's test2json lines naming a test, in order, for the census; never part of the verdict.
+	Events []TestEvent
 }
 
 // Runs reads a run's finished events for one unit; found is false when the unit never reported.
