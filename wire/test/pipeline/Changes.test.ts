@@ -148,6 +148,6 @@ describe("loom-pipeline's Worker", function () {
         expect(accepted.status, await accepted.clone().text()).toBe(201);
         expect(await accepted.json()).toMatchObject({ state: 'queued' });
         expect((await call('/runs/r1')).status).toBe(404);
-        expect(await (await call('/')).text()).toContain('Loom pipeline');
+        expect(await (await call('/')).text()).toContain('<title>Loom</title>');
     });
 });

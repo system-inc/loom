@@ -109,6 +109,13 @@ describe('the board of changes', function () {
         // The policy forbids inline style attributes, so the page carries none: every style is under its nonce.
         expect(html).not.toMatch(/ style="/);
         expect(html).toContain('<link rel="icon" href="/favicon.svg" type="image/svg+xml">');
+        // The bare address serves the same page, still with no data and no token.
+        const front = await call('/');
+        expect(front.headers.get('Content-Security-Policy')).toMatch(/script-src 'nonce-[0-9a-f]+'/);
+        const frontHtml = await front.text();
+        expect(frontHtml).toContain('<title>Loom</title>');
+        expect(frontHtml).not.toContain('chg_');
+        expect(frontHtml).not.toMatch(/ style="/);
     });
 });
 

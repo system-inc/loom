@@ -61,9 +61,9 @@ export default {
         if (action !== null) {
             return action;
         }
-        // The board of changes: its page holds no data and no token; its one read needs a board token. Only the
-        // Queue object reaches the board's push, through its binding, never from outside.
-        if (path === '/board' || path === '/board/') {
+        // The board of changes, at the bare address too: its page holds no data and no token; its one read needs a
+        // board token. Only the Queue object reaches the board's push, through its binding, never from outside.
+        if (path === '/' || path === '/board' || path === '/board/') {
             if (request.method !== 'GET') {
                 return jsonResponse(405, { error: 'use GET' }, { Allow: 'GET' });
             }
@@ -103,11 +103,6 @@ export default {
         if (path === '/favicon.svg') {
             return new Response(loomFavicon(), {
                 headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' },
-            });
-        }
-        if (path === '/') {
-            return new Response('Loom pipeline. The endpoints are in docs/contracts.md.\n', {
-                headers: { 'Content-Type': 'text/plain; charset=utf-8' },
             });
         }
         return jsonResponse(404, { error: 'no such endpoint' });
