@@ -7,6 +7,7 @@ package judge
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,6 +24,7 @@ type PlannedFuture struct {
 	Base    string            `json:"base"`
 	Attempt int               `json:"attempt"` // the run attempt to read; 0 is read as 1
 	Parity  bool              `json:"parity"`  // a parity run's future: tested on exactly its tree, never landed
+	Empty   bool              `json:"empty"`   // a docs-only future planned with no units, the docs lane's to decide
 	Change  PlannedChange     `json:"change"`
 	Units   []PlannedUnitWire `json:"units"`
 }
@@ -153,45 +155,59 @@ func (puller Puller) stale(run string, events []protocol.Event, open int) string
 }
 
 // PullOnce judges every listed future whose run has a finished event for each unit it runs, and returns how many it
-// posted. A future still running is left for the next pass.
+// posted. A future still running is left for the next pass. One future's error never stops the others: they are judged,
+// and the errors come back joined.
 func (puller Puller) PullOnce() (int, error) {
 	futures, err := puller.Source.Planned()
 	if err != nil {
 		return 0, err
 	}
-	judged := 0
+	judged, failures := 0, []error{}
 	for _, future := range futures {
-		attempt := future.Attempt
-		if attempt < 1 {
-			attempt = 1
-		}
-		run := puller.RunOf(future.Future, attempt)
-		events, err := puller.Read(run)
+		posted, err := puller.pullOne(future)
 		if err != nil {
-			return judged, fmt.Errorf("future %s: reading run %s: %w", future.Future, run, err)
+			failures = append(failures, fmt.Errorf("future %s: %w", future.Future, err))
 		}
-		order, earlier, err := puller.earlier(future, attempt)
-		if err != nil {
-			return judged, err
+		if posted {
+			judged++
 		}
-		if open := openUnits(future, events, order, earlier); open > 0 {
-			if why := puller.stale(run, events, open); why != "" {
-				loop, job := puller.jobOf(future, run, events)
-				if _, err := loop.VoidFuture(job, InfraSilent, why); err != nil {
-					return judged, fmt.Errorf("future %s: %w", future.Future, err)
-				}
-				judged++
-			}
-			continue
+	}
+	return judged, errors.Join(failures...)
+}
+
+// pullOne judges one listed future if it's ready, and says whether it posted.
+func (puller Puller) pullOne(future PlannedFuture) (bool, error) {
+	if future.Empty {
+		// A docs-only future, planned empty (Queue 98e66e3): the docs lane decides it by rule ruled-gate-docs-v0
+		// (#w2mmfjd), never judge-v1, which Queue refuses. Until that lane lands, it's left for the old path.
+		return false, nil
+	}
+	attempt := future.Attempt
+	if attempt < 1 {
+		attempt = 1
+	}
+	run := puller.RunOf(future.Future, attempt)
+	events, err := puller.Read(run)
+	if err != nil {
+		return false, fmt.Errorf("reading run %s: %w", run, err)
+	}
+	order, earlier, err := puller.earlier(future, attempt)
+	if err != nil {
+		return false, err
+	}
+	if open := openUnits(future, events, order, earlier); open > 0 {
+		why := puller.stale(run, events, open)
+		if why == "" {
+			return false, nil
 		}
 		loop, job := puller.jobOf(future, run, events)
-		loop.Runs, job.Earlier = EventRuns{Read: runsOf(run, events, earlier), Log: puller.Log}, order
-		if _, err := loop.JudgeFuture(job); err != nil {
-			return judged, fmt.Errorf("future %s: %w", future.Future, err)
-		}
-		judged++
+		_, err := loop.VoidFuture(job, InfraSilent, why)
+		return err == nil, err
 	}
-	return judged, nil
+	loop, job := puller.jobOf(future, run, events)
+	loop.Runs, job.Earlier = EventRuns{Read: runsOf(run, events, earlier), Log: puller.Log}, order
+	_, err = loop.JudgeFuture(job)
+	return err == nil, err
 }
 
 // VoidOne posts one listed future's run as void, naming cause (Loop.VoidFuture): attempt must be the attempt Queue

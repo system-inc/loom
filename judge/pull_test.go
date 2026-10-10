@@ -2,6 +2,7 @@ package judge
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -239,5 +240,31 @@ func TestCarriedListsTheUnitsAndSourceRunsTheLoopCarries(t *testing.T) {
 	}
 	if _, err := puller.Carried(strings.Repeat("e", 40), 3); err == nil {
 		t.Fatal("listed carried units for a future Queue doesn't list")
+	}
+}
+
+func TestAnEmptyFutureIsLeftAndOneFuturesErrorNeverStopsTheRest(t *testing.T) {
+	docs, broken, ready := strings.Repeat("a", 40), strings.Repeat("b", 40), strings.Repeat("c", 40)
+	unit := strings.Repeat("1", 64)
+	units := []PlannedUnitWire{{UnitKey: unit, Decision: "run"}}
+	queue := &StubQueue{}
+	puller := NewPuller(Puller{
+		Source: listedFutures{{Future: docs, Empty: true, Change: PlannedChange{Change: "chg_D"}}, {Future: broken, Units: units, Change: PlannedChange{Change: "chg_B"}},
+			{Future: ready, Units: units, Change: PlannedChange{Change: "chg_R"}}},
+		RunOf: func(tree string, attempt int) string { return "future-" + tree + "-1" },
+		Read: func(run string) ([]protocol.Event, error) {
+			if strings.Contains(run, broken) {
+				return nil, errors.New("wire down")
+			}
+			return finishedStream(unit, "passed"), nil
+		},
+		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now},
+	})
+	judged, err := puller.PullOnce()
+	if judged != 1 || len(queue.Posts[ready]) != 1 || err == nil || !strings.Contains(err.Error(), "future "+broken) {
+		t.Fatalf("judged %d, posts %v, error %v: want the ready future judged past the broken one's error", judged, queue.Posts, err)
+	}
+	if len(queue.Posts[docs]) != 0 {
+		t.Fatal("an empty docs future was posted by judge-v1")
 	}
 }
