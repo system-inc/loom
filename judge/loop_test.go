@@ -578,8 +578,8 @@ func TestAWarmAttemptIsPlacedAgainColdBeforeItDecides(t *testing.T) {
 			c.setup(h)
 			asked := []string{}
 			loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now,
-				Warm: func(run, unitKey string) (bool, error) {
-					asked = append(asked, run+" "+unitKey)
+				Warm: func(run string, unit PlanUnit, _ Attempt) (bool, error) {
+					asked = append(asked, run+" "+unit.UnitKey)
 					return c.warm, nil
 				}}
 			post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: baseTree}, Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1", Plan: []PlanUnit{{UnitKey: "u"}}})
@@ -595,6 +595,90 @@ func TestAWarmAttemptIsPlacedAgainColdBeforeItDecides(t *testing.T) {
 			}
 			if c.warm && len(post.Quarantine) != 0 {
 				t.Fatalf("quarantined %v after a warm attempt", post.Quarantine)
+			}
+		})
+	}
+}
+
+// Release's ruling (Oct 10 02:49Z, settled 02:54Z): on a runner whose workers keep a shared Go cache, a test attempt
+// counts only from a machine a cold pool names, at or after the latest coldSince among the pools naming it. Two pools
+// report Cloud, so a Cloud attempt between their two coldSince times is warm.
+var warmRunnerPools = []PoolEntry{
+	{Name: "codex-strict", Runner: "8a70", MemoryMegabytes: 16384, Cpus: 4},
+	{Name: "box-strict-8a70-cold", Runner: "8a70", MemoryMegabytes: 65536, Cpus: 16, Cold: true, Machines: []string{"Cloud"}, ColdSince: "2026-10-10T02:33:00Z"},
+	{Name: "box-strict-8a70", Runner: "8a70", MemoryMegabytes: 16384, Cpus: 4, Cold: true, Machines: []string{"Cloud"}, ColdSince: "2026-10-10T02:44:10Z"},
+}
+
+func TestAWarmAttemptIsReadFromThePoolTable(t *testing.T) {
+	at := func(machine, started string) Attempt { return Attempt{Machine: machine, StartedAt: started} }
+	for _, c := range []struct {
+		name    string
+		pools   []PoolEntry
+		attempt Attempt
+		warm    bool
+	}{
+		{"Cloud after both pools ran cold", warmRunnerPools, at("Cloud", "2026-10-10T02:50:00Z"), false},
+		{"Cloud between the two coldSince times", warmRunnerPools, at("Cloud", "2026-10-10T02:40:00Z"), true},
+		{"a Codex instance no cold pool names", warmRunnerPools, at("cb2a541fac2d", "2026-10-10T02:50:00Z"), true},
+		{"a machine a pool not marked cold names", append([]PoolEntry{{Name: "w", Machines: []string{"Cloud"}, ColdSince: "2026-10-10T02:00:00Z"}}, warmRunnerPools...), at("Cloud", "2026-10-10T02:50:00Z"), true},
+		{"a cold pool with no coldSince", []PoolEntry{{Name: "c", Cold: true, Machines: []string{"Cloud"}}}, at("Cloud", "2026-10-10T02:50:00Z"), true},
+		{"an unreadable started time", warmRunnerPools, at("Cloud", ""), true},
+	} {
+		if why := WarmAttempt(c.pools, c.attempt); (why != "") != c.warm {
+			t.Errorf("%s: warm %q, want warm %v", c.name, why, c.warm)
+		}
+	}
+	unit := PlanUnit{UnitKey: "u", Kind: "test", Runner: "8a70"}
+	if WarmUnit(warmRunnerPools, map[string]bool{"8a70": true}, PlanUnit{UnitKey: "p", Kind: "phase", Runner: "8a70"}, at("x", "")) != "" {
+		t.Error("a phase unit was judged by the test units' cache rule")
+	}
+	if WarmUnit(warmRunnerPools, map[string]bool{"ed74": true}, unit, at("x", "")) != "" {
+		t.Error("a unit off the warm runners was read warm")
+	}
+	if names := ColdPools(warmRunnerPools); len(names) != 2 || names[0].Name != "box-strict-8a70-cold" || len(warmRunnerPools) != 3 {
+		t.Errorf("cold pools %v, want the two marked cold, the table untouched", names)
+	}
+}
+
+// A warm pass never decides, and neither does one carried from an earlier attempt: each is placed again, and the
+// cold attempt decides.
+func TestAWarmPassNeverDecidesEvenCarried(t *testing.T) {
+	codex := Finished{Attempt: Attempt{Status: Passed, Machine: "cb2a541fac2d", StartedAt: "2026-10-10T02:20:00Z"}, Tests: []TestOutcome{outcome("TestA", "pass")}}
+	cloud := codex
+	cloud.Attempt.Machine, cloud.Attempt.StartedAt = "Cloud", "2026-10-10T02:50:00Z"
+	for _, c := range []struct {
+		name    string
+		runs    runsByRun
+		earlier []string
+		placed  int
+	}{
+		{"a warm Codex pass is placed again", runsByRun{"run-2 u": codex}, nil, 1},
+		{"a warm pass carried from an earlier attempt is placed again", runsByRun{"run-1 u": codex}, []string{"run-1"}, 1},
+		{"a cold Cloud pass decides", runsByRun{"run-2 u": cloud}, nil, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			h.script("u", futureTree, failedWith("TestB"), failedWith("TestB"))
+			h.script("u", baseTree, passed())
+			loop := Loop{Runs: c.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now,
+				Warm: func(_ string, unit PlanUnit, attempt Attempt) (bool, error) {
+					return WarmUnit(warmRunnerPools, map[string]bool{"8a70": true}, unit, attempt) != "", nil
+				}}
+			job := censusJob(PlanUnit{UnitKey: "u", Kind: "test", Runner: "8a70"})
+			job.Run, job.Earlier = "run-2", c.earlier
+			post, err := loop.JudgeFuture(job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.placed == 0 {
+				if len(h.fabric.Asked) != 0 || post.Decision.Status != "green" {
+					t.Fatalf("placements %v, run %s: a cold pass decides", h.fabric.Asked, post.Decision.Status)
+				}
+				return
+			}
+			// Its cold attempt fails, so the warm pass didn't decide it: the alone reruns make it the change's red.
+			if len(h.fabric.Asked) < c.placed || post.Decision.Status != "red" {
+				t.Fatalf("placements %v, run %s: the warm pass decided", h.fabric.Asked, post.Decision.Status)
 			}
 		})
 	}

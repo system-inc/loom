@@ -57,6 +57,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	poolsPath := flags.String("pools", "", "the pool table, workshop's ~/.loom/pools.json: a rerun goes only to a pool serving its key's runner whose workers hold its declared need")
 	needsGit := flags.String("needs-git", "", "with --pools, a clone of Adamic whose origin's loom/planner-reads holds unit-needs.json, for a unit whose plan carried no need")
 	warmAttempts := flags.String("warm-attempts", "", "a file of attempts that ran on a warm shared cache, one '<run> <unitKey>' per line, read on every pass: each is void warmCache and placed again cold (Release, Oct 10 02:43Z)")
+	warmRunners := flags.String("warm-runner", "", "runner sha256s, comma-separated, whose workers keep a shared Go cache: a test attempt keyed on one counts only from a machine a pool marked cold names, at or after its coldSince; else void warmCache, placed again on a cold pool only (Release, Oct 10 02:49Z). Needs --pools")
 	requireRunner := flags.Bool("require-runner", false, "void an attempt whose runner reports no sha256 (the logged fail-closed switch, a cutover condition, once every pool's runner sends it); a mismatch is void either way")
 	censusRows := flags.String("census-rows", "", "the skip census's rows, comma-separated files (the tools tree's skips.json and census-extra.json); every unit whose tests pass is held to it")
 	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
@@ -90,6 +91,16 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "judge:", err)
 			return 1
 		}
+	}
+	warmRunner := map[string]bool{}
+	for _, runner := range strings.Split(*warmRunners, ",") {
+		if runner = strings.TrimSpace(runner); runner != "" {
+			warmRunner[runner] = true
+		}
+	}
+	if len(warmRunner) > 0 && *poolsPath == "" {
+		fmt.Fprintln(stderr, "judge: --warm-runner needs --pools, whose cold pools are the only place its units count")
+		return 1
 	}
 	if *poolsPath != "" {
 		// Read once here so a bad table stops the judge at start; each rerun reads it again (readPools).
@@ -155,6 +166,10 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				}
 				unit.Resources = need
 				fit := judge.FitPools(table, parts.Kind, parts.Tools.Runner, need)
+				if parts.Kind == "test" && warmRunner[parts.Tools.Runner] {
+					// A unit keyed on a warm runner reruns only where each unit starts on an empty Go cache.
+					fit = judge.ColdPools(fit)
+				}
 				if len(fit) == 0 {
 					return []protocol.Event{{Unit: unit.Id, Type: "error", Phase: protocol.PhasePlace,
 						Message: fmt.Sprintf("not placed: no pool takes a %s unit on runner %.12s with %d MB and %d cpus", parts.Kind, parts.Tools.Runner, need.MemoryMegabytes, need.Cpus)}}, nil
@@ -180,10 +195,22 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Stale: judge.StaleAfter,
 	})
 	puller.Loop.RequireRunner = *requireRunner
-	if *warmAttempts != "" {
-		puller.Loop.Warm = func(run, unitKey string) (bool, error) {
-			listed, err := readWarmAttempts(*warmAttempts)
-			return listed[run+" "+unitKey], err
+	if *warmAttempts != "" || len(warmRunner) > 0 {
+		puller.Loop.Warm = func(run string, unit judge.PlanUnit, attempt judge.Attempt) (bool, error) {
+			if *warmAttempts != "" {
+				listed, err := readWarmAttempts(*warmAttempts)
+				if err != nil || listed[run+" "+unit.UnitKey] {
+					return true, err
+				}
+			}
+			if len(warmRunner) == 0 {
+				return false, nil
+			}
+			table, err := readPools(*poolsPath)
+			if err != nil {
+				return true, err
+			}
+			return judge.WarmUnit(table, warmRunner, unit, attempt) != "", nil
 		}
 	}
 	if *poolsPath != "" {

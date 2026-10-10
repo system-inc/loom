@@ -167,7 +167,7 @@ type Loop struct {
 	Need func(unitKey string) (listed, need protocol.Resources, err error)
 	// Warm, when set, says whether a run's attempt of a unit ran on a warm shared cache (Release, Oct 10 02:43Z), from
 	// a list Fabric reads off the worker's serve log; such an attempt is placed again cold before it decides anything.
-	Warm func(run, unitKey string) (bool, error)
+	Warm func(run string, unit PlanUnit, attempt Attempt) (bool, error)
 }
 
 // CensusConfig is what the census step reads: the tools tree's rows, whether an awaited branch is on main, and the
@@ -314,7 +314,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		if carried != "" {
 			run = carried
 		}
-		warm, err := loop.Warm(run, unit.UnitKey)
+		warm, err := loop.Warm(run, unit, first.Attempt)
 		if err != nil {
 			return Verdict{}, nil, err
 		}

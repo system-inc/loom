@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -413,6 +414,62 @@ type PoolEntry struct {
 	// Kinds are the unit kinds the pool takes when it is limited to some (box-phase takes only phase, Fabric's Oct 10
 	// 02:12Z): empty takes tests and products, as the planner reads it.
 	Kinds []string `json:"kinds,omitempty"`
+	// Cold marks a pool whose workers give each test unit an empty Go cache at its start (Release, Oct 10 02:48Z);
+	// Machines are the machine names its workers report in started events, and ColdSince (RFC 3339, read from its
+	// cold loop's first log line) is when that became true.
+	Cold      bool     `json:"cold,omitempty"`
+	Machines  []string `json:"machines,omitempty"`
+	ColdSince string   `json:"coldSince,omitempty"`
+}
+
+// WarmUnit says why a unit's attempt counts as warm, empty when it counts: only a test unit keyed on one of
+// warmRunners is judged by where it ran (WarmAttempt); every other unit counts as today.
+func WarmUnit(pools []PoolEntry, warmRunners map[string]bool, unit PlanUnit, attempt Attempt) string {
+	if unit.Kind != "test" || !warmRunners[unit.Runner] {
+		return ""
+	}
+	return WarmAttempt(pools, attempt)
+}
+
+// ColdPools is the pools a rerun of a unit keyed on a warm runner may use: only those marked cold.
+func ColdPools(pools []PoolEntry) []PoolEntry {
+	return slices.DeleteFunc(slices.Clone(pools), func(pool PoolEntry) bool { return !pool.Cold })
+}
+
+// WarmAttempt says why an attempt counts as run on a warm cache, empty when it ran cold (Release, Oct 10 02:54Z):
+// cold only if a pool marked cold names the attempt's machine, no pool not marked cold names it, and the attempt
+// started at or after the latest coldSince among the pools naming it, since two pools can report one machine name
+// (cloud-box-2 and cloud-box-3 both say Cloud). Anything unread or unnamed is warm: fail closed.
+func WarmAttempt(pools []PoolEntry, attempt Attempt) string {
+	started, err := time.Parse(time.RFC3339, attempt.StartedAt)
+	if err != nil {
+		return fmt.Sprintf("started time %q unreadable", attempt.StartedAt)
+	}
+	named := false
+	var since time.Time
+	for _, pool := range pools {
+		if !slices.Contains(pool.Machines, attempt.Machine) {
+			continue
+		}
+		if !pool.Cold {
+			return fmt.Sprintf("machine %s is a worker of %s, not marked cold", attempt.Machine, pool.Name)
+		}
+		poolSince, err := time.Parse(time.RFC3339, pool.ColdSince)
+		if err != nil {
+			return fmt.Sprintf("pool %s is marked cold with no readable coldSince", pool.Name)
+		}
+		if poolSince.After(since) {
+			since = poolSince
+		}
+		named = true
+	}
+	switch {
+	case !named:
+		return fmt.Sprintf("machine %q is named by no cold pool", attempt.Machine)
+	case started.Before(since):
+		return fmt.Sprintf("started %s, before machine %s ran cold at %s", attempt.StartedAt, attempt.Machine, since.Format(time.RFC3339))
+	}
+	return ""
 }
 
 // Takes is whether the pool takes a unit of this kind: a pool limited to some kinds takes only those, and an

@@ -208,3 +208,15 @@ func TestTheWarmAttemptsFileNamesARunAndAUnitPerLine(t *testing.T) {
 		t.Fatal("read a line with a run and no unit key")
 	}
 }
+
+// A rerun of a unit keyed on a warm runner never lands on a pool not marked cold, even when that pool fits it.
+func TestAWarmRunnersRerunGoesOnlyToColdPools(t *testing.T) {
+	pools := []judge.PoolEntry{
+		{Name: "codex-strict", Runner: "8a70", MemoryMegabytes: 16384, Cpus: 4},
+		{Name: "box-strict-8a70", Runner: "8a70", MemoryMegabytes: 16384, Cpus: 4, Cold: true, Machines: []string{"Cloud"}, ColdSince: "2026-10-10T02:44:10Z"},
+	}
+	fit := judge.ColdPools(judge.FitPools(pools, "test", "8a70", protocol.Resources{Cpus: 4}))
+	if len(fit) != 1 || fit[0].Name != "box-strict-8a70" {
+		t.Fatalf("fit %v, want only the cold box", fit)
+	}
+}
