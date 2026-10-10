@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
@@ -142,8 +143,9 @@ func TestTheBuildersCloneHasOnlyThePublicOrigin(t *testing.T) {
 
 // A release's restart mid-build (SIGTERM, #apsj7zp) never kills the build: the builder leaves its child running, its
 // running record standing with the child's pid, and the next builder adopts it, waiting for it and recording it built
-// from the store, never building the tree again. Mutants: the child killed on the builder's stop; the restarted
-// builder building the tree again instead of adopting.
+// from the store, never building the tree again, with the phases its summary line wrote to its log. Mutants: the
+// child killed on the builder's stop; the restarted builder building the tree again instead of adopting; the adopted
+// build's phases left off its record.
 func TestARestartMidBuildLeavesItRunningAndTheNextBuilderAdoptsIt(t *testing.T) {
 	key := strings.Repeat("a", 64)
 	parts, _ := json.Marshal(planner.KeyParts{Kind: "test", Package: "x", Tools: planner.Tools{Go: "go1.27.1"}})
@@ -153,21 +155,22 @@ func TestARestartMidBuildLeavesItRunningAndTheNextBuilderAdoptsIt(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The child: two seconds of building, then its index is up.
-	index := filepath.Join(t.TempDir(), "index")
+	// The child: two seconds of building, then its summary and its index is up.
+	index, log := filepath.Join(t.TempDir(), "index"), filepath.Join(t.TempDir(), "b.log")
 	child := filepath.Join(t.TempDir(), "build-tree")
-	os.WriteFile(child, []byte("#!/bin/bash\nsleep 2\ntouch '"+index+"'\n"), 0o755)
+	os.WriteFile(child, []byte("#!/bin/bash\nsleep 2\necho '{\"phases\":{\"products\":1.5,\"total\":2}}'\ntouch '"+index+"'\n"), 0o755)
 	indexed := func(string) (bool, error) { _, err := os.Stat(index); return err == nil, nil }
 	alive := func(pid int, _ string) bool { return syscall.Kill(pid, 0) == nil }
 	runContext, stop := context.WithCancel(context.Background())
 	builds := 0
 	loop := &treebuilder.Builder{Source: source, Indexed: indexed, Floor: func() error { return nil },
-		Build: func(want treebuilder.Want, running func(int) error) error {
+		Build: func(want treebuilder.Want, running func(int) error) (*builder.TreePhases, error) {
 			builds++
 			time.AfterFunc(300*time.Millisecond, stop) // the release's SIGTERM
-			return runBuildTree(runContext, child, nil, filepath.Join(t.TempDir(), "b.log"), 2*time.Hour, running)
+			return nil, runBuildTree(runContext, child, nil, log, 2*time.Hour, running)
 		},
-		Alive: alive, Kill: killGroup, Bound: 2 * time.Hour, Poll: 50 * time.Millisecond,
+		Phases: func(string) *builder.TreePhases { return readTreePhases(log) },
+		Alive:  alive, Kill: killGroup, Bound: 2 * time.Hour, Poll: 50 * time.Millisecond,
 		Stopping: func() bool { return runContext.Err() != nil }, Ledger: ledger, Now: time.Now, Log: io.Discard}
 	if _, err := loop.BuildOnce(); err != nil {
 		t.Fatal(err)
@@ -183,12 +186,15 @@ func TestARestartMidBuildLeavesItRunningAndTheNextBuilderAdoptsIt(t *testing.T) 
 		t.Fatalf("after the stop the build is recorded %+v, alive %v: it must still be running", newest, alive(newest.Pid, key))
 	}
 	loop.Ledger, loop.Stopping = reopened, func() bool { return false }
-	loop.Build = func(treebuilder.Want, func(int) error) error { builds++; return nil }
+	loop.Build = func(treebuilder.Want, func(int) error) (*builder.TreePhases, error) { builds++; return nil, nil }
 	if adopted, err := loop.BuildOnce(); err != nil || !adopted {
 		t.Fatalf("the restarted builder: adopted %v, %v", adopted, err)
 	}
 	if newest, _ = reopened.Newest(key); newest.Event != treebuilder.Built || !strings.Contains(newest.Cause, "adopted") || builds != 1 {
 		t.Fatalf("the adopted build is recorded %+v after %d builds; want it built once, adopted", newest, builds)
+	}
+	if newest.Phases == nil || newest.Phases.Products != 1.5 || newest.Phases.Total != 2 {
+		t.Fatalf("the adopted build's phases: %+v", newest.Phases)
 	}
 	if built, err := loop.BuildOnce(); err != nil || built || builds != 1 {
 		t.Fatalf("after adopting: built %v (%v), %d builds", built, err, builds)
@@ -238,12 +244,12 @@ func TestACheckoutHiccupIsTransient(t *testing.T) {
 		return "", nil, errors.New("git fetch --quiet origin: The requested URL returned error: 502")
 	}
 	want := treebuilder.Want{Tree: strings.Repeat("b", 64), Future: strings.Repeat("2", 40), Go: "go1.27.1"}
-	if err := buildWant(context.Background(), failing, "/bin/true", settings, want, nil, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrTransient) || !strings.Contains(err.Error(), "502") {
+	if _, err := buildWant(context.Background(), failing, "/bin/true", settings, want, nil, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrTransient) || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("a checkout's 502: %v", err)
 	}
 	stopped, stop := context.WithCancel(context.Background())
 	stop()
-	if err := buildWant(stopped, failing, "/bin/true", settings, want, nil, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrStopped) {
+	if _, err := buildWant(stopped, failing, "/bin/true", settings, want, nil, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrStopped) {
 		t.Fatalf("a checkout the stop cut short: %v", err)
 	}
 }

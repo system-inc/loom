@@ -74,6 +74,9 @@ type Store struct {
 	SkipNative bool
 	// Requests counts what this store was asked, for measuring a build's cost (#k62gwdt). Shared by copies of the Store.
 	Requests *Requests
+	// Phases, when set, takes PublishTree's seconds by what it sends: chunks, products, binaries, the index. Shared by
+	// copies of the Store, as Requests is.
+	Phases *TreePhases
 }
 
 // Requests counts a store's calls: reads are GETs and HEADs, writes are PUTs.
