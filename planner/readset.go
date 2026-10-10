@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // A ReadSet is what a unit's traced runs read inside the tree's submodules (cohere, and TypeScript inside it) beyond
@@ -141,11 +142,22 @@ func UnitReadSet(directory, codeKey string) (ReadSet, string, bool, error) {
 
 // RecordReadSet records what a traced run of the unit read under its code key: the set already recorded there grown
 // by measured, written before the code key names it, each file by a rename, so a reader never sees half of one. It
-// returns the id the code key names now. Two records at once may keep only one run's paths; the other run's paths come
-// back as a void the next time a traced run reads them, never as a stale key.
+// returns the id the code key names now. The read, the union and the write hold the directory's lock, so two records
+// at once each grow the set by their run's paths, and neither loses the other's.
 func RecordReadSet(directory, codeKey string, parts KeyParts, measured ReadSet) (string, error) {
 	if !Sha256Hex(codeKey) {
 		return "", fmt.Errorf("code key %q isn't a sha256", codeKey)
+	}
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return "", err
+	}
+	lock, err := os.OpenFile(filepath.Join(directory, "lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return "", err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return "", fmt.Errorf("locking %s: %w", directory, err)
 	}
 	set := measured.normal()
 	recorded, _, found, err := UnitReadSet(directory, codeKey)

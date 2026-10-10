@@ -1,11 +1,13 @@
 package planner
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -395,5 +397,29 @@ func TestAnUntrackedSubmoduleFileKeysTheSubmodulesCommit(t *testing.T) {
 	beyond := check(narrow).Beyond()
 	if len(beyond) != 1 || beyond[0].Path != "sub/node_modules/x/index.js" || !strings.HasPrefix(beyond[0].State, "untracked in sub") {
 		t.Fatalf("an untracked file read on a key without its submodule's commit: beyond %+v", beyond)
+	}
+}
+
+// The review's proof (finding 6): two records at once under one code key, each with its own run's path, keep both.
+// Mutant that fails it: the records not locked.
+func TestConcurrentRecordsKeepEveryPath(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	for round := 0; round < 50; round++ {
+		codeKey := fmt.Sprintf("%064d", round)
+		var group sync.WaitGroup
+		for _, name := range []string{"sub/a", "sub/b", "sub/c"} {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				if _, err := RecordReadSet(directory, codeKey, KeyParts{Kind: "test"}, ReadSet{Paths: []string{name}}); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		group.Wait()
+		if set, _, _, err := UnitReadSet(directory, codeKey); err != nil || len(set.Paths) != 3 {
+			t.Fatalf("round %d: three records at once kept %v (%v)", round, set.Paths, err)
+		}
 	}
 }
