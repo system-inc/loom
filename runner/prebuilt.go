@@ -118,15 +118,15 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		for _, note := range passed {
 			run.say(note)
 		}
-		kept := map[string]bool{}
+		kept := map[builder.SourceChunk]bool{}
 		if base != nil {
 			for _, chunk := range base.state.Chunks {
-				kept[chunk.Blob] = true
+				kept[chunk] = true
 			}
 		}
 		fetching, fetchingBytes := 0, int64(0)
 		for _, chunk := range index.Source {
-			if !kept[chunk.Blob] {
+			if !kept[chunk] {
 				needed = append(needed, neededBlob{sum: chunk.Blob, what: "the tree's source chunk " + strconv.Quote(chunk.First) + " to " + strconv.Quote(chunk.Last), chunk: true})
 				fetching++
 				fetchingBytes += chunk.Bytes

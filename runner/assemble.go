@@ -177,10 +177,10 @@ func (base *sourceBase) release() {
 // and that is unchanged since it was assembled, held exclusively; nil when none is. A changed one's state is removed,
 // so it is never checked again. why says what it passed over.
 func (cache sourceCache) nearest(chunks []builder.SourceChunk) (base *sourceBase, why []string) {
-	wanted := map[string]bool{}
+	wanted := map[builder.SourceChunk]bool{}
 	total := int64(0)
 	for _, chunk := range chunks {
-		wanted[chunk.Blob] = true
+		wanted[chunk] = true
 		total += chunk.Bytes
 	}
 	states, _ := filepath.Glob(filepath.Join(cache.directory, "*"+sourceStateSuffix))
@@ -197,7 +197,7 @@ func (cache sourceCache) nearest(chunks []builder.SourceChunk) (base *sourceBase
 		}
 		candidate := &sourceBase{sum: sum, directory: filepath.Join(cache.directory, sum), state: state}
 		for _, chunk := range state.Chunks {
-			if wanted[chunk.Blob] {
+			if wanted[chunk] {
 				candidate.shared += chunk.Bytes
 			}
 		}
@@ -298,14 +298,14 @@ func (cache sourceCache) assemble(assembleContext context.Context, held *heldSou
 	// Removed while still locked, whatever it holds: nothing, once the tree is named.
 	defer removeDirectory(scratch)
 	tree := filepath.Join(scratch, "tree")
-	kept := map[string]bool{}
+	kept := map[builder.SourceChunk]bool{}
 	if base != nil {
 		if kept, err = cache.spend(base, chunks, tree, &done); err != nil {
 			return done, fmt.Errorf("making it from tree %s: %w", base.sum, err)
 		}
 	}
 	for _, chunk := range chunks {
-		if kept[chunk.Blob] {
+		if kept[chunk] {
 			continue
 		}
 		file, err := open(assembleContext, chunk.Blob)
@@ -348,7 +348,7 @@ func (cache sourceCache) assemble(assembleContext context.Context, held *heldSou
 // runner killed from here on leaves it whole at its name, or inside the unpacking a sweep removes, never a state
 // naming another tree), its lock file removed, its marker taken out, and the entries of each of its chunks chunks
 // lacks removed, deepest first, then the directories that leaves empty. It returns the chunks the tree still holds.
-func (cache sourceCache) spend(base *sourceBase, chunks []builder.SourceChunk, tree string, done *assembly) (map[string]bool, error) {
+func (cache sourceCache) spend(base *sourceBase, chunks []builder.SourceChunk, tree string, done *assembly) (map[builder.SourceChunk]bool, error) {
 	if err := os.Remove(cache.statePath(base.sum)); err != nil {
 		return nil, err
 	}
@@ -361,14 +361,16 @@ func (cache sourceCache) spend(base *sourceBase, chunks []builder.SourceChunk, t
 	if err := os.Remove(filepath.Join(tree, sourceMarker)); err != nil {
 		return nil, err
 	}
-	wanted := map[string]bool{}
+	// A chunk is kept whole or not at all: its blob, its range and its count, so a range the new index draws
+	// narrower around the same blob unpacks again, refused as a fresh assembly would refuse it.
+	wanted := map[builder.SourceChunk]bool{}
 	for _, chunk := range chunks {
-		wanted[chunk.Blob] = true
+		wanted[chunk] = true
 	}
-	kept := map[string]bool{}
+	kept := map[builder.SourceChunk]bool{}
 	for _, chunk := range base.state.Chunks {
-		if wanted[chunk.Blob] {
-			kept[chunk.Blob] = true
+		if wanted[chunk] {
+			kept[chunk] = true
 			done.kept++
 		}
 	}
@@ -385,7 +387,7 @@ func (cache sourceCache) spend(base *sourceBase, chunks []builder.SourceChunk, t
 			continue
 		}
 		holder := sort.Search(len(base.state.Chunks), func(position int) bool { return base.state.Chunks[position].Last >= entry.Name })
-		if holder < len(base.state.Chunks) && base.state.Chunks[holder].Holds(entry.Name) && kept[base.state.Chunks[holder].Blob] {
+		if holder < len(base.state.Chunks) && base.state.Chunks[holder].Holds(entry.Name) && kept[base.state.Chunks[holder]] {
 			continue
 		}
 		if err := root.Remove(entry.Name); err != nil {

@@ -26,6 +26,7 @@ import (
 //	chunks whose ranges meet let through: TestAnIndexOfAnotherFormatIsUnfitAndOverlappingChunksPoisoned
 //	the index's format not checked: TestAnIndexOfAnotherFormatIsUnfitAndOverlappingChunksPoisoned
 //	an entry's depth or length unbounded: TestUnpackRefusesANameTooLongOrTooDeepBeforeOpeningItsParents
+//	one blob listed twice let through: TestAnIndexOfAnotherFormatIsUnfitAndOverlappingChunksPoisoned
 
 // withChunkTarget sets chunkTarget for one test.
 func withChunkTarget(t *testing.T, target int64) {
@@ -174,7 +175,8 @@ func TestASourcesChunksHangOnItsFilesAlone(t *testing.T) {
 
 // A one-file change sends one chunk, the one holding the file, when the file keeps its size. One that changes its size
 // can move the cut after it (a chance of the change over chunkTarget: this one, 38 bytes in 4 KiB, does), and sends at
-// most that chunk and the next, and so does a file made beside it. Nothing else moves, though the file is near the
+// most that chunk and the next, and so does a file made beside it (one grown past chunkTarget makes three:
+// TestEveryOneFileChangeTouchesAtMostThreeChunks). Nothing else moves, though the file is near the
 // front of the tree.
 func TestAOneFileChangeSendsOneChunk(t *testing.T) {
 	withChunkTarget(t, 4<<10)
@@ -308,13 +310,14 @@ func TestAnIndexOfAnotherFormatIsUnfitAndOverlappingChunksPoisoned(t *testing.T)
 		return SourceChunk{Blob: keyOf(first + last), First: first, Last: last, Files: files, Bytes: 1}
 	}
 	for name, chunks := range map[string][]SourceChunk{
-		"overlapping":         {chunk("a", "c", 1), chunk("b", "d", 1)},
-		"meeting at a name":   {chunk("a", "b", 1), chunk("b", "d", 1)},
-		"out of order":        {chunk("c", "d", 1), chunk("a", "b", 1)},
-		"empty":               {chunk("a", "b", 0)},
-		"a range backwards":   {chunk("b", "a", 1)},
-		"none":                {},
-		"a blob not a sha256": {{Blob: "x", First: "a", Last: "a", Files: 1}},
+		"overlapping":           {chunk("a", "c", 1), chunk("b", "d", 1)},
+		"meeting at a name":     {chunk("a", "b", 1), chunk("b", "d", 1)},
+		"out of order":          {chunk("c", "d", 1), chunk("a", "b", 1)},
+		"empty":                 {chunk("a", "b", 0)},
+		"a range backwards":     {chunk("b", "a", 1)},
+		"none":                  {},
+		"a blob not a sha256":   {{Blob: "x", First: "a", Last: "a", Files: 1}},
+		"one blob listed twice": {{Blob: keyOf("x"), First: "a", Last: "a", Files: 1, Bytes: 1}, {Blob: keyOf("x"), First: "b", Last: "b", Files: 1, Bytes: 1}},
 	} {
 		index := TreeIndex{Format: TreeIndexFormat, Tree: "t", Source: chunks, Packages: map[string]TreePackage{}}
 		encoded, _ := index.encode()
@@ -350,4 +353,54 @@ func TestUnpackRefusesANameTooLongOrTooDeepBeforeOpeningItsParents(t *testing.T)
 	if err := Unpack(bytes.NewReader(tarGzip(t, entry{name: strings.Repeat("a/", 255) + "f", body: "x"})), directory, nil); err != nil {
 		t.Errorf("256 levels deep: %v", err)
 	}
+}
+
+// Every one-file change, to each of 400 files, touches at most three chunks: one when the file keeps its size, two
+// when its size moves the cut after it, three when it grows past chunkTarget, a chunk of its own cutting its old one in
+// two. (The review's proof, Oct 10.)
+func TestEveryOneFileChangeTouchesAtMostThreeChunks(t *testing.T) {
+	withChunkTarget(t, 8192)
+	directory, names := t.TempDir(), []string{}
+	for index := range 400 {
+		name := fmt.Sprintf("d%02d/f%03d.txt", index%17, index)
+		os.MkdirAll(filepath.Join(directory, fmt.Sprintf("d%02d", index%17)), 0o755)
+		os.WriteFile(filepath.Join(directory, name), []byte(strings.Repeat("x", 100+index*7%900)), 0o644)
+		names = append(names, name)
+	}
+	base, err := ChunkFiles(directory, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	had := map[string]bool{}
+	for _, chunk := range base.Chunks {
+		had[chunk.Blob] = true
+	}
+	most := map[string]int{"the same size": 1, "three times the size": 2, "past chunkTarget": 3}
+	worst := map[string]int{}
+	for _, name := range names {
+		path := filepath.Join(directory, name)
+		original, _ := os.ReadFile(path)
+		for change, content := range map[string]string{"the same size": strings.Repeat("y", len(original)),
+			"three times the size": strings.Repeat("x", len(original)*3), "past chunkTarget": strings.Repeat("x", 9000)} {
+			os.WriteFile(path, []byte(content), 0o644)
+			changed, err := ChunkFiles(directory, names)
+			if err != nil {
+				t.Fatal(err)
+			}
+			made := 0
+			for _, chunk := range changed.Chunks {
+				if !had[chunk.Blob] {
+					made++
+				}
+			}
+			worst[change] = max(worst[change], made)
+		}
+		os.WriteFile(path, original, 0o644)
+	}
+	for change, limit := range most {
+		if worst[change] < 1 || worst[change] > limit {
+			t.Errorf("a change to %s made up to %d new chunks, not 1 to %d", change, worst[change], limit)
+		}
+	}
+	t.Logf("%d chunks; the most new chunks a one-file change made: %v", len(base.Chunks), worst)
 }

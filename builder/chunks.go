@@ -24,7 +24,9 @@ import (
 // first to last, and no two chunks' ranges meet. Where a run ends depends only on each path and its size, never on
 // the order a listing gave or on any other file: after a path whose hash, read as a fraction, falls under its weight
 // (its size and a tar header) over chunkTarget, and around any path that weighs chunkTarget alone. A one-file change
-// so changes the one chunk holding it, and two at most when its new size moves the cut after it. Measured on
+// that keeps the file's size so changes the one chunk holding it; one that changes its size can move the cut after it
+// (two chunks), and one that grows it past chunkTarget makes it a chunk of its own, cutting its old chunk in two
+// (three). Measured on
 // 2016af55's source (Oct 10): see chunkTarget.
 
 // chunkTarget is the weight a chunk holds on average: 1 MiB. Measured on 2016af55's source (98,459 files and links,
@@ -182,14 +184,17 @@ func cutAfter(file sourceFile) bool {
 }
 
 // CheckChunks refuses a chunk list that isn't in path order with ranges that never meet, an empty chunk, a range whose
-// first path is after its last, or a blob that isn't a sha256: two chunks that could both hold a path would let one
-// write where another already had.
+// first path is after its last, a blob that isn't a sha256, or one blob listed twice: two chunks that could both hold
+// a path would let one write where another already had, and one blob can hold only one range's paths.
 func CheckChunks(chunks []SourceChunk) error {
 	if len(chunks) == 0 {
 		return fmt.Errorf("its source has no chunks")
 	}
+	listed := map[string]bool{}
 	for index, chunk := range chunks {
 		switch {
+		case listed[chunk.Blob]:
+			return fmt.Errorf("its source lists chunk %s twice", chunk.Blob)
 		case !productKeyPattern.MatchString(chunk.Blob):
 			return fmt.Errorf("its source chunk %d is blob %q", index, chunk.Blob)
 		case chunk.Files < 1 || chunk.First == "" || chunk.First > chunk.Last:
@@ -197,6 +202,7 @@ func CheckChunks(chunks []SourceChunk) error {
 		case index > 0 && chunks[index-1].Last >= chunk.First:
 			return fmt.Errorf("its source chunks %s (to %q) and %s (from %q) overlap", chunks[index-1].Blob, chunks[index-1].Last, chunk.Blob, chunk.First)
 		}
+		listed[chunk.Blob] = true
 	}
 	return nil
 }

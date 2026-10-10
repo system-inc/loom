@@ -32,6 +32,7 @@ import (
 //	a spent tree renamed before its state is removed, or a tree assembled at its name:
 //	TestAnAssemblyKilledPartwayLeavesNothingTrusted
 //	a fetched chunk's hash unchecked, or a cached one's: TestACorruptChunkIsNeverAssembled
+//	a kept chunk matched by its blob alone, not its range and count: TestAKeptChunkIsMatchedWholeNotByItsBlob
 
 // describeTree describes every entry under directory but the marker: its type and mode, a link's target, a file's
 // bytes.
@@ -241,6 +242,34 @@ func TestAHeldKeptTreeIsNeverSpent(t *testing.T) {
 	}
 	if !unit.whole() {
 		t.Fatal("the held tree was spent")
+	}
+}
+
+// A kept chunk is kept only when the new index lists it whole, its blob, range and count: one whose range the new
+// index draws narrower around the same blob is unpacked again and refused, as a fresh assembly refuses it, never left
+// in place with a file outside every chunk's range. (The review's proof, Oct 10.)
+func TestAKeptChunkIsMatchedWholeNotByItsBlob(t *testing.T) {
+	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
+	open := openFrom(t, blobs, map[string]int{})
+	cache := newSourceCache(t.TempDir())
+	assembleTree(t, cache, chunksA, open)
+	narrowed := append([]builder.SourceChunk{}, chunksA...)
+	narrowed[0].Last, narrowed[0].Files = "a/b.txt", 1
+	if err := builder.CheckChunks(narrowed); err != nil {
+		t.Fatal(err)
+	}
+	held, _ := cache.hold(builder.SourceSum(narrowed))
+	defer held.release()
+	base, why := cache.nearest(narrowed)
+	if base == nil {
+		t.Fatalf("A isn't near the narrowed index: %q", why)
+	}
+	_, err := cache.assemble(context.Background(), held, narrowed, base, open)
+	if err == nil || !strings.Contains(err.Error(), "isn't one this archive may hold") {
+		t.Fatalf("a narrowed range around a kept blob: %v", err)
+	}
+	if _, err = os.Lstat(held.directory); err == nil {
+		t.Error("the narrowed tree is at its name")
 	}
 }
 
