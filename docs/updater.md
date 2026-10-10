@@ -41,7 +41,7 @@ end 4
 
 Every section must close with an end line whose count matches, and a manifest with a canary line must hold both sections. So a manifest cut short at any line, which would otherwise read as a smaller one and drop the binaries it no longer saw, is refused whole. Any other line, a file outside a section, or a name listed twice for one platform, refuses it too. A blob lives at `<base>/blobs/<sha256>` and never changes: its name is its content. Nothing else is read. `publish.sh` also keeps each commit's own manifest, one section with no canary, at `<base>/manifests/<commit>.txt`, which is what a rollback publishes.
 
-The release store is the `loom-artifacts` bucket, under `releases/`: `https://artifacts.loom.system.inc/releases` is the base, so blobs are `releases/blobs/<sha256>` and the manifest `releases/current.txt`. That prefix never expires. The bucket's own `blobs/` and `refs/` are test products, expired after 7 days, and never hold a release.
+The release store is the `loom-artifacts` bucket, under `releases/`: `https://artifacts.loom.system.inc/releases` is the base, so blobs are `releases/blobs/<sha256>` and the manifest `releases/current.txt`. That prefix never expires. The bucket's own `blobs/`, `refs/` and `trees/` are the action store (builder/store.go), each object expired 7 days after its upload, and never hold a release.
 
 ## On a machine
 

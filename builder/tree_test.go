@@ -86,7 +86,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		index.Packages[result.Package] = result
 	}
 	fake, store := serve(t)
-	treeKey, err := PublishTree(store, &index, build.Out, build.Cache, source)
+	treeKey, err := PublishTree(store, &index, build.Out, build.Cache, source, nil)
 	if err != nil || treeKey != TreeKey(index.Tree, index.Go, GateEnvironment()) {
 		t.Fatal(treeKey, err)
 	}
@@ -137,7 +137,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		result.Binary = ""
 		again.Packages[name] = result
 	}
-	if _, err = PublishTree(store, &again, build.Out, build.Cache, source); err != nil {
+	if _, err = PublishTree(store, &again, build.Out, build.Cache, source, nil); err != nil {
 		t.Fatal(err)
 	}
 	if fake.Count("PUT", "blobs/") != 0 || fake.Count("PUT", "refs/") != 0 || fake.Count("PUT", "trees/") != 1 {
@@ -151,7 +151,7 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 		result.Binary = ""
 		conflicted.Packages[name] = result
 	}
-	if _, err = PublishTree(store, &conflicted, build.Out, build.Cache, source); err != nil {
+	if _, err = PublishTree(store, &conflicted, build.Out, build.Cache, source, nil); err != nil {
 		t.Fatal(err)
 	}
 	if broke := conflicted.Packages["example.com/tree/a"].Error; !strings.Contains(broke, strings.Repeat("e", 64)) || !strings.Contains(broke, stored.Products[product]) {

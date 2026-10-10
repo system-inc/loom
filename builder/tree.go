@@ -29,7 +29,8 @@ import (
 //
 // A tree key T names the build: sha256 of "loom-tree-v1", the tree hash, the Go version and the gate env. Its index is
 // trees/<T>.json in the store (store.go): each package's test binary, gzipped, as a blob; the buildcache products its
-// tests read, each its own archive under refs/action/<buildcache key>, so a product no tree changed goes up once; and
+// tests read, each its own archive under refs/action/<buildcache key>, so a product no tree changed is built and goes
+// up once and later trees fetch it (held.go); and
 // the tree's source archive, one blob every package shares. A runner reads the index, then only its own package's
 // binary, products and the source, each by sha256.
 
@@ -100,6 +101,8 @@ type TreeBuild struct {
 	// reads it (nil means ProcGauge).
 	Busy  float64
 	Gauge Gauge
+	// Held is a HeldProducts server's address: the store's products, offered to buildcache before it builds one.
+	Held string
 }
 
 func (build TreeBuild) busy() float64 {
@@ -165,8 +168,15 @@ func (build TreeBuild) Warm(packages []planner.ProductTest) error {
 	return nil
 }
 
+// environment is a go process's environment. With Held set, buildcache asks it for a product before building one,
+// audits none of what it is given (a native product isn't reproducible yet, #tsn1wp8, so an audit's rebuild never
+// matches), and holds no write credential, so it never publishes anywhere itself.
 func (build TreeBuild) environment(extra ...string) []string {
-	return append(append(append(os.Environ(), build.Environment...), "ADAMIC_BUILD_CACHE_DIR="+build.Cache, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on"), extra...)
+	store := []string{"ADAMIC_BUILD_STORE=off"}
+	if build.Held != "" {
+		store = []string{"ADAMIC_BUILD_STORE=" + build.Held, "ADAMIC_BUILD_AUDIT=0", "ADAMIC_BUILD_STORE_TOKEN=" + os.DevNull}
+	}
+	return append(append(append(append(os.Environ(), build.Environment...), "ADAMIC_BUILD_CACHE_DIR="+build.Cache, "ADAMIC_BUILD_CACHE=on"), store...), extra...)
 }
 
 // Binaries compiles every package's test binary into Out, cold for this tree, Jobs at a time. Its blob is named when
@@ -389,8 +399,9 @@ func each(count, jobs int, work func(index int) error) error {
 // package's tests read, once each, as its own archive under its buildcache key, then each built package's binary,
 // gzipped, and the index last, so no index names what the store lacks. A product whose ref names another archive (a
 // ConflictError) fails every package that reads it, named in each one's error, and the rest of the tree still goes
-// up. It fills in treeIndex's blobs as it goes.
-func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte) (string, error) {
+// up. A product in held (HeldProducts.Held) came from the store this build, its blob already fresh, so it is named
+// in the index and nothing more. It fills in treeIndex's blobs as it goes.
+func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source []byte, held map[string]string) (string, error) {
 	treeKey := TreeKey(treeIndex.Tree, treeIndex.Go, GateEnvironment())
 	var err error
 	if treeIndex.Source, err = store.PutBlob(source); err != nil {
@@ -414,6 +425,10 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 	sort.Strings(products)
 	sums, conflicts := make([]string, len(products)), make([]error, len(products))
 	err = each(len(products), publishJobs, func(index int) error {
+		if sum, fetched := held[products[index]]; fetched {
+			sums[index] = sum
+			return nil
+		}
 		archive, _, err := ProductArchive(cache, []string{products[index]})
 		if err == nil {
 			sums[index], err = store.Publish(products[index], archive)

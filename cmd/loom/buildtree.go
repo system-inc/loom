@@ -72,9 +72,25 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loom: warming the tree: %v\n", err)
 	}
 	warmSeconds := time.Since(warmStarted).Seconds()
+	// The store's products are offered to buildcache before it builds one, so only what the store lacks is built.
+	scratch, err := os.MkdirTemp(directory, "held-")
+	if err != nil {
+		return fail(err)
+	}
+	defer os.RemoveAll(scratch)
+	held, err := builder.ServeHeldProducts(store, scratch)
+	if err != nil {
+		return fail(err)
+	}
+	build.Held = held.Address
 	productsStarted := time.Now()
 	products, productFailures := build.Products(productTests, filepath.Join(directory, "logs"))
 	productSeconds := time.Since(productsStarted).Seconds()
+	held.Close()
+	if err = held.Err(); err != nil {
+		return fail(fmt.Errorf("the store held products it couldn't give whole: %w", err))
+	}
+	build.Held = ""
 	binariesStarted := time.Now()
 	built := build.Binaries(packages)
 	binarySeconds := time.Since(binariesStarted).Seconds()
@@ -95,7 +111,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	uploadStarted := time.Now()
 	treeIndex.Seconds = time.Since(started).Seconds()
-	treeKey, err := builder.PublishTree(store, &treeIndex, build.Out, build.Cache, source)
+	treeKey, err := builder.PublishTree(store, &treeIndex, build.Out, build.Cache, source, held.Held())
 	if err != nil {
 		return fail(err)
 	}
@@ -110,7 +126,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	encoder.Encode(map[string]any{
 		"tree": treeHash, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json",
-		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products),
+		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products), "productsFetched": len(held.Held()),
 		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
 		"seconds": time.Since(started).Seconds(), "sourceBytes": len(source),
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),

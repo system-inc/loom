@@ -26,7 +26,8 @@ import (
 //	trees/<treeKey>.json      a tree's index (TreeIndex): each package's binary, the products its tests read, the
 //	                          source archive
 //
-// The bucket's lifecycle deletes every blob and ref 7 days after its upload. So a blob the store holds is skipped
+// The bucket's lifecycle deletes every blob, ref and tree index 7 days after its upload (trees/ by Loom's own rule,
+// Oct 10, so old indexes naming expired blobs don't pile up). So a blob the store holds is skipped
 // only while it was uploaded within FreshFor; an older one goes up again, which starts its 7 days over, and a ref is
 // only ever written after its blob is fresh, so no ref written today names a blob that vanishes tomorrow.
 
