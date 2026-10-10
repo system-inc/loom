@@ -97,6 +97,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "pool" {
 		return pool(arguments[1:], stdout, stderr)
 	}
+	if len(arguments) > 0 && arguments[0] == "fleet" {
+		return fleetCommand(arguments[1:], stdout, stderr)
+	}
 	if len(arguments) > 0 && arguments[0] == "submit-token" {
 		return submitToken(arguments[1:], stdout, stderr)
 	}
