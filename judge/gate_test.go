@@ -1,6 +1,8 @@
 package judge
 
 import (
+	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -124,5 +126,27 @@ func TestTheCanaryAndTheSuiteMustBeWhole(t *testing.T) {
 				t.Fatal("promoted")
 			}
 		})
+	}
+}
+
+func TestABatchReadsAsTheGateReadsARecord(t *testing.T) {
+	mutant := Mutant{Name: "wasi-family-must-run", Sha: strings.Repeat("1", 40), Step: "tests", Pattern: regexp.MustCompile(`internal/native TestWASIUnit[0-9]+`)}
+	red, _ := Verdict{UnitKey: "u", Status: Failed, Cause: CauseChange, Tests: []TestOutcome{
+		{Package: "internal/native", Test: "TestWASIUnit07", Outcome: "fail"}, {Package: "internal/native", Test: "TestOther", Outcome: "pass"}}}.Canonical()
+	fine, _ := Verdict{UnitKey: "v", Status: Passed, Tests: []TestOutcome{{Package: "internal/ir", Test: "TestA", Outcome: "pass"}}}.Canonical()
+	post := FuturePost{Verdicts: []json.RawMessage{red, fine}, Decision: PostDecision{RunVerdict: RunVerdict{Status: "red", Red: []string{"u"}}}}
+	reading, err := ReadingOf(mutant.Sha, post)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reading.PassedTests != 2 || reading.FirstStep != "tests" {
+		t.Fatalf("reading %+v", reading)
+	}
+	if said := JudgeMutant(mutant, reading); said != "ok" {
+		t.Fatalf("the mutant reads %q through a batch, want ok", said)
+	}
+	thin, err := ReadingOf(strings.Repeat("2", 40), FuturePost{Verdicts: []json.RawMessage{fine}, Decision: PostDecision{RunVerdict: RunVerdict{Status: "green"}}})
+	if err != nil || thin.PassedTests != 1 || JudgeMutant(Mutant{Name: "canary-inert", Sha: strings.Repeat("2", 40), Step: StepThin}, thin) != "ok" {
+		t.Fatalf("a green batch of one passed test reads %+v, want a thin canary", thin)
 	}
 }

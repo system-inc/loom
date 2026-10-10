@@ -7,6 +7,7 @@ package judge
 // old one agree on what a correct gate looks like.
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -145,4 +146,41 @@ func GateTheGate(suite []Mutant, readings map[string]Reading, canary Reading) To
 	}
 	result.Promote = len(result.Hold) == 0
 	return result
+}
+
+// ReadingOf reads a future's posted batch as a gate reading, so GateTheGate judges the new path's runs the way it
+// judges the box's: the decision's status, "tests" as the step of a red (the new path's units are tests; it has no
+// census step yet), the red units' failing tests as the first failure's text, and every passed test counted for the
+// thin-canary rule.
+func ReadingOf(sha string, post FuturePost) (Reading, error) {
+	reading := Reading{Sha: sha, Status: post.Decision.Status}
+	red := map[string]bool{}
+	for _, key := range post.Decision.Red {
+		red[key] = true
+	}
+	failures := []string{}
+	for _, raw := range post.Verdicts {
+		var record struct {
+			UnitKey string        `json:"unitKey"`
+			Tests   []TestOutcome `json:"tests"`
+		}
+		if err := json.Unmarshal(raw, &record); err != nil {
+			return Reading{}, err
+		}
+		for _, outcome := range record.Tests {
+			switch {
+			case outcome.Outcome == "pass":
+				reading.PassedTests++
+			case outcome.Outcome == "fail" && red[record.UnitKey]:
+				failures = append(failures, outcome.Package+" "+outcome.Test)
+			}
+		}
+	}
+	switch reading.Status {
+	case "red":
+		reading.FirstStep, reading.FirstFailure = "tests", strings.Join(failures, "\n")
+	case "void":
+		reading.VoidCause = strings.Join(post.Decision.Problems, "; ")
+	}
+	return reading, nil
 }
