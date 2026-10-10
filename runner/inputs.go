@@ -60,23 +60,17 @@ func (run *unitRun) fetchInputs(runContext context.Context) error {
 	return nil
 }
 
-// fetchBlob downloads <store>/<sha256> into the staging area and returns its path there, with the run's token.
-func (run *unitRun) fetchBlob(runContext context.Context, hash string) (string, error) {
-	return run.fetchBlobFrom(runContext, storeUrl(run.unit.Store.Url, hash), hash, true)
-}
-
-// fetchBlobFrom downloads url into the staging area as the blob hash and returns its path there. The bytes are
+// fetchBlob downloads <store>/<sha256> into the staging area and returns its path there. The bytes are
 // hashed as they arrive; a blob whose hash isn't the one asked for is deleted and refused, never retried,
-// since a store that serves the wrong bytes once has nothing to offer a second time. withToken sends the run's
-// token, which the public action store never gets.
-func (run *unitRun) fetchBlobFrom(runContext context.Context, url string, hash string, withToken bool) (string, error) {
+// since a store that serves the wrong bytes once has nothing to offer a second time.
+func (run *unitRun) fetchBlob(runContext context.Context, hash string) (string, error) {
 	path := filepath.Join(run.staging, hash)
 	var lastError error
 	for attempt := range storeAttempts {
 		if attempt > 0 {
 			sleepFor(runContext, attempt)
 		}
-		got, retry, err := run.download(runContext, url, path, withToken)
+		got, retry, err := run.download(runContext, storeUrl(run.unit.Store.Url, hash), path)
 		if err == nil && got == hash {
 			return path, nil
 		}
@@ -102,12 +96,12 @@ func sleepFor(runContext context.Context, attempt int) {
 
 // download makes one GET of a blob into path and returns the sha256 of what arrived. retry says whether a
 // failure is worth another attempt.
-func (run *unitRun) download(runContext context.Context, url string, path string, withToken bool) (got string, retry bool, err error) {
+func (run *unitRun) download(runContext context.Context, url string, path string) (got string, retry bool, err error) {
 	request, err := http.NewRequestWithContext(runContext, http.MethodGet, url, nil)
 	if err != nil {
 		return "", false, err
 	}
-	if withToken && run.unit.Token != "" {
+	if run.unit.Token != "" {
 		request.Header.Set("Authorization", "Bearer "+run.unit.Token)
 	}
 	response, err := run.options.Client.Do(request)
