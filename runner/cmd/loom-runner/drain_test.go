@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -58,9 +59,22 @@ func TestAHangupDrainsServe(t *testing.T) {
 	}
 }
 
-// install-serve is the hook's whole work, and only a Linux box serves through systemd.
+// A hangup that arrives before serve's drain handler is in place is ignored, never the default's exit: serve ignores
+// it first thing, so even one refused at its flags leaves it ignored.
+func TestServeIgnoresAHangupFromItsFirstMoment(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"serve"}, &stdout, &stderr); code != 2 || !signal.Ignored(syscall.SIGHUP) {
+		t.Fatalf("exit %d, SIGHUP ignored %v", code, signal.Ignored(syscall.SIGHUP))
+	}
+}
+
+// install-serve is the hook's whole work, and only a Linux box serves through systemd. The hook knows a release has it
+// by this exact usage line.
 func TestInstallServeTakesNoArgumentsAndOnlyLinux(t *testing.T) {
 	var stdout, stderr bytes.Buffer
+	if code := run(nil, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "\n  loom-runner install-serve\n") {
+		t.Fatalf("the usage the hook reads: exit %d, %q", code, stderr.String())
+	}
 	if code := run([]string{"install-serve", "now"}, &stdout, &stderr); code != 2 {
 		t.Fatalf("install-serve with an argument: exit %d", code)
 	}

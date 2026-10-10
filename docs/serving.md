@@ -21,24 +21,24 @@ A pinned runner must be a release at or after the one that brought this hand-off
 
 ## The unit
 
-`serving/systemd/loom-serve.service` is the unit. Nobody copies it: `loom-runner install-serve` renders it from the box's settings and installs it, and the updater's hook runs that after every release, so the unit always comes with the runner it runs.
+`serving/systemd/loom-serve.service` is the unit. Nobody copies it: `loom-runner install-serve` renders it from the box's settings and installs it, writes the updater's hook that runs it after every release, and starts or reloads serve, so the unit and the hook always come with the serving runner.
 
 | Path | What it is |
 |---|---|
 | `~/.loom/serve.conf` | `key = value` lines, `#` comments, as `update.conf`: `pool` (required, the pool's name on the wire) and `phase-jobs` (`yes` for a pool that takes phase units, like `box-phase`; default `no`). Anything else is refused. |
-| `~/.loom/serve-token` | The pool token for that pool (`loom pool token <pool>`), mode 600. `install-serve` refuses one anyone but its owner can read. |
-| `~/.loom/updated.d/50-serve` | The hook: `exec "$LOOM_UPDATE_BIN/loom-runner" install-serve`. |
+| `~/.loom/serve-token` | The pool token for that pool (`loom pool token <pool>`), mode 600. `install-serve` refuses one that is empty, not this user's, or readable by anyone else. |
+| `~/.loom/updated.d/50-serve` | The hook (`serving/updated.d/50-serve`), written by `install-serve` when its text changed: it runs `install-serve` from the release just installed, or, when that release has none (a rollback past it), passes with a note and leaves serve as it runs. |
 | `~/.config/systemd/user/loom-serve.service` | The rendered unit, written only when its text changed. |
 | `~/loom-serve/root` | The runner's root: its blob cache and unpacked sources, under the runner's own bounds (4 GiB of blobs, at most two sources, 3 GiB free before a prebuilt unit starts). |
 | `~/loom-serve/units` | Each unit's workspace while it runs. |
 
-The unit runs `~/.loom/bin/loom-runner serve --strict [--phase-jobs] --pool https://runs.loom.system.inc/pools/<pool> --token-file <copy> --worker <hostname> --until 1h --root ~/loom-serve/root --workspace ~/loom-serve/units`. Every box worker is strict, since the placer sends a pool only test jobs, and never `--exclusive`: the box is shared with other work (on Workshop, the tree builder and Kirk's own), so a unit clears only earlier units' leavings under its own root, never HOME's caches, and runs no `cloud/setup.sh` in HOME; a checkout unit on a box without adamic's toolchain is unfit there, named. The worker's name is the host's name, the same name its started events give as the machine. Each start copies the token into the unit's own runtime directory (mode 700), and serve reads that copy and removes it, so the token is never on a command line.
+The unit runs `~/.loom/bin/loom-runner serve --strict [--phase-jobs] --pool https://runs.loom.system.inc/pools/<pool> --token-file <copy> --worker <host>-<machine id> --until 1h --root ~/loom-serve/root --workspace ~/loom-serve/units`. Every box worker is strict, since the placer sends a pool only test jobs, and never `--exclusive`: the box is shared with other work (on Workshop, the tree builder and Kirk's own), so a unit clears only earlier units' leavings under its own root, never `HOME`'s caches, and runs no `cloud/setup.sh` in `HOME`; a checkout unit on a box without adamic's toolchain is unfit there, named. The worker's name is the host's short name and the first six digits of `/etc/machine-id`, so two boxes sharing a host name never read as one worker in the pool's status; a unit's started event still names the machine by its host name. The unit orders itself after nothing: a user unit can't wait on the system's `network-online.target`, and serve retries the pool until it answers. Each start copies the token into the unit's own runtime directory (mode 700), and serve reads that copy and removes it, so the token is never on a command line.
 
 - **Restart.** `Restart=always`: serve ends every hour (`--until`) once the unit in hand finishes, or when it exits for any reason, and systemd starts it again 30 s later on whatever `~/.loom/bin/loom-runner` is then. A token the pool refuses (expired, say) makes it exit 2 and start again every 30 s, saying so in the journal, until a new token is in place.
 - **Reload is a drain.** `systemctl --user reload loom-serve` sends `SIGHUP`: serve asks for nothing more, lets the unit in hand finish, and exits 0, and `Restart=always` starts the new runner. A drain never cuts an ask in flight, whose unit the pool has already taken off its queue.
 - **Stop breaks only the unit in hand.** `systemctl --user stop loom-serve` sends `SIGTERM` to serve alone (`KillMode=mixed`): it kills the unit's process group, posts the unit broken to the wire (the judge places it again), and exits; whatever the unit left is killed once serve has. Nothing still queued is touched.
 
-`install-serve` reads `serve.conf`, checks the token, writes the unit when its text changed (then `systemctl --user daemon-reload`), enables it and runs `systemctl --user reload-or-restart loom-serve.service`: a running serve drains, a stopped one starts. Run twice for one release, it costs one more drain. It refuses anything but Linux.
+`install-serve` first does everything that can refuse: reads `serve.conf`, checks the token, names the worker, and writes the hook and the unit when their text changed (then `systemctl --user daemon-reload`). Only then, last, does it touch serve: `enable`, then `start` when it isn't running, `reload` (a drain) when its unit changed or its main process runs another binary than `~/.loom/bin/loom-runner` (read from `/proc/<pid>/exe`), and nothing otherwise. So a refused install, which the updater runs again every minute, never reloads serve, and a hook run twice for one release reloads it once. It refuses anything but Linux.
 
 ## Installing
 
@@ -48,15 +48,13 @@ Once per box, after the updater is installed and has a release with `install-ser
 umask 077
 printf 'pool = box-strict\n' > ~/.loom/serve.conf          # or: pool = box-phase, phase-jobs = yes
 cat > ~/.loom/serve-token                                    # the token minted on Workshop, on stdin
-printf '#!/bin/sh\nexec "$LOOM_UPDATE_BIN/loom-runner" install-serve\n' > ~/.loom/updated.d/50-serve
-chmod 755 ~/.loom/updated.d/50-serve
-~/.loom/bin/loom-runner install-serve
+~/.loom/bin/loom-runner install-serve                        # writes the hook, the unit, and starts serve
 ```
 
-On Workshop, the token for each pool: `~/.loom/bin/loom pool token box-strict --hours 720` (30 days, as the placer's token lasts). Every box of a pool may share its token; a new one replaces `~/.loom/serve-token` and is read at serve's next start. `~/.loom/pools.json` lists each pool once, by the name the boxes' `serve.conf` give it, with the pin as its `runner` and the boxes' host names as its `machines`.
+On Workshop, the token for each pool: `~/.loom/bin/loom pool token box-strict --hours 720` (30 days, as the placer's token lasts). Every box of a pool may share its token; a new one replaces `~/.loom/serve-token` and is read at serve's next start. `~/.loom/pools.json` lists each pool once, by the name the boxes' `serve.conf` give it, with the pin as its `runner` and the boxes' host names (not their worker names) as its `machines`.
 
 `loginctl enable-linger` (already on for the updater) keeps the unit running logged out. `systemctl --user status loom-serve` and `journalctl --user -u loom-serve` show it; `loom pool status <pool>` on Workshop shows each worker, when it last asked and what it took.
 
 ## Tests
 
-`go test ./serving/ ./runner/... ./planner/ ./protocol/ ./cmd/loom/`: `serving` reads and refuses settings, renders the unit, writes it only when it changed, and refuses an open or missing token; `runner` hands a served unit to the runner it names, fetched once and run with serve's settings, voids one whose runner can't be had and waits only after repeated ones, bounds and rechecks its kept runners, refuses a job naming another runner given by hand, and drains (the unit in hand passes, idle or standing down it ends at once); `loom-runner`'s own tests run a real serve handing a unit to a real, freshly built runner; `loom-runner`'s own test sends itself `SIGHUP` mid-unit and sees serve exit 0, the unit passed. The unit file itself has run only in these tests, never under systemd: the first box to install it is its first real run.
+`go test ./serving/ ./runner/... ./planner/ ./protocol/ ./cmd/loom/`: `serving` reads and refuses settings, names the worker, renders the unit, starts or reloads serve only when its unit or its runner changed, never touches serve when it refuses (an open, empty, missing or other user's token, no machine id), and runs the hook it writes, which passes on a rollback; `runner` hands a served unit to the runner it names, fetched once and run with serve's settings, voids one whose runner can't be had and waits only after repeated ones, bounds and rechecks its kept runners, refuses a job naming another runner given by hand, and drains (the unit in hand passes, idle or standing down it ends at once); `loom-runner`'s own tests run a real serve handing a unit to a real, freshly built runner; `loom-runner`'s own test sends itself `SIGHUP` mid-unit and sees serve exit 0, the unit passed. The unit file itself has run only in these tests, never under systemd: the first box to install it is its first real run.

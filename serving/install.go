@@ -10,7 +10,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 
 	"github.com/system-inc/loom/protocol"
 )
@@ -70,9 +72,9 @@ func ReadConfig(content string) (Config, error) {
 	return config, nil
 }
 
-// Unit is loom-serve.service for this config: the template with its ExecStart line's POOL and FLAGS filled in, and
-// nothing else changed.
-func Unit(config Config) string {
+// Unit is loom-serve.service for this config and worker name: the template with its ExecStart line's POOL, FLAGS and
+// WORKER filled in, and nothing else changed.
+func Unit(config Config, worker string) string {
 	flags := "--strict"
 	if config.PhaseJobs {
 		flags += " --phase-jobs"
@@ -81,32 +83,70 @@ func Unit(config Config) string {
 	for index, line := range lines {
 		if strings.HasPrefix(line, "ExecStart=") {
 			line = strings.Replace(line, " FLAGS ", " "+flags+" ", 1)
+			line = strings.Replace(line, " --worker WORKER ", " --worker "+worker+" ", 1)
 			lines[index] = strings.Replace(line, "/pools/POOL ", "/pools/"+config.Pool+" ", 1)
 		}
 	}
 	return strings.Join(lines, "\n")
 }
 
-// Paths are where Install reads and writes: the box's serve.conf and pool token, and the systemd user unit directory.
+var hostPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
+var machineIdPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// WorkerName is the name serve gives its pool: the host's name, to its first dot, and the first six digits of its
+// machine id, so two boxes that happen to share a host name never read as one worker.
+func WorkerName(host, machineId string) (string, error) {
+	host, _, _ = strings.Cut(host, ".")
+	machineId = strings.TrimSpace(machineId)
+	if !hostPattern.MatchString(host) {
+		return "", fmt.Errorf("the host name %q isn't a worker's name (letters, digits, dash, underscore)", host)
+	}
+	if !machineIdPattern.MatchString(machineId) {
+		return "", fmt.Errorf("the machine id %q isn't 32 lowercase hex digits", machineId)
+	}
+	return host + "-" + machineId[:6], nil
+}
+
+// Paths are what Install reads and writes: the box's serve.conf and pool token, the systemd user unit directory, the
+// updater's hook, the serving binary the updater installed, and the host's name, machine id, user and /proc.
 type Paths struct {
-	Config string
-	Token  string
-	Units  string
+	Config    string
+	Token     string
+	Units     string
+	Hook      string
+	Binary    string
+	Host      string
+	MachineId string
+	User      int
+	Proc      string
 }
 
-// HomePaths are a box's: ~/.loom/serve.conf, ~/.loom/serve-token and ~/.config/systemd/user.
+// HomePaths are a box's: ~/.loom/serve.conf, ~/.loom/serve-token, ~/.config/systemd/user, ~/.loom/updated.d/50-serve
+// and ~/.loom/bin/loom-runner, this host, /etc/machine-id, this user and /proc.
 func HomePaths(home string) Paths {
+	host, _ := os.Hostname()
 	return Paths{Config: filepath.Join(home, ".loom", "serve.conf"), Token: filepath.Join(home, ".loom", "serve-token"),
-		Units: filepath.Join(home, ".config", "systemd", "user")}
+		Units: filepath.Join(home, ".config", "systemd", "user"), Hook: filepath.Join(home, ".loom", "updated.d", HookName),
+		Binary: filepath.Join(home, ".loom", "bin", "loom-runner"), Host: host, MachineId: "/etc/machine-id", User: os.Getuid(), Proc: "/proc"}
 }
 
-// Install readies loom-serve.service and restarts it on the runner now installed: it reads serve.conf, refuses a
-// token file that is missing, empty, or readable by anyone but its owner, writes the unit only when its text changed
-// (then reloads systemd's view of it), enables it, and asks systemd to reload it, which drains a running serve so the
-// unit in hand finishes before Restart=always starts the new runner, or starts a stopped one. systemctl runs
-// `systemctl --user <arguments>`. Run again with nothing changed, it only drains and restarts serve, so a hook the
-// updater runs twice for one release costs nothing but a restart.
-func Install(paths Paths, systemctl func(arguments ...string) error, report io.Writer) error {
+//go:embed updated.d/50-serve
+var hookText string
+
+// HookName is the updater's hook that runs install-serve after every release (docs/updater.md).
+const HookName = "50-serve"
+
+// A Systemctl runs `systemctl --user <arguments>` and gives back what it printed.
+type Systemctl func(arguments ...string) (string, error)
+
+// Install readies loom-serve on this box and leaves it running the release now installed. First everything that can
+// be refused: serve.conf, the token (a file holding one, owned by this user and readable by no one else), the worker's
+// name, the hook and the unit, each written only when its text changed (the unit beside its name and renamed over it,
+// then systemd's view of it reloaded). Only then, last, is serve touched: started when it isn't running, reloaded when
+// its unit changed or it runs another binary than the one the updater installed (a reload drains: the unit in hand
+// finishes, and Restart=always starts the new runner), and otherwise left alone. So a refused install never reloads
+// serve, and the updater running the hook again for one release costs nothing.
+func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 	content, err := os.ReadFile(paths.Config)
 	if err != nil {
 		return fmt.Errorf("this box's serve settings: %w", err)
@@ -124,32 +164,84 @@ func Install(paths Paths, systemctl func(arguments ...string) error, report io.W
 	case token.Mode().Perm()&0o077 != 0:
 		return fmt.Errorf("the pool token %s is mode %o: anyone but its owner can read it (chmod 600)", paths.Token, token.Mode().Perm())
 	}
-	unit := Unit(config)
-	path := filepath.Join(paths.Units, UnitName)
-	if held, err := os.ReadFile(path); err != nil || string(held) != unit {
-		if err := os.MkdirAll(paths.Units, 0o755); err != nil {
-			return err
-		}
-		// Written beside its name and renamed over it, so systemd never reads half a unit.
-		partial := path + ".partial"
-		if err := os.WriteFile(partial, []byte(unit), 0o644); err != nil {
-			return err
-		}
-		if err := os.Rename(partial, path); err != nil {
-			os.Remove(partial)
-			return err
-		}
-		fmt.Fprintf(report, "loom-runner install-serve: wrote %s, serving pool %s\n", path, config.Pool)
-		if err := systemctl("daemon-reload"); err != nil {
-			return err
-		}
+	if owner, ok := token.Sys().(*syscall.Stat_t); !ok || int(owner.Uid) != paths.User {
+		return fmt.Errorf("the pool token %s isn't this user's", paths.Token)
 	}
-	if err := systemctl("enable", UnitName); err != nil {
+	machineId, err := os.ReadFile(paths.MachineId)
+	if err != nil {
+		return fmt.Errorf("the machine id: %w", err)
+	}
+	worker, err := WorkerName(paths.Host, string(machineId))
+	if err != nil {
 		return err
 	}
-	if err := systemctl("reload-or-restart", UnitName); err != nil {
+	if _, err := writeChanged(paths.Hook, hookText, 0o755); err != nil {
+		return fmt.Errorf("the updater's hook: %w", err)
+	}
+	unit := Unit(config, worker)
+	changed, err := writeChanged(filepath.Join(paths.Units, UnitName), unit, 0o644)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(report, "loom-runner install-serve: %s reloaded: serve drains the unit in hand and starts again on this release\n", UnitName)
+	if changed {
+		fmt.Fprintf(report, "loom-runner install-serve: wrote %s, serving pool %s as %s\n", filepath.Join(paths.Units, UnitName), config.Pool, worker)
+		if _, err := systemctl("daemon-reload"); err != nil {
+			return err
+		}
+	}
+	if _, err := systemctl("enable", UnitName); err != nil {
+		return err
+	}
+	answer, err := systemctl("show", "--property=MainPID", "--value", UnitName)
+	if err != nil {
+		return err
+	}
+	pid := strings.TrimSpace(answer)
+	switch {
+	case pid == "" || pid == "0":
+		if _, err := systemctl("start", UnitName); err != nil {
+			return err
+		}
+		fmt.Fprintf(report, "loom-runner install-serve: %s started\n", UnitName)
+	case changed || !sameFile(filepath.Join(paths.Proc, pid, "exe"), paths.Binary):
+		if _, err := systemctl("reload", UnitName); err != nil {
+			return err
+		}
+		fmt.Fprintf(report, "loom-runner install-serve: %s reloaded: serve drains the unit in hand and starts again on this release\n", UnitName)
+	default:
+		fmt.Fprintf(report, "loom-runner install-serve: %s already runs this unit and this release\n", UnitName)
+	}
 	return nil
+}
+
+// writeChanged writes content to path, beside it first and renamed over it so nothing reads half of it, unless path
+// already holds exactly that. It says whether it wrote.
+func writeChanged(path, content string, mode os.FileMode) (bool, error) {
+	if held, err := os.ReadFile(path); err == nil && string(held) == content {
+		return false, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return false, err
+	}
+	partial := path + ".partial"
+	if err := os.WriteFile(partial, []byte(content), mode); err != nil {
+		return false, err
+	}
+	if err := os.Chmod(partial, mode); err != nil {
+		os.Remove(partial)
+		return false, err
+	}
+	if err := os.Rename(partial, path); err != nil {
+		os.Remove(partial)
+		return false, err
+	}
+	return true, nil
+}
+
+// sameFile is whether two paths are one file, a running process's /proc/<pid>/exe and an installed binary's link
+// alike; unreadable reads as not the same, so serve is reloaded rather than left on an unknown binary.
+func sameFile(left, right string) bool {
+	leftInfo, leftErr := os.Stat(left)
+	rightInfo, rightErr := os.Stat(right)
+	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
 }

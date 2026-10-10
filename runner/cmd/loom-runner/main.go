@@ -116,6 +116,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 // serve runs units from a pool until the deadline. Diagnostics go to stderr, which is quiet unless something
 // is wrong; the events go to the log file or nowhere, since each unit posts them to the wire itself.
 func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	// A hangup before the drain's handler is in place is ignored, never the default's exit.
+	signal.Ignore(syscall.SIGHUP)
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	pool := flags.String("pool", "", "the pool's address, <wire>/pools/<pool>")
@@ -198,13 +200,14 @@ func installServe(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loom-runner: %v\n", err)
 		return 2
 	}
-	systemctl := func(arguments ...string) error {
+	systemctl := func(arguments ...string) (string, error) {
 		command := exec.Command("systemctl", append([]string{"--user"}, arguments...)...)
-		command.Stdout, command.Stderr = stdout, stderr
-		if err := command.Run(); err != nil {
-			return fmt.Errorf("systemctl --user %s: %w", strings.Join(arguments, " "), err)
+		command.Stderr = stderr
+		output, err := command.Output()
+		if err != nil {
+			return "", fmt.Errorf("systemctl --user %s: %w", strings.Join(arguments, " "), err)
 		}
-		return nil
+		return string(output), nil
 	}
 	if err := serving.Install(serving.HomePaths(home), systemctl, stdout); err != nil {
 		fmt.Fprintf(stderr, "loom-runner: %v\n", err)

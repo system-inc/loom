@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -35,20 +36,42 @@ func TestServeConfReadsAPoolAndRefusesAnythingElse(t *testing.T) {
 	}
 }
 
-// The unit is the template with the pool and the flags filled into ExecStart alone: its comments keep their words.
+// Two boxes may share a host name, so a worker is its host's short name and the first six digits of its machine id.
+func TestAWorkersNameIsItsHostAndItsMachine(t *testing.T) {
+	machineId := "4f1d2c3b4a5968778695a4b3c2d1e0f9\n"
+	if name, err := WorkerName("cloud.lan", machineId); err != nil || name != "cloud-4f1d2c" {
+		t.Fatalf("named %q, %v", name, err)
+	}
+	for name, test := range map[string][2]string{
+		"no host":         {"", machineId},
+		"a host with %":   {"cl%oud", machineId},
+		"a short id":      {"cloud", "4f1d2c"},
+		"an uppercase id": {"cloud", strings.ToUpper(machineId)},
+		"no machine id":   {"cloud", ""},
+		"a host with a /": {"a/b", machineId},
+		"a host too long": {strings.Repeat("a", 64), machineId},
+	} {
+		if worker, err := WorkerName(test[0], test[1]); err == nil {
+			t.Errorf("%s: named %q", name, worker)
+		}
+	}
+}
+
+// The unit is the template with the pool, the flags and the worker filled into ExecStart alone: its comments keep their
+// words.
 func TestTheUnitServesTheConfiguredPoolStrictAndDrainsOnReload(t *testing.T) {
-	unit := Unit(Config{Pool: "box-strict"})
+	unit := Unit(Config{Pool: "box-strict"}, "cloud-4f1d2c")
 	var execStart []string
 	for _, line := range strings.Split(unit, "\n") {
 		if strings.HasPrefix(line, "ExecStart=") {
 			execStart = append(execStart, line)
 		}
 	}
-	want := "ExecStart=%h/.loom/bin/loom-runner serve --strict --pool https://runs.loom.system.inc/pools/box-strict --token-file %t/loom-serve/pool-token --worker %H --until 1h --root %h/loom-serve/root --workspace %h/loom-serve/units"
+	want := "ExecStart=%h/.loom/bin/loom-runner serve --strict --pool https://runs.loom.system.inc/pools/box-strict --token-file %t/loom-serve/pool-token --worker cloud-4f1d2c --until 1h --root %h/loom-serve/root --workspace %h/loom-serve/units"
 	if len(execStart) != 1 || execStart[0] != want {
 		t.Fatalf("ExecStart lines %q", execStart)
 	}
-	if phase := Unit(Config{Pool: "box-phase", PhaseJobs: true}); !strings.Contains(phase, "serve --strict --phase-jobs --pool https://runs.loom.system.inc/pools/box-phase ") {
+	if phase := Unit(Config{Pool: "box-phase", PhaseJobs: true}, "cloud-4f1d2c"); !strings.Contains(phase, "serve --strict --phase-jobs --pool https://runs.loom.system.inc/pools/box-phase ") {
 		t.Fatalf("a phase box's unit:\n%s", phase)
 	}
 	for _, line := range []string{
@@ -63,35 +86,56 @@ func TestTheUnitServesTheConfiguredPoolStrictAndDrainsOnReload(t *testing.T) {
 			t.Errorf("the unit has no %q", line)
 		}
 	}
-	if Unit(Config{Pool: "box-strict"}) != strings.Replace(strings.Replace(unitTemplate, " FLAGS --pool", " --strict --pool", 1), "/pools/POOL ", "/pools/box-strict ", 1) {
-		t.Fatal("rendering changed more than ExecStart's pool and flags")
+	// A user unit can't order itself after the system's network-online.target; it would only wait on nothing.
+	if strings.Contains(unit, "network-online") || strings.Contains(unit, "--exclusive") {
+		t.Errorf("the unit waits on the system's network, or serves --exclusive:\n%s", unit)
 	}
 }
 
-// A box as the hook finds it: serve.conf and a token, and a recorder in place of systemctl.
+// A box as the hook finds it: serve.conf, a token, a machine id, an installed runner, and a recorder in place of
+// systemctl that answers `show` with serve's main pid, whose /proc/<pid>/exe is a link the test points.
 type box struct {
-	paths Paths
-	calls [][]string
-	fail  string
+	paths   Paths
+	calls   [][]string
+	fail    string
+	mainPid string
 }
 
 func newBox(t *testing.T, config string, tokenMode os.FileMode) *box {
 	home := t.TempDir()
-	served := &box{paths: HomePaths(home)}
-	os.MkdirAll(filepath.Join(home, ".loom"), 0o755)
+	served := &box{paths: HomePaths(home), mainPid: "0"}
+	served.paths.Host, served.paths.MachineId, served.paths.Proc = "cloud", filepath.Join(home, "machine-id"), filepath.Join(home, "proc")
+	os.MkdirAll(filepath.Join(home, ".loom", "bin"), 0o755)
 	os.WriteFile(served.paths.Config, []byte(config), 0o644)
 	os.WriteFile(served.paths.Token, []byte("pool-token\n"), tokenMode)
 	os.Chmod(served.paths.Token, tokenMode)
+	os.WriteFile(served.paths.MachineId, []byte("4f1d2c3b4a5968778695a4b3c2d1e0f9\n"), 0o444)
+	os.WriteFile(served.paths.Binary, []byte("release one"), 0o755)
 	return served
 }
 
+// running says serve runs as pid 4242 from binary.
+func (served *box) running(t *testing.T, binary string) {
+	served.mainPid = "4242"
+	exe := filepath.Join(served.paths.Proc, "4242", "exe")
+	os.MkdirAll(filepath.Dir(exe), 0o755)
+	os.Remove(exe)
+	if err := os.Symlink(binary, exe); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (served *box) install() error {
-	return Install(served.paths, func(arguments ...string) error {
+	served.calls = nil
+	return Install(served.paths, func(arguments ...string) (string, error) {
 		served.calls = append(served.calls, arguments)
 		if arguments[0] == served.fail {
-			return errors.New("systemctl failed")
+			return "", errors.New("systemctl failed")
 		}
-		return nil
+		if arguments[0] == "show" {
+			return served.mainPid + "\n", nil
+		}
+		return "", nil
 	}, io.Discard)
 }
 
@@ -103,58 +147,115 @@ func (served *box) unit(t *testing.T) string {
 	return string(content)
 }
 
-// Every release's hook runs install: the unit is written and systemd reloaded only when its text changed, and serve is
-// enabled and reloaded (a drain, then the new runner) every time.
-func TestInstallWritesTheUnitWhenItChangedAndReloadsServeEveryTime(t *testing.T) {
+var (
+	reloadCall = []string{"daemon-reload"}
+	enableCall = []string{"enable", UnitName}
+	showCall   = []string{"show", "--property=MainPID", "--value", UnitName}
+	startCall  = []string{"start", UnitName}
+	reloadUnit = []string{"reload", UnitName}
+)
+
+// A release's hook runs install every time: the unit is written, and systemd told, only when its text changed; a
+// stopped serve is started; a running one is reloaded (a drain, then the new runner) only when its unit changed or it
+// runs another binary than the one installed, and otherwise left alone.
+func TestInstallReloadsServeOnlyWhenItsUnitOrItsRunnerChanged(t *testing.T) {
 	served := newBox(t, "pool = box-strict\n", 0o600)
-	if err := served.install(); err != nil {
-		t.Fatal(err)
+	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{reloadCall, enableCall, showCall, startCall}) {
+		t.Fatalf("first install: %q, %v", served.calls, err)
 	}
-	want := [][]string{{"daemon-reload"}, {"enable", UnitName}, {"reload-or-restart", UnitName}}
-	if !reflect.DeepEqual(served.calls, want) || served.unit(t) != Unit(Config{Pool: "box-strict"}) {
-		t.Fatalf("first install: %q", served.calls)
-	}
-	served.calls = nil
-	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, want[1:]) {
-		t.Fatalf("again with nothing changed: %q, %v", served.calls, err)
+	if served.unit(t) != Unit(Config{Pool: "box-strict"}, "cloud-4f1d2c") {
+		t.Fatalf("the unit written:\n%s", served.unit(t))
 	}
 	if _, err := os.Stat(filepath.Join(served.paths.Units, UnitName+".partial")); !os.IsNotExist(err) {
 		t.Fatalf("a partial unit stayed: %v", err)
 	}
-	// A box moved to another pool gets its unit rewritten and systemd told.
+	// Running the installed binary, nothing changed: left alone, however often the hook runs.
+	served.running(t, served.paths.Binary)
+	for range 2 {
+		if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{enableCall, showCall}) {
+			t.Fatalf("again with nothing changed: %q, %v", served.calls, err)
+		}
+	}
+	// A release linked a new binary: serve still runs the old one, so it is reloaded.
+	old := filepath.Join(filepath.Dir(served.paths.Binary), "old-loom-runner")
+	os.WriteFile(old, []byte("release zero"), 0o755)
+	served.running(t, old)
+	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{enableCall, showCall, reloadUnit}) {
+		t.Fatalf("after a release: %q, %v", served.calls, err)
+	}
+	// A box moved to another pool gets its unit rewritten, systemd told, and serve reloaded.
+	served.running(t, served.paths.Binary)
 	os.WriteFile(served.paths.Config, []byte("pool = box-phase\nphase-jobs = yes\n"), 0o644)
-	served.calls = nil
-	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, want) || served.unit(t) != Unit(Config{Pool: "box-phase", PhaseJobs: true}) {
+	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{reloadCall, enableCall, showCall, reloadUnit}) ||
+		served.unit(t) != Unit(Config{Pool: "box-phase", PhaseJobs: true}, "cloud-4f1d2c") {
 		t.Fatalf("after a pool change: %q, %v", served.calls, err)
 	}
 	// A failing systemctl fails the hook, which the updater runs again next minute.
-	served.calls, served.fail = nil, "reload-or-restart"
+	served.running(t, old)
+	served.fail = "reload"
 	if err := served.install(); err == nil {
 		t.Fatal("a failed reload passed")
 	}
 }
 
-// The token is the box's only credential: a token anyone else can read, or none, installs nothing.
-func TestInstallRefusesATokenOthersCanReadOrNone(t *testing.T) {
-	for name, served := range map[string]*box{
+// Everything that can refuse an install comes before serve is touched, so a refused install, which the updater runs
+// again every minute, never reloads serve.
+func TestARefusedInstallNeverTouchesServe(t *testing.T) {
+	cases := map[string]*box{
 		"group-readable": newBox(t, "pool = box-strict\n", 0o640),
 		"world-readable": newBox(t, "pool = box-strict\n", 0o604),
 		"no settings":    newBox(t, "", 0o600),
-	} {
-		if err := served.install(); err == nil || len(served.calls) != 0 {
-			t.Errorf("%s: installed (%v), calls %q", name, err, served.calls)
-		}
 	}
 	missing := newBox(t, "pool = box-strict\n", 0o600)
 	os.Remove(missing.paths.Token)
+	cases["a missing token"] = missing
 	empty := newBox(t, "pool = box-strict\n", 0o600)
 	os.WriteFile(empty.paths.Token, nil, 0o600)
-	for name, served := range map[string]*box{"missing": missing, "empty": empty} {
+	cases["an empty token"] = empty
+	others := newBox(t, "pool = box-strict\n", 0o600)
+	others.paths.User++
+	cases["another user's token"] = others
+	noMachine := newBox(t, "pool = box-strict\n", 0o600)
+	os.Remove(noMachine.paths.MachineId)
+	cases["no machine id"] = noMachine
+	for name, served := range cases {
+		old := filepath.Join(filepath.Dir(served.paths.Binary), "old-loom-runner")
+		os.WriteFile(old, []byte("release zero"), 0o755)
+		served.running(t, old)
 		if err := served.install(); err == nil || len(served.calls) != 0 {
-			t.Errorf("a %s token: installed (%v), calls %q", name, err, served.calls)
+			t.Errorf("%s: installed (%v), calls %q", name, err, served.calls)
 		}
 		if _, err := os.Stat(filepath.Join(served.paths.Units, UnitName)); !os.IsNotExist(err) {
-			t.Errorf("a %s token: the unit was written", name)
+			t.Errorf("%s: the unit was written", name)
 		}
+	}
+}
+
+// install writes the updater's hook too, so it is the binary's to keep. The hook runs install-serve, and a release
+// from before install-serve (a rollback past it) passes with a note, loom-serve left as it runs.
+func TestTheHookRunsInstallServeOrPassesOnARollback(t *testing.T) {
+	served := newBox(t, "pool = box-strict\n", 0o600)
+	if err := served.install(); err != nil {
+		t.Fatal(err)
+	}
+	hook, err := os.Stat(served.paths.Hook)
+	if err != nil || hook.Mode().Perm() != 0o755 {
+		t.Fatalf("the hook: %v, %v", hook, err)
+	}
+	run := func(runner string) (int, string) {
+		bin := t.TempDir()
+		os.WriteFile(filepath.Join(bin, "loom-runner"), []byte(runner), 0o755)
+		command := exec.Command(served.paths.Hook)
+		command.Env = []string{"PATH=/usr/bin:/bin", "LOOM_UPDATE_BIN=" + bin}
+		output, _ := command.CombinedOutput()
+		return command.ProcessState.ExitCode(), string(output)
+	}
+	current := "#!/bin/sh\nif [ $# = 0 ]; then printf 'usage:\\n  loom-runner install-serve\\n  loom-runner version\\n' >&2; exit 2; fi\necho \"ran $*\"; exit 7\n"
+	if code, output := run(current); code != 7 || !strings.Contains(output, "ran install-serve") {
+		t.Fatalf("with install-serve: exit %d, %s", code, output)
+	}
+	rollback := "#!/bin/sh\nif [ $# = 0 ]; then printf 'usage:\\n  loom-runner version\\n' >&2; exit 2; fi\necho \"ran $*\"; exit 7\n"
+	if code, output := run(rollback); code != 0 || strings.Contains(output, "ran ") || !strings.Contains(output, "has no install-serve") {
+		t.Fatalf("on a rollback: exit %d, %s", code, output)
 	}
 }

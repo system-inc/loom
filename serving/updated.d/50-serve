@@ -1,0 +1,10 @@
+#!/bin/sh
+# The updater's hook for loom-serve (docs/serving.md), written by `loom-runner install-serve`: after every release it
+# readies loom-serve on the runner the release installed. A release from before install-serve (a rollback past it) has
+# nothing to ready, so loom-serve is left as it runs and the hook passes, saying so.
+runner=${LOOM_UPDATE_BIN:-${HOME}/.loom/bin}/loom-runner
+if ! "${runner}" 2>&1 | grep -q '^  loom-runner install-serve$'; then
+	echo "50-serve: ${runner} has no install-serve (a release from before it?); loom-serve is left as it runs"
+	exit 0
+fi
+exec "${runner}" install-serve

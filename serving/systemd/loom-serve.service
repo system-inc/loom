@@ -1,7 +1,8 @@
 # Loom's serve on a Linux box (docs/serving.md): `loom-runner serve` asks this box's pool on the wire for units and
-# runs them one at a time, on the release's runner, beside loom-update. Nobody copies this file: `loom-runner
+# runs them one at a time, each on the runner its key names, beside loom-update. Nobody copies this file: `loom-runner
 # install-serve`, which the updater's hook ~/.loom/updated.d/50-serve runs after every release, renders it from
-# ~/.loom/serve.conf (POOL and FLAGS below) into ~/.config/systemd/user/loom-serve.service, enables it and reloads it.
+# ~/.loom/serve.conf (POOL and FLAGS below) and the host (WORKER: its name and a short machine id) into
+# ~/.config/systemd/user/loom-serve.service, enables it, and starts it or reloads it when it runs an older release.
 #
 # Reload is a drain (SIGHUP): serve asks for nothing more, lets the unit in hand finish, and exits 0, and Restart=always
 # starts it again on the runner the release just linked, so a release breaks no unit. --until ends every serve the same
@@ -14,8 +15,6 @@
 # 3 GiB free before a prebuilt unit starts); ~/loom-serve/units holds each unit's workspace while it runs.
 [Unit]
 Description=Loom serve: this box takes units from its pool on the wire and runs them
-After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
@@ -23,7 +22,7 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 RuntimeDirectory=loom-serve
 RuntimeDirectoryMode=0700
 ExecStartPre=/usr/bin/install -m 600 %h/.loom/serve-token %t/loom-serve/pool-token
-ExecStart=%h/.loom/bin/loom-runner serve FLAGS --pool https://runs.loom.system.inc/pools/POOL --token-file %t/loom-serve/pool-token --worker %H --until 1h --root %h/loom-serve/root --workspace %h/loom-serve/units
+ExecStart=%h/.loom/bin/loom-runner serve FLAGS --pool https://runs.loom.system.inc/pools/POOL --token-file %t/loom-serve/pool-token --worker WORKER --until 1h --root %h/loom-serve/root --workspace %h/loom-serve/units
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=mixed
 TimeoutStopSec=90
