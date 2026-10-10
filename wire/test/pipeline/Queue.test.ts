@@ -914,6 +914,70 @@ describe('a witness of main', function () {
     });
 });
 
+describe("main's red pause", function () {
+    it('holds every green change while the newest decided witness of main is red, but a fix-forward or a revert, and lifts on a later green witness', async function () {
+        const queue = await freshQueue({ [sha(40)]: facts({}, []), [sha(41)]: facts({}, []), [sha(42)]: facts({}, []), [sha(45)]: facts({ revertOf: sha(9) }) });
+        const idOf = async function (request: Record<string, unknown>): Promise<string> {
+            const answer = await submit(queue, request);
+            expect(answer.status, await answer.clone().text()).toBe(201);
+            return ((await answer.json()) as { change: string }).change;
+        };
+        const witnessOf = function (seed: number): Record<string, unknown> {
+            return { sha: sha(seed), base: sha(seed), owner: 'system_adamic_loom_judge', paths: [], parity: true, witness: true };
+        };
+        // Judge decides a future of one unit: green, or red on that unit.
+        const decide = async function (id: string, tree: string, name: string, status: 'green' | 'red' | 'void'): Promise<void> {
+            const units = await planOf([name]);
+            const key = units[0]?.unitKey ?? '';
+            expect((await postPlan(queue, tree, units)).status).toBe(200);
+            const verdict = status === 'green' ? 'passed' : status === 'red' ? 'failed' : 'void';
+            const records = [record(id, key, 'run-' + name, verdict, status === 'red' ? 'change' : status === 'void' ? 'infra' : null)];
+            const answer = await postBatch(queue, tree, batch(id, tree, 'run-' + name, records, status, [], status === 'red' ? [key] : []));
+            expect(answer.status, await answer.clone().text()).toBe(200);
+        };
+        const listed = async function (): Promise<string[]> {
+            return (await landings(queue)).map((order) => order.change);
+        };
+        const older = await idOf(witnessOf(40));
+        const red = await idOf(witnessOf(41));
+        const green = await idOf(change(43));
+        await decide(green, sha(43), 'g', 'green');
+        expect(await listed()).toEqual([green]);
+        // A void witness decides nothing about main.
+        await decide(red, sha(41), 'w-void', 'void');
+        expect(await listed()).toEqual([green]);
+        expect((await logOf(queue)).filter((event) => event.type.startsWith('main.'))).toEqual([]);
+        // The newest decided witness is red: main is held, and the green change waits, still green, never parked.
+        const units = await planOf(['w-void']);
+        const answer = await postBatch(queue, sha(41), batch(red, sha(41), 'run-2', [record(red, units[0]?.unitKey ?? '', 'run-2', 'failed', 'change')], 'red', [], [units[0]?.unitKey ?? '']));
+        expect(answer.status, await answer.clone().text()).toBe(200);
+        expect(await listed()).toEqual([]);
+        expect(await (await queue.fetch(`https://queue/changes/${green}`)).json()).toMatchObject({ state: 'testing' });
+        expect(await (await queue.fetch('https://queue/head')).json()).toMatchObject({ mainRed: { witness: red, main: sha(41), units: ['github.com/system-inc/adamic/internal/w-void'] } });
+        // A fix-forward naming that red main lands, and so does a revert by git's facts; nothing else does.
+        const fix = await idOf(change(44, { fixesRed: sha(41) }));
+        await decide(fix, sha(44), 'f', 'green');
+        const revert = await idOf(change(45));
+        await decide(revert, sha(45), 'r', 'green');
+        const wrongFix = await idOf(change(46, { fixesRed: sha(9) }));
+        await decide(wrongFix, sha(46), 'x', 'green');
+        expect((await listed()).sort()).toEqual([fix, revert].sort());
+        // An older witness decided late says nothing about main now.
+        await decide(older, sha(40), 'o', 'green');
+        expect(await listed()).not.toContain(green);
+        // A later witness, green, lifts the hold, and everything green lands again.
+        const later = await idOf(witnessOf(42));
+        await decide(later, sha(42), 'l', 'green');
+        expect((await listed()).sort()).toEqual([green, fix, revert, wrongFix].sort());
+        const log = await logOf(queue);
+        expect(log.filter((event) => event.type.startsWith('main.')).map((event) => [event.type, event.data.witness])).toEqual([
+            ['main.red', red],
+            ['main.green', later],
+        ]);
+        expect((await replay(log)).mainRed).toBe(null);
+    });
+});
+
 describe('the replay proof', function () {
     it('reads the whole log and the head, and replaying the log reaches exactly that head and main', async function () {
         const queue = await freshQueue();
@@ -928,7 +992,7 @@ describe('the replay proof', function () {
                 return JSON.parse(line) as QueueEvent;
             });
         const replayed = await replay(lines);
-        expect(head).toEqual({ seq: replayed.seq, head: replayed.head, landedMain: sha(80) });
+        expect(head).toEqual({ seq: replayed.seq, head: replayed.head, landedMain: sha(80), mainRed: replayed.mainRed });
         expect(replayed.landedMain).toBe(sha(80));
         expect(lines).toHaveLength(head.seq);
     });

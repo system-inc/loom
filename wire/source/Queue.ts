@@ -49,7 +49,10 @@ export type EventType =
     | 'change.kicked'
     | 'change.restacked'
     | 'change.parked'
-    | 'rule.changed';
+    | 'rule.changed'
+    // Main's red pause (#3ypyka5): the newest decided witness of main's tip was red, then a later one cleared it.
+    | 'main.red'
+    | 'main.green';
 
 export type ChangeState = 'queued' | 'building' | 'testing' | 'landed' | 'red' | 'parked' | 'refused';
 
@@ -143,6 +146,8 @@ export interface GitFacts {
     baseOnMain: boolean;
     // The paths of the diff base..sha, as git names them.
     diffPaths: string[];
+    // The commit on main whose inverse this change's diff is, when it is a revert (the bridge's fact), else absent.
+    revertOf?: string | null;
 }
 
 export interface History {
@@ -238,6 +243,8 @@ export interface ChangeEntry {
     shas: string[];
     // The block it joined, or null: with blocks on, a cleared change waits for the next block.
     block: number | null;
+    // The main commit this change reverts, from git's facts, or null: a revert lands while main is red.
+    revertOf: string | null;
 }
 
 // The rules a rule.changed event moves, each naming the landed commit that changed it (contracts v1, section 4).
@@ -273,6 +280,9 @@ export interface QueueState {
     landedMain: string | null;
     rules: Rules;
     blocks: Map<number, BlockEntry>;
+    // Main held red by the newest decided witness of its tip, or null (#3ypyka5): while set, only a fix-forward naming
+    // that main or a revert gets a landing order, and every other green change waits.
+    mainRed: { witness: string; main: string; units: string[] } | null;
 }
 
 const shaPattern = /^[0-9a-f]{40}$/;
@@ -577,7 +587,7 @@ export function parityOf(state: QueueState, future: FutureEntry): boolean {
 }
 
 export function emptyState(): QueueState {
-    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 }, outsideVerdicts: { refused: false } }, blocks: new Map() };
+    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 }, outsideVerdicts: { refused: false } }, blocks: new Map(), mainRed: null };
 }
 
 // A whole verdict's decision, by the judge's rule: a failure that is main's red (excused, as Green excuses it) doesn't
@@ -604,11 +614,19 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             checked: event.data.facts !== null,
             shas: [record.sha],
             block: null,
+            revertOf: ((event.data.facts ?? null) as GitFacts | null)?.revertOf ?? null,
         });
         state.line.push(record.change);
     }
     else if (event.type === 'change.checked' && entry !== undefined) {
         entry.checked = true;
+        entry.revertOf = ((event.data.facts ?? null) as GitFacts | null)?.revertOf ?? null;
+    }
+    else if (event.type === 'main.red') {
+        state.mainRed = { witness: event.data.witness as string, main: event.data.main as string, units: event.data.units as string[] };
+    }
+    else if (event.type === 'main.green') {
+        state.mainRed = null;
     }
     else if (event.type === 'rule.changed') {
         if (event.data.rule === 'blocks') {
@@ -671,6 +689,9 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             if (member !== undefined) {
                 member.future = tree;
                 member.checked = true;
+                if (event.data.facts !== undefined) {
+                    member.revertOf = ((event.data.facts ?? null) as GitFacts | null)?.revertOf ?? null;
+                }
             }
         }
     }
@@ -1569,11 +1590,15 @@ export class Queue extends DurableObject<Env> {
         ) {
             return jsonResponse(400, { error: 'the body is git facts: {shaExists, baseIsAncestor, baseOnMain, diffPaths}' });
         }
+        if (parsed.revertOf !== undefined && parsed.revertOf !== null && (typeof parsed.revertOf !== 'string' || !shaPattern.test(parsed.revertOf))) {
+            return jsonResponse(400, { error: 'revertOf is the main commit the change reverts, or null' });
+        }
         const facts: GitFacts = {
             shaExists: parsed.shaExists,
             baseIsAncestor: parsed.baseIsAncestor,
             baseOnMain: parsed.baseOnMain,
             diffPaths: [...(parsed.diffPaths as string[])].sort(),
+            ...(typeof parsed.revertOf === 'string' ? { revertOf: parsed.revertOf } : {}),
         };
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
@@ -1858,8 +1883,36 @@ export class Queue extends DurableObject<Env> {
                 await this.parkDependents(batch.change);
             }
             await this.decideBlock(state.changes.get(batch.change)?.block ?? null);
+            await this.witnessMain(batch.change, decision);
             return jsonResponse(200, { future: tree, decided: decision.status, landable: futureLandable(future) });
         });
+    }
+
+    // Main's red pause (#3ypyka5, push-main l.25-31): a decided witness of main that's newer than every other decided one
+    // holds main red when it's red (the judge's red leaves out what it quarantined), and clears the hold when it's green.
+    private async witnessMain(change: string, decision: Decision): Promise<void> {
+        const state = await this.current();
+        const entry = state.changes.get(change);
+        if (entry?.record.witness !== true || decision.status === 'void') {
+            return;
+        }
+        const newer = [...state.changes.values()].some(function (other) {
+            const decided = state.futures.get(other.future ?? '')?.decided;
+            return other.record.witness === true && other.position > entry.position && decided !== null && decided !== undefined && decided.status !== 'void';
+        });
+        if (newer) {
+            return;
+        }
+        const future = state.futures.get(entry.future ?? '');
+        if (decision.status === 'red') {
+            const units = decision.red.map(function (key) {
+                return future?.units?.get(key)?.name ?? key;
+            });
+            await this.append('main.red', { change: change }, { witness: change, main: entry.record.sha, units: units });
+        }
+        else if (state.mainRed !== null) {
+            await this.append('main.green', { change: change }, { witness: change, main: entry.record.sha, cleared: state.mainRed.witness });
+        }
     }
 
     // Every change on its way that stacks on `base`, however deep, parked with the reason (#05b5c2f): a dependent's
@@ -1892,6 +1945,10 @@ export class Queue extends DurableObject<Env> {
             }
             // A parity run is tested, never landed: no landing order is ever written for one.
             if (entry.record.parity === true) {
+                return [];
+            }
+            // While main is red, only a fix-forward naming that red main or a revert lands; the rest wait, green.
+            if (state.mainRed !== null && entry.record.fixesRed !== state.mainRed.main && entry.revertOf === null) {
                 return [];
             }
             // In a block, only the decided block's longest green prefix lands, once, carrying every change ahead of it.
@@ -1965,7 +2022,7 @@ export class Queue extends DurableObject<Env> {
     // genesis must reach exactly this seq and head.
     private async readHead(): Promise<Response> {
         const state = await this.current();
-        return jsonResponse(200, { seq: state.seq, head: state.head, landedMain: state.landedMain });
+        return jsonResponse(200, { seq: state.seq, head: state.head, landedMain: state.landedMain, mainRed: state.mainRed });
     }
 
     private async readVerdict(unitKey: string): Promise<Response> {
