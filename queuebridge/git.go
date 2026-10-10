@@ -43,17 +43,47 @@ type Clone struct {
 // prompt and no ssh. PATH and TMPDIR are the process's, and LC_ALL=C keeps git's words the ones the bridge reads.
 func keyless() []string {
 	environment := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.DevNull, "XDG_CONFIG_HOME=" + os.DevNull, "GIT_CONFIG_GLOBAL=" + os.DevNull,
-		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "SSH_ASKPASS=/bin/false", "GIT_SSH_COMMAND=false", "LC_ALL=C"}
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=" + falsePath, "SSH_ASKPASS=" + falsePath, "GIT_SSH_COMMAND=false", "LC_ALL=C"}
 	if temporary := os.Getenv("TMPDIR"); temporary != "" {
 		environment = append(environment, "TMPDIR="+temporary)
 	}
 	return environment
 }
 
+// cloneSettingPattern is every setting the clone's own configuration may hold: what `git clone --bare` (or init and
+// `remote add`, as the tests' clones are made) writes for the public repository, and nothing else. Any other (a
+// url.<base>.insteadOf whose base holds a user and password, an http.<url>.extraHeader, a credential, an include, a
+// proxy, an ssh or askpass command) could carry a key or send git elsewhere, and command-line settings don't reset a
+// url-scoped one, so the clone is refused, named, before git reads anything with it.
+var cloneSettingPattern = regexp.MustCompile(`^(core\.(repositoryformatversion|filemode|bare|ignorecase|precomposeunicode|logallrefupdates|symlinks)|remote\.origin\.(url|fetch)|extensions\.objectformat)$`)
+
+// ownSettings refuses a clone whose own configuration holds a setting outside cloneSettingPattern.
+func (clone Clone) ownSettings() error {
+	listed, err := clone.git([]string{"config", "--local", "--name-only", "--list"})
+	if err != nil {
+		return err
+	}
+	for _, name := range strings.Split(listed, "\n") {
+		if name != "" && !cloneSettingPattern.MatchString(strings.ToLower(name)) {
+			return &GitError{fmt.Sprintf("the clone's own configuration holds %s, which a keyless clone of the public repository never does: remove it, or clone again", name)}
+		}
+	}
+	return nil
+}
+
 // keylessSettings are set on every git's command line, over anything a repository's own configuration says, since no
 // environment drops that: no credential helper, no extra header (an Authorization one is a key), and the server's
 // certificate verified.
 var keylessSettings = []string{"-c", "credential.helper=", "-c", "http.extraHeader=", "-c", "http.sslVerify=true"}
+
+// falsePath is the false command where this machine has it (/bin/false on Linux, /usr/bin/false on a Mac): an askpass
+// that answers nothing.
+var falsePath = func() string {
+	if found, err := exec.LookPath("false"); err == nil {
+		return found
+	}
+	return "/bin/false"
+}()
 
 // gitArguments are git's arguments for a command in repository, after keylessSettings.
 func gitArguments(repository string, arguments ...string) []string {
@@ -255,6 +285,11 @@ func (clone Clone) Facts(sha, base string) (map[string]any, error) {
 	// anything is fetched from it, and the change waits.
 	origin, err := clone.git([]string{"remote", "get-url", "origin"})
 	if err != nil {
+		return nil, err
+	}
+	// Its own configuration holds nothing that could carry a key or send git elsewhere, read before any git that reaches
+	// the network runs with it.
+	if err := clone.ownSettings(); err != nil {
 		return nil, err
 	}
 	// The origin holds to the pins' rule (PinUrl): github.com over https, as owner/name, nothing in the url that is a key.

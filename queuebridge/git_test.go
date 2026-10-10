@@ -18,6 +18,7 @@ import (
 //	a revert matched by anything but its exact inverse: TestARevertOfAMainCommitIsNamedAndAnythingElseIsNone
 //	main's head read from the local ref: TestMainsHeadIsOriginsOwnEvenWhenTheShasFetchFails
 //	an origin that needs a key fetched from: TestAnOriginThatIsntHttpsIsRefusedBeforeAnyFetch
+//	the clone's own settings unchecked: TestAClonesOwnSettingsThatCouldCarryAKeyAreRefusedBeforeAnyFetch
 //	main fetched without its refspec (a bare clone then has no origin/main): TestABareCloneOfThePublicRemoteReadsMain
 //	any failed fetch read as "origin lacks the sha": TestARemoteThatCantBeReadChecksNothingThisTick
 //	a git exit code left unchecked: TestGitsExitCodeIsCheckedEverywhere
@@ -182,6 +183,42 @@ func TestAnOriginThatIsntHttpsIsRefusedBeforeAnyFetch(t *testing.T) {
 	}
 	if after := gitIn(t, made.work, "rev-parse", "origin/main"); after != before {
 		t.Fatalf("origin/main moved to %s: something was fetched", after)
+	}
+}
+
+// A clone whose own configuration holds anything but what a keyless clone writes is refused, named, before git reads
+// anything with it: command-line settings don't reset a url-scoped one, so the review's two probes are among these.
+// Mutant: ownSettings not checked.
+func TestAClonesOwnSettingsThatCouldCarryAKeyAreRefusedBeforeAnyFetch(t *testing.T) {
+	made := newWorld(t)
+	before := gitIn(t, made.work, "rev-parse", "origin/main")
+	made.pushFromAnotherTree(t)
+	for _, setting := range [][2]string{
+		{"url.https://kirk:key@stand-in.example/.insteadOf", "https://github.com/"},
+		{"http.https://stand-in.example/.extraHeader", "Authorization: Basic a2lyazprZXk="},
+		{"http.extraHeader", "Authorization: Basic a2lyazprZXk="},
+		{"credential.https://github.com.helper", "!f() { echo password=key; }; f"},
+		{"include.path", "/tmp/elsewhere.gitconfig"},
+		{"includeIf.gitdir:/.path", "/tmp/elsewhere.gitconfig"},
+		{"http.proxy", "http://stand-in.example:3128"},
+		{"remote.origin.proxy", "http://stand-in.example:3128"},
+		{"core.sshCommand", "ssh -i /tmp/key"},
+		{"core.askPass", "/tmp/answer-with-a-key"},
+		{"http.sslVerify", "false"},
+	} {
+		gitIn(t, made.work, "config", setting[0], setting[1])
+		var gitError *GitError
+		if facts, err := made.clone.Facts(made.base, made.base); !errors.As(err, &gitError) || !strings.Contains(strings.ToLower(err.Error()), "holds "+strings.ToLower(setting[0])) {
+			t.Errorf("%s: facts %v, %v", setting[0], facts, err)
+		}
+		gitIn(t, made.work, "config", "--unset", setting[0])
+	}
+	if after := gitIn(t, made.work, "rev-parse", "origin/main"); after != before {
+		t.Fatalf("origin/main moved to %s: something was fetched", after)
+	}
+	// With them gone, the same clone reads facts.
+	if facts, err := made.clone.Facts(made.base, made.base); err != nil || facts["shaExists"] != true {
+		t.Fatalf("a clean clone: facts %v, %v", facts, err)
 	}
 }
 
