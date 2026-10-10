@@ -1,0 +1,9 @@
+# The Loom updater on a Linux house machine (docs/updater.md): one pass of ~/.loom/loom-update.sh, run by
+# loom-update.timer every minute. A user unit, so its hooks restart the user's own Loom services.
+[Unit]
+Description=Loom updater: this machine's Loom binaries to the published manifest
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash %h/.loom/loom-update.sh
+TimeoutStartSec=900

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The Loom updater on a macOS house machine (docs/updater.md): ~/.loom/loom-update.sh every minute. launchd doesn't
+     expand ~, so HOME_DIRECTORY is replaced with the user's home on install (docs/updater.md, "Installing"). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.loom.update</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>HOME_DIRECTORY/.loom/loom-update.sh</string></array>
+  <key>WorkingDirectory</key><string>HOME_DIRECTORY/.loom</string>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin</string><key>HOME</key><string>HOME_DIRECTORY</string></dict>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>HOME_DIRECTORY/.loom/update.err</string>
+  <key>StandardErrorPath</key><string>HOME_DIRECTORY/.loom/update.err</string>
+</dict>
+</plist>

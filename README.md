@@ -4,9 +4,10 @@ The kingdom's remote compute fabric: any job, on any machine we own or rent, str
 Commands in, artifacts out. A runner holds no credential but its tokens (below); a missing unit is void, never green.
 `docs/protocol.md` is the contract: jobs, units, events, verdicts, tokens, the store and the wire's endpoints.
 `protocol/` holds its Go types; `runner/` and `coordinator/` (with `cmd/loom`) are the Go module's parts; `wire/` is the Cloudflare Worker, live at https://runs.loom.system.inc.
+`updater/` is how the house machines get Loom's binaries: Workshop builds and publishes them once per commit, and each machine's updater installs them (`docs/updater.md`).
 The work and its laws live in the task tree at #system_adamic_developer_tools_loom.
 
-Tests, from a clean clone: `go test ./...`, then in `wire/` `pnpm install --frozen-lockfile && pnpm test && pnpm check`. There is no CI service: Loom gates itself once the coordinator exists.
+Tests, from a clean clone: `go test ./...`, then in `wire/` `pnpm install --frozen-lockfile && pnpm test && pnpm check`, and `updater/update_test.sh`. There is no CI service: Loom gates itself once the coordinator exists.
 
 ## What a strict worker does
 
