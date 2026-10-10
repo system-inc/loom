@@ -202,7 +202,7 @@ func (puller Puller) pullOne(future PlannedFuture) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if open := openUnits(future, events, order, earlier); open > 0 {
+	if open := openUnits(future, events, order, earlier, puller.Loop.Warm); open > 0 {
 		why := puller.stale(run, events, open)
 		if why == "" {
 			return false, nil
@@ -249,20 +249,7 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	plan := []PlanUnit{}
 	for _, unit := range future.Units {
 		parts[unit.UnitKey], resources[unit.UnitKey] = unit.KeyParts, unit.Resources
-		planUnit := PlanUnit{UnitKey: unit.UnitKey}
-		var parts struct {
-			Kind  string `json:"kind"`
-			Tools struct {
-				Runner string `json:"runner"`
-			} `json:"tools"`
-			Select struct {
-				Run string `json:"run"`
-			} `json:"select"`
-		}
-		if json.Unmarshal(unit.KeyParts, &parts) == nil {
-			planUnit.Named, _ = planner.RunNames(parts.Select.Run)
-			planUnit.Kind, planUnit.Runner = parts.Kind, parts.Tools.Runner
-		}
+		planUnit := planUnitOf(unit)
 		if unit.Decision == "reuse" {
 			planUnit.Reused = "reused"
 			if unit.Reused != nil && *unit.Reused != "" {
@@ -287,6 +274,25 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	return loop, Job{Record: record, Change: record.Change, Future: future.Future, Base: future.Base, Run: run, Plan: plan}
 }
 
+// planUnitOf reads a listed unit's kind, runner and named tests from its key parts.
+func planUnitOf(unit PlannedUnitWire) PlanUnit {
+	planUnit := PlanUnit{UnitKey: unit.UnitKey}
+	var parts struct {
+		Kind  string `json:"kind"`
+		Tools struct {
+			Runner string `json:"runner"`
+		} `json:"tools"`
+		Select struct {
+			Run string `json:"run"`
+		} `json:"select"`
+	}
+	if json.Unmarshal(unit.KeyParts, &parts) == nil {
+		planUnit.Named, _ = planner.RunNames(parts.Select.Run)
+		planUnit.Kind, planUnit.Runner = parts.Kind, parts.Tools.Runner
+	}
+	return planUnit
+}
+
 // A CarriedUnit is a unit the judge carries into a future's attempt, and the earlier run of it that passed it.
 type CarriedUnit struct {
 	UnitKey string
@@ -297,7 +303,11 @@ type CarriedUnit struct {
 // earlier attempt whose runner status is passed, which means a finished passed event and no signal or deadline on its
 // exit. It is the one definition: openUnits counts these done, the loop judges them from that run, and
 // `loom judge carried` prints them for Fabric's placer, which places every other planned unit.
-func carried(future PlannedFuture, order []string, earlier map[string][]protocol.Event) []CarriedUnit {
+//
+// A pass warm says ran on a warm shared cache is never carried (Release, Oct 10 02:49Z): carried, Fabric's placer
+// would leave it out, and the judge would read it warm and void the future, every attempt. Left out of the list, it's
+// placed again, cold. An error asking warm counts as warm, so a unit is never carried on a guess.
+func carried(future PlannedFuture, order []string, earlier map[string][]protocol.Event, warm func(string, PlanUnit, Attempt) (bool, error)) []CarriedUnit {
 	units := []CarriedUnit{}
 	for _, unit := range future.Units {
 		if unit.Decision == "reuse" {
@@ -305,6 +315,11 @@ func carried(future PlannedFuture, order []string, earlier map[string][]protocol
 		}
 		for _, run := range order {
 			if prior, found := FinishedFromEvents(eventsOf(earlier[run], unit.UnitKey)); found && prior.Attempt.Status == Passed {
+				if warm != nil {
+					if isWarm, err := warm(run, planUnitOf(unit), prior.Attempt); err != nil || isWarm {
+						continue
+					}
+				}
 				units = append(units, CarriedUnit{UnitKey: unit.UnitKey, Run: run})
 				break
 			}
@@ -327,7 +342,7 @@ func (puller Puller) Carried(tree string, attempt int) ([]CarriedUnit, error) {
 		if err != nil {
 			return nil, err
 		}
-		return carried(future, order, earlier), nil
+		return carried(future, order, earlier, puller.Loop.Warm), nil
 	}
 	return nil, fmt.Errorf("future %s isn't listed planned and undecided", tree)
 }
@@ -348,14 +363,14 @@ func (puller Puller) earlier(future PlannedFuture, attempt int) ([]string, map[s
 }
 
 // openUnits is how many units the future runs that have no finished event in its run and aren't carried.
-func openUnits(future PlannedFuture, events []protocol.Event, order []string, earlier map[string][]protocol.Event) int {
+func openUnits(future PlannedFuture, events []protocol.Event, order []string, earlier map[string][]protocol.Event, warm func(string, PlanUnit, Attempt) (bool, error)) int {
 	finished := map[string]bool{}
 	for _, event := range events {
 		if event.Type == "finished" {
 			finished[event.Unit] = true
 		}
 	}
-	for _, unit := range carried(future, order, earlier) {
+	for _, unit := range carried(future, order, earlier, warm) {
 		finished[unit.UnitKey] = true
 	}
 	open := 0

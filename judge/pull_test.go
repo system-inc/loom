@@ -519,3 +519,54 @@ func TestAFailureThatRanBelowItsNeedIsVoidNeverARed(t *testing.T) {
 		})
 	}
 }
+
+// Carried, a warm pass would be left out by Fabric's placer and read warm by the judge, voiding the future on every
+// attempt. So the carried list skips it: the unit is placed again, or carried from an older pass that ran cold. An
+// error asking warm never carries.
+func TestAWarmPassIsNeverCarried(t *testing.T) {
+	unit := strings.Repeat("1", 64)
+	future := PlannedFuture{Future: strings.Repeat("d", 40), Units: []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"kind":"test","tools":{"runner":"8a70"}}`), Decision: "run"}}}
+	passedOn := func(machine string) []protocol.Event {
+		stream := finishedStream(unit, "passed")
+		stream[0].Machine = machine
+		return stream
+	}
+	earlier := map[string][]protocol.Event{"run-2": passedOn("codex"), "run-1": passedOn("Cloud")}
+	warm := func(run string, planned PlanUnit, attempt Attempt) (bool, error) {
+		if planned.Kind != "test" || planned.Runner != "8a70" {
+			t.Fatalf("asked about %+v, want the unit's kind and runner from its key", planned)
+		}
+		return attempt.Machine == "codex", nil
+	}
+	if got := carried(future, []string{"run-2"}, earlier, warm); len(got) != 0 {
+		t.Fatalf("carried %v from a warm pass", got)
+	}
+	if got := carried(future, []string{"run-2", "run-1"}, earlier, warm); len(got) != 1 || got[0].Run != "run-1" {
+		t.Fatalf("carried %v, want the older cold pass", got)
+	}
+	failing := func(string, PlanUnit, Attempt) (bool, error) { return false, errors.New("pools.json unreadable") }
+	if got := carried(future, []string{"run-1"}, earlier, failing); len(got) != 0 {
+		t.Fatalf("carried %v on an error asking warm", got)
+	}
+	if open := openUnits(future, nil, []string{"run-2"}, earlier, warm); open != 1 {
+		t.Fatalf("open %d, want the warm-passed unit still open", open)
+	}
+}
+
+func TestThePlacersCarriedListAsksTheLoopsWarmRule(t *testing.T) {
+	tree, unit := strings.Repeat("d", 40), strings.Repeat("1", 64)
+	source := listedFutures{{Future: tree, Base: baseTree, Units: []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"kind":"test","tools":{"runner":"8a70"}}`), Decision: "run"}}}}
+	puller := Puller{
+		Source: source,
+		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
+		Read:   func(string) ([]protocol.Event, error) { return finishedStream(unit, "passed"), nil },
+		Loop:   Loop{Warm: func(string, PlanUnit, Attempt) (bool, error) { return true, nil }},
+	}
+	if units, err := puller.Carried(tree, 2); err != nil || len(units) != 0 {
+		t.Fatalf("carried %v (%v): a warm pass went on the placer's list", units, err)
+	}
+	puller.Loop.Warm = nil
+	if units, err := puller.Carried(tree, 2); err != nil || len(units) != 1 {
+		t.Fatalf("carried %v (%v), want the pass with no warm rule", units, err)
+	}
+}

@@ -301,6 +301,12 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 			return Verdict{}, nil, err
 		}
 		if priorFound && prior.Attempt.Status == Passed {
+			if loop.Warm != nil {
+				// A warm pass is never carried, as carried() leaves it off the placer's list: the next one back may be.
+				if warm, err := loop.Warm(earlier, unit, prior.Attempt); err != nil || warm {
+					continue
+				}
+			}
 			first, found, carried = prior, true, earlier
 		}
 	}

@@ -655,6 +655,7 @@ func TestAWarmPassNeverDecidesEvenCarried(t *testing.T) {
 		{"a warm Codex pass is placed again", runsByRun{"run-2 u": codex}, nil, 1},
 		{"a warm pass carried from an earlier attempt is placed again", runsByRun{"run-1 u": codex}, []string{"run-1"}, 1},
 		{"a cold Cloud pass decides", runsByRun{"run-2 u": cloud}, nil, 0},
+		{"a newer warm pass is skipped for an older cold one", runsByRun{"run-1 u": codex, "run-0 u": cloud}, []string{"run-1", "run-0"}, 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness()
