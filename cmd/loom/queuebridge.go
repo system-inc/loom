@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -20,10 +21,13 @@ import (
 // every 60 s on the machine whose ~/.loom/queue-bridge.conf makes it the bridge: git's facts for every unchecked change.
 // It exits 0 after a pass (or when another pass holds the lock), 1 when it couldn't read the queue, 2 on a bad command
 // line and 3 when its settings can't be read. `loom queue-bridge install` is the updater hook's: it installs the
-// release's units and never starts them.
+// release's units and never starts them. `loom queue-bridge pins` prints a commit's pins as the bridge posts them.
 func queueBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "install" {
 		return queueBridgeInstall(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "pins" {
+		return queueBridgePins(arguments[1:], stdout, stderr)
 	}
 	home, _ := os.UserHomeDir()
 	flags := flag.NewFlagSet("queue-bridge", flag.ContinueOnError)
@@ -69,6 +73,34 @@ func queueBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	bridge := queuebridge.Bridge{Queue: queuebridge.HTTPQueue{Base: config.Queue, Secret: secret}, Gate: queuebridge.Clone{Repository: config.Repository}, Log: log}
 	if !bridge.Tick() {
 		return 1
+	}
+	return 0
+}
+
+// queueBridgePins is `loom queue-bridge pins [--repository <clone>] <sha>`: the pins fact for a commit the clone holds,
+// every gitlink at any depth proven by a keyless fetch, printed as the JSON the bridge posts. It exits 0 when every pin
+// is fetchable, 1 when one isn't (the queue would refuse the change), 2 on a bad command line and 3 when git or a
+// remote couldn't say (the bridge would wait).
+func queueBridgePins(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	home, _ := os.UserHomeDir()
+	flags := flag.NewFlagSet("queue-bridge pins", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	repository := flags.String("repository", queuebridge.DefaultConfig(home).Repository, "the adamic clone that holds the commit")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: loom queue-bridge pins [--repository <clone>] <sha>")
+		return 2
+	}
+	pins, err := queuebridge.Clone{Repository: *repository}.PinsOf(flags.Arg(0))
+	if err != nil {
+		fmt.Fprintf(stderr, "loom queue-bridge pins: git can't say, so the facts would wait: %v\n", err)
+		return 3
+	}
+	encoded, _ := json.MarshalIndent(pins, "", "  ")
+	fmt.Fprintln(stdout, string(encoded))
+	for _, pin := range pins {
+		if !pin.Fetchable {
+			return 1
+		}
 	}
 	return 0
 }

@@ -76,6 +76,7 @@ const usage = `usage:
   loom push install
   loom queue-bridge [--config <queue-bridge.conf>]
   loom queue-bridge install
+  loom queue-bridge pins [--repository <clone>] <sha>
   loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--tailnet] [--public]
   loom house-cache install
   loom release watch [--config <file>] [--wire <url>]
