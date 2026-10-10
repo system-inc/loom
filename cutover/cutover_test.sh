@@ -36,10 +36,11 @@ g=${STUB_GITHUB}
 r=repos/system-inc/adamic
 [ "$1" = api ] || exit 9
 shift
-method=GET path='' filter='' fields=''
+method=GET path='' filter='' fields='' paginate=no
 while [ $# -gt 0 ]; do
 	case $1 in
 	-X) method=$2; shift 2 ;;
+	--paginate) paginate=yes; shift ;;
 	--jq) filter=$2; shift 2 ;;
 	-f | -F) fields="${fields}$2
 "; shift 2 ;;
@@ -54,7 +55,10 @@ fi
 field() { echo "${fields}" | sed -n "s/^$1=//p" | head -n 1; }
 missing() { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
 case "${method} ${path}" in
-"GET ${r}/keys") out=$(cat "${g}/keys.json") ;;
+"GET ${r}/keys")
+	# GitHub's first page only, unless --paginate (STUB_PAGE keys a page).
+	if [ "${paginate}" = yes ]; then out=$(cat "${g}/keys.json"); else out=$(jq ".[:${STUB_PAGE:-30}]" "${g}/keys.json"); fi
+	;;
 "GET ${r}/keys/"*)
 	out=$(jq -ce --argjson id "${path##*/}" '.[] | select(.id == $id)' "${g}/keys.json") || missing
 	;;
@@ -76,7 +80,10 @@ case "${method} ${path}" in
 	;;
 "PUT ${r}/rulesets/"*)
 	[ -f "${g}/rulesets/${path##*/}.json" ] || missing
-	jq --arg enforcement "$(field enforcement)" '.enforcement = $enforcement' "${g}/rulesets/${path##*/}.json" > "${g}/ruleset.new" && mv "${g}/ruleset.new" "${g}/rulesets/${path##*/}.json"
+	# STUB_PUT_IGNORED: GitHub answers the PUT and the ruleset stays as it was.
+	if [ -z "${STUB_PUT_IGNORED:-}" ]; then
+		jq --arg enforcement "$(field enforcement)" '.enforcement = $enforcement' "${g}/rulesets/${path##*/}.json" > "${g}/ruleset.new" && mv "${g}/ruleset.new" "${g}/rulesets/${path##*/}.json"
+	fi
 	out=$(cat "${g}/rulesets/${path##*/}.json")
 	;;
 "GET ${r}/rules/branches/"*)
@@ -97,9 +104,19 @@ esac
 if [ -n "${filter}" ]; then echo "${out}" | jq -r "${filter}"; else echo "${out}"; fi
 STUB
 
-# ssh <host> <command>...: the command runs here, in that host's home, with its name for the git stub.
+# ssh <host> <command>...: the command runs here, in that host's home, with its name for the git stub. ssh -G <alias>
+# answers from the home's .ssh/aliases ("<alias> <hostname> <identityfile>"), else as ssh does for an unknown name.
 cat > "${T}/bin/ssh" << 'STUB'
 #!/bin/bash
+if [ "$1" = -G ]; then
+	line=$(grep "^$2 " "${HOME}/.ssh/aliases" 2> /dev/null)
+	if [ -n "${line}" ]; then
+		echo "${line}" | awk '{print "hostname " $2; print "identityfile " $3}'
+	else
+		printf 'hostname %s\nidentityfile ~/.ssh/id_ed25519\n' "$2"
+	fi
+	exit 0
+fi
 host=$1
 shift
 echo "ssh ${host} $*" >> "${STUB_GITHUB}/calls.log"
@@ -165,10 +182,12 @@ github() { # <url>: who the push or fetch authenticates as, or a refusal before 
 		who=person
 		return 0
 		;;
-	Workshop) case $1 in *github-lander*) keyFile=${HOME}/.ssh/loom_lander.pub ;; *) echo "git@github.com: Permission denied (publickey)." >&2; return 128 ;; esac ;;
-	Cloud) case $1 in git@github.com:*) echo "fatal: could not read Username for 'https://github.com': No such device or address" >&2; return 128 ;; esac; keyFile=${HOME}/.ssh/adamic_deploy.pub ;;
+	Workshop) case $1 in *github-lander*) keyFile=${HOME}/.ssh/loom_lander ;; *) echo "git@github.com: Permission denied (publickey)." >&2; return 128 ;; esac ;;
+	Cloud) case $1 in git@github.com:*) echo "fatal: could not read Username for 'https://github.com': No such device or address" >&2; return 128 ;; esac; keyFile=${HOME}/.ssh/adamic_deploy ;;
 	esac
-	key=$(awk '{print $1" "$2}' "${keyFile}")
+	# Without the private half, ssh offers nothing and GitHub says what it says for a key it doesn't know.
+	[ -f "${keyFile}" ] || { printf 'git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n' >&2; return 128; }
+	key=$(awk '{print $1" "$2}' "${keyFile}.pub")
 	readOnly=$(jq -r --arg key "${key}" '.[] | select(.key == $key) | .read_only' "${g}/keys.json")
 	[ -n "${readOnly}" ] || { printf 'git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n' >&2; return 128; }
 	if [ "${readOnly}" = true ]; then who=readOnlyKey; else who=writeKey; fi
@@ -213,6 +232,12 @@ push)
 *) echo "git stub: no ${verb}" >&2; exit 9 ;;
 esac
 STUB
+# ssh-keygen -y -f <private key>: its public half, which the stub keeps beside it as <private key>.pub.
+cat > "${T}/bin/ssh-keygen" << 'STUB'
+#!/bin/bash
+[ -f "$3" ] || { echo "Load key \"$3\": No such file or directory" >&2; exit 255; }
+awk '{print $1" "$2}' "$3.pub"
+STUB
 chmod 755 "${T}/bin/"*
 
 ruleset() { # <id> <enforcement> <ref>
@@ -221,7 +246,11 @@ ruleset() { # <id> <enforcement> <ref>
 		rules: [{type: "update"}, {type: "deletion"}, {type: "non_fast_forward"}], bypass_actors: [{actor_id: null, actor_type: "DeployKey", bypass_mode: "always"}]}' \
 		> "${STUB_GITHUB}/rulesets/$1.json"
 }
+reshape() { # <id> <jq>: a ruleset edited by hand
+	jq "$2" "${STUB_GITHUB}/rulesets/$1.json" > "${T}/ruleset.new" && mv "${T}/ruleset.new" "${STUB_GITHUB}/rulesets/$1.json"
+}
 timer() { echo "$1 $2" > "${STUB_HOSTS}/Workshop/systemd/loom-pusher.timer"; }
+service() { echo "$1 static" > "${STUB_HOSTS}/Workshop/systemd/loom-pusher.service"; }
 key() { # <id> <read_only> <key>: one more deploy key
 	jq --argjson id "$1" --argjson readOnly "$2" --arg key "$3" '. + [{id: $id, title: "key \($id)", key: $key, read_only: $readOnly}]' \
 		"${STUB_GITHUB}/keys.json" > "${T}/keys.new" && mv "${T}/keys.new" "${STUB_GITHUB}/keys.json"
@@ -238,7 +267,11 @@ world() {
 	: > "${STUB_GITHUB}/calls.log"
 	echo 170000000 > "${STUB_GITHUB}/nextkey"
 	echo "${landerKey} ahra@Workshop" > "${STUB_HOSTS}/Workshop/.ssh/loom_lander.pub"
+	echo private > "${STUB_HOSTS}/Workshop/.ssh/loom_lander"
+	echo "github-lander github.com ~/.ssh/loom_lander" > "${STUB_HOSTS}/Workshop/.ssh/aliases"
 	echo "${gateKey} ahra@Cloud" > "${STUB_HOSTS}/Cloud/.ssh/adamic_deploy.pub"
+	echo private > "${STUB_HOSTS}/Cloud/.ssh/adamic_deploy"
+	echo "github.com github.com ~/.ssh/adamic_deploy" > "${STUB_HOSTS}/Cloud/.ssh/aliases"
 	echo "${mainSha}" > "${STUB_HOSTS}/Workshop/loom-lander/adamic.git/tips"
 	echo "${mainSha}" > "${STUB_HOSTS}/Workshop/loom-lander/adamic.git/main"
 	jq -n --arg lander "${landerKey}" --arg gate "${gateKey}" \
@@ -249,6 +282,7 @@ world() {
 	echo "${mainSha}" > "${STUB_GITHUB}/refs/main"
 	echo "${scratchSha}" > "${STUB_GITHUB}/refs/loom-rehearsal"
 	timer inactive disabled
+	service inactive
 	if [ "${1:-}" = on ]; then
 		ruleset 24823318 active main
 		timer active enabled
@@ -298,8 +332,20 @@ world on; STUB_GH_FAIL="GET .*/keys$" run check
 check "check: an unreadable key list reads as neither" 'code 3 && ! said "main is (on|off)"'
 world; STUB_SYSTEMCTL_FAIL=1 run check
 check "check: a systemd that can't be asked reads as neither" 'code 3 && ! said "main is (on|off)"'
-world; run check --timer loom-push.timer
-check "check: the timer is a setting, and one with no unit file reads as stopped" 'code 0 && said "loom-push.timer not-found" && called "show .*loom-push.timer"'
+world; echo "inactive disabled" > "${STUB_HOSTS}/Workshop/systemd/loom-push.timer"; echo "inactive static" > "${STUB_HOSTS}/Workshop/systemd/loom-push.service"; run check --timer loom-push.timer
+check "check: the timer is a setting, its service named after it" 'code 0 && said "loom-push.timer inactive disabled, loom-push.service loaded inactive" && ! called "show .*loom-pusher"'
+world on; run check --timer loom-pusherr.timer
+check "check: a mistyped --timer reads as neither, never off" 'code 3 && said "no loom-pusherr.timer" && ! said "main is (on|off)"'
+world; service activating; run check
+check "check: a pusher pass in flight with the timer off reads mixed" 'code 1 && said "main is mixed"'
+world on; reshape 24823318 '.rules = [{type: "deletion"}, {type: "non_fast_forward"}]'; run check
+check "check: a ruleset without its update rule reads mixed" 'code 1 && said "main is mixed" && said "not exactly deletion"'
+world on; reshape 24823318 '.bypass_actors += [{actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always"}]'; run check
+check "check: a ruleset bypassed by a role as well reads mixed" 'code 1 && said "main is mixed" && said "not by DeployKey alone"'
+world on; reshape 24823318 '.conditions.ref_name.include += ["refs/heads/release"]'; run check
+check "check: main's ruleset over a second branch reads mixed, and is still read by its id" 'code 1 && said "main is mixed"'
+world on; key 42 false "ssh-ed25519 AAAAC3other"; STUB_PAGE=2 run check
+check "check: every page of keys is read" 'code 1 && said "write key 42"'
 
 # on
 world; run on
@@ -315,6 +361,8 @@ world; STUB_SYSTEMCTL_FAIL=1 run on
 check "on: a timer that can't be enabled fails on" '! code 0 && said "neither|stopped|can.t"'
 world; STUB_DOWN=Workshop run on
 check "on: Workshop unreachable changes nothing" 'code 3 && enforcement 24823318 disabled && ! called "^gh (PUT|POST|DELETE)"'
+world; reshape 24823318 '.bypass_actors += [{actor_id: 5, actor_type: "RepositoryRole", bypass_mode: "always"}]'; run on
+check "on: a ruleset out of its shape changes nothing" 'code 1 && said "isn.t in on.s shape" && ! called "^gh (PUT|POST|DELETE)" && timerIs inactive disabled'
 
 # off
 world on; run off
@@ -326,10 +374,18 @@ world on; run off --delete-lander-key
 check "off --delete-lander-key: the lander's key is gone" 'code 0 && [ -z "$(jq -r ".[] | select(.id == 165969878)" "${STUB_GITHUB}/keys.json")" ] && keyIs 165969193 true'
 world on; STUB_DOWN=Workshop run off
 check "off: Workshop unreachable still disables the ruleset, and fails" '! code 0 && enforcement 24823318 disabled'
-world on; STUB_GH_FAIL="PUT .*/rulesets/" run off
-check "off: a ruleset that won't disable still stops the timer, and fails" '! code 0 && timerIs inactive disabled'
-world on; rm "${STUB_HOSTS}/Workshop/systemd/loom-pusher.timer"; run off
-check "off: no timer's unit file is nothing to stop" 'code 0 && said "main is off"'
+world on; STUB_GH_FAIL="PUT .*/rulesets/" run off --delete-lander-key
+check "off: a ruleset PUT that fails leaves the lander its key and timer, so main keeps a writer" '! code 0 && enforcement 24823318 active && keyIs 165969878 false && timerIs active enabled && said "doesn.t read back disabled"'
+world on; STUB_PUT_IGNORED=1 run off --delete-lander-key
+check "off: a ruleset that reads back active after the PUT leaves the lander as it is" '! code 0 && keyIs 165969878 false && timerIs active enabled'
+world on; STUB_GH_FAIL="GET .*/rulesets/" run off
+check "off: main's ruleset is disabled by its id even when it can't be read, and the timer waits on the read-back" '! code 0 && called "^gh PUT .*/rulesets/24823318" && enforcement 24823318 disabled && timerIs active enabled'
+world on; reshape 24823318 '.conditions.ref_name.include += ["refs/heads/release"]'; run off
+check "off: main's ruleset over a second branch is still disabled, then the timer stopped" 'code 0 && enforcement 24823318 disabled && timerIs inactive disabled'
+world on; service activating; run off
+check "off: a pusher pass in flight is stopped" 'code 0 && called "systemctl --user stop loom-pusher.service" && [ "$(cat "${STUB_HOSTS}/Workshop/systemd/loom-pusher.service")" = "inactive static" ]'
+world on; run off --timer loom-pusherr.timer
+check "off: a mistyped --timer fails, and the real timer is named as still running" '! code 0 && said "no loom-pusherr.timer" && timerIs active enabled && enforcement 24823318 disabled'
 
 # rehearsal
 world; run on "${scratch[@]}"
@@ -347,6 +403,16 @@ world; run on --ref loom-rehearsal --ruleset 24823318
 check "rehearsal: main's ruleset on a scratch ref is refused" 'code 2 && ! called "^gh PUT"'
 world; run off "${scratch[@]}" --delete-lander-key
 check "rehearsal: --delete-lander-key is refused" 'code 2 && ! called "^gh"'
+world; ruleset 900 active main; run off "${scratch[@]}"
+check "rehearsal off: a scratch ruleset over main is refused before any write" 'code 3 && enforcement 900 active && ! called "^gh PUT"'
+world on; run on --ref loom-rehearsal --ruleset 024823318
+check "rehearsal: main's ruleset id spelled with a leading zero is refused" 'code 2 && ! called "^gh"'
+world; run on --ref refs/heads/main --ruleset 900
+check "rehearsal: a ref spelled refs/heads/main is refused before any write" '! code 0 && ! called "^gh PUT"'
+world; run off --ref Main --ruleset 900
+check "rehearsal: a ref spelled Main is refused before any write" '! code 0 && ! called "^gh PUT"'
+world on; ruleset 900 active loom-rehearsal; run off "${scratch[@]}" --timer x.timer
+check "rehearsal: --timer touches no timer" 'code 0 && ! called "^systemctl" && timerIs active enabled'
 
 # prove
 world on; run prove
@@ -358,7 +424,7 @@ check "prove on: a push that lands is a failed proof" 'code 1 && said "PROOF FAI
 world on; STUB_KIRK_NO_AUTH=1 run prove
 check "prove on: Kirk's credential missing is no proof" 'code 1 && said "no proof: Kirk"'
 world on; STUB_KIRK_NO_WRITE=1 run prove
-check "prove on: Kirk refused for want of write isn't the ruleset's refusal" 'code 1 && said "not with /GH013/"'
+check "prove on: Kirk refused for want of write isn't the ruleset's refusal" 'code 1 && said "not with /GH013: Repository rule violations found for refs/heads/main"'
 world on; STUB_NETWORK_DOWN=1 run prove
 check "prove on: a push that never reached GitHub is no proof" 'code 1 && said "no proof"'
 world; dropKey 165969878; run prove
@@ -369,6 +435,14 @@ world; run prove
 check "prove off, lander key kept: nothing must be refused, and it says why" 'code 0 && said "quiet because loom-pusher.timer is inactive and disabled" && ! called "bash -s"'
 world on; timer active disabled; run prove
 check "prove: mixed runs no probe" 'code 1 && said "mixed, so no probe runs" && ! called "bash -s"'
+world on; ruleset 901 active main; run prove
+check "prove on: a GH013 while another ruleset applies to main isn't this ruleset's" 'code 1 && said "of other rulesets apply to main"'
+world on; key 43 true "ssh-ed25519 AAAAC3cloudnew"; echo "ssh-ed25519 AAAAC3cloudnew" > "${STUB_HOSTS}/Cloud/.ssh/adamic_deploy.pub"; run prove
+check "prove on: Cloud pushing with a key that isn't the gate key is no proof of the gate key" 'code 1 && said "no proof: Cloud.s gate key.*isn.t|no identity"'
+world; dropKey 165969878; mv "${STUB_HOSTS}/Workshop/.ssh/loom_lander" "${STUB_HOSTS}/Workshop/.ssh/loom_lander.moved"; run prove
+check "prove off: a lander key missing on Workshop isn't GitHub refusing the lander" 'code 1 && said "no proof: the lander.*no identity"'
+world; dropKey 165969878; : > "${STUB_HOSTS}/Workshop/.ssh/aliases"; run prove
+check "prove off: a missing github-lander alias isn't GitHub refusing the lander" 'code 1 && said "no proof: the lander.*doesn.t reach github.com"'
 world on; ruleset 900 active loom-rehearsal; run prove "${scratch[@]}"
 check "prove, rehearsal on: refusals on loom-rehearsal, main untouched" 'code 0 && refIs loom-rehearsal "${scratchSha}" && refIs main "${mainSha}"'
 
@@ -422,16 +496,29 @@ mutant "accept as the negated proof it was" -e 's/^		mustLand "\(.*\)" "\(.*\)" 
 mutant "accept without reading the ref back" -e 's/if \[ "\${tip}" != "\${probeSha}" \]; then/if false; then/'
 mutant "on only starts the timer" -e 's/systemctl --user enable --now/systemctl --user start/'
 mutant "off only stops the timer" -e 's/systemctl --user disable --now/systemctl --user stop/'
-mutant "off deletes the lander's key unasked" -e 's/^			if \[ "\${deleteLanderKey}" = yes \]; then$/			if true; then/'
-mutant "a rehearsal writes keys and the timer" -e 's/^		if \[ "\${rehearsal}" = no \]; then$/		if true; then/'
-mutant "a ruleset over another ref is flipped" -e 's/if \[ "\${target}" != "refs\/heads\/\${reference}" \]; then/if false; then/'
+mutant "off deletes the lander's key unasked" -e 's/^	if \[ "\${deleteLanderKey}" = yes \]; then$/	if true; then/'
+mutant "a rehearsal writes keys and the timer" -e 's/^		if \[ "\${rehearsal}" = no \]; then$/		if true; then/' \
+	-e 's/^		elif \[ "\${rehearsal}" = no \]; then$/		elif true; then/'
+mutant "a rehearsal flips a ruleset over another ref" -e 's/if \[ "\${rehearsal}" = yes \] \&\& \[ "\${target}" != /if false \&\& [ "${target}" != /'
 mutant "check reads an unreadable switch" -e "s/readState || { say \"can't read the switch, so it reads as neither on nor off\"; exit 3; }/readState || true/"
-mutant "off ignores the timer" -e 's/{ \[ "\${rehearsal}" = yes \] || timerOff; }/true/'
-mutant "on ignores the timer" -e 's/{ \[ "\${rehearsal}" = yes \] || timerOn; }/true/'
+mutant "off ignores the timer" -e 's/{ \[ "\${rehearsal}" = yes \] || pusherOff; }/true/'
+mutant "on ignores the timer" -e 's/{ \[ "\${rehearsal}" = yes \] || pusherOn; }/true/'
 mutant "on without GitHub's view" -e 's/ \&\& \[ "\${applied}" -gt 0 \]//'
 mutant "a refusal read from before the push" -e 's/pushed=\${probeOutput#\*push begins}/pushed=${probeOutput}/' \
 	-e 's/case \${probeOutput} in \*"push begins"\*"push ended "\*) ;; \*) return ;; esac/:/'
-mutant "any refusal of Kirk counts" -e "s/'GH013' || failed=1/'.' || failed=1/"
+mutant "any refusal of Kirk counts" -e 's/\(mustRefuse "Kirk.s credential from this Mac" local "git@github.com:\${repository}.git"\) "[^"]*"/\1 "."/'
+mutant "off quiets the lander without the read-back" -e 's/if ! readEnforcement || \[ "\${rule}" != disabled \]; then/if false; then/'
+mutant "off quiets the lander after a failed PUT" -e 's/if ! readEnforcement || \[ "\${rule}" != disabled \]; then/if ! readEnforcement; then/'
+mutant "a timer Workshop doesn't have reads as off" -e 's/if \[ "\${timerLoad}" != loaded \]; then/if false; then/'
+mutant "main's ruleset must target main alone to be read" -e 's/if \[ "\${rehearsal}" = yes \] \&\& \[ "\${target}" != /if [ "${target}" != /'
+mutant "on without its update rule" -e 's/if \[ "\${rules}" != deletion,non_fast_forward,update \]; then/if false; then/'
+mutant "on with any bypass" -e 's/if \[ "\${bypass}" != DeployKey\/always \]; then/if false; then/'
+mutant "a pass in flight isn't stopped" -e 's/ \&\& ssh "\${landerHost}" systemctl --user stop "\${pusherService}"//'
+mutant "a pass in flight reads as off" -e 's/if running "\${timerActive}" || running "\${serviceActive}"; then/if running "${timerActive}"; then/'
+mutant "only the first page of keys" -e 's/gh api --paginate /gh api /'
+mutant "a GH013 counts while other rulesets apply" -e 's/if \[ "\${foreign}" = 0 \]; then/if true; then/'
+mutant "a probe's identity isn't checked where it lives" -e 's/if \[ -n "\${key}" \]; then/if false; then/'
+mutant "a ruleset id with a leading zero" -e "s/'' | 0\* | \*\[!0-9\]\*) usage ;; esac/'' | *[!0-9]*) usage ;; esac/"
 
 if command -v shellcheck > /dev/null; then
 	if shellcheck "${script}" "$0" > "${T}/run.log" 2>&1; then echo "PASS shellcheck"; else check "shellcheck" false; fi
