@@ -53,6 +53,9 @@ type Config struct {
 	Durations *Durations
 	// Log receives one line per thing that happens, for a person. Nil discards it.
 	Log io.Writer
+	// Run, when set, is the run's id in place of one made from the job's name and the time: a pipeline future's
+	// FutureRun, so Judge reads its units under the id it expects. Empty makes one.
+	Run string
 	// RecordPlatform, when set ("linux/amd64"), is the platform whose verdict the run records: a unit that isn't portable
 	// goes only to a machine of it, and one no machine of it can take is never placed, so the run is void. Empty places
 	// every unit on any platform, as before.
@@ -121,7 +124,12 @@ func Run(runContext context.Context, config Config, job protocol.Job) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	run := RunId(job.Name, time.Now())
+	run := config.Run
+	if run == "" {
+		run = RunId(job.Name, time.Now())
+	} else if !protocol.RunIdPattern.MatchString(run) {
+		return Result{}, fmt.Errorf("run id %q isn't one the wire takes", run)
+	}
 	expires := time.Now().Add(48 * time.Hour).Unix()
 	mint := func(scope string) (string, error) {
 		return protocol.MintToken(config.Secret, protocol.TokenClaims{Run: run, Scope: scope, Expires: expires})

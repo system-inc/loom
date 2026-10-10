@@ -427,3 +427,18 @@ func TestRerunAloneTakesTheTopTierAndLeavesThePoolAsItWas(t *testing.T) {
 		t.Fatalf("run %s, events %+v", result.Run, result.Events)
 	}
 }
+
+// A pipeline future's units run under the id Judge reads them by, and an id the wire won't take is refused.
+func TestARunTakesTheIdItIsGiven(t *testing.T) {
+	wire := newFakeWire(t)
+	settings := config(wire)
+	settings.Run = FutureRun(strings.Repeat("e", 40), 1)
+	result := run(t, settings, shell("a", "echo a"))
+	if result.Run != settings.Run || len(wire.events(settings.Run)) == 0 {
+		t.Fatalf("ran as %q, the wire holds %d events under %q", result.Run, len(wire.events(settings.Run)), settings.Run)
+	}
+	settings.Run = "not a run/id"
+	if _, err := Run(context.Background(), settings, protocol.Job{Name: "j", Units: []protocol.JobUnit{shell("a", "true")}}); err == nil {
+		t.Fatal("a run id the wire won't take was accepted")
+	}
+}

@@ -135,6 +135,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.Var(&pools, "pool", "also place units on a pool on the wire, <name>=<slots>; repeatable")
 	var strictPools poolSlotsFlag
 	flags.Var(&strictPools, "strict-pool", "a pool whose workers serve --strict, <name>=<slots>: it takes the job's test jobs and nothing else; repeatable")
+	runId := flags.String("run-id", "", "the run's id, such as a pipeline future's future-<tree>-<attempt>; empty makes one from the job's name")
 	recordPlatform := flags.String("record-platform", "", "the platform whose verdict the run records, such as linux/amd64: units not marked portable go only to its machines")
 	poolPlatforms := poolPlatformFlag{}
 	flags.Var(poolPlatforms, "pool-platform", "the platform a pool's workers run when it isn't Linux's, <name>=<goos>/<goarch>; repeatable")
@@ -220,7 +221,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			}
 		}
 	}
-	config := coordinator.Config{Wire: *wire, Secret: secret, Slots: slots, Uncached: *uncached, Durations: durations, RecordPlatform: *recordPlatform, Log: stdout}
+	config := coordinator.Config{Wire: *wire, Secret: secret, Slots: slots, Uncached: *uncached, Durations: durations, RecordPlatform: *recordPlatform, Run: *runId, Log: stdout}
 	if *yieldTo != "" {
 		config.SlotLimit = yieldLimit(slots, *yieldTo)
 	}
