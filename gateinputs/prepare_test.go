@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,9 +16,10 @@ import (
 // prepare.sh's gate inputs, run as the runner runs them. Each mutant below must make a test here fail:
 //
 //	reading the gate inputs from blobs/ (which expires), or not as Pack writes them: TestPrepareUnpacksWhatPublishWrote
-//	the reviewed order (the inputs moved aside, the new ones unpacked in place, the marker rewritten after), or only
-//	unpacking in place, or the marker not removed first, or staging kept after a failure:
-//	TestAFailedUnpackLeavesNoMarkerAndNoStaging
+//	unpacking in place rather than in staging moved whole, or staging kept after a failure, or the inputs of another
+//	name replaced: TestAFailedUnpackLeavesNothingByItsName
+//	no fetch lock, so units at once each fetch: TestUnitsAtOnceFetchTheGateInputsOnce
+//	gate inputs of another name removed while a unit holds them, or never removed: TestHeldGateInputsAreNeverRemoved
 //	the trim not taking an earlier unit's staging: TestTheTrimTakesAKilledUnitsStaging
 //	no room check before the fetch, or one that counts only the floor: TestPrepareMakesRoomForBothSizesBeforeItFetches
 //	the tar's sha256 not checked against the job's name: TestPrepareChecksTheTarAgainstTheJobsName
@@ -87,15 +89,12 @@ func TestPrepareUnpacksWhatPublishWrote(t *testing.T) {
 	if !ok {
 		t.Fatalf("prepare.sh: %s", output)
 	}
-	checkout := filepath.Join(root, "adamic-tools", Root, "typescript")
+	checkout := filepath.Join(root, "adamic-tools", Root+"-"+published.Name, "typescript")
 	if !strings.Contains(output, "source="+checkout) {
 		t.Fatalf("ADAMIC_TYPESCRIPT_SOURCE isn't the unpacked checkout: %s", output)
 	}
 	if status := git(t, checkout, "status", "--porcelain", "--untracked-files=all"); status != "" {
 		t.Fatalf("the checkout prepare.sh unpacked isn't clean:\n%s", status)
-	}
-	if marker, _ := os.ReadFile(filepath.Join(root, "adamic-tools", "gate-inputs.manifest")); strings.TrimSpace(string(marker)) != published.Name {
-		t.Fatalf("prepare.sh marked %q", marker)
 	}
 	chunk := published.Manifest.Chunks[0]
 	held, _ := fake.Object(Prefix + chunk)
@@ -125,10 +124,9 @@ func TestNoCheckerArchiveReachesTheTests(t *testing.T) {
 	}
 }
 
-// An unpack that fails (a full disk, the unit's deadline) leaves no marker and no staging, and the inputs it would
-// have replaced whole, never half of each: the next unit on the manifest the root had before fetches it again and
-// reads its own files.
-func TestAFailedUnpackLeavesNoMarkerAndNoStaging(t *testing.T) {
+// An unpack that fails (a full disk, the unit's deadline) leaves nothing by its name and no staging, and the inputs of
+// another name whole: the next unit on the first name reads its own files, and the next on the second fetches again.
+func TestAFailedUnpackLeavesNothingByItsName(t *testing.T) {
 	fake := r2test.New(t)
 	run := prepareSection(t, fake)
 	first, err := Publish(inputsFixture(t), 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
@@ -147,7 +145,6 @@ func TestAFailedUnpackLeavesNoMarkerAndNoStaging(t *testing.T) {
 	write(t, filepath.Join(stubs, "tar"), "#!/bin/bash\nif [ -f '"+failing+"' ]; then '"+realTar+"' \"$@\" 2> /dev/null; echo 'tar: No space left on device' >&2; exit 2; fi\nexec '"+realTar+"' \"$@\"\n", 0o755)
 	path := "PATH=" + stubs + ":" + os.Getenv("PATH")
 	root := t.TempDir()
-	marker := filepath.Join(root, "adamic-tools", "gate-inputs.manifest")
 	if output, ok := run(root, first.Name, path); !ok {
 		t.Fatalf("the first unit: %s", output)
 	}
@@ -155,33 +152,118 @@ func TestAFailedUnpackLeavesNoMarkerAndNoStaging(t *testing.T) {
 	if output, ok := run(root, second.Name, path); ok || !strings.Contains(output, "unpack failed") {
 		t.Fatalf("an unpack that fails: %v: %s", ok, output)
 	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		held, _ := os.ReadFile(marker)
-		t.Fatalf("after a failed unpack the marker names %.12s", held)
+	if _, err := os.Stat(filepath.Join(root, "adamic-tools", Root+"-"+second.Name)); !os.IsNotExist(err) {
+		t.Fatalf("after a failed unpack its name is there: %v", err)
 	}
 	if staging, _ := filepath.Glob(filepath.Join(root, "adamic-tools", "staging-*")); len(staging) != 0 {
 		t.Fatalf("a failed unpack left %v", staging)
 	}
-	if read, _ := os.ReadFile(filepath.Join(root, "adamic-tools", Root, "css-printer", "package.json")); string(read) != `{"dependencies":{"prettier":"3.9.6"}}` {
-		t.Fatalf("a failed unpack left its half in place of the inputs it replaced: css-printer/package.json is %s", read)
+	if read, _ := os.ReadFile(filepath.Join(root, "adamic-tools", Root+"-"+first.Name, "css-printer", "package.json")); string(read) != `{"dependencies":{"prettier":"3.9.6"}}` {
+		t.Fatalf("a failed unpack changed the first name's inputs: css-printer/package.json is %s", read)
 	}
 	os.Remove(failing)
 	if output, ok := run(root, first.Name, path); !ok {
 		t.Fatalf("the next unit: %s", output)
 	}
-	if read, _ := os.ReadFile(filepath.Join(root, "adamic-tools", Root, "css-printer", "package.json")); string(read) != `{"dependencies":{"prettier":"3.9.6"}}` {
+	if read, _ := os.ReadFile(filepath.Join(root, "adamic-tools", Root+"-"+first.Name, "css-printer", "package.json")); string(read) != `{"dependencies":{"prettier":"3.9.6"}}` {
 		t.Fatalf("the next unit on the first manifest reads css-printer/package.json as %s", read)
+	}
+	if output, ok := run(root, second.Name); !ok || !strings.Contains(output, "source="+filepath.Join(root, "adamic-tools", Root+"-"+second.Name, "typescript")) {
+		t.Fatalf("the next unit on the second manifest: %v: %s", ok, output)
+	}
+}
+
+// Units a box serve runs at once on one root, each preparing the same gate inputs, fetch them once: one preparation
+// fetches under the lock, and the others find what it unpacked.
+func TestUnitsAtOnceFetchTheGateInputsOnce(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("units run at once only where there is flock")
+	}
+	fake := r2test.New(t)
+	run := prepareSection(t, fake)
+	published, err := Publish(inputsFixture(t), 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.ResetRequests()
+	root := t.TempDir()
+	outputs := make(chan string, 6)
+	for range 6 {
+		go func() {
+			output, ok := run(root, published.Name)
+			if !ok || !strings.Contains(output, "source="+filepath.Join(root, "adamic-tools", Root+"-"+published.Name, "typescript")) {
+				output = "FAILED: " + output
+			}
+			outputs <- output
+		}()
+	}
+	for range 6 {
+		if output := <-outputs; strings.HasPrefix(output, "FAILED: ") {
+			t.Fatal(output)
+		}
+	}
+	if count := fake.Count("PUBLIC", Prefix+published.Name); count != 1 {
+		t.Fatalf("six units at once fetched the manifest %d times", count)
+	}
+	for _, chunk := range published.Manifest.Chunks {
+		if count := fake.Count("PUBLIC", Prefix+chunk); count != 1 {
+			t.Fatalf("six units at once fetched chunk %.12s %d times", chunk, count)
+		}
+	}
+}
+
+// Gate inputs another unit holds (the runner's shared lock on gate-inputs-<name>.lock, strict.go) stay while a unit of
+// another name prepares; once no unit holds them, the next preparation of another name removes them.
+func TestHeldGateInputsAreNeverRemoved(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("units run at once only where there is flock")
+	}
+	fake := r2test.New(t)
+	run := prepareSection(t, fake)
+	first, err := Publish(inputsFixture(t), 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := inputsFixture(t)
+	write(t, filepath.Join(moved, "css-printer", "package.json"), `{"moved":1}`, 0o644)
+	second, err := Publish(moved, 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if output, ok := run(root, first.Name); !ok {
+		t.Fatalf("the first unit: %s", output)
+	}
+	firstInputs := filepath.Join(root, "adamic-tools", Root+"-"+first.Name)
+	lock, err := os.OpenFile(firstInputs+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+	if output, ok := run(root, second.Name); !ok {
+		t.Fatalf("a unit of another name: %s", output)
+	}
+	if read, _ := os.ReadFile(filepath.Join(firstInputs, "css-printer", "package.json")); string(read) != `{"dependencies":{"prettier":"3.9.6"}}` {
+		t.Fatalf("held gate inputs were removed or changed under their unit: css-printer/package.json is %q", read)
+	}
+	lock.Close()
+	if output, ok := run(root, second.Name); !ok {
+		t.Fatalf("the next unit of another name: %s", output)
+	}
+	if _, err := os.Stat(firstInputs); !os.IsNotExist(err) {
+		t.Fatalf("gate inputs no unit holds stayed: %v", err)
 	}
 }
 
 // A unit killed mid-fetch can't clean up after itself; the next strict unit's trim takes its staging, and leaves the
-// unpacked inputs and their marker.
+// unpacked inputs.
 func TestTheTrimTakesAKilledUnitsStaging(t *testing.T) {
 	prepareTools(t)
 	root := t.TempDir()
 	write(t, filepath.Join(root, "adamic-tools", "staging-4242", "gate-inputs.tar.gz"), "half", 0o644)
-	write(t, filepath.Join(root, "adamic-tools", "gate-inputs.manifest"), strings.Repeat("a", 64)+"\n", 0o644)
-	write(t, filepath.Join(root, "adamic-tools", Root, "css", "package.json"), "{}", 0o644)
+	write(t, filepath.Join(root, "adamic-tools", Root+"-"+strings.Repeat("a", 64), "css", "package.json"), "{}", 0o644)
 	command := exec.Command("bash", filepath.Join("..", "runner", "prepare.sh"), "trim-only", root, "shared")
 	command.Env = append(os.Environ(), "HOME="+t.TempDir())
 	if output, err := command.CombinedOutput(); err != nil {
@@ -190,7 +272,7 @@ func TestTheTrimTakesAKilledUnitsStaging(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "adamic-tools", "staging-4242")); !os.IsNotExist(err) {
 		t.Fatalf("the trim left a killed unit's staging: %v", err)
 	}
-	for _, kept := range []string{"gate-inputs.manifest", "gate-inputs/css/package.json"} {
+	for _, kept := range []string{Root + "-" + strings.Repeat("a", 64) + "/css/package.json"} {
 		if _, err := os.Stat(filepath.Join(root, "adamic-tools", kept)); err != nil {
 			t.Fatalf("the trim took %s: %v", kept, err)
 		}
@@ -264,7 +346,7 @@ func TestPrepareChecksTheTarAgainstTheJobsName(t *testing.T) {
 	if output, ok := run(root, first.Name); ok || !strings.Contains(output, "gate inputs tar isn't "+first.Name) {
 		t.Fatalf("another tar's chunks under the first's name: %v: %s", ok, output)
 	}
-	if _, err := os.Stat(filepath.Join(root, "adamic-tools", Root)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "adamic-tools", Root+"-"+first.Name)); !os.IsNotExist(err) {
 		t.Fatalf("another tar was unpacked under the first's name: %v", err)
 	}
 }

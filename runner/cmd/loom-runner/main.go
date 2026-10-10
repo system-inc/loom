@@ -2,7 +2,7 @@
 // each. It exits 0 when the unit passed, 1 when it failed and 2 when it is broken or couldn't be read.
 //
 //	loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] [--house-cache <url>] <unit.json | https URL | ->
-//	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>]
+//	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>] [--units <n>] [--unit-cpus <n>] [--unit-memory <MB>] [--busy <fraction>]
 //	loom-runner install-serve
 //	loom-runner version
 //
@@ -15,6 +15,11 @@
 //
 // --house-cache is the house cache's address, http://<host>:<port> (docs/house-cache.md), asked first for every blob
 // and runner by its sha256; without it, LOOM_HOUSE_CACHE, and with neither, none.
+//
+// --units runs that many units at once at most (#ef2rgaq, runner/slots.go): serve asks for another while the shares
+// in hand leave room for one of --unit-cpus and --unit-memory, a unit's share when it declares none, and the machine is
+// under --busy of its CPU time. Only a prebuilt test job on serve's own runner runs beside others; each runs in a cgroup
+// of its own, held to its share, where systemd delegated one (loom-serve.service's Delegate=yes).
 //
 // install-serve readies this Linux box's loom-serve.service from ~/.loom/serve.conf, ~/.loom/serve-token and the
 // house-cache line of ~/.loom/update.conf, and reloads it (package serving, docs/serving.md); the updater's hook runs
@@ -41,7 +46,7 @@ import (
 
 const usage = `usage:
   loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] [--house-cache <url>] <unit.json | https URL | ->
-  loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>]
+  loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>] [--units <n>] [--unit-cpus <n>] [--unit-memory <MB>] [--busy <fraction>]
   loom-runner install-serve
   loom-runner version
 `
@@ -149,10 +154,14 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tree := flags.String("tree", "", "where a test job's checkout is kept across units (default <root>/adamic)")
 	releases := flags.String("releases", runner.DefaultReleases, "where a unit's runner is fetched by its sha256 when it names another than this one")
 	houseCache := flags.String("house-cache", os.Getenv(housecache.Variable), "the house cache, http://<host>:<port>, asked first for every blob and runner by its sha256 (default $"+housecache.Variable+")")
+	units := flags.Int("units", 1, "the most units to run at once")
+	unitCpus := flags.Int("unit-cpus", 8, "a unit's CPUs when it declares none")
+	unitMemory := flags.Int("unit-memory", 16384, "a unit's memory in MB when it declares none")
+	busy := flags.Float64("busy", 0.8, "ask for another unit only while the machine's CPUs are busy less than this fraction of the time")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
-	if flags.NArg() != 0 || *pool == "" || *tokenFile == "" || *worker == "" || *until <= 0 {
+	if flags.NArg() != 0 || *pool == "" || *tokenFile == "" || *worker == "" || *until <= 0 || *units < 1 || *unitCpus < 1 || *unitMemory < 1 || *busy <= 0 || *busy > 1 {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
@@ -199,6 +208,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Drain:      drain,
 		Releases:   *releases,
 		LiveStatus: liveStatus(*root, livestatus.ServePath),
+		Units:      *units, UnitCpus: *unitCpus, UnitMemoryMegabytes: *unitMemory, Busy: *busy,
 	})
 	fmt.Fprintln(stdout, summary)
 	if err != nil {
