@@ -450,7 +450,7 @@ export function futureLandable(future: FutureEntry | undefined): boolean {
         return false;
     }
     if (future.units === null) {
-        return future.whole !== null && future.whole.status === 'passed' && future.whole.future === future.tree;
+        return future.whole !== null && decisionOf(future.whole) === 'green' && future.whole.future === future.tree;
     }
     if (future.units.size === 0) {
         return false;
@@ -487,8 +487,13 @@ export function emptyState(): QueueState {
     return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0 };
 }
 
-function decisionOf(status: VerdictStatus): Decision['status'] {
-    return status === 'passed' ? 'green' : status === 'failed' ? 'red' : 'void';
+// A whole verdict's decision, by the judge's rule: a failure that is main's red (excused, as Green excuses it) doesn't
+// make the change red.
+function decisionOf(verdict: Verdict): Decision['status'] {
+    if (verdict.status === 'passed' || (verdict.status === 'failed' && verdict.cause === 'mainRed')) {
+        return 'green';
+    }
+    return verdict.status === 'failed' ? 'red' : 'void';
 }
 
 // Applies one event to the state. Replay is this over the log in order; nothing here reads a clock or asks git.
@@ -570,7 +575,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
         else if (event.data.verdict !== undefined && future !== undefined) {
             const verdict = event.data.verdict as Verdict;
             future.whole = verdict;
-            future.decided = { run: verdict.run, status: decisionOf(verdict.status) };
+            future.decided = { run: verdict.run, status: decisionOf(verdict) };
             future.voids += future.decided.status === 'void' ? 1 : 0;
             if (entry !== undefined) {
                 entry.verdict = verdict as unknown as Record<string, unknown>;

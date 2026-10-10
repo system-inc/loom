@@ -42,6 +42,11 @@ class FakeGate:
     def record(self, tree):
         return self.found
 
+    failures = []
+
+    def failing(self, ref):
+        return self.failures
+
     def parents(self, sha):
         return {other: [old, tree], "3" * 40: [old, "4" * 40]}.get(sha, [])
 
@@ -112,6 +117,19 @@ class Tick(unittest.TestCase):
         pipeline, gate = FakePipeline([dict(future, parity=True)]), FakeGate({"ref": "gate-logs/r/fast", "status": "green", "gated": tree})
         queue_bridge.tick(pipeline, gate, memory())
         self.assertEqual((gate.queued, pipeline.posts()), ([], []))
+
+    def test_a_red_that_is_only_mains_ruled_red_is_excused_and_any_other_failure_is_not(self):
+        pipeline, gate = FakePipeline([future]), FakeGate({"ref": "gate-logs/r/fast", "status": "red", "gated": tree})
+        gate.failures = ["stage1/cohere/gitignore TestThePortAnswersAsGoCohereAndGitDo_022"]
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual([(body["verdict"]["status"], body["verdict"]["cause"]) for path, body in pipeline.posts()], [("failed", "mainRed")])
+        pipeline, gate = FakePipeline([future]), FakeGate({"ref": "gate-logs/r/fast", "status": "red", "gated": tree})
+        gate.failures = ["stage1/cohere/gitignore TestThePortAnswersAsGoCohereAndGitDo_022", "stage1/cohere/gitignore TestPatterns"]
+        queue_bridge.tick(pipeline, gate, memory())
+        self.assertEqual([(body["verdict"]["status"], body["verdict"]["cause"]) for path, body in pipeline.posts()], [("void", "flake")])
+        self.assertEqual(queue_bridge.excusedNames(["stage1/cohere/gitignore TestThePortAnswersAsGoCohereAndGitDo_026"]),
+                         ["stage1/cohere/gitignore TestThePortAnswersAsGoCohereAndGitDo_026=" + queue_bridge.mainReds[0][2]])
+        self.assertIsNone(queue_bridge.excusedNames(["stage1/cohere/estree TestThePortAnswersAsGoCohereAndGitDo_026"]))
 
     def test_a_first_red_is_served_again_and_only_a_second_red_is_the_changes(self):
         pipeline, held = FakePipeline([future]), memory()

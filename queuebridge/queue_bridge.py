@@ -27,7 +27,7 @@ The queue decides; this only carries. No credential that moves main lives in Clo
 
 usage: queuebridge/queue_bridge.py    (launchd com.loom.queue-bridge runs it every minute)
 """
-import base64, fcntl, hashlib, hmac, json, os, re, subprocess, sys, time, urllib.error, urllib.request
+import base64, fcntl, gzip, hashlib, hmac, json, os, re, subprocess, sys, time, urllib.error, urllib.request
 
 pipeline = os.environ.get("QUEUE_BRIDGE_URL", "https://loom-pipeline.kirk-ouimet.workers.dev")
 state = os.environ.get("QUEUE_BRIDGE_STATE", os.path.expanduser("~/.loom/queue-bridge"))
@@ -39,6 +39,27 @@ github = "system-inc/adamic"
 rule = "todays-gate-v0"
 docsRule = "ruled-gate-docs-v0"
 docsRuling = "docs only: Markdown no product test reads (Loom, Oct 10 00:18Z)"
+
+
+# Main's own reds the judge has ruled, each by package and test pattern with its ruling. A red record whose every failing
+# test is one of these is main's red, not the change's; push-main --infra-red checks each by name on the output again
+# (a test-owned time limit, no assertion), so a ruled name can't hide a real failure of the same test.
+mainReds = [
+    ("stage1/cohere/gitignore", re.compile(r"^TestThePortAnswersAsGoCohereAndGitDo_\d+$"),
+     "main's red: its run time at its own 90 s hard deadline, a deadline at its edge (Judge, Oct 10 00:33Z)"),
+]
+
+
+def excusedNames(failing):
+    """The --infra-red names for failing ("<package> <Test>") when every one is a ruled main red, else None."""
+    names = []
+    for name in failing:
+        package, test = name.split(" ", 1)
+        ruling = [ruling for ruledPackage, pattern, ruling in mainReds if ruledPackage == package and pattern.match(test)]
+        if not ruling:
+            return None
+        names.append("%s %s=%s" % (package, test, ruling[0]))
+    return names or None
 
 
 def docsOnly(paths):
@@ -126,6 +147,23 @@ class Gate:
             return {"ref": ref, "status": status, "gated": fast.get("gated") or fast.get("sha") or ""}
         return None
 
+    def failing(self, ref):
+        """The failing top-level tests of a record, "<package under the module> <Test>", from its test.jsonl.gz."""
+        raw = subprocess.run(["git", "-C", repository, "show", "origin/%s:test.jsonl.gz" % ref], capture_output=True).stdout
+        names = set()
+        try:
+            lines = gzip.decompress(raw).decode(errors="replace").splitlines() if raw else []
+        except OSError:
+            return None
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if event.get("Action") == "fail" and event.get("Test"):
+                names.add(event.get("Package", "").split("/adamic/")[-1] + " " + event["Test"].split("/")[0])
+        return sorted(names)
+
     def queue(self, tree):
         """Puts tree in front of fast-gate-watch as a cloud/land-* tip. True when the branch is there."""
         branch = "cloud/land-queue-%s" % tree[:8]
@@ -139,8 +177,11 @@ class Gate:
         return ran.returncode == 0
 
     def land(self, record, tree, label):
-        """push-main.sh --fast-gate on the record: (exit code, stdout, stderr)."""
-        ran = subprocess.run(["bash", pushMain, "--fast-gate", record, tree, label], capture_output=True, text=True,
+        """push-main.sh --fast-gate on the record, naming any ruled main red it carries: (exit code, stdout, stderr)."""
+        infra = []
+        for name in excusedNames(self.failing(record) or []) or []:
+            infra += ["--infra-red", name]
+        ran = subprocess.run(["bash", pushMain, "--fast-gate", record, *infra, tree, label], capture_output=True, text=True,
                              cwd=os.path.dirname(os.path.dirname(os.path.dirname(pushMain))))
         return ran.returncode, ran.stdout, ran.stderr
 
@@ -194,6 +235,9 @@ def verdictOf(record, tree, gate, served=False):
             return {"verdict": {"future": tree, "run": record["ref"], "status": "void", "cause": "infra", "rule": rule}}
         merge = {"base": parents[0]}
     status, cause = {"green": ("passed", None), "red": ("failed", "change") if served else ("void", "flake"), "void": ("void", "infra")}[record["status"]]
+    if record["status"] == "red" and excusedNames(gate.failing(record["ref"]) or []) is not None:
+        # Every failure is a red the judge ruled main's: excused, as the judge's Green excuses it.
+        status, cause = "failed", "mainRed"
     body = {"verdict": {"future": gated, "run": record["ref"], "status": status, "cause": cause, "rule": rule}}
     if merge is not None:
         body["gateMerge"] = merge

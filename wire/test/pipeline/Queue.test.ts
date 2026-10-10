@@ -226,7 +226,7 @@ describe('the queue', function () {
             ids.push(((await (await submit(queue, change(seed))).json()) as { change: string }).change);
         }
         expect((await postWhole(queue, ids[0] ?? '', sha(1), 'failed', 'change')).status).toBe(200);
-        expect((await postWhole(queue, ids[1] ?? '', sha(2), 'failed', 'mainRed')).status).toBe(200);
+        expect((await postWhole(queue, ids[1] ?? '', sha(2), 'failed', 'flake')).status).toBe(200);
         expect((await postWhole(queue, ids[2] ?? '', sha(3), 'void', 'infra')).status).toBe(200);
         expect((await postWhole(queue, ids[3] ?? '', sha(4), 'passed', null)).status).toBe(200);
         expect(
@@ -552,6 +552,22 @@ describe('a stack', function () {
         ]);
         expect(await (await queue.fetch(`https://queue/changes/${c}`)).json()).toMatchObject({ state: 'queued' });
         expect(await (await queue.fetch(`https://queue/changes/${other}`)).json()).toMatchObject({ state: 'queued' });
+    });
+});
+
+describe("today's gate and main's own red", function () {
+    it("lands a change whose only failure is main's red, as the judge's Green excuses it, and nothing else that failed", async function () {
+        const queue = await freshQueue();
+        const excused = ((await (await submit(queue, change(11))).json()) as { change: string }).change;
+        const flaky = ((await (await submit(queue, change(12))).json()) as { change: string }).change;
+        await postWhole(queue, excused, sha(11), 'failed', 'mainRed');
+        await postWhole(queue, flaky, sha(12), 'failed', 'flake');
+        expect(
+            (await landings(queue)).map(function (order) {
+                return order.change;
+            }),
+        ).toEqual([excused]);
+        expect(((await (await queue.fetch('https://queue/events?owners=1')).text()).trim())).toBe('');
     });
 });
 
