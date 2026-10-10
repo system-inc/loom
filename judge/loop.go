@@ -458,6 +458,7 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 	verdict.Attempts = append(verdict.Attempts, candidate.Attempt, main.Attempt)
 	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256, OverBudget: candidate.OverBudget}
 	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256, OverBudget: main.OverBudget}
+	evidence.SameTree = job.Future == job.Base
 	evidence.MainRecorded = nil
 	if found {
 		evidence.MainRecorded = recorded

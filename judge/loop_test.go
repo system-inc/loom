@@ -178,6 +178,51 @@ func TestAFlakeIsPostedForQuarantine(t *testing.T) {
 	}
 }
 
+// A witness of main (base = sha, chg_2bfxkyyp's shape) reruns its one tree twice: only failed alone both times is red,
+// which Queue records as main.red; a failure that passes alone either time is a flake; Loom's breaks are void (#r0xntgv).
+func TestAWitnessIsRedOnlyWhenItsOneTreeFailsAloneTwice(t *testing.T) {
+	cases := []struct {
+		name   string
+		first  Finished
+		alone  []Finished // the candidate's rerun, then main's: both on the witness's one tree
+		status string
+		cause  string
+		infra  string
+		run    string
+	}{
+		{"failed alone both times: red, the witness's own", failedWith("TestB"), []Finished{failedWith("TestB"), failedWith("TestB")}, Failed, CauseChange, "", "red"},
+		{"failed, then failed and passed alone: a flake", failedWith("TestB"), []Finished{failedWith("TestB"), passed()}, Passed, CauseFlake, "", "green"},
+		{"failed, then passed and failed alone: a flake", failedWith("TestB"), []Finished{passed(), failedWith("TestB")}, Passed, CauseFlake, "", "green"},
+		{"failed, then passed alone both times: a flake", failedWith("TestB"), []Finished{passed(), passed()}, Passed, CauseFlake, "", "green"},
+		{"broken by Loom every time: void, never red", broken(InfraRefused), []Finished{broken(InfraRefused), broken(InfraRefused)}, Void, CauseInfra, InfraRefused, "void"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			h.runs["u"] = c.first
+			h.script("u", futureTree, c.alone...)
+			loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 10, 20, 30, 0, 0, time.UTC) }}
+			post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_W", Sha: futureTree, Base: futureTree, Owner: "system_adamic_loom"}, Change: "chg_W",
+				Future: futureTree, Base: futureTree, Run: "run-1", Plan: []PlanUnit{{UnitKey: "u"}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record := recordOf(t, post, "u"); record.Status != c.status || record.Cause != c.cause || record.Infra != c.infra {
+				t.Fatalf("record %+v, want %s %s %s", record, c.status, c.cause, c.infra)
+			}
+			if post.Decision.Status != c.run {
+				t.Fatalf("run %s, want %s", post.Decision.Status, c.run)
+			}
+			if c.cause == CauseFlake && (len(post.Quarantine) != 1 || post.Quarantine[0].Test != "TestB") {
+				t.Fatalf("quarantine %v, want TestB", post.Quarantine)
+			}
+			if _, kicked := post.Decision.Kicks["u"]; kicked != (c.run == "red") {
+				t.Fatalf("kicks %v for a %s run", post.Decision.Kicks, c.run)
+			}
+		})
+	}
+}
+
 func TestTheReranRedRunsOnTheCandidateAndOnMain(t *testing.T) {
 	h := newHarness()
 	h.runs["u"] = failedWith("TestB")

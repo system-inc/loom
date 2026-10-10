@@ -17,6 +17,9 @@
 // at the future's base fails the same package and test, and that test is the unit's only failing one; otherwise the
 // failure is the change's. A flake is passed with cause flake, and every flake is recorded so flakes can be counted
 // per test, because a flake the change introduced looks the same.
+//
+// A witness of main (base = sha) has no candidate apart from main: both reruns run its one tree, so only failed alone
+// both times is red, and a failure that passes alone either time is a flake (#r0xntgv).
 package judge
 
 import (
@@ -273,6 +276,9 @@ type Evidence struct {
 	BelowNeed string
 	Candidate *Rerun // the unit rerun alone on the candidate; nil until it has run
 	Main      *Rerun // the unit rerun alone on main at the future's base; nil until it has run
+	// SameTree marks a future whose base is its own tree, a witness of main (base = sha): its two alone reruns run one
+	// tree twice, so there is no change between them to blame.
+	SameTree bool
 	// MainRecorded is main's latest recorded verdict for this unit at the future's base, its test outcomes; nil when
 	// main has none.
 	MainRecorded []TestOutcome
@@ -379,6 +385,12 @@ func Decide(evidence Evidence) (Decision, error) {
 		}
 	}
 	candidateFailed, mainFailed := evidence.Candidate.Status == Failed, evidence.Main.Status == Failed
+	if evidence.SameTree && !(candidateFailed && mainFailed) {
+		// One tree run three times that passed alone at least once: the table's candidate-or-main rows would name a
+		// change that isn't there, and a witness's red holds main for everyone, so it's the tree's flake.
+		return Decision{Decided: true, Status: Passed, Cause: CauseFlake, Flaky: failing(evidence.FirstTests),
+			Why: "a witness's one tree failed, then passed alone at least once of its two alone reruns: a flake, quarantined and counted"}, nil
+	}
 	switch {
 	case candidateFailed && !mainFailed:
 		return Decision{Decided: true, Status: Failed, Cause: CauseChange, Why: "fails alone on the candidate, passes alone on main"}, nil
