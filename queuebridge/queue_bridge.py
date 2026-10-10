@@ -38,6 +38,9 @@ requeueScript = os.environ.get("QUEUE_BRIDGE_REQUEUE", os.path.expanduser("~/.lo
 github = "system-inc/adamic"
 rule = "todays-gate-v0"
 docsRule = "ruled-gate-docs-v0"
+# Whether this Mac still runs push-main on landing orders. Off once workshop's pusher holds main (QUEUE_BRIDGE_LANDS=1
+# turns it back on).
+landsHere = os.environ.get("QUEUE_BRIDGE_LANDS", "0") == "1"
 docsRuling = "docs only: Markdown no product test reads (Loom, Oct 10 00:18Z)"
 
 
@@ -216,6 +219,14 @@ class Gate:
             listed = git("rev-list", "--parents", "-n", "1", sha).split()
         return listed[1:]
 
+    def laneChecks(self, base, tree):
+        """push-main's test-only lane checks on tree against base, from the merge tree: None when they pass, else why."""
+        directory = os.path.dirname(pushMain)
+        git("fetch", "-q", "--no-tags", "origin", tree)
+        ran = subprocess.run(["python3", os.path.join(directory, "lane-checks.py"), base, tree, tree], capture_output=True, text=True,
+                             cwd=os.path.dirname(os.path.dirname(directory)), timeout=300)
+        return None if ran.returncode == 0 else ((ran.stdout + ran.stderr).strip() or "exit %d" % ran.returncode)
+
     def landRuled(self, ruling, tree, label):
         """push-main.sh --ruled-gate: the census and static checks on the merged tree, no product suite."""
         ran = subprocess.run(["bash", pushMain, "--ruled-gate", ruling, tree, "0", "0", "0", "0", label], capture_output=True, text=True,
@@ -296,6 +307,12 @@ def tick(pipeline, gate, memory):
             if change in memory["ruled"]:
                 continue
             verdict = {"future": tree, "run": lane[0], "status": "passed", "cause": None, "rule": lane[1]}
+            # The test-only lane's checks (gofmt, declared tools, t.Parallel, vet) run before the verdict, since the
+            # pusher only fast-forwards: a violation is the change's red, its reason in the run.
+            if lane[0] == "test-only":
+                refused = gate.laneChecks(future["base"], tree)
+                if refused is not None:
+                    verdict.update(status="failed", cause="change", run="test-only lane checks refused: " + refused[:300])
             status, answer = pipeline.call("POST", "/verdicts", {"change": change, "verdict": verdict})
             log("verdict %s passed under %s: %d %s" % (change, lane[1], status, answer))
             if status in (200, 409):
@@ -318,6 +335,9 @@ def tick(pipeline, gate, memory):
         if body["verdict"]["status"] == "void" and status == 200 and tree not in memory["requeued"]:
             memory["requeued"].append(tree)
             log("requeued %s after its void: %s" % (tree[:12], "started" if gate.requeue(tree) else "requeue.sh refused"))
+    # Landing is the pusher's on workshop, with the lander key (#83m6zw8); this Mac lands only while it's asked to.
+    if not landsHere:
+        return
     status, orders = pipeline.call("GET", "/landings")
     if status != 200:
         log("landings: %d %s" % (status, orders))

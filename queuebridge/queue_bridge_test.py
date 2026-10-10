@@ -8,6 +8,9 @@ import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import queue_bridge
 
+# These tests drive the landing step too; on the Mac it is off once workshop's pusher holds main.
+queue_bridge.landsHere = True
+
 tree = "1" * 40
 other = "2" * 40
 old, new = "a" * 40, "b" * 40
@@ -64,6 +67,11 @@ class FakeGate:
     def land(self, record, tree, label):
         self.landed.append((record, tree))
         return self.landing
+
+    laneRefusal = None
+
+    def laneChecks(self, base, tree):
+        return self.laneRefusal
 
     def landTestOnly(self, tree, label):
         self.landed.append(("test-only", tree))
@@ -183,6 +191,22 @@ class Tick(unittest.TestCase):
         pipeline, gate = FakePipeline([future], paths=["internal/oracle/a_test.go", "internal/oracle/a.go"]), FakeGate()
         queue_bridge.tick(pipeline, gate, memory())
         self.assertEqual(gate.queued, [tree])
+        # The lane's checks refuse a test that isn't gofmt'd: the change's red, its reason in the run.
+        pipeline, gate = FakePipeline([future], paths=["internal/oracle/a_test.go"]), FakeGate()
+        gate.laneRefusal = "internal/oracle/a_test.go isn't gofmt-formatted"
+        queue_bridge.tick(pipeline, gate, memory())
+        verdict = pipeline.posts()[0][1]["verdict"]
+        self.assertEqual((verdict["status"], verdict["cause"]), ("failed", "change"))
+        self.assertIn("gofmt", verdict["run"])
+
+    def test_the_mac_lands_nothing_once_the_pusher_holds_main(self):
+        queue_bridge.landsHere = False
+        try:
+            pipeline, gate = FakePipeline(landings=[order]), FakeGate(landing=(0, "", ""))
+            queue_bridge.tick(pipeline, gate, memory())
+            self.assertEqual((gate.landed, pipeline.posts()), ([], []))
+        finally:
+            queue_bridge.landsHere = True
 
     def test_a_void_is_served_once_more_and_only_once(self):
         pipeline, held = FakePipeline([future]), memory()
