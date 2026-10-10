@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -176,13 +177,15 @@ func TestTwoTreesSharingAProductBuildItOnce(t *testing.T) {
 		t.Fatalf("the product went up %d times and its ref %d: %v", blobs, refs, fake.Requests())
 	}
 
-	// Six days on, the blob is about to expire: the third tree fetches it, uses it, and sends it again.
+	// Six days on, the blob and its ref are about to expire: the third tree fetches the blob, uses it, and sends both
+	// again, their own bytes.
 	fake.Set("blobs/"+archive, mustObject(t, fake, "blobs/"+archive), time.Now().Add(-6*24*time.Hour))
+	fake.Set("refs/action/"+sharedProduct, mustObject(t, fake, "refs/action/"+sharedProduct), time.Now().Add(-6*24*time.Hour))
 	third, log := heldBuild(t, store, "3")
 	if !strings.Contains(log, " fetched ") || third.Products[sharedProduct] != archive {
 		t.Fatalf("the third tree: %q, %s", log, third.Products[sharedProduct])
 	}
-	if fake.Count("PUT", "blobs/"+archive) != 2 || fake.Count("PUT", "refs/action/"+sharedProduct) != 1 || time.Since(fake.Modified("blobs/"+archive)) > time.Minute {
+	if fake.Count("PUT", "blobs/"+archive) != 2 || fake.Count("PUT", "refs/action/"+sharedProduct) != 2 || time.Since(fake.Modified("blobs/"+archive)) > time.Minute || time.Since(fake.Modified("refs/action/"+sharedProduct)) > time.Minute {
 		t.Fatalf("a stale held blob: %v, modified %v", fake.Requests(), fake.Modified("blobs/"+archive))
 	}
 }
@@ -242,5 +245,42 @@ func TestHeldProductsRefusesAPoisonedArchive(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != 404 || held.Err() != nil {
 		t.Fatalf("an unheld key: %s %v", response.Status, held.Err())
+	}
+}
+
+// An ask that failed after the archive unpacked (here, the store refusing the ref's refresh) leaves nothing that
+// trips the next ask for the same key: each ask unpacks into its own directory.
+func TestHeldProductsAsksAgainAfterAFailure(t *testing.T) {
+	fake, store := serve(t)
+	archive := tarGzip(t, entry{name: sharedProduct + "/tool", body: "the tool"}, entry{name: sharedProduct + ".inputs", body: "name shared"})
+	fake.Set("blobs/"+digest(archive), archive, time.Now())
+	fake.Set("refs/action/"+sharedProduct, []byte(digest(archive)), time.Now().Add(-6*24*time.Hour))
+	var refuse atomic.Bool
+	refuse.Store(true)
+	fake.Answer = func(method, key string) int {
+		if refuse.Load() && method == "PUT" && key == "refs/action/"+sharedProduct {
+			return 403
+		}
+		return 0
+	}
+	held, err := ServeHeldProducts(store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	ask := func() int {
+		response, err := store.client().Get(held.Address + "/refs/build/" + sharedProduct)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response.StatusCode
+	}
+	if status := ask(); status == 200 || held.Err() == nil {
+		t.Fatalf("a refused refresh: %d %v", status, held.Err())
+	}
+	refuse.Store(false)
+	if status := ask(); status != 200 || held.Held()[sharedProduct] != digest(archive) {
+		t.Fatalf("the second ask: %d %v", status, held.Err())
 	}
 }

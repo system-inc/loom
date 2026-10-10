@@ -131,9 +131,10 @@ type Result struct {
 	Products int
 	Seconds  float64
 	Error    string
+	Note     string `json:",omitempty"` // why a product the store has a ref for was built again
 }
 
-// Build builds every action whose productKey the store doesn't hold whole and fresh, once each, and uploads it. An
+// Build builds every action whose productKey the store doesn't hold whole, once each, and uploads it. An
 // action already stored builds nothing. A product test that fails, or a ref that conflicts, is that action's failure,
 // reported, and never uploaded. Results come back in the actions' order.
 func (builder Builder) Build(actions []Action) []Result {
@@ -261,6 +262,9 @@ func (builder Builder) build(action Action) Result {
 	if stored {
 		result.Archive = archive
 		return finish("stored", nil)
+	}
+	if archive != "" {
+		result.Note = fmt.Sprintf("refs/action/%s names blob %s, which the store no longer holds, so it is built again", key, archive)
 	}
 	return builder.buildAndUpload(action, key, &result, finish)
 }

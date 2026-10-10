@@ -87,6 +87,9 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	products, productFailures := build.Products(productTests, filepath.Join(directory, "logs"))
 	productSeconds := time.Since(productsStarted).Seconds()
 	held.Close()
+	for _, note := range held.Notes() {
+		fmt.Fprintln(stderr, "build-tree:", note)
+	}
 	if err = held.Err(); err != nil {
 		return fail(fmt.Errorf("the store held products it couldn't give whole: %w", err))
 	}

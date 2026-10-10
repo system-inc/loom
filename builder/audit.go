@@ -50,13 +50,13 @@ func Audit(store Store) (AuditReport, error) {
 			report.Expiring++
 			continue
 		}
-		sum, err := store.heldRef(key)
+		named, err := store.heldRef(key)
 		if err != nil {
 			return AuditReport{}, err
 		}
-		blobUploaded, held := uploaded[sum]
+		blobUploaded, held := uploaded[named.Sum]
 		switch {
-		case sum == "" || !held:
+		case named.Sum == "" || !held:
 			report.Dangling = append(report.Dangling, key)
 		case ref.Modified.Unix()-blobUploaded > int64(FreshFor.Seconds()):
 			report.Stale = append(report.Stale, key)

@@ -12,8 +12,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-
-	"github.com/system-inc/loom/r2"
 )
 
 // A tree builds only the products the store doesn't hold (Loom, Oct 10). Which products a product test needs is known
@@ -57,6 +55,7 @@ type HeldProducts struct {
 	blobs    map[string]string // a manifest's or a file's sha256 to the file holding it
 	held     map[string]string // product key to its archive's sha256
 	failures []error
+	notes    []string
 }
 
 // ServeHeldProducts starts the server on 127.0.0.1, unpacking what it fetches under scratch.
@@ -98,6 +97,13 @@ func (held *HeldProducts) Err() error {
 	held.mutex.Lock()
 	defer held.mutex.Unlock()
 	return errors.Join(held.failures...)
+}
+
+// Notes are the products the store had a ref for but no longer the blob, which were built again: each one's line.
+func (held *HeldProducts) Notes() []string {
+	held.mutex.Lock()
+	defer held.mutex.Unlock()
+	return append([]string{}, held.notes...)
 }
 
 func (held *HeldProducts) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -151,39 +157,36 @@ func (held *HeldProducts) prepare(key string) (string, error) {
 	if done {
 		return manifest, nil
 	}
-	sum, err := held.store.heldRef(key)
-	if err != nil || sum == "" {
+	ref, err := held.store.heldRef(key)
+	if err != nil || ref.Sum == "" {
 		return "", err
 	}
-	held.store.read()
-	object, err := held.store.Bucket.Head("blobs/" + sum)
-	if errors.Is(err, r2.ErrNotFound) {
+	// The blob is read, checked, and sent again when it is stale; once it unpacks, the ref is kept fresh the same way.
+	archive, err := held.store.heldBlob(ref.Sum)
+	if errors.Is(err, ErrNotStored) {
 		// A ref whose blob the lifecycle took first: buildcache builds it, and the ref decides what that build may be.
+		held.mutex.Lock()
+		held.notes = append(held.notes, fmt.Sprintf("refs/action/%s names blob %s, which the store no longer holds, so it is built again", key, ref.Sum))
+		held.mutex.Unlock()
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	held.store.read()
-	archive, err := held.store.Bucket.Get("blobs/" + sum)
+	// Each ask unpacks into its own directory, so one that failed partway never leaves a later one an entry that is
+	// already there.
+	directory, err := os.MkdirTemp(held.scratch, key[:12]+"-")
 	if err != nil {
 		return "", err
 	}
-	if actual := digest(archive); actual != sum {
-		return "", fmt.Errorf("blob %s hashes to %s: the store is poisoned", sum, actual)
-	}
-	directory := filepath.Join(held.scratch, key)
 	own := func(name string) bool {
 		return name == key+".inputs" || (strings.HasPrefix(name, key+"/") && len(name) > len(key)+1)
 	}
 	if err = Unpack(archive, directory, own); err != nil {
 		return "", fmt.Errorf("%w: the store is poisoned", err)
 	}
-	if held.store.now().Sub(object.Modified) >= FreshFor {
-		held.store.wrote()
-		if err = held.store.Bucket.Put("blobs/"+sum, archive, r2.PutOptions{ContentType: "application/octet-stream", CacheControl: ImmutableBlob}); err != nil {
-			return "", err
-		}
+	if err = held.store.refreshRef(key, ref); err != nil {
+		return "", err
 	}
 	product := heldManifest{Version: 1, Key: key, Files: []heldFile{}}
 	blobs := map[string]string{}
@@ -239,6 +242,6 @@ func (held *HeldProducts) prepare(key string) (string, error) {
 	}
 	held.blobs[manifest] = manifestFile
 	held.refs[key] = manifest
-	held.held[key] = sum
+	held.held[key] = ref.Sum
 	return manifest, nil
 }

@@ -22,17 +22,19 @@ import (
 //
 //	blobs/<sha256>            gzipped bytes, named by their own sha256: a test binary, a product's archive, or a
 //	                          tree's source archive
-//	refs/action/<productKey>  the sha256 of that product's archive, as text, written once and never changed
+//	refs/action/<productKey>  the sha256 of that product's archive, as text, never changed (only rewritten with its
+//	                          own bytes, to keep it fresh)
 //	trees/<treeKey>.json      a tree's index (TreeIndex): each package's binary, the products its tests read, the
 //	                          source archive
 //
 // The bucket's lifecycle deletes every blob, ref and tree index 7 days after its upload (trees/ by Loom's own rule,
-// Oct 10, so old indexes naming expired blobs don't pile up). So a blob the store holds is skipped
-// only while it was uploaded within FreshFor; an older one goes up again, which starts its 7 days over, and a ref is
-// only ever written after its blob is fresh, so no ref written today names a blob that vanishes tomorrow.
+// Oct 10, so old indexes naming expired blobs don't pile up). So a blob or ref the store holds is relied on as it is
+// only while it was uploaded within FreshFor; an older one a build relies on is written again, the same bytes, which
+// starts its 7 days over (a held product is refreshed, never rebuilt), and a ref is only ever written after its blob
+// is fresh, so no ref written today names a blob that vanishes tomorrow.
 
-// FreshFor is how recently a blob must have been uploaded for a builder to rely on it without sending it again,
-// leaving two of the lifecycle's 7 days for the runners that read it.
+// FreshFor is how recently a blob or ref must have been uploaded for a builder to rely on it without writing it
+// again, leaving two of the lifecycle's 7 days for the runners that read it.
 const FreshFor = 5 * 24 * time.Hour
 
 // ImmutableBlob is a blob's Cache-Control: named by its hash, its bytes never change, so the edge may keep it.
@@ -63,16 +65,21 @@ type Requests struct {
 // ErrNotStored is an action, blob or tree the store doesn't hold.
 var ErrNotStored = errors.New("not in the action store")
 
-// ConflictError is a ref that already names another archive than the one this build made: one key, two products.
-// The key isn't honest, or the build isn't reproducible, and since a ref never changes it always fails the build.
+// ConflictError is a ref that already names an archive of other files than the one this build made: one key, two
+// products. The key isn't honest, or the build isn't reproducible, and since a ref never changes it always fails the
+// build. Gone is a ref whose archive the store no longer holds, so the two can't be compared.
 type ConflictError struct {
 	Key   string
 	Held  string
 	Built string
+	Gone  bool
 }
 
 func (conflict ConflictError) Error() string {
-	return fmt.Sprintf("refs/action/%s holds %s and this build made %s: a ref never changes, so this key isn't honest or its build isn't reproducible", conflict.Key, conflict.Held, conflict.Built)
+	if conflict.Gone {
+		return fmt.Sprintf("refs/action/%s names %s, which the store no longer holds, and this build made %s: a ref never changes, so this key can't be built again until the ref expires", conflict.Key, conflict.Held, conflict.Built)
+	}
+	return fmt.Sprintf("refs/action/%s holds %s and this build made %s, other files: a ref never changes, so this key isn't honest or its build isn't reproducible", conflict.Key, conflict.Held, conflict.Built)
 }
 
 func (store Store) now() time.Time {
@@ -181,93 +188,193 @@ func (store Store) Ref(key string) (string, error) {
 	return target, nil
 }
 
-// heldRef is what the bucket itself holds at refs/action/<key>, empty when nothing: a builder asks the bucket, never
-// the public domain, whose edge could answer from before the ref was written.
-func (store Store) heldRef(key string) (string, error) {
+// A heldRef is what the bucket holds at refs/action/<key>: the archive it names, and the object itself, whose age
+// and ETag a refresh reads.
+type heldRef struct {
+	Sum    string
+	Object r2.Object
+}
+
+// heldRef is what the bucket itself holds at refs/action/<key>, Sum empty when nothing: a builder asks the bucket,
+// never the public domain, whose edge could answer from before the ref was written.
+func (store Store) heldRef(key string) (heldRef, error) {
 	store.read()
-	content, err := store.Bucket.Get("refs/action/" + key)
+	content, object, err := store.Bucket.GetObject("refs/action/" + key)
 	if errors.Is(err, r2.ErrNotFound) {
-		return "", nil
+		return heldRef{}, nil
 	}
 	if err != nil {
-		return "", err
+		return heldRef{}, err
 	}
 	target := strings.TrimSpace(string(content))
 	if !productKeyPattern.MatchString(target) {
-		return "", fmt.Errorf("refs/action/%s holds %q, not an archive's sha256: the store is poisoned", key, target[:min(80, len(target))])
+		return heldRef{}, fmt.Errorf("refs/action/%s holds %q, not an archive's sha256: the store is poisoned", key, target[:min(80, len(target))])
 	}
-	return target, nil
+	return heldRef{Sum: target, Object: object}, nil
 }
 
-// fresh reports whether the bucket holds blob sum, uploaded within FreshFor.
-func (store Store) fresh(sum string) (bool, error) {
-	store.read()
-	object, err := store.Bucket.Head("blobs/" + sum)
-	if errors.Is(err, r2.ErrNotFound) {
-		return false, nil
+// refreshRef keeps a held ref fresh: one written more than FreshFor ago is written again, the same bytes, only over
+// the very object read (If-Match on its ETag), so a runner that reads it has two days, as a blob's reader does. A ref
+// another builder rewrote first is read again and must still name sum.
+func (store Store) refreshRef(key string, held heldRef) error {
+	if store.now().Sub(held.Object.Modified) < FreshFor {
+		return nil
 	}
+	store.wrote()
+	err := store.Bucket.Put("refs/action/"+key, []byte(held.Sum), r2.PutOptions{ContentType: "text/plain", CacheControl: "no-cache", IfMatch: held.Object.ETag})
+	if !errors.Is(err, r2.ErrChanged) {
+		return err
+	}
+	again, err := store.heldRef(key)
 	if err != nil {
-		return false, err
+		return err
 	}
-	return store.now().Sub(object.Modified) < FreshFor, nil
+	if again.Sum != held.Sum {
+		return fmt.Errorf("refs/action/%s changed from %s to %s while it was refreshed: a ref never changes", key, held.Sum, again.Sum)
+	}
+	return nil
+}
+
+// stale reports whether a blob or ref written at modified must be written again before anything relies on it.
+func (store Store) stale(modified time.Time) bool {
+	return store.now().Sub(modified) >= FreshFor
+}
+
+// putBlob sends content to blobs/<sum>.
+func (store Store) putBlob(sum string, content []byte) error {
+	store.wrote()
+	return store.Bucket.Put("blobs/"+sum, content, r2.PutOptions{ContentType: "application/octet-stream", CacheControl: ImmutableBlob})
 }
 
 // PutBlob makes the bucket hold content, fresh, at blobs/<its sha256>, and returns that sha256. A blob the bucket
 // holds from within FreshFor isn't sent again; one older, or missing, goes up, which starts its 7 days over.
 func (store Store) PutBlob(content []byte) (string, error) {
 	sum := digest(content)
-	held, err := store.fresh(sum)
-	if err != nil || held {
+	store.read()
+	object, err := store.Bucket.Head("blobs/" + sum)
+	switch {
+	case err == nil && !store.stale(object.Modified):
+		return sum, nil
+	case err != nil && !errors.Is(err, r2.ErrNotFound):
 		return sum, err
 	}
-	store.wrote()
-	return sum, store.Bucket.Put("blobs/"+sum, content, r2.PutOptions{ContentType: "application/octet-stream", CacheControl: ImmutableBlob})
+	return sum, store.putBlob(sum, content)
 }
 
-// Publish stores a product's archive under its key and returns the archive's sha256. A ref naming the same archive
-// is found, and only its blob is kept fresh; a ref naming another archive is a ConflictError, and nothing goes up.
-// Otherwise the blob goes up first, fresh, then the ref, written only if nothing is there (If-None-Match: *): of two
-// builders racing, one writes and the other reads what it wrote, the same archive or a ConflictError. A ref is never
-// overwritten.
+// heldBlob reads blob sum from the bucket, checked against its hash, and sends it again, the same bytes, when it was
+// uploaded more than FreshFor ago: a blob the store holds is refreshed, never rebuilt. A blob the bucket lacks is
+// ErrNotStored.
+func (store Store) heldBlob(sum string) ([]byte, error) {
+	store.read()
+	content, object, err := store.Bucket.GetObject("blobs/" + sum)
+	if errors.Is(err, r2.ErrNotFound) {
+		return nil, fmt.Errorf("blobs/%s: %w", sum, ErrNotStored)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if actual := digest(content); actual != sum {
+		return nil, fmt.Errorf("blob %s hashes to %s: the store is poisoned", sum, actual)
+	}
+	if store.stale(object.Modified) {
+		if err = store.putBlob(sum, content); err != nil {
+			return nil, err
+		}
+	}
+	return content, nil
+}
+
+// sameContent reports whether two archives hold the same tar, whatever gzip made of it: a Go whose compress/flate
+// writes other bytes for the same files makes another sha256, never another product.
+func sameContent(left, right []byte) (bool, error) {
+	leftTar, err := gunzipped(left)
+	if err != nil {
+		return false, err
+	}
+	rightTar, err := gunzipped(right)
+	if err != nil {
+		return false, err
+	}
+	return digest(leftTar) == digest(rightTar), nil
+}
+
+// Publish stores a product's archive under its key and returns the sha256 of the archive the store now names for
+// it. A ref naming the same archive is found, and it and its blob are kept fresh. A ref naming another archive holding
+// the same tar (gzip's bytes changed, the files didn't) is that archive, kept fresh; one holding other files is a
+// ConflictError, and nothing goes up. Otherwise the blob goes up first, fresh, then the ref, written only if nothing
+// is there (If-None-Match: *): of two builders racing, one writes and the other is held to what it wrote. A ref is
+// never overwritten with anything but its own bytes.
 func (store Store) Publish(key string, archive []byte) (string, error) {
 	sum := digest(archive)
 	held, err := store.heldRef(key)
 	if err != nil {
 		return "", err
 	}
-	if held != "" && held != sum {
-		return "", ConflictError{Key: key, Held: held, Built: sum}
+	if held.Sum == "" {
+		if _, err = store.PutBlob(archive); err != nil {
+			return "", err
+		}
+		store.wrote()
+		err = store.Bucket.Put("refs/action/"+key, []byte(sum), r2.PutOptions{ContentType: "text/plain", CacheControl: "no-cache", IfNoneMatch: true})
+		if !errors.Is(err, r2.ErrExists) {
+			return sum, err
+		}
+		if held, err = store.heldRef(key); err != nil {
+			return "", err
+		}
 	}
-	if _, err = store.PutBlob(archive); err != nil {
-		return "", err
-	}
-	if held == sum {
-		return sum, nil
-	}
-	store.wrote()
-	err = store.Bucket.Put("refs/action/"+key, []byte(sum), r2.PutOptions{ContentType: "text/plain", CacheControl: "no-cache", IfNoneMatch: true})
-	if !errors.Is(err, r2.ErrExists) {
-		return sum, err
-	}
-	if held, err = store.heldRef(key); err != nil {
-		return "", err
-	}
-	if held != sum {
-		return "", ConflictError{Key: key, Held: held, Built: sum}
-	}
-	return sum, nil
+	return store.agree(key, held, archive)
 }
 
-// Stored reports whether the bucket holds key's product whole and fresh: its ref, and the blob it names uploaded
-// within FreshFor. A ref whose blob is older (or gone) isn't stored, so the product is built again and its blob
-// sent again, the same bytes, before anything relies on it.
+// agree holds this build's archive to the ref the store holds, and keeps what the ref names fresh.
+func (store Store) agree(key string, held heldRef, archive []byte) (string, error) {
+	sum := digest(archive)
+	if held.Sum == sum {
+		if _, err := store.PutBlob(archive); err != nil {
+			return "", err
+		}
+		return sum, store.refreshRef(key, held)
+	}
+	theirs, err := store.heldBlob(held.Sum)
+	if errors.Is(err, ErrNotStored) {
+		return "", ConflictError{Key: key, Held: held.Sum, Built: sum, Gone: true}
+	}
+	if err != nil {
+		return "", err
+	}
+	same, err := sameContent(theirs, archive)
+	if err != nil {
+		return "", err
+	}
+	if !same {
+		return "", ConflictError{Key: key, Held: held.Sum, Built: sum}
+	}
+	return held.Sum, store.refreshRef(key, held)
+}
+
+// Stored reports whether the bucket holds key's product, the sha256 of the archive its ref names, and whether that
+// archive is there. A held product is kept fresh, never rebuilt: its blob, uploaded more than FreshFor ago, is read
+// and sent again, the same bytes, and so is its ref. Only a ref whose blob the store no longer holds isn't stored, and
+// the caller says so when it builds again.
 func (store Store) Stored(key string) (string, bool, error) {
 	held, err := store.heldRef(key)
-	if err != nil || held == "" {
+	if err != nil || held.Sum == "" {
 		return "", false, err
 	}
-	fresh, err := store.fresh(held)
-	return held, fresh, err
+	store.read()
+	object, err := store.Bucket.Head("blobs/" + held.Sum)
+	if errors.Is(err, r2.ErrNotFound) {
+		return held.Sum, false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if store.stale(object.Modified) {
+		if _, err = store.heldBlob(held.Sum); err != nil {
+			return "", false, err
+		}
+	}
+	return held.Sum, true, store.refreshRef(key, held)
 }
 
 // FetchProduct writes a product's files under directory (a runner's ADAMIC_BUILD_CACHE_DIR): its ref, then its

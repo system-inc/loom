@@ -1,6 +1,8 @@
 package builder
 
 import (
+	"bytes"
+	"compress/gzip"
 	"errors"
 	"slices"
 	"strings"
@@ -60,23 +62,74 @@ func TestAFreshRefNeverNamesABlobAboutToExpire(t *testing.T) {
 	if !fake.Modified("blobs/" + digest(archive)).Equal(now) {
 		t.Fatalf("the blob's clock wasn't reset: %v", fake.Modified("blobs/"+digest(archive)))
 	}
-	// A ref already held for the same archive is found: only its blob is kept fresh, and the ref isn't written.
+	// A ref already held for the same archive is found, and it and its blob, both now past FreshFor, are written
+	// again with their own bytes, the ref only over the object read (If-Match), blob first.
 	now = now.Add(5*24*time.Hour + time.Minute)
 	fake.ResetRequests()
 	if _, err := store.Publish(key, archive); err != nil {
 		t.Fatal(err)
 	}
-	if fake.Count("PUT", "refs/") != 0 || fake.Count("PUT", "blobs/") != 1 {
-		t.Fatalf("an unchanged product: %v", fake.Requests())
+	requests = fake.Requests()
+	blob, ref = slices.Index(requests, "PUT blobs/"+digest(archive)), slices.Index(requests, "PUT refs/action/"+key)
+	if blob < 0 || ref < 0 || blob > ref || !fake.Modified("refs/action/"+key).Equal(now) {
+		t.Fatalf("an unchanged product past FreshFor: %v", requests)
 	}
-	// And a builder holding the action, with its blob gone stale, builds it again rather than calling it stored.
+	if held, _ := fake.Object("refs/action/" + key); string(held) != digest(archive) {
+		t.Fatalf("the ref was rewritten as %q", held)
+	}
+	// A builder holding the action, its blob and ref gone stale, calls it stored and refreshes both, the blob from its
+	// own bytes: a held product is refreshed, never rebuilt.
 	now = now.Add(5*24*time.Hour + time.Minute)
-	if _, stored, err := store.Stored(key); err != nil || stored {
-		t.Fatalf("a ref whose blob is 5 days old is stored: %v", err)
+	fake.ResetRequests()
+	if sum, stored, err := store.Stored(key); err != nil || !stored || sum != digest(archive) {
+		t.Fatalf("a held product 5 days old: %s %v %v", sum, stored, err)
 	}
-	now = now.Add(-4 * 24 * time.Hour)
-	if _, stored, err := store.Stored(key); err != nil || !stored {
-		t.Fatalf("a ref whose blob is a day old isn't stored: %v", err)
+	if fake.Count("PUT", "blobs/") != 1 || fake.Count("PUT", "refs/") != 1 || !fake.Modified("blobs/"+digest(archive)).Equal(now) || !fake.Modified("refs/action/"+key).Equal(now) {
+		t.Fatalf("a stale held product wasn't refreshed: %v", fake.Requests())
+	}
+	// A day later nothing is written.
+	now = now.Add(24 * time.Hour)
+	fake.ResetRequests()
+	if _, stored, err := store.Stored(key); err != nil || !stored || fake.Count("PUT", "") != 0 {
+		t.Fatalf("a fresh held product: %v %v", err, fake.Requests())
+	}
+	// Only a ref whose blob is gone isn't stored, so its product is built again; the builder says why.
+	fake.Delete("blobs/" + digest(archive))
+	if sum, stored, err := store.Stored(key); err != nil || stored || sum != digest(archive) {
+		t.Fatalf("a ref whose blob is gone: %s %v %v", sum, stored, err)
+	}
+	runs := 0
+	builder := Builder{Store: store, Scratch: t.TempDir(), Cache: t.TempDir(), Key: func(Action) (string, error) { return key, nil },
+		Run: func(Action, []string) ([]byte, error) { runs++; return nil, nil }}
+	if results := builder.Build([]Action{{Directory: "x", Test: "TestProduct_X"}}); runs != 1 || !strings.Contains(results[0].Note, "no longer holds") {
+		t.Fatalf("a rebuild of a product whose blob is gone: %+v", results)
+	}
+}
+
+// A ref another builder rewrote between our read and our refresh is read again: the same archive is fine, another
+// is refused, and the If-Match keeps us from writing over it either way.
+func TestARefRefreshIsWrittenOnlyOverTheRefRead(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	key := keyOf("p")
+	archive := tarGzip(t, entry{name: key + "/tool", body: "tool"})
+	for name, theirs := range map[string]string{"the same archive": digest(archive), "another archive": keyOf("another")} {
+		t.Run(name, func(t *testing.T) {
+			fake, store := clocked(t, &now)
+			fake.Set("blobs/"+digest(archive), archive, now)
+			fake.Set("refs/action/"+key, []byte(digest(archive)), now.Add(-6*24*time.Hour))
+			fake.Before = func(method, path string) {
+				if method == "PUT" && path == "refs/action/"+key {
+					fake.Set(path, []byte(theirs+"\n"), now)
+				}
+			}
+			_, _, err := store.Stored(key)
+			if held, _ := fake.Object("refs/action/" + key); string(held) != theirs+"\n" {
+				t.Fatalf("the other builder's ref was overwritten with %q", held)
+			}
+			if same := theirs == digest(archive); same != (err == nil) {
+				t.Fatalf("%s: %v", name, err)
+			}
+		})
 	}
 }
 
@@ -147,5 +200,46 @@ func TestTheAuditFindsAFreshRefWhoseBlobIsGoneOrAboutToBe(t *testing.T) {
 	}
 	if fake.Count("LIST", "blobs/") != 3 {
 		t.Fatalf("the audit didn't walk the listing's pages: %v", fake.Requests())
+	}
+}
+
+// regzip is archive's tar gzipped again at another level, as another Go's compress/flate might write it.
+func regzip(t *testing.T, archive []byte, level int) []byte {
+	t.Helper()
+	tar, err := gunzipped(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buffer bytes.Buffer
+	compressor, _ := gzip.NewWriterLevel(&buffer, level)
+	compressor.Write(tar)
+	compressor.Close()
+	return buffer.Bytes()
+}
+
+// A conflict is other files, not other gzip bytes: an archive of the same tar under another sha256 is the held one,
+// and nothing of it goes up; an archive of other files is refused.
+func TestAnArchiveOfTheSameFilesGzippedOtherwiseIsTheHeldOne(t *testing.T) {
+	fake, store := serve(t)
+	key := keyOf("p")
+	archive := tarGzip(t, entry{name: key + "/tool", body: strings.Repeat("the same tool ", 200)})
+	if _, err := store.Publish(key, archive); err != nil {
+		t.Fatal(err)
+	}
+	other := regzip(t, archive, gzip.BestSpeed)
+	if digest(other) == digest(archive) {
+		t.Fatal("the two gzips came out the same; the test needs them to differ")
+	}
+	fake.ResetRequests()
+	sum, err := store.Publish(key, other)
+	if err != nil || sum != digest(archive) {
+		t.Fatalf("the same files gzipped otherwise: %s %v", sum, err)
+	}
+	if _, held := fake.Object("blobs/" + digest(other)); held || fake.Count("PUT", "") != 0 {
+		t.Fatalf("the other gzip went up: %v", fake.Requests())
+	}
+	different := tarGzip(t, entry{name: key + "/tool", body: "another tool"})
+	if _, err = store.Publish(key, different); !errors.As(err, &ConflictError{}) {
+		t.Fatalf("other files: %v", err)
 	}
 }
