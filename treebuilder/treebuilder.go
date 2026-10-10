@@ -168,6 +168,9 @@ func Newest(path, tree string) (Record, bool, error) {
 type Want struct {
 	Tree   string
 	Future string
+	// Go is the Go release the plan's units are keyed on (keyParts.tools.go), which the planner checked is the tree
+	// key's: build-tree refuses to build with another.
+	Go string
 }
 
 // Wanted lists the trees the listed futures run, in listing order, each once: the tree key a future's test and product
@@ -176,7 +179,7 @@ type Want struct {
 func Wanted(futures []judge.PlannedFuture) ([]Want, []string) {
 	wants, problems, seen := []Want{}, []string{}, map[string]bool{}
 	for _, future := range futures {
-		keys, running, keyless := map[string]bool{}, false, 0
+		keys, releases, running, keyless := map[string]bool{}, map[string]bool{}, false, 0
 		for _, unit := range future.Units {
 			var parts planner.KeyParts
 			if json.Unmarshal(unit.KeyParts, &parts) != nil || !planner.RunsTreeBuild(parts.Kind) {
@@ -188,7 +191,7 @@ func Wanted(futures []judge.PlannedFuture) ([]Want, []string) {
 				}
 				continue
 			}
-			keys[unit.Tree] = true
+			keys[unit.Tree], releases[parts.Tools.Go] = true, true
 			running = running || unit.Decision == "run"
 		}
 		switch {
@@ -196,11 +199,15 @@ func Wanted(futures []judge.PlannedFuture) ([]Want, []string) {
 			problems = append(problems, fmt.Sprintf("future %s: %d running units carry no tree key", future.Future, keyless))
 		case len(keys) > 1:
 			problems = append(problems, fmt.Sprintf("future %s: its units carry %d tree keys", future.Future, len(keys)))
+		case len(releases) > 1 || releases[""]:
+			problems = append(problems, fmt.Sprintf("future %s: its units name %d Go releases, not one", future.Future, len(releases)))
 		case running:
 			for key := range keys {
-				if !seen[key] {
-					seen[key] = true
-					wants = append(wants, Want{Tree: key, Future: future.Future})
+				for release := range releases {
+					if !seen[key] {
+						seen[key] = true
+						wants = append(wants, Want{Tree: key, Future: future.Future, Go: release})
+					}
 				}
 			}
 		}

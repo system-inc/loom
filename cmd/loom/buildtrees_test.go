@@ -31,7 +31,7 @@ func TestTheShippedTreeBuilderUnitBuildsUnderAdamicsToolchain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(unit, []byte("\nEnvironment=GOTOOLCHAIN=local\n")) || !bytes.Contains(unit, []byte("'source %h/adamic-tools/env.sh && exec ")) {
+	if !bytes.Contains(unit, []byte("\nEnvironment=GOTOOLCHAIN=local\n")) || !bytes.Contains(unit, []byte("'. %h/adamic-tools/env.sh && exec ")) {
 		t.Fatal("the unit doesn't build under adamic's toolchain with GOTOOLCHAIN=local")
 	}
 	if bytes.Contains(unit, []byte("\nKillMode=")) {
@@ -76,10 +76,10 @@ func TestABuildTreeChildIsBoundedAndSaysHowItEnded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := treebuilder.Want{Tree: strings.Repeat("b", 64), Future: strings.Repeat("2", 40)}
+	want := treebuilder.Want{Tree: strings.Repeat("b", 64), Future: strings.Repeat("2", 40), Go: "go1.27.1"}
 	arguments := buildTreeArguments(settings, "/trees/adamic", want)
 	if arguments[0] != "build-tree" || !slices.Contains(arguments, "--tree-key") || arguments[slices.Index(arguments, "--tree-key")+1] != want.Tree ||
-		arguments[slices.Index(arguments, "--future")+1] != want.Future || arguments[slices.Index(arguments, "--tree")+1] != "/trees/adamic" {
+		arguments[slices.Index(arguments, "--future")+1] != want.Future || arguments[slices.Index(arguments, "--go")+1] != want.Go || arguments[slices.Index(arguments, "--tree")+1] != "/trees/adamic" {
 		t.Fatalf("build-tree's arguments: %v", arguments)
 	}
 
@@ -140,7 +140,7 @@ func TestTheBuildersCloneHasOnlyThePublicOrigin(t *testing.T) {
 // failure.
 func TestAStopMidBuildIsNeverTheTreesFailure(t *testing.T) {
 	key := strings.Repeat("a", 64)
-	parts, _ := json.Marshal(planner.KeyParts{Kind: "test", Package: "x"})
+	parts, _ := json.Marshal(planner.KeyParts{Kind: "test", Package: "x", Tools: planner.Tools{Go: "go1.27.1"}})
 	source := listedTrees{{Future: strings.Repeat("f", 40), Attempt: 1, Units: []judge.PlannedUnitWire{{UnitKey: strings.Repeat("1", 64), KeyParts: parts, Decision: "run", Tree: key}}}}
 	path := filepath.Join(t.TempDir(), "trees.jsonl")
 	ledger, err := treebuilder.OpenLedger(path, time.Now())
@@ -178,3 +178,31 @@ func TestAStopMidBuildIsNeverTheTreesFailure(t *testing.T) {
 type listedTrees []judge.PlannedFuture
 
 func (futures listedTrees) Planned() ([]judge.PlannedFuture, error) { return futures, nil }
+
+// The planner and the tree builder read one tree's key under one environment, so their units start them alike: the
+// same Environment lines and the same shell before `exec` (adamic's env.sh, GOTOOLCHAIN=local). Mutant: the planner's
+// unit without GOTOOLCHAIN=local.
+func TestThePlannerAndTheTreeBuilderShareOneEnvironment(t *testing.T) {
+	environment := func(path string) string {
+		t.Helper()
+		unit, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := []string{}
+		for _, line := range strings.Split(string(unit), "\n") {
+			if strings.HasPrefix(line, "Environment=") {
+				lines = append(lines, line)
+			}
+			if command, found := strings.CutPrefix(line, "ExecStart="); found {
+				before, _, _ := strings.Cut(command, "exec ")
+				lines = append(lines, before)
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	planner, builder := environment("../../planner/systemd/loom-plan.service"), environment("../../treebuilder/systemd/loom-build-trees.service")
+	if planner != builder || !strings.Contains(planner, "Environment=GOTOOLCHAIN=local") || !strings.Contains(planner, "adamic-tools/env.sh") {
+		t.Fatalf("the planner starts under\n%s\nand the tree builder under\n%s", planner, builder)
+	}
+}

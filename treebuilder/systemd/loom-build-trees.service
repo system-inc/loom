@@ -14,8 +14,8 @@
 #
 # Its environment is adamic's toolchain (~/adamic-tools/env.sh: its Go, clang, node and WASI SDK) under
 # GOTOOLCHAIN=local, as build-tree ran by hand on Workshop. A tree's key names the Go release go reports inside the
-# tree under it, so loom-plan must run under the same: the two keys meet in --tree-key, and a tree they read apart
-# fails, named, and its future is voided as Loom's.
+# tree under it, so loom-plan (planner/systemd/loom-plan.service) runs under exactly the same, and the two keys meet in
+# --tree-key and --go: a tree they read apart fails, named, and its future is voided as Loom's.
 #
 # Token: ~/.loom/build-trees-token, scope coordinator, run "build-trees" (`~/.loom/bin/loom coordinator-token --days 30
 # build-trees`), read once at start; it reads Queue's planned listing and nothing else. The action store is read and
@@ -29,8 +29,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/loom-trees
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=GOTOOLCHAIN=local
-ExecStart=/bin/bash -c 'source %h/adamic-tools/env.sh && exec %h/.loom/bin/loom build-trees --queue https://loom.system.inc --token-file %h/.loom/build-trees-token --clone %h/loom-trees/adamic --ledger %h/loom-trees/trees.jsonl --logs %h/loom-trees/logs --r2 %h/.loom/r2-releases.conf --cache %h/loom-builder/trees --interval 10s'
+ExecStart=/bin/bash -c '. %h/adamic-tools/env.sh && exec %h/.loom/bin/loom build-trees --queue https://loom.system.inc --token-file %h/.loom/build-trees-token --clone %h/loom-trees/adamic --ledger %h/loom-trees/trees.jsonl --logs %h/loom-trees/logs --r2 %h/.loom/r2-releases.conf --cache %h/loom-builder/trees --interval 10s'
 Nice=10
 IOSchedulingClass=idle
 Restart=on-failure

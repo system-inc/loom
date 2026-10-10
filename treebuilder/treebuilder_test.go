@@ -24,7 +24,7 @@ func (futures listedFutures) Planned() ([]judge.PlannedFuture, error) { return f
 
 func unit(t *testing.T, kind, decision, tree string) judge.PlannedUnitWire {
 	t.Helper()
-	parts, err := json.Marshal(planner.KeyParts{Kind: kind, Package: "github.com/system-inc/adamic/internal/x"})
+	parts, err := json.Marshal(planner.KeyParts{Kind: kind, Package: "github.com/system-inc/adamic/internal/x", Tools: planner.Tools{Go: "go1.27.1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestOnlyMissingTreesAreBuiltOneAtATime(t *testing.T) {
 	h := newHarness(t, source, ledger)
 	h.indexed[keyA] = true
 	h.buildOnce(t, true)
-	if len(h.builds) != 1 || h.builds[0] != (Want{Tree: keyB, Future: strings.Repeat("2", 40)}) {
+	if len(h.builds) != 1 || h.builds[0] != (Want{Tree: keyB, Future: strings.Repeat("2", 40), Go: "go1.27.1"}) {
 		t.Fatalf("the first pass built %v, want tree b of future 2 alone", h.builds)
 	}
 	if newest, _ := ledger.Newest(keyB); newest.Event != Built || newest.Future != strings.Repeat("2", 40) {
@@ -228,6 +228,23 @@ func TestAPlanNamingNoOneTreeIsNeverBuilt(t *testing.T) {
 		t.Fatalf("wanted %v, want only future 3's tree", wants)
 	}
 	if len(problems) != 2 || !strings.Contains(problems[0], "2 tree keys") || !strings.Contains(problems[1], "1 running units carry no tree key") {
+		t.Fatalf("problems %v", problems)
+	}
+}
+
+// A future whose units name two Go releases can't say which go builds its tree, and isn't built; one release is carried
+// to build-tree, which refuses another. Mutant: the releases not compared.
+func TestAPlanNamingTwoGoReleasesIsNeverBuilt(t *testing.T) {
+	other := unit(t, "test", "run", keyA)
+	var parts planner.KeyParts
+	json.Unmarshal(other.KeyParts, &parts)
+	parts.Tools.Go = "go1.27.2"
+	other.KeyParts, _ = json.Marshal(parts)
+	wants, problems := Wanted([]judge.PlannedFuture{future("1", unit(t, "test", "run", keyA), other), future("2", unit(t, "test", "run", keyB))})
+	if len(wants) != 1 || wants[0] != (Want{Tree: keyB, Future: strings.Repeat("2", 40), Go: "go1.27.1"}) {
+		t.Fatalf("wanted %v", wants)
+	}
+	if len(problems) != 1 || !strings.Contains(problems[0], "2 Go releases") {
 		t.Fatalf("problems %v", problems)
 	}
 }

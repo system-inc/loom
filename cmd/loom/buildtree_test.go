@@ -26,22 +26,29 @@ func TestBuildTreeExitsNonZeroWhenTheIndexWasKept(t *testing.T) {
 	}
 }
 
-// build-tree refuses a tree that keys otherwise than the plan's tree key, naming both, before anything is built: an
-// index under another key is one no unit of the plan would read. No key asked, or the same one, builds. Mutant: the
-// check dropped.
+// build-tree refuses a tree that keys otherwise than the plan's tree key, a go that isn't the release the plan's
+// units are keyed on, and a machine that isn't the runners' platform, naming each, before anything is built: an index
+// under another key is one no unit of the plan would read. No key or release asked, or the same ones, builds. Mutants:
+// the key check dropped; the release check dropped; the platform check dropped.
 func TestBuildTreeRefusesATreeThatKeysOtherwiseThanThePlan(t *testing.T) {
 	identity := planner.TreeIdentity{Tree: strings.Repeat("a", 40), Go: "go1.27.1", Goos: "linux", Goarch: "amd64"}
-	if err := checkTreeKey(identity, ""); err != nil {
+	if err := checkTreeKey(identity, "", "", "linux/amd64"); err != nil {
 		t.Fatalf("no key asked: %v", err)
 	}
-	if err := checkTreeKey(identity, identity.Key()); err != nil {
-		t.Fatalf("the same key: %v", err)
+	if err := checkTreeKey(identity, identity.Key(), "go1.27.1", "linux/amd64"); err != nil {
+		t.Fatalf("the same key and release: %v", err)
 	}
 	other := identity
 	other.Goos, other.Goarch = "darwin", "arm64"
-	if err := checkTreeKey(identity, other.Key()); err == nil || !strings.Contains(err.Error(), other.Key()) || !strings.Contains(err.Error(), identity.Key()) ||
+	if err := checkTreeKey(identity, other.Key(), "", "linux/amd64"); err == nil || !strings.Contains(err.Error(), other.Key()) || !strings.Contains(err.Error(), identity.Key()) ||
 		!strings.Contains(err.Error(), "linux/amd64") {
 		t.Fatalf("a tree keying for another platform: %v", err)
+	}
+	if err := checkTreeKey(identity, identity.Key(), "go1.27.2", "linux/amd64"); err == nil || !strings.Contains(err.Error(), "keyed on go1.27.2, and this go is go1.27.1") {
+		t.Fatalf("another release: %v", err)
+	}
+	if err := checkTreeKey(identity, identity.Key(), "go1.27.1", "darwin/arm64"); err == nil || !strings.Contains(err.Error(), "this is darwin/arm64") {
+		t.Fatalf("another host: %v", err)
 	}
 }
 

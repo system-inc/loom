@@ -344,7 +344,7 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 			}
 		}
 		if err == nil {
-			err = carryTree(tree, phases, results)
+			err = carryTree(tree, tools.Go, phases, results)
 		}
 		cleanup()
 		if err != nil {
@@ -380,11 +380,16 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 
 // carryTree sets the checked-out tree's key on every unit of its plan that runs the tree's build (#w7agfa9), read here
 // where the tree is, by the one function `loom build-tree` keys it with, so the placer can name the build a unit runs
-// and Workshop's builder knows what to build. A tree that can't be keyed isn't planned.
-func carryTree(tree string, plans ...[]PlannedResult) error {
+// and Workshop's builder knows what to build. A tree that can't be keyed isn't planned, and neither is one whose Go
+// release isn't the one every unit's key names (keyParts.tools.go, the release the plan carries to the builder): its
+// build would run another go than its units were keyed on.
+func carryTree(tree, goRelease string, plans ...[]PlannedResult) error {
 	identity, err := ReadTreeIdentity(tree)
 	if err != nil {
 		return fmt.Errorf("the tree's key: %w", err)
+	}
+	if identity.Go != goRelease {
+		return fmt.Errorf("the tree's key: its build's go is %s, and its units are keyed on %s", identity.Go, goRelease)
 	}
 	for _, results := range plans {
 		for index := range results {

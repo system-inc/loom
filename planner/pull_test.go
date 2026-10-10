@@ -22,7 +22,7 @@ import (
 func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	t.Parallel()
 	tree, gateTools := planFixture(t)
-	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
+	tools := Tools{Runner: strings.Repeat("d", 64), Go: localGo(t)}
 	gateInputs := strings.Repeat("4", 64)
 	first, err := PlanChange(tree, gateTools, tools, MemoryIndex{}, false, ParityInputs{GateInputs: gateInputs})
 	if err != nil {
@@ -135,12 +135,14 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 }
 
 // buildTreeKey is the key build-tree writes a checked-out tree's index under, read with git and go themselves: sha256
-// of "loom-tree-v2", the tree hash, go env GOVERSION, GOOS/GOARCH, and the gate environment's sorted lines.
+// of "loom-tree-v2", the tree hash, the local go's release, the runners' linux/amd64, and the gate environment's sorted
+// lines.
 func buildTreeKey(t *testing.T, tree string) string {
 	t.Helper()
 	read := func(name string, arguments ...string) string {
 		command := exec.Command(name, arguments...)
 		command.Dir = tree
+		command.Env = append(os.Environ(), "GOTOOLCHAIN=local")
 		output, err := command.Output()
 		if err != nil {
 			t.Fatalf("%s %v: %v", name, arguments, err)
@@ -153,7 +155,7 @@ func buildTreeKey(t *testing.T, tree string) string {
 	}
 	sort.Strings(lines)
 	sum := sha256.Sum256([]byte("loom-tree-v2\n" + read("git", "rev-parse", "HEAD^{tree}") + "\n" + read("go", "env", "GOVERSION") + "\n" +
-		read("go", "env", "GOOS") + "/" + read("go", "env", "GOARCH") + "\n" + strings.Join(lines, "\n")))
+		"linux/amd64" + "\n" + strings.Join(lines, "\n")))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -166,7 +168,7 @@ func TestAFutureMovingNoKeyPostsAnEmptyPlan(t *testing.T) {
 	if output, err := exec.Command("git", "-C", tree, "add", ".").CombinedOutput(); err != nil {
 		t.Fatalf("git add: %v %s", err, output)
 	}
-	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
+	tools := Tools{Runner: strings.Repeat("d", 64), Go: localGo(t)}
 	changes := map[string][]string{"chg-readme": {"README.md"}, "chg-notes": {"a/testdata/notes.md"}, "chg-go": {"a/a.go"}}
 	var lock sync.Mutex
 	posted := map[string]string{}
@@ -223,5 +225,30 @@ func TestAFutureMovingNoKeyPostsAnEmptyPlan(t *testing.T) {
 		if !strings.HasPrefix(posted[future], "[") {
 			t.Errorf("%s posted %s, want its plan's units", future, posted[future])
 		}
+	}
+}
+
+// localGo is the local go's release, as a planner pinned to GOTOOLCHAIN=local keys every unit on.
+func localGo(t *testing.T) string {
+	t.Helper()
+	command := exec.Command("go", "env", "GOVERSION")
+	command.Env = append(os.Environ(), "GOTOOLCHAIN=local")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// A tree whose build's go isn't the release its units are keyed on isn't planned, naming both: the plan carries the
+// release (keyParts.tools.go) to the builder, which refuses another. Mutant: the release not compared.
+func TestATreeWhoseGoIsntItsUnitsIsNotPlanned(t *testing.T) {
+	tree, _ := planFixture(t)
+	results := []PlannedResult{{Name: "a", KeyParts: KeyParts{Kind: "test"}}}
+	if err := carryTree(tree, "go1.0.0", results); err == nil || !strings.Contains(err.Error(), "keyed on go1.0.0") || results[0].Tree != "" {
+		t.Fatalf("another release: %v, tree %q", err, results[0].Tree)
+	}
+	if err := carryTree(tree, localGo(t), results); err != nil || results[0].Tree == "" {
+		t.Fatalf("its own release: %v, tree %q", err, results[0].Tree)
 	}
 }

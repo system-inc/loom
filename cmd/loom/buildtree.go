@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tree := flags.String("tree", "", "the future's checked-out tree")
 	future := flags.String("future", "", "the future's commit")
 	wantKey := flags.String("tree-key", "", "the tree key the plan carries for this tree: refused before building when the tree keys otherwise")
+	wantGo := flags.String("go", "", "the Go release the plan's units are keyed on: refused before building when this go is another")
 	storeFlags := addStoreFlags(flags)
 	cache := flags.String("cache", filepath.Join(home, "loom-builder", "trees"), "the base of each tree's own build directory, <base>/<tree hash>")
 	keep := flags.Int("keep", 2, "tree directories kept under --cache, newest first, when a tree's upload fails")
@@ -42,7 +44,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tempFloorGB := flags.Uint64("temp-floor-gb", 20, "free space the temporary directory keeps, in GB (it may be memory)")
 	goCacheGB := flags.Uint64("go-cache-gb", 150, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
 		return 2
 	}
 	started := time.Now()
@@ -55,7 +57,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	if err = checkTreeKey(identity, *wantKey); err != nil {
+	if err = checkTreeKey(identity, *wantKey, *wantGo, runtime.GOOS+"/"+runtime.GOARCH); err != nil {
 		return fail(err)
 	}
 	requests := &builder.Requests{}
@@ -104,7 +106,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return fail(err)
 	}
 	defer treeLock.Close()
-	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: planner.GateEnvironmentList(),
+	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: append(planner.GateEnvironmentList(), planner.TreeBuildEnvironment()...),
 		Jobs: *jobs, Compile: *compile, Watched: watched}
 	for _, path := range []string{build.Cache, build.Out, filepath.Join(directory, "logs")} {
 		if err = os.MkdirAll(path, 0o755); err != nil {
@@ -206,8 +208,16 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten, treeLock)
 }
 
-// checkTreeKey refuses a tree whose identity doesn't key as the plan's tree key want does (empty: no plan names one).
-func checkTreeKey(identity planner.TreeIdentity, want string) error {
+// checkTreeKey refuses to build a tree here unless this machine is the runners' platform (host, GOOS/GOARCH), whose
+// binaries and product tests it runs, its go is the Go release the plan's units are keyed on (wantGo; empty: no plan
+// names one), and it keys as the plan's tree key want does (empty: no plan names one), each named.
+func checkTreeKey(identity planner.TreeIdentity, want, wantGo, host string) error {
+	if target := planner.RunnersGoos + "/" + planner.RunnersGoarch; host != target {
+		return fmt.Errorf("build-tree builds for the runners' %s on that platform, and this is %s", target, host)
+	}
+	if wantGo != "" && identity.Go != wantGo {
+		return fmt.Errorf("the plan's units are keyed on %s, and this go is %s: the tree is built only by the release its units name", wantGo, identity.Go)
+	}
 	if want == "" || identity.Key() == want {
 		return nil
 	}

@@ -197,7 +197,7 @@ func readyClone(clone string) error {
 // buildTreeArguments are the `loom build-tree` that builds one wanted tree with the builder's settings, the plan's tree
 // key among them, so a tree keying otherwise is refused before anything is built.
 func buildTreeArguments(settings buildTreesSettings, tree string, want treebuilder.Want) []string {
-	return []string{"build-tree", "--tree", tree, "--future", want.Future, "--tree-key", want.Tree,
+	return []string{"build-tree", "--tree", tree, "--future", want.Future, "--tree-key", want.Tree, "--go", want.Go,
 		"--read", *settings.store.read, "--r2", *settings.store.credentials, "--bucket", *settings.store.bucket, "--cache", *settings.cache,
 		"--jobs", strconv.Itoa(*settings.jobs), "--compile", strconv.Itoa(*settings.compile),
 		"--floor-gb", strconv.FormatUint(*settings.floorGB, 10), "--temp-floor-gb", strconv.FormatUint(*settings.tempFloorGB, 10),
