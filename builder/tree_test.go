@@ -345,11 +345,15 @@ func TestATestsOwnGoBuildsGetTheirShareOfTheCompileLimit(t *testing.T) {
 	}
 }
 
+// adamicGoBuildFlags are the flags adamic's buildcache.GoBuild puts on every product build (reproducible(), in
+// internal/buildcache/gobuild.go), written out here so the test holds Warm to adamic, not to itself.
+var adamicGoBuildFlags = []string{"-trimpath", "-ldflags=-buildid=", "-buildvcs=false"}
+
 // compiles is what a product's go build compiles after a warm: it runs go build -x with buildcache.GoBuild's flags
 // and returns the packages it compiled (each compile line's -p).
 func compiles(t *testing.T, build TreeBuild, pkg string) []string {
 	t.Helper()
-	arguments := append(append([]string{"build", "-x"}, ProductBuildFlags...), "-o", filepath.Join(t.TempDir(), "product"), pkg)
+	arguments := append(append([]string{"build", "-x"}, adamicGoBuildFlags...), "-o", filepath.Join(t.TempDir(), "product"), pkg)
 	command := exec.Command("go", arguments...)
 	command.Dir = build.Tree
 	command.Env = build.shared()
