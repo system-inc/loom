@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -246,14 +247,41 @@ func GitCheckout(repository string) Checkout {
 	}
 }
 
-// KeylessGit is git with arguments, keyless: no system or global configuration (whose url rewrites could send a fetch
-// over ssh with a key, and whose credential helpers could answer GitHub), no credential helper or askpass, and no
-// prompt; submodules recorded over ssh are fetched from GitHub over https. What it fetches is what the origin serves
-// anyone.
+// keylessProtocols are the transports a keyless git may use, colon-separated: https alone. A test of a local clone
+// adds file.
+var keylessProtocols = "https"
+
+// keylessDropped are the environment's variables a keyless git never sees: an ssh agent and ssh commands, askpass
+// programs, an allowed-protocol list, and configuration given through the environment, any of which could hand git a
+// key or a transport that uses one.
+var keylessDropped = []string{"SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_ALLOW_PROTOCOL",
+	"GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"}
+
+// KeylessGit is git with arguments, keyless, so what it fetches is only what GitHub serves anyone (review of
+// tree-wiring, finding 3: the source a tree builder checks out, submodules included, is published):
+//   - no system or global configuration, and none from the environment, whose url rewrites could send a fetch over ssh
+//     and whose credential helpers could answer GitHub;
+//   - no credential helper, askpass, ssh agent or terminal prompt;
+//   - https is the only transport, for the repository and every submodule (protocol.allow=never with https allowed,
+//     and GIT_ALLOW_PROTOCOL, which submodule fetches honor), and ssh is a command that fails, so an ssh:// or scp-like
+//     URL in a change's own .gitmodules is refused without ssh ever running;
+//   - GitHub's ssh URLs (git@github.com: and ssh://git@github.com/, as adamic records its submodules) are fetched from
+//     the same repositories over https instead.
 func KeylessGit(arguments ...string) *exec.Cmd {
-	command := exec.Command("git", append([]string{"-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "credential.helper=", "-c", "core.askPass="},
-		arguments...)...)
-	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ASKPASS=", "SSH_ASKPASS=")
+	config := []string{"-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "url.https://github.com/.insteadOf=ssh://git@github.com/",
+		"-c", "credential.helper=", "-c", "core.askPass=", "-c", "core.sshCommand=false", "-c", "protocol.allow=never"}
+	for _, protocol := range strings.Split(keylessProtocols, ":") {
+		config = append(config, "-c", "protocol."+protocol+".allow=always")
+	}
+	command := exec.Command("git", append(config, arguments...)...)
+	for _, variable := range os.Environ() {
+		name, _, _ := strings.Cut(variable, "=")
+		if !slices.Contains(keylessDropped, name) && !strings.HasPrefix(name, "GIT_CONFIG_KEY_") && !strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
+			command.Env = append(command.Env, variable)
+		}
+	}
+	command.Env = append(command.Env, "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_ALLOW_PROTOCOL="+keylessProtocols, "GIT_SSH_COMMAND=false")
 	return command
 }
 
