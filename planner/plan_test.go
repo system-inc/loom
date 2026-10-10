@@ -170,3 +170,44 @@ func TestRunNamesIsExactRunsInverse(t *testing.T) {
 		}
 	}
 }
+
+// Proof 3's by-key plan: against the parent's keys made with the future's own parity parts, the unit the change
+// reaches runs, the rest reuse, and every unit carries exactly the key its uncached parity run used, so the witness
+// compare matches each reused unit to its uncached verdict.
+func TestPlanByKeyReusesOnTheUncachedRunsKeys(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := planFixture(t)
+	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
+	inputs := ParityInputs{GateInputs: strings.Repeat("4", 64), ChangedPaths: []string{"a/a.go"}}
+	path := filepath.Join(tree, "a/a.go")
+	original, _ := os.ReadFile(path)
+	checkout := func(sha string) (string, func(), error) {
+		content := original
+		if sha == "mutant" {
+			content = append(append([]byte{}, original...), "\nconst Mutated = 1\n"...)
+		}
+		return tree, func() {}, os.WriteFile(path, content, 0o644)
+	}
+	byKey, err := PlanByKey(checkout, "parent-sha-0000", "mutant", gateTools, tools, ParitySelect{}, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uncached, err := PlanSelected(tree, gateTools, tools, ParitySelect{}, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witnessKey := map[string]string{}
+	for _, unit := range uncached {
+		witnessKey[unit.Name] = unit.UnitKey
+	}
+	decisions := map[string]string{}
+	for _, unit := range byKey {
+		decisions[unit.Name] = unit.Decision
+		if unit.UnitKey != witnessKey[unit.Name] {
+			t.Errorf("%s's by-key key %s isn't its uncached run's %s", unit.Name, unit.UnitKey, witnessKey[unit.Name])
+		}
+	}
+	if decisions["example.com/plan/a"] != "run" || decisions["example.com/plan/b"] != "reuse" {
+		t.Fatalf("by-key decisions %v: want a run (the change reaches it) and b reused", decisions)
+	}
+}

@@ -122,6 +122,37 @@ func (client QueueClient) ParityInputs(future Future, gateInputs string) (Parity
 	return ParityInputs{GateInputs: gateInputs, ChangedPaths: change.Record.Paths}, nil
 }
 
+// PlannedFuture reads a planned future's base and change from Queue's planned listing (GET /futures?state=planned).
+func (client QueueClient) PlannedFuture(future string) (Future, error) {
+	response, err := client.do("GET", "/futures?state=planned", nil)
+	if err != nil {
+		return Future{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return Future{}, fmt.Errorf("GET /futures?state=planned: %s", response.Status)
+	}
+	var listing struct {
+		Futures []struct {
+			Future string `json:"future"`
+			Base   string `json:"base"`
+			Parity bool   `json:"parity"`
+			Change struct {
+				Change string `json:"change"`
+			} `json:"change"`
+		} `json:"futures"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&listing); err != nil {
+		return Future{}, fmt.Errorf("GET /futures?state=planned: %w", err)
+	}
+	for _, planned := range listing.Futures {
+		if planned.Future == future {
+			return Future{Future: planned.Future, Tree: planned.Future, Base: planned.Base, Parity: planned.Parity, Changes: []string{planned.Change.Change}}, nil
+		}
+	}
+	return Future{}, fmt.Errorf("future %s isn't in the planned listing", future)
+}
+
 // HTTPIndex reads Queue's verdict index, GET /verdicts/<unitKey>; a 404 is no decided verdict.
 type HTTPIndex struct{ Client QueueClient }
 

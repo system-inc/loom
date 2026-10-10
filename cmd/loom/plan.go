@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,9 @@ import (
 // plan is the planner's pull loop on the coordinator host (contract v1.1, the planning seam): it plans every future
 // Queue serves at GET /futures?state=unplanned and posts each plan back.
 func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) > 0 && arguments[0] == "by-key" {
+		return planByKey(arguments[1:], stdout, stderr)
+	}
 	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	queue := flags.String("queue", "", "loom-pipeline's base URL")
@@ -91,4 +95,73 @@ func refreshGateTools(directory, branch string) error {
 		}
 	}
 	return nil
+}
+
+// planByKey writes a parity future's plan by selection against its base's keys, for proof 3's compare with the
+// future's uncached run (Loom, Oct 10 01:29Z): the base keyed with the future's own parity parts, every key passed.
+func planByKey(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("plan by-key", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	queue := flags.String("queue", "", "loom-pipeline's base URL")
+	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
+	repository := flags.String("repository", "", "the planner's clone")
+	gateTools := flags.String("gate-tools", "", "the gate tools checkout, for executors.txt's reads lines")
+	runnerShaFile := flags.String("runner-sha-file", "", "the file holding the pool's pinned runner sha256")
+	gateInputsFile := flags.String("gate-inputs-file", "", "the file holding the gate inputs' manifest sha256")
+	future := flags.String("future", "", "the parity future (its tree sha)")
+	out := flags.String("out", "", "where to write the plan, a JSON list of planned units")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if *queue == "" || *tokenFile == "" || *repository == "" || *gateTools == "" || *runnerShaFile == "" || *gateInputsFile == "" || *future == "" || *out == "" {
+		fmt.Fprintln(stderr, "usage: loom plan by-key --queue <url> --token-file <path> --repository <clone> --gate-tools <dir> --runner-sha-file <path> --gate-inputs-file <path> --future <tree sha> --out <file>")
+		return 2
+	}
+	token, err := os.ReadFile(*tokenFile)
+	if err != nil {
+		fmt.Fprintln(stderr, "plan by-key:", err)
+		return 1
+	}
+	gateInputs, err := os.ReadFile(*gateInputsFile)
+	if err != nil {
+		fmt.Fprintln(stderr, "plan by-key:", err)
+		return 1
+	}
+	tools, err := planner.ProbeTools(*runnerShaFile)
+	if err != nil {
+		fmt.Fprintln(stderr, "plan by-key: tools:", err)
+		return 1
+	}
+	client := planner.QueueClient{Base: *queue, Token: strings.TrimSpace(string(token))}
+	planned, err := client.PlannedFuture(*future)
+	if err != nil {
+		fmt.Fprintln(stderr, "plan by-key:", err)
+		return 1
+	}
+	inputs, err := client.ParityInputs(planned, strings.TrimSpace(string(gateInputs)))
+	if err != nil {
+		fmt.Fprintln(stderr, "plan by-key:", err)
+		return 1
+	}
+	results, err := planner.PlanByKey(planner.GitCheckout(*repository), planned.Base, *future, *gateTools, tools, planner.ParitySelect{}, inputs)
+	if err != nil {
+		fmt.Fprintln(stderr, "plan by-key:", err)
+		return 1
+	}
+	encoded, err := json.MarshalIndent(results, "", "  ")
+	if err == nil {
+		err = os.WriteFile(*out, append(encoded, '\n'), 0o644)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "plan by-key:", err)
+		return 1
+	}
+	reused := 0
+	for _, result := range results {
+		if result.Decision == "reuse" {
+			reused++
+		}
+	}
+	fmt.Fprintf(stdout, "%s: %d units, %d reused, %d run, base %s\n", *future, len(results), reused, len(results)-reused, planned.Base)
+	return 0
 }

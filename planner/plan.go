@@ -47,6 +47,31 @@ func PlanSelected(tree, gateTools string, tools Tools, selection ParitySelect, i
 	return planTree(tree, gateTools, tools, MemoryIndex{}, true, KeyFor, &selection)
 }
 
+// PlanByKey is the planner's selection by key for a parity future, as proof 3 compares it with the future's uncached
+// run (Loom, Oct 10 01:29Z): the parent tree is keyed with the future's own parity parts and every key counted passed,
+// then the tree is planned against them, so a unit the change didn't reach reuses on exactly the key its uncached run
+// used. One checkout serves both trees in turn.
+func PlanByKey(checkout Checkout, parent, sha, gateTools string, tools Tools, selection ParitySelect, inputs ParityInputs) ([]PlannedResult, error) {
+	selection.inputs = &inputs
+	plan := func(at string, index VerdictIndex, uncached bool) ([]PlannedResult, error) {
+		tree, cleanup, err := checkout(at)
+		if err != nil {
+			return nil, err
+		}
+		defer cleanup()
+		return planTree(tree, gateTools, tools, index, uncached, KeyFor, &selection)
+	}
+	parentPlan, err := plan(parent, MemoryIndex{}, true)
+	if err != nil {
+		return nil, fmt.Errorf("parent %s: %w", parent, err)
+	}
+	index := MemoryIndex{}
+	for _, unit := range parentPlan {
+		index[unit.UnitKey] = Verdict{UnitKey: unit.UnitKey, Status: "passed", Run: "parent-" + parent[:12]}
+	}
+	return plan(sha, index, false)
+}
+
 // ParityInputs are what a parity run's box record ran with: the gate inputs' manifest sha256, the change's paths and
 // the sample commit (empty: unset).
 type ParityInputs struct {
