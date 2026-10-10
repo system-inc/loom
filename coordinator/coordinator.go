@@ -526,6 +526,15 @@ func (coordinator *coordinator) unfit(state *unitState) string {
 			return "the record platform " + record
 		}
 	}
+	if need := state.planned.Unit.Resources.MemoryMegabytes; need > 0 {
+		found := false
+		for _, machine := range coordinator.config.Slots {
+			found = found || holds(machine, need)
+		}
+		if !found {
+			return fmt.Sprintf("%d MB of memory", need)
+		}
+	}
 	for _, toolchain := range state.planned.Unit.Requires {
 		found := false
 		for _, machine := range coordinator.config.Slots {
@@ -541,13 +550,19 @@ func (coordinator *coordinator) unfit(state *unitState) string {
 	return ""
 }
 
-// fitsUnit says whether the machine may take the unit: it has every toolchain the unit requires, and in a run with a
-// record platform, it is of that platform or the unit is portable.
+// fitsUnit says whether the machine may take the unit: it has every toolchain the unit requires, the memory the unit
+// declares, and in a run with a record platform, it is of that platform or the unit is portable.
 func (coordinator *coordinator) fitsUnit(machine Machine, unit protocol.JobUnit) bool {
 	if record := coordinator.config.RecordPlatform; record != "" && !unit.Portable && machine.Platform() != record {
 		return false
 	}
-	return fits(machine, unit.Requires)
+	return holds(machine, unit.Resources.MemoryMegabytes) && fits(machine, unit.Requires)
+}
+
+// holds says whether the machine has the memory a unit declares. A machine that doesn't say (a box) holds any.
+func holds(machine Machine, need int) bool {
+	sized, ok := machine.(interface{ MemoryCapacity() int })
+	return need <= 0 || !ok || sized.MemoryCapacity() <= 0 || sized.MemoryCapacity() >= need
 }
 
 // fits says whether the machine has every toolchain in requires. A machine that names none has none.

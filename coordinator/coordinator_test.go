@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -973,5 +974,56 @@ func TestARecordPlatformKeepsUnitsThatArentPortableOnIt(t *testing.T) {
 	}
 	if startedCounts(result.Events)["portable-0"] != 1 {
 		t.Fatalf("the portable unit didn't run on a Mac: %+v", unitEventsOf(result.Events, "portable-0"))
+	}
+}
+
+// A sizedMachine says how much memory its workers have, the way a pool given --pool-memory does, and notes each unit
+// it ran.
+type sizedMachine struct {
+	LocalMachine
+	memory int
+	mutex  sync.Mutex
+	ran    []string
+}
+
+func (machine *sizedMachine) MemoryCapacity() int { return machine.memory }
+
+func (machine *sizedMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {
+	machine.mutex.Lock()
+	machine.ran = append(machine.ran, unit.Unit)
+	machine.mutex.Unlock()
+	return machine.LocalMachine.Run(runContext, unit, events)
+}
+
+// A unit declaring more memory than a pool's workers have never goes there (Oct 10: f7812fff's typeaware products took
+// two 16 GB Codex instances down); a machine that doesn't say, a box, takes it. Mutant: holds always true, and the big
+// unit lands on the first free 16 GB slot.
+func TestAUnitDeclaringMoreMemoryThanAPoolHasGoesWhereItFits(t *testing.T) {
+	wire := newFakeWire(t)
+	small := &sizedMachine{LocalMachine: LocalMachine{Label: "codex-strict"}, memory: 16384}
+	box := &sizedMachine{LocalMachine: LocalMachine{Label: "box"}}
+	big := shell("big", "echo big")
+	big.Resources.MemoryMegabytes = 24576
+	result := run(t, config(wire, small, small, box), big, shell("a", "echo a"))
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	if slices.Contains(small.ran, "big") || !slices.Contains(box.ran, "big") {
+		t.Fatalf("the 24 GB unit ran on %v (16 GB) and %v (the box)", small.ran, box.ran)
+	}
+}
+
+// With no machine that holds it, the unit is never placed, says why, and closes broken.
+func TestAUnitNoMachineHoldsIsNeverPlaced(t *testing.T) {
+	wire := newFakeWire(t)
+	small := &sizedMachine{LocalMachine: LocalMachine{Label: "codex-strict"}, memory: 16384}
+	big := shell("big", "echo big")
+	big.Resources.MemoryMegabytes = 24576
+	result := run(t, config(wire, small), big)
+	if result.Verdict.Status != "void" || len(small.ran) != 0 {
+		t.Fatalf("verdict %+v, ran %v", result.Verdict, small.ran)
+	}
+	if why := closedBroken(wire.events(result.Run), result.Run, "big"); why != "not placed: no machine of the run has 24576 MB of memory" {
+		t.Fatalf("the unit isn't closed after its refusal: %q", why)
 	}
 }

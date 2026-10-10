@@ -76,6 +76,9 @@ type PoolMachine struct {
 	// Has names the toolchains every worker of the pool has, for units that require them (protocol.Toolchains):
 	// a Codex instance set up with setup.sh --wasi-sdk has wasiSdk.
 	Has []string
+	// MemoryMegabytes is each worker's memory, 0 when unknown: a unit declaring more (its Resources) is never placed
+	// here (Oct 10: f7812fff's typeaware products took two 16 GB Codex instances down, so they go to a box).
+	MemoryMegabytes int
 	// Log, when set, hears each unit queued again.
 	Log io.Writer
 
@@ -132,6 +135,9 @@ func (machine *PoolMachine) TakesOnlyTestJobs() bool { return machine.Strict }
 func (machine *PoolMachine) Platform() string { return machine.GoPlatform }
 
 func (machine *PoolMachine) Toolchains() []string { return machine.Has }
+
+// MemoryCapacity is each worker's memory in megabytes, 0 when unknown.
+func (machine *PoolMachine) MemoryCapacity() int { return machine.MemoryMegabytes }
 
 func (machine *PoolMachine) Cores() int { return machine.CoreCount }
 

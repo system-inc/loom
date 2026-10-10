@@ -77,6 +77,29 @@ func (pools poolHasFlag) Set(text string) error {
 	return nil
 }
 
+// poolMemoryFlag is --pool-memory <name>=<megabytes>: each worker's memory, by pool, so a unit declaring more is never
+// placed there.
+type poolMemoryFlag map[string]int
+
+func (pools poolMemoryFlag) String() string {
+	var parts []string
+	for name, megabytes := range pools {
+		parts = append(parts, fmt.Sprintf("%s=%d", name, megabytes))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
+}
+
+func (pools poolMemoryFlag) Set(text string) error {
+	name, number, found := strings.Cut(text, "=")
+	megabytes, err := strconv.Atoi(number)
+	if !found || !protocol.RunIdPattern.MatchString(name) || err != nil || megabytes <= 0 {
+		return fmt.Errorf("%q isn't <name>=<megabytes>, such as codex-strict=16384", text)
+	}
+	pools[name] = megabytes
+	return nil
+}
+
 // poolPlatformFlag is --pool-platform <name>=<goos>/<goarch>: the platform a pool's workers run, by pool, where it
 // isn't Linux's (Macs serve a pool of their own, since the wire can't route by worker).
 type poolPlatformFlag map[string]string

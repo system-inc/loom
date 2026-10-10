@@ -149,6 +149,8 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.Var(poolPlatforms, "pool-platform", "the platform a pool's workers run when it isn't Linux's, <name>=<goos>/<goarch>; repeatable")
 	poolHas := poolHasFlag{}
 	flags.Var(poolHas, "pool-has", "the toolchains every worker of a pool has, <name>=<toolchain>,...: units that require one go only there; repeatable")
+	poolMemory := poolMemoryFlag{}
+	flags.Var(poolMemory, "pool-memory", "each worker's memory in a pool, <name>=<megabytes>: a unit declaring more never goes there; repeatable")
 	priority := flags.Int("priority", 0, "the run's units' priority on its pools, 0 to 1000, highest handed out first")
 	ageEvery := flags.Duration("pool-age-every", 0, "lift a pool unit that waits this long, and again each time after, so a lower tier never starves; 0 is off")
 	ageStep := flags.Int("pool-age-step", 10, "how much higher each --pool-age-every lifts a waiting unit")
@@ -222,7 +224,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		for _, wanted := range append(append(poolSlotsFlag{}, pools...), strictPools...) {
 			strict := slices.Contains(strictPools, wanted)
 			machine := &coordinator.PoolMachine{Pool: wanted.name, Strict: strict, Priority: *priority, AgeEvery: *ageEvery, AgeStep: *ageStep, AgeCeiling: *ageCeiling,
-				Has: poolHas[wanted.name], Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: platformOf(poolPlatforms, wanted.name), Log: stdout}
+				Has: poolHas[wanted.name], MemoryMegabytes: poolMemory[wanted.name], Wire: *wire, Secret: secret, Version: poolVersion, GoPlatform: platformOf(poolPlatforms, wanted.name), Log: stdout}
 			poolMachines[machine.Name()] = true
 			for range wanted.slots {
 				slots = append(slots, machine)
