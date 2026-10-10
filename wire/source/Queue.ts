@@ -215,6 +215,8 @@ export interface ChangeEntry {
     // Whether git's facts have cleared it. With no GitHub credential here, the bridge on Kirk's Mac reads them from
     // git and posts them (POST /submissions/<change>/facts); a change has no future until they clear it.
     checked: boolean;
+    // Every sha the change was ever tested on, so a red one never returns (#qvcm8ez).
+    shas: string[];
 }
 
 export interface QueueState {
@@ -541,6 +543,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
             verdict: null,
             landed: null,
             checked: event.data.facts !== null,
+            shas: [record.sha],
         });
         state.line.push(record.change);
     }
@@ -633,6 +636,15 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'change.red' && entry !== undefined) {
         entry.state = 'red';
         entry.verdict = (event.data.decision ?? event.data.verdict ?? null) as Record<string, unknown> | null;
+    }
+    else if (event.type === 'change.restacked' && entry !== undefined) {
+        // The same change on a new sha: back in the line where it was, unchecked until git's facts clear the new sha.
+        entry.record = { ...entry.record, sha: event.data.to as string, base: event.data.base as string, paths: event.data.paths as string[] };
+        entry.shas.push(entry.record.sha);
+        entry.state = 'queued';
+        entry.future = null;
+        entry.verdict = null;
+        entry.checked = false;
     }
     else if (event.type === 'change.parked' && entry !== undefined) {
         entry.state = 'parked';
@@ -975,6 +987,10 @@ export class Queue extends DurableObject<Env> {
         if (eventsMatch !== null && method === 'GET') {
             return this.changeEvents(request, eventsMatch[1] ?? '');
         }
+        const resubmitMatch = /^\/changes\/(chg_[0-9a-z]{26})\/sha$/.exec(path);
+        if (resubmitMatch !== null && method === 'POST') {
+            return this.resubmit(request, resubmitMatch[1] ?? '');
+        }
         const changeMatch = /^\/changes\/(chg_[0-9a-z]{26})$/.exec(path);
         if (changeMatch !== null && method === 'GET') {
             return this.readChange(changeMatch[1] ?? '');
@@ -1133,6 +1149,44 @@ export class Queue extends DurableObject<Env> {
             }
             const entry = state.changes.get(record.change);
             return jsonResponse(201, { change: record.change, state: entry?.state ?? 'queued', position: entry?.position ?? 0 });
+        });
+    }
+
+    // The owner moves a red or parked change to a new sha, keeping its id and its place (#50j0pvg): change.restacked,
+    // then git's facts on the new sha exactly as at submit. A sha the change was ever tested on never comes back.
+    private async resubmit(request: Request, change: string): Promise<Response> {
+        const body = await readBodyText(request, MaximumChangeBodyBytes);
+        if (body === null) {
+            return jsonResponse(413, { reason: `a change is at most ${MaximumChangeBodyBytes} bytes` });
+        }
+        const checked = checkChangeRequest(body);
+        if (typeof checked === 'string') {
+            return jsonResponse(422, { reason: checked });
+        }
+        if (checked.parent !== null || checked.fixesRed !== null || checked.parity === true || checked.select !== undefined || checked.witness === true) {
+            return jsonResponse(422, { reason: 'a resubmit moves the sha, base and paths only; the change keeps everything else' });
+        }
+        return this.ctx.blockConcurrencyWhile(async () => {
+            const state = await this.current();
+            const entry = state.changes.get(change);
+            if (entry === undefined) {
+                return jsonResponse(404, { reason: `no change ${change}` });
+            }
+            if (entry.record.owner !== checked.owner) {
+                return jsonResponse(403, { reason: `change ${change} is ${entry.record.owner}'s` });
+            }
+            if (entry.state !== 'red' && entry.state !== 'parked') {
+                return jsonResponse(409, { reason: `change ${change} is ${entry.state}; only a red or parked change moves to a new sha` });
+            }
+            if (entry.shas.includes(checked.sha)) {
+                return jsonResponse(422, { reason: `change ${change} was already tested on ${checked.sha}; a resubmit needs a new sha` });
+            }
+            const duplicate = lineRefusalOf({ ...checked, parent: entry.record.parent }, state);
+            if (duplicate !== null) {
+                return jsonResponse(422, { reason: duplicate });
+            }
+            await this.append('change.restacked', { change: change }, { from: entry.record.sha, to: checked.sha, base: checked.base, paths: checked.paths });
+            return jsonResponse(200, { change: change, state: 'queued', sha: checked.sha });
         });
     }
 

@@ -183,6 +183,30 @@ async function queueRequest(request: Request, claims: TokenClaims, operation: st
             body: canonicalJson(change),
         });
     }
+    // A resubmit: the owner moves a red or parked change to a new sha, keeping its id (Queue, #50j0pvg).
+    const resubmit = /^(chg_[0-9a-hjkmnp-tv-z]{26})\/sha$/.exec(operation);
+    if (resubmit !== null) {
+        if (request.method !== 'POST') {
+            return jsonResponse(405, { error: 'use POST' }, { Allow: 'POST' });
+        }
+        if (claims.scope !== 'submit') {
+            await request.body?.cancel();
+            return jsonResponse(403, { error: `a ${claims.scope} token can't move a change` });
+        }
+        const body = await readBodyText(request, MaximumChangeBodyBytes);
+        if (body === null) {
+            return jsonResponse(413, { error: `a change is at most ${MaximumChangeBodyBytes} bytes` });
+        }
+        const change = checkChangeRequest(body, claims.run);
+        if (typeof change === 'string') {
+            return jsonResponse(400, { error: change });
+        }
+        return new Request(`https://queue/changes/${resubmit[1] ?? ''}/sha`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: canonicalJson(change),
+        });
+    }
     if (request.method !== 'GET') {
         await request.body?.cancel();
         return jsonResponse(405, { error: 'use GET' }, { Allow: 'GET' });

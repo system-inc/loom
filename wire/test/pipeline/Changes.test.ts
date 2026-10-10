@@ -64,6 +64,17 @@ describe('submitting a change', function () {
         expect(queue.received).toHaveLength(0);
     });
 
+    it("passes an owner's resubmit on to the queue, from a submit token only", async function () {
+        const queue = new MemoryQueue();
+        const id = 'chg_' + '0'.repeat(26);
+        const resubmit = function (scope: TokenScope): Promise<Response> {
+            return handleChanges(new Request(`https://pipeline.test/changes/${id}/sha`, { method: 'POST', body: body() }), claimsOf(scope), `${id}/sha`, queue);
+        };
+        expect((await resubmit('coordinator')).status).toBe(403);
+        await resubmit('submit');
+        expect(new URL(queue.received[0]?.url ?? '').pathname).toBe(`/changes/${id}/sha`);
+    });
+
     it("passes a witness of main on to the queue: base the sha itself, no paths", async function () {
         const queue = new MemoryQueue();
         const witness = { sha: sha, base: sha, owner: owner, paths: [], parity: true, witness: true };

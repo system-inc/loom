@@ -571,6 +571,34 @@ describe("today's gate and main's own red", function () {
     });
 });
 
+describe('a resubmit', function () {
+    it('moves a red or parked change to a new sha under the same id, rechecked by git, and never back to a tested sha', async function () {
+        const queue = await freshQueue();
+        const id = ((await (await submit(queue, change(41))).json()) as { change: string }).change;
+        const resubmit = function (fields: Record<string, unknown>): Promise<Response> {
+            return queue.fetch(`https://queue/changes/${id}/sha`, { method: 'POST', body: JSON.stringify({ ...change(42), ...fields }) });
+        };
+        // A change on its way doesn't move.
+        expect((await resubmit({})).status).toBe(409);
+        await postWhole(queue, id, sha(41), 'failed', 'change');
+        expect((await resubmit({ owner: 'system_adamic_other' })).status).toBe(403);
+        expect((await resubmit({ sha: sha(41) })).status).toBe(422);
+        expect((await resubmit({ parity: true })).status).toBe(422);
+        const moved = await resubmit({});
+        expect(moved.status, await moved.clone().text()).toBe(200);
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ state: 'queued', record: { change: id, sha: sha(42) }, future: null, position: 0 });
+        // Unchecked until git clears the new sha, then its own future.
+        expect(((await (await queue.fetch('https://queue/submissions?state=unchecked')).json()) as { changes: { sha: string }[] }).changes.map((item) => item.sha)).toEqual([sha(42)]);
+        await queue.fetch(`https://queue/submissions/${id}/facts`, { method: 'POST', body: JSON.stringify(facts()) });
+        expect(await (await queue.fetch(`https://queue/changes/${id}`)).json()).toMatchObject({ future: sha(42) });
+        expect((await postWhole(queue, id, sha(42), 'passed', null)).status).toBe(200);
+        expect((await landings(queue)).map((order) => order.future)).toEqual([sha(42)]);
+        const restacked = (await logOf(queue)).find((event) => event.type === 'change.restacked');
+        expect(restacked).toMatchObject({ subject: { change: id }, data: { from: sha(41), to: sha(42) } });
+        expect((await replay(await logOf(queue))).changes.get(id)?.record.sha).toBe(sha(42));
+    });
+});
+
 describe('a withdrawn plan', function () {
     it('goes back to the planner while nothing judged it, logged with who and why, and never after a verdict', async function () {
         const queue = await freshQueue();
