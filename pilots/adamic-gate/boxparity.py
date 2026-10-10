@@ -74,7 +74,9 @@ def newSide(path, topLevel):
         verdict = json.loads(line)
         changes.add(verdict.get("change"))
         if verdict.get("status") not in ("passed", "failed"):
-            return None, None, changes, None, "verdict %s (line %d) is %s, not passed or failed" % (verdict.get("unitKey"), number, verdict.get("status"))
+            # The cause says what happens next: overBudget (Kirk's 90 s shape) is split and rerun, a void is rerun.
+            cause = "/".join(part for part in (verdict.get("cause"), verdict.get("infra")) if part)
+            return None, None, changes, None, "verdict %s (line %d) is %s%s, not passed or failed" % (verdict.get("unitKey"), number, verdict.get("status"), " (%s)" % cause if cause else "")
         if verdict.get("phase") is not None:
             stage = (verdict["phase"].split() or [""])[0]
             stages.setdefault(stage, []).append((verdict.get("unitKey"), verdict["status"]))

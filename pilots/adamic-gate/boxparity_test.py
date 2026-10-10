@@ -90,6 +90,12 @@ check("a box record with never-run tests is not comparable, exit 3", code == 3 a
 code, output = run(box, verdicts(root, same + [("k4", "void", [])]))
 check("a void verdict is not comparable, exit 3", code == 3 and "k4" in output and "void" in output, output)
 
+path = verdicts(root, same)
+with open(path, "a") as stream:
+    stream.write(json.dumps({"unitKey": "k6", "change": "chg_test", "status": "void", "cause": "infra", "infra": "overBudgetRun", "tests": []}) + "\n")
+code, output = run(box, path)
+check("an over-budget void is not comparable and names its cause, exit 3", code == 3 and "k6" in output and "overBudgetRun" in output, output)
+
 code, output = run(box, verdicts(root, same + [("k5", "passed", [("TestB", "pass")])]))
 check("two units disagreeing on one test is not comparable, exit 3", code == 3 and "units k2 and k5 disagree" in output, output)
 
