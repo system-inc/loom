@@ -136,3 +136,36 @@ func TestTheIndexIsOneBuildersAndRefusesWhatItCantRead(t *testing.T) {
 		t.Fatal("an index with a bad line opened")
 	}
 }
+
+func TestATrustedIndexDecidesAMissWithNoReadAndTheStoreStillCatchesADifferentBuild(t *testing.T) {
+	store := newFakeStore()
+	product := keyOf("product")
+	productKey := keyOf("productKey")
+	runs := 0
+	// Stored before this index knew it.
+	honest := map[string]map[string]string{product: {"bin/tool": "built once"}}
+	Builder{Store: serve(t, store, "workshop"), Scratch: t.TempDir(), Cache: t.TempDir(), Run: fakeRun(honest, &runs),
+		Key: func(Action) (string, error) { return productKey, nil }}.Build([]Action{{Directory: "x", Test: "TestProduct_X"}})
+	trusted := func(products map[string]map[string]string) (Result, *Requests) {
+		index, err := OpenIndex(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer index.Close()
+		served := serve(t, store, "workshop")
+		served.Requests = &Requests{}
+		results := Builder{Store: served, Scratch: t.TempDir(), Cache: t.TempDir(), Run: fakeRun(products, &runs), Index: index, TrustIndex: true,
+			Key: func(Action) (string, error) { return productKey, nil }}.Build([]Action{{Directory: "x", Test: "TestProduct_X"}})
+		return results[0], served.Requests
+	}
+	// The same bytes: built again with no read, and the store answers 200.
+	result, requests := trusted(honest)
+	if result.Outcome != "built" || requests.Reads.Load() != 0 {
+		t.Fatalf("a trusted miss: %+v, %d reads", result, requests.Reads.Load())
+	}
+	// Other bytes for the same key: the store's 409 names both builders, so trusting the index hid nothing.
+	result, _ = trusted(map[string]map[string]string{product: {"bin/tool": "built differently"}})
+	if result.Outcome != "failed" || !strings.Contains(result.Error, "workshop built") {
+		t.Fatalf("a different rebuild: %+v", result)
+	}
+}

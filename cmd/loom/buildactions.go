@@ -30,6 +30,7 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	cache := flags.String("cache", filepath.Join(home, "loom-builder", "cache"), "the build's buildcache directory, shared by its actions and kept between builds")
 	jobs := flags.Int("jobs", 4, "actions built at once")
 	indexDirectory := flags.String("index", filepath.Join(home, "loom-builder", "index"), "Workshop's index of what the store holds, so deciding reads nothing ('' for none)")
+	trustIndex := flags.Bool("trust-index", true, "an index miss builds without asking the store (the store's 200 or 409 still checks it)")
 	list := flags.Bool("list", false, "print each action and its productKey, and build nothing")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		return 2
@@ -99,14 +100,15 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		defer index.Close()
 	}
 	work := builder.Builder{
-		Tree:    *tree,
-		Index:   index,
-		Store:   builder.Store{Read: strings.TrimSuffix(*read, "/"), Write: strings.TrimSuffix(*write, "/"), Token: strings.TrimSpace(string(token)), Requests: requests},
-		Key:     key,
-		Run:     builder.GoTest(*tree),
-		Cache:   *cache,
-		Scratch: *scratch,
-		Jobs:    *jobs,
+		Tree:       *tree,
+		Index:      index,
+		TrustIndex: *trustIndex,
+		Store:      builder.Store{Read: strings.TrimSuffix(*read, "/"), Write: strings.TrimSuffix(*write, "/"), Token: strings.TrimSpace(string(token)), Requests: requests},
+		Key:        key,
+		Run:        builder.GoTest(*tree),
+		Cache:      *cache,
+		Scratch:    *scratch,
+		Jobs:       *jobs,
 	}
 	// Each result is printed as its action finishes, so a long build shows its progress and a stopped one its record.
 	failed := 0

@@ -442,6 +442,11 @@ type Builder struct {
 	Jobs    int
 	Report  func(Result) // when set, hears each action's result as it finishes, one at a time
 	Index   *Index       // when set, Workshop's record of the store: deciding reads nothing, uploading skips what it holds
+	// TrustIndex makes an index miss a build with no read: Workshop is the store's only writer, so what its index
+	// lacks the store lacks. A miss the store did hold re-uploads to a 200 (the same bytes) or a 409 naming both
+	// builders (a build that isn't reproducible), so trusting the index can't hide anything; the daily audit counts
+	// what the store holds that the index doesn't.
+	TrustIndex bool
 }
 
 // A Result is what happened to one action.
@@ -584,8 +589,11 @@ func (builder Builder) build(action Action) Result {
 			return finish("stored", nil)
 		}
 	}
-	// An index miss (or no index) asks the store once; what it holds goes into the index, so the next build reads
-	// nothing for this key.
+	// An index miss (or no index) asks the store once, unless the index is trusted; what the store holds goes into
+	// the index, so the next build reads nothing for this key.
+	if builder.Index != nil && builder.TrustIndex {
+		return builder.buildAndUpload(action, key, &result, finish)
+	}
 	switch manifest, manifestSum, err := builder.Store.manifestAndSum(key); {
 	case err == nil:
 		if builder.Index != nil {
@@ -606,7 +614,12 @@ func (builder Builder) build(action Action) Result {
 	case !errors.Is(err, ErrNotStored):
 		return finish("failed", err)
 	}
-	if err = os.MkdirAll(builder.Cache, 0o755); err != nil {
+	return builder.buildAndUpload(action, key, &result, finish)
+}
+
+// buildAndUpload runs one action's product test and uploads what it used.
+func (builder Builder) buildAndUpload(action Action, key string, result *Result, finish func(string, error) Result) Result {
+	if err := os.MkdirAll(builder.Cache, 0o755); err != nil {
 		return finish("failed", err)
 	}
 	logs, err := os.MkdirTemp(builder.Scratch, "action-"+key[:12]+"-")
