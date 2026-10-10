@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -109,6 +110,69 @@ func Unit(config Config, worker, houseCache string) string {
 	return strings.Join(lines, "\n")
 }
 
+// extraNamePattern is what a box's further pool may be called in its file names (serve-<name>.conf): a short word, so
+// its unit, token, directories and worker name read as the box's own serve's with the name added.
+var extraNamePattern = regexp.MustCompile(`^[a-z0-9]{1,16}$`)
+
+// An Extra is one more pool a box serves beside serve.conf's (Oct 10: Chonchon, box-phase's only worker, went down,
+// and Home and Cloud took box-phase beside box-strict). ~/.loom/serve-<name>.conf names it in serve.conf's own
+// settings, ~/.loom/serve-token-<name> is its token, and it runs as loom-serve-<name>.service, with its own runtime
+// directory, root and workspace under ~/loom-serve-<name>, as worker <host>-<id>-<name>.
+type Extra struct {
+	Name   string
+	Config Config
+}
+
+// ExtraUnitName is the unit an extra pool's serve runs as.
+func ExtraUnitName(name string) string {
+	return "loom-serve-" + name + ".service"
+}
+
+// ExtraUnit is Unit for an extra pool: the same serve with the name added to its worker, its token, its runtime
+// directory, and its root and workspace, so two serves on one box share nothing a unit writes.
+func ExtraUnit(extra Extra, worker, houseCache string) string {
+	unit := Unit(extra.Config, worker+"-"+extra.Name, houseCache)
+	for _, swap := range [][2]string{
+		{"RuntimeDirectory=loom-serve\n", "RuntimeDirectory=loom-serve-" + extra.Name + "\n"},
+		{"%h/.loom/serve-token ", "%h/.loom/serve-token-" + extra.Name + " "},
+		{"%t/loom-serve/", "%t/loom-serve-" + extra.Name + "/"},
+		{"%h/loom-serve/", "%h/loom-serve-" + extra.Name + "/"},
+	} {
+		unit = strings.ReplaceAll(unit, swap[0], swap[1])
+	}
+	return strings.Replace(unit, "Description=Loom serve:", "Description=Loom serve for "+extra.Config.Pool+":", 1)
+}
+
+// readExtras reads every serve-<name>.conf beside serve.conf, each with its token checked as serve.conf's is, in name
+// order. A file whose name isn't a name an extra may have is refused, so a stray file never serves a pool quietly.
+func readExtras(paths Paths) ([]Extra, error) {
+	found, err := filepath.Glob(filepath.Join(filepath.Dir(paths.Config), "serve-*.conf"))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(found)
+	extras := []Extra{}
+	for _, path := range found {
+		name := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "serve-"), ".conf")
+		if !extraNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("%s: an extra pool's name is 1 to 16 lowercase letters and digits, not %q", path, name)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		config, err := ReadConfig(string(content))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if err := checkToken(filepath.Join(filepath.Dir(paths.Token), "serve-token-"+name), paths.User); err != nil {
+			return nil, err
+		}
+		extras = append(extras, Extra{Name: name, Config: config})
+	}
+	return extras, nil
+}
+
 var hostPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
 var machineIdPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
@@ -191,17 +255,12 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", paths.Config, err)
 	}
-	token, err := os.Stat(paths.Token)
-	switch {
-	case err != nil:
-		return fmt.Errorf("the pool token: %w", err)
-	case !token.Mode().IsRegular() || token.Size() == 0:
-		return fmt.Errorf("the pool token %s isn't a file holding a token", paths.Token)
-	case token.Mode().Perm()&0o077 != 0:
-		return fmt.Errorf("the pool token %s is mode %o: anyone but its owner can read it (chmod 600)", paths.Token, token.Mode().Perm())
+	if err := checkToken(paths.Token, paths.User); err != nil {
+		return err
 	}
-	if owner, ok := token.Sys().(*syscall.Stat_t); !ok || int(owner.Uid) != paths.User {
-		return fmt.Errorf("the pool token %s isn't this user's", paths.Token)
+	extras, err := readExtras(paths)
+	if err != nil {
+		return err
 	}
 	machineId, err := os.ReadFile(paths.MachineId)
 	if err != nil {
@@ -219,45 +278,92 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 		return fmt.Errorf("the updater's hook: %w", err)
 	}
 	// The probe puts serve's state in every report the updater posts: the canary's health, and `loom release status`.
-	probe, err := updater.Probe(UnitName)
+	// Every serve this box runs, serve.conf's first: each is written, then each is readied, as one.
+	type serving struct {
+		name, text, pool, worker string
+		changed                  bool
+	}
+	servings := []serving{{name: UnitName, text: Unit(config, worker, houseCache), pool: config.Pool, worker: worker}}
+	for _, extra := range extras {
+		servings = append(servings, serving{name: ExtraUnitName(extra.Name), text: ExtraUnit(extra, worker, houseCache), pool: extra.Config.Pool,
+			worker: worker + "-" + extra.Name})
+	}
+	names := []string{}
+	for _, each := range servings {
+		names = append(names, each.name)
+	}
+	probe, err := updater.Probe(names...)
 	if err != nil {
 		return err
 	}
 	if _, err := WriteChanged(paths.Probe, probe, 0o755); err != nil {
 		return fmt.Errorf("the updater's health probe: %w", err)
 	}
-	unit := Unit(config, worker, houseCache)
-	changed, err := WriteChanged(filepath.Join(paths.Units, UnitName), unit, 0o644)
-	if err != nil {
-		return err
+	anyChanged := false
+	for index := range servings {
+		each := &servings[index]
+		if each.changed, err = WriteChanged(filepath.Join(paths.Units, each.name), each.text, 0o644); err != nil {
+			return err
+		}
+		if each.changed {
+			anyChanged = true
+			fmt.Fprintf(report, "loom-runner install-serve: wrote %s, serving pool %s as %s\n", filepath.Join(paths.Units, each.name), each.pool, each.worker)
+		}
 	}
-	if changed {
-		fmt.Fprintf(report, "loom-runner install-serve: wrote %s, serving pool %s as %s\n", filepath.Join(paths.Units, UnitName), config.Pool, worker)
+	if anyChanged {
 		if _, err := systemctl("daemon-reload"); err != nil {
 			return err
 		}
 	}
-	if _, err := systemctl("enable", UnitName); err != nil {
+	for _, each := range servings {
+		if err := ready(paths, systemctl, report, each.name, each.changed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ready leaves one serve unit enabled and running this release: started when it isn't running, reloaded when its unit
+// changed or it runs another binary than the one the updater installed, and otherwise left alone.
+func ready(paths Paths, systemctl Systemctl, report io.Writer, unitName string, changed bool) error {
+	if _, err := systemctl("enable", unitName); err != nil {
 		return err
 	}
-	answer, err := systemctl("show", "--property=MainPID", "--value", UnitName)
+	answer, err := systemctl("show", "--property=MainPID", "--value", unitName)
 	if err != nil {
 		return err
 	}
 	pid := strings.TrimSpace(answer)
 	switch {
 	case pid == "" || pid == "0":
-		if _, err := systemctl("start", UnitName); err != nil {
+		if _, err := systemctl("start", unitName); err != nil {
 			return err
 		}
-		fmt.Fprintf(report, "loom-runner install-serve: %s started\n", UnitName)
+		fmt.Fprintf(report, "loom-runner install-serve: %s started\n", unitName)
 	case changed || !SameFile(filepath.Join(paths.Proc, pid, "exe"), paths.Binary):
-		if _, err := systemctl("reload", UnitName); err != nil {
+		if _, err := systemctl("reload", unitName); err != nil {
 			return err
 		}
-		fmt.Fprintf(report, "loom-runner install-serve: %s reloaded: serve drains the unit in hand and starts again on this release\n", UnitName)
+		fmt.Fprintf(report, "loom-runner install-serve: %s reloaded: serve drains the unit in hand and starts again on this release\n", unitName)
 	default:
-		fmt.Fprintf(report, "loom-runner install-serve: %s already runs this unit and this release\n", UnitName)
+		fmt.Fprintf(report, "loom-runner install-serve: %s already runs this unit and this release\n", unitName)
+	}
+	return nil
+}
+
+// checkToken refuses a pool token that isn't a file holding one, owned by this user and readable by no one else.
+func checkToken(path string, user int) error {
+	token, err := os.Stat(path)
+	switch {
+	case err != nil:
+		return fmt.Errorf("the pool token: %w", err)
+	case !token.Mode().IsRegular() || token.Size() == 0:
+		return fmt.Errorf("the pool token %s isn't a file holding a token", path)
+	case token.Mode().Perm()&0o077 != 0:
+		return fmt.Errorf("the pool token %s is mode %o: anyone but its owner can read it (chmod 600)", path, token.Mode().Perm())
+	}
+	if owner, ok := token.Sys().(*syscall.Stat_t); !ok || int(owner.Uid) != user {
+		return fmt.Errorf("the pool token %s isn't this user's", path)
 	}
 	return nil
 }

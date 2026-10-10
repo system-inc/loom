@@ -305,3 +305,64 @@ func TestTheHookRunsInstallServeOrPassesOnARollback(t *testing.T) {
 		t.Fatalf("on a rollback: exit %d, %s", code, output)
 	}
 }
+
+// A box serves a further pool beside serve.conf's from serve-<name>.conf and serve-token-<name> (Oct 10: Home and Cloud
+// took box-phase while Chonchon was down): its own unit, token, runtime directory, root, workspace and worker, sharing
+// nothing a unit writes with serve.conf's, whose unit stays exactly a single pool's. Each is started, and the health
+// probe watches both. Mutants: the extras never read; the root left shared; the token left shared.
+func TestABoxServesAnExtraPoolBesideItsOwn(t *testing.T) {
+	served := newBox(t, "pool = box-strict\n", 0o600)
+	extraConfig := filepath.Join(filepath.Dir(served.paths.Config), "serve-phase.conf")
+	extraToken := filepath.Join(filepath.Dir(served.paths.Token), "serve-token-phase")
+	os.WriteFile(extraConfig, []byte("pool = box-phase\nphase-jobs = yes\n"), 0o644)
+	os.WriteFile(extraToken, []byte("phase-token\n"), 0o600)
+	phaseName := ExtraUnitName("phase")
+	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{reloadCall, enableCall, showCall, startCall,
+		{"enable", phaseName}, {"show", "--property=MainPID", "--value", phaseName}, {"start", phaseName}}) {
+		t.Fatalf("install with an extra pool: %q, %v", served.calls, err)
+	}
+	if served.unit(t) != Unit(Config{Pool: "box-strict"}, "cloud-4f1d2c", "") {
+		t.Fatalf("serve.conf's unit changed beside an extra:\n%s", served.unit(t))
+	}
+	content, err := os.ReadFile(filepath.Join(served.paths.Units, phaseName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase := string(content)
+	for _, line := range []string{
+		"RuntimeDirectory=loom-serve-phase",
+		"ExecStartPre=/usr/bin/install -m 600 %h/.loom/serve-token-phase %t/loom-serve-phase/pool-token",
+		"ExecStart=%h/.loom/bin/loom-runner serve --strict --phase-jobs --pool https://runs.loom.system.inc/pools/box-phase --token-file %t/loom-serve-phase/pool-token --worker cloud-4f1d2c-phase --until 1h --root %h/loom-serve-phase/root --workspace %h/loom-serve-phase/units",
+	} {
+		if !strings.Contains(phase, "\n"+line+"\n") {
+			t.Errorf("the extra's unit has no %q:\n%s", line, phase)
+		}
+	}
+	for _, line := range strings.Split(phase, "\n") {
+		if !strings.HasPrefix(line, "#") && (strings.Contains(line, "loom-serve/") || strings.Contains(line, "serve-token ") || strings.HasSuffix(line, "=loom-serve")) {
+			t.Errorf("the extra shares serve.conf's %q", line)
+		}
+	}
+	probe, err := os.ReadFile(served.paths.Probe)
+	if err != nil || !strings.Contains(string(probe), `units="`+UnitName+" "+phaseName+`"`) {
+		t.Errorf("the health probe doesn't watch both serves: %v", err)
+	}
+	// Anything wrong with an extra refuses the whole install before systemd is touched, as serve.conf's own would.
+	for name, breakIt := range map[string]func(){
+		"a token others can read": func() { os.Chmod(extraToken, 0o644) },
+		"no token":                func() { os.Remove(extraToken) },
+		"a name it can't have": func() {
+			os.WriteFile(filepath.Join(filepath.Dir(served.paths.Config), "serve-Phase_2.conf"), []byte("pool = box-phase\n"), 0o644)
+		},
+		"a setting it lacks": func() { os.WriteFile(extraConfig, []byte("pool = box-phase\nworker = home\n"), 0o644) },
+	} {
+		os.WriteFile(extraConfig, []byte("pool = box-phase\nphase-jobs = yes\n"), 0o644)
+		os.WriteFile(extraToken, []byte("phase-token\n"), 0o600)
+		os.Chmod(extraToken, 0o600)
+		os.Remove(filepath.Join(filepath.Dir(served.paths.Config), "serve-Phase_2.conf"))
+		breakIt()
+		if err := served.install(); err == nil || len(served.calls) != 0 {
+			t.Errorf("%s: installed (%v), systemctl %q", name, err, served.calls)
+		}
+	}
+}

@@ -28,8 +28,9 @@ A pinned runner must be a release at or after the one that brought this hand-off
 | `~/.loom/serve.conf` | `key = value` lines, `#` comments, as `update.conf`: `pool` (required, the pool's name on the wire), `phase-jobs` (`yes` for a pool that takes phase units, like `box-phase`; default `no`) and `has` (the toolchains this box claims, such as `go,clang,node,wasiSdk`; see "Claims" below). Anything else is refused. |
 | `~/.loom/update.conf` | The updater's settings; its `house-cache` line, when there is one, is the house cache serve asks first for every blob and runner (docs/house-cache.md), rendered into the unit as `--house-cache`. Changing it takes `install-serve`, which reloads serve onto it. |
 | `~/.loom/serve-token` | The pool token for that pool (`loom pool token <pool>`), mode 600. `install-serve` refuses one that is empty, not this user's, or readable by anyone else. |
+| `~/.loom/serve-<name>.conf`, `~/.loom/serve-token-<name>` | A further pool this box serves beside `serve.conf`'s, in the same settings, with its own token: `<name>` is 1 to 16 lowercase letters and digits. It runs as `loom-serve-<name>.service`, with its own runtime directory, its root and workspace under `~/loom-serve-<name>`, and worker `<host>-<id>-<name>`, so the two serves share nothing a unit writes; `serve.conf`'s unit is exactly what it is without one. Anything wrong with one refuses the whole install before systemd is touched. Oct 10: Chonchon, `box-phase`'s only worker, went down, and Home and Cloud took `box-phase` (`serve-phase.conf`: `pool = box-phase`, `phase-jobs = yes`) beside `box-strict`. A worker name must be in its pool's `machines` in Workshop's `pools.json`, or the judge reads its attempts as run warm. |
 | `~/.loom/updated.d/50-serve` | The hook (`serving/updated.d/50-serve`), written by `install-serve` when its text changed: it runs `install-serve` from the release just installed, or, when that release has none (a rollback past it), passes with a note and leaves serve as it runs. |
-| `~/.loom/health.d/50-serve` | The health probe (`updater/health.d/units` for `loom-serve.service`), written by `install-serve` when its text changed: serve's state and restarts in every report the updater posts, which is how the release watcher judges a canary and `loom release status` shows serve (docs/releases.md). |
+| `~/.loom/health.d/50-serve` | The health probe (`updater/health.d/units` for `loom-serve.service` and every `loom-serve-<name>.service`), written by `install-serve` when its text changed: serve's state and restarts in every report the updater posts, which is how the release watcher judges a canary and `loom release status` shows serve (docs/releases.md). |
 | `~/.config/systemd/user/loom-serve.service` | The rendered unit, written only when its text changed. |
 | `~/loom-serve/root` | The runner's root: its blob cache and unpacked sources, under the runner's own bounds (4 GiB of blobs, at most two sources, 3 GiB free before a prebuilt unit starts). |
 | `~/loom-serve/units` | Each unit's workspace while it runs. |
@@ -52,10 +53,12 @@ Once per box, after the updater is installed and has a release with `install-ser
 umask 077
 printf 'pool = box-strict\n' > ~/.loom/serve.conf          # or: pool = box-phase, phase-jobs = yes
 cat > ~/.loom/serve-token                                    # the token minted on Workshop, on stdin
+printf 'pool = box-phase\nphase-jobs = yes\n' > ~/.loom/serve-phase.conf   # a further pool, if the box serves one
+cat > ~/.loom/serve-token-phase                              # its token, as serve-token's
 ~/.loom/bin/loom-runner install-serve                        # writes the hook, the unit, and starts serve
 ```
 
-On Workshop, the token for each pool: `~/.loom/bin/loom pool token box-strict --hours 720` (30 days, as the placer's token lasts). Every box of a pool may share its token; a new one replaces `~/.loom/serve-token` and is read at serve's next start. `~/.loom/pools.json` lists each pool once, by the name the boxes' `serve.conf` give it, with the pin as its `runner` and the boxes' worker names (as `loom pool status` shows them, the machine their started events give) as its `machines`.
+On Workshop, the token for each pool: `~/.loom/bin/loom pool token --hours 720 box-strict` (30 days, as the placer's token lasts). Every box of a pool may share its token; a new one replaces `~/.loom/serve-token` and is read at serve's next start. `~/.loom/pools.json` lists each pool once, by the name the boxes' `serve.conf` give it, with the pin as its `runner` and the boxes' worker names (as `loom pool status` shows them, the machine their started events give) as its `machines`.
 
 `loginctl enable-linger` (already on for the updater) keeps the unit running logged out. `systemctl --user status loom-serve` and `journalctl --user -u loom-serve` show it; `loom pool status <pool>` on Workshop shows each worker, when it last asked and what it took.
 
