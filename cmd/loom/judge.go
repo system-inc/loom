@@ -39,11 +39,12 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	once := flags.Bool("once", false, "pull once and exit")
 	dryRun := flags.Bool("dry-run", false, "judge and print each future's batch, posting nothing (before cutover, a posted green can land)")
 	postOnly := flags.String("post", "", "with --dry-run, post this one future's batch (its tree sha) and print the rest: the first live batch, on Loom's word")
+	postParity := flags.Bool("post-parity", false, "with --dry-run, post the batches of parity futures (which never land) and print the rest: the steady judge before cutover")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0) {
-		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree>]]")
+		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]]")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -101,12 +102,14 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
 		Loop:  judge.Loop{Now: time.Now},
 	}
-	if *postOnly != "" && !*dryRun {
-		fmt.Fprintln(stderr, "judge: --post names the one future to post while every other stays dry, so it needs --dry-run")
+	if (*postOnly != "" || *postParity) && !*dryRun {
+		fmt.Fprintln(stderr, "judge: --post and --post-parity name what posts while every other future stays dry, so they need --dry-run")
 		return 2
 	}
 	if *dryRun {
-		puller.Queue = scopedQueue{post: *postOnly, live: puller.Queue, dry: printedQueue{out: stdout}}
+		parity := parityFutures{source: puller.Source, trees: map[string]bool{}}
+		puller.Source = parity
+		puller.Queue = scopedQueue{post: *postOnly, parity: *postParity, trees: parity.trees, live: puller.Queue, dry: printedQueue{out: stdout}}
 	}
 	for runContext.Err() == nil {
 		count, err := puller.PullOnce()
@@ -144,17 +147,33 @@ func (queue printedQueue) PostVerdicts(future string, post judge.FuturePost) err
 	return err
 }
 
-// scopedQueue posts only the one named future's batch to Queue and prints every other, so the first live batch can be
-// one future Loom names while the rest stay dry.
+// scopedQueue posts the named future's batch (--post), or every parity future's (--post-parity), to Queue and prints
+// every other: a parity future never lands, so posting it can't move main before cutover.
 type scopedQueue struct {
-	post string
-	live judge.Queue
-	dry  judge.Queue
+	post   string
+	parity bool
+	trees  map[string]bool // the listed futures that are parity runs, as the listing said
+	live   judge.Queue
+	dry    judge.Queue
 }
 
 func (queue scopedQueue) PostVerdicts(future string, post judge.FuturePost) error {
-	if queue.post != "" && future == queue.post {
+	if (queue.post != "" && future == queue.post) || (queue.parity && queue.trees[future]) {
 		return queue.live.PostVerdicts(future, post)
 	}
 	return queue.dry.PostVerdicts(future, post)
+}
+
+// parityFutures notes which listed futures are parity runs, for scopedQueue.
+type parityFutures struct {
+	source judge.FutureSource
+	trees  map[string]bool
+}
+
+func (futures parityFutures) Planned() ([]judge.PlannedFuture, error) {
+	listed, err := futures.source.Planned()
+	for _, future := range listed {
+		futures.trees[future.Future] = future.Parity
+	}
+	return listed, err
 }

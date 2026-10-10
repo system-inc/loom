@@ -43,3 +43,29 @@ func TestPostSendsOnlyTheNamedFutureAndPrintsTheRest(t *testing.T) {
 		t.Fatalf("printed %q, want the other future only", out.String())
 	}
 }
+
+type fixedFutures []judge.PlannedFuture
+
+func (futures fixedFutures) Planned() ([]judge.PlannedFuture, error) { return futures, nil }
+
+func TestPostParityPostsOnlyParityFutures(t *testing.T) {
+	var out bytes.Buffer
+	parityTree, realTree := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	source := parityFutures{source: fixedFutures{{Future: parityTree, Parity: true}, {Future: realTree}}, trees: map[string]bool{}}
+	if _, err := source.Planned(); err != nil {
+		t.Fatal(err)
+	}
+	live := &keptQueue{}
+	queue := scopedQueue{parity: true, trees: source.trees, live: live, dry: printedQueue{out: &out}}
+	for _, future := range []string{parityTree, realTree} {
+		if err := queue.PostVerdicts(future, judge.FuturePost{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(live.futures) != 1 || live.futures[0] != parityTree {
+		t.Fatalf("posted %v, want the parity future alone", live.futures)
+	}
+	if !strings.Contains(out.String(), realTree) {
+		t.Fatalf("printed %q, want the real change's future kept dry", out.String())
+	}
+}

@@ -20,6 +20,7 @@ type PlannedFuture struct {
 	Future  string            `json:"future"`
 	Base    string            `json:"base"`
 	Attempt int               `json:"attempt"` // the run attempt to read; 0 is read as 1
+	Parity  bool              `json:"parity"`  // a parity run's future: tested on exactly its tree, never landed
 	Change  PlannedChange     `json:"change"`
 	Units   []PlannedUnitWire `json:"units"`
 }
