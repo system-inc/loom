@@ -232,6 +232,20 @@ class Tick(unittest.TestCase):
         finally:
             queue_bridge.landsHere = True
 
+    def test_once_judge_decides_every_future_the_bridge_only_carries_gits_facts(self):
+        queue_bridge.decidesHere = False
+        try:
+            submitted = [{"change": change, "sha": tree, "base": old, "paths": ["a.go"]}]
+            # Every lane today's gate decides: the fast gate (a record, or none yet to queue), docs and test-only.
+            for paths, record in ((["a.go"], {"ref": "gate-logs/r/fast", "status": "green", "gated": tree}), (["a.go"], None),
+                                  (["docs/a.md"], None), (["internal/x/a_test.go"], None)):
+                pipeline, gate = FakePipeline([future], unchecked=submitted, paths=paths), FakeGate(record)
+                queue_bridge.tick(pipeline, gate, memory())
+                self.assertEqual([path for path, body in pipeline.posts()], ["/submissions/%s/facts" % change])
+                self.assertEqual((gate.queued, getattr(gate, "checks", []), gate.requeued), ([], [], []))
+        finally:
+            queue_bridge.decidesHere = True
+
     def test_a_void_is_served_once_more_and_only_once(self):
         pipeline, held = FakePipeline([future]), memory()
         gate = FakeGate({"ref": "gate-logs/r1/fast", "status": "void", "gated": tree})

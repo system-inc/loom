@@ -23,6 +23,9 @@ suite: a change that touches only Markdown is posted passed under the docs rulin
 own testOnlyPattern) is posted passed under the test-only ruling and lands through push-main --test-only, whose lane
 checks (gofmt, t.Parallel, vet) refuse anything that isn't.
 
+Once Judge decides every future (slice 2), QUEUE_BRIDGE_DECIDES=0 turns step 1 and both lanes off, and the bridge only
+carries git's facts.
+
 The queue decides; this only carries. No credential that moves main lives in Cloudflare.
 
 usage: queuebridge/queue_bridge.py    (launchd com.loom.queue-bridge runs it every minute)
@@ -42,6 +45,9 @@ docsRule = "ruled-gate-docs-v0"
 # turns it back on).
 landsHere = os.environ.get("QUEUE_BRIDGE_LANDS", "0") == "1"
 docsRuling = "docs only: Markdown no product test reads (Loom, Oct 10 00:18Z)"
+# Whether today's gate still decides futures here. Off (QUEUE_BRIDGE_DECIDES=0) once Judge decides every future and
+# outside verdicts are refused (#xvvf6cn); git's facts keep posting either way.
+decidesHere = os.environ.get("QUEUE_BRIDGE_DECIDES", "1") == "1"
 
 
 # Main's own reds the judge has ruled, each by package and test pattern with its ruling. A red record whose every failing
@@ -284,16 +290,9 @@ def checked(gate, arguments, change):
     return code, reason
 
 
-def tick(pipeline, gate, memory):
-    """One pass: git's facts, verdicts for unplanned futures, then every landing order. memory holds what was done or said."""
-    status, unchecked = pipeline.call("GET", "/submissions?state=unchecked")
-    if status != 200:
-        log("submissions: %d %s" % (status, unchecked))
-        return
-    for submitted in unchecked["changes"]:
-        facts = gate.facts(submitted["sha"], submitted["base"])
-        status, answer = pipeline.call("POST", "/submissions/%s/facts" % submitted["change"], facts)
-        log("facts for %s: %d %s" % (submitted["change"], status, answer))
+def decide(pipeline, gate, memory):
+    """Today's gate's verdict for every unplanned future: the docs and test-only lanes by push-main's checks, the rest by
+    a fast record. Off (QUEUE_BRIDGE_DECIDES=0) once Judge decides every future."""
     status, listed = pipeline.call("GET", "/futures?state=unplanned")
     if status != 200:
         log("futures: %d %s" % (status, listed))
@@ -356,6 +355,21 @@ def tick(pipeline, gate, memory):
         if body["verdict"]["status"] == "void" and status == 200 and tree not in memory["requeued"]:
             memory["requeued"].append(tree)
             log("requeued %s after its void: %s" % (tree[:12], "started" if gate.requeue(tree) else "requeue.sh refused"))
+
+
+def tick(pipeline, gate, memory):
+    """One pass: git's facts, verdicts for unplanned futures, then every landing order. memory holds what was done or said."""
+    status, unchecked = pipeline.call("GET", "/submissions?state=unchecked")
+    if status != 200:
+        log("submissions: %d %s" % (status, unchecked))
+        return
+    for submitted in unchecked["changes"]:
+        facts = gate.facts(submitted["sha"], submitted["base"])
+        status, answer = pipeline.call("POST", "/submissions/%s/facts" % submitted["change"], facts)
+        log("facts for %s: %d %s" % (submitted["change"], status, answer))
+    # Once outside verdicts are refused, Judge decides every future and this only carries git's facts (#hkmzefm).
+    if decidesHere:
+        decide(pipeline, gate, memory)
     # Landing is the pusher's on workshop, with the lander key (#83m6zw8); this Mac lands only while it's asked to.
     if not landsHere:
         return
