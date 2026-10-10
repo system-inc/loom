@@ -73,6 +73,8 @@ const usage = `usage:
   loom gate-inputs check [--manifest-file <path>] [<name>]
   loom push [--config <push.conf>]
   loom push install
+  loom queue-bridge [--config <queue-bridge.conf>]
+  loom queue-bridge install
   loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--tailnet] [--public]
   loom house-cache install
 `
@@ -141,6 +143,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "push" {
 		return push(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "queue-bridge" {
+		return queueBridge(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "house-cache" {
 		return houseCache(arguments[1:], stdout, stderr)
