@@ -224,9 +224,13 @@ if [ -n "${gateInputs}" ]; then
 	export ADAMIC_GRAPHQL_PRETTIER=${inputs}/css-printer ADAMIC_JSON_PRETTIER=${inputs}/json-prettier
 	export ADAMIC_CSS_PRINTER_LIBRARY=${inputs}/css-printer ADAMIC_ESTREE_LIBRARY=${inputs}/css-printer
 	export ADAMIC_TS_PRETTIER=${inputs}/css-printer ADAMIC_YAML_LIBRARY=${inputs}/css-printer
-	export ADAMIC_GITIGNORE_LARGEST=${inputs}/gitignore/.gitignore ADAMIC_CLANG_TSGO_ARCHIVE=${inputs}/checker/tsgo.a
+	export ADAMIC_GITIGNORE_LARGEST=${inputs}/gitignore/.gitignore
 	export PATH="${ADAMIC_TYPESCRIPT_SOURCE}/bin:${PATH}"
 fi
+# The checker archive the tests link is the tree's own product, built from the bridge they compile against (#nee3cfe).
+# A box's env.sh may still export one it built from another tree for its own gate, and a tree that still reads it would
+# judge its bridge against that one, so none passes through.
+unset ADAMIC_CLANG_TSGO_ARCHIVE
 
 # Every Go module's dependencies from Go's public module proxy first: tests that build a nested module read any
 # "go: downloading" on stderr as a failure.

@@ -21,6 +21,7 @@ import (
 //	the trim not taking an earlier unit's staging: TestTheTrimTakesAKilledUnitsStaging
 //	no room check before the fetch, or one that counts only the floor: TestPrepareMakesRoomForBothSizesBeforeItFetches
 //	the tar's sha256 not checked against the job's name: TestPrepareChecksTheTarAgainstTheJobsName
+//	a box's ADAMIC_CLANG_TSGO_ARCHIVE passed through, or one pointed into the gate inputs: TestNoCheckerArchiveReachesTheTests
 
 // prepareTools skips a test on a machine without what a runner's prepare.sh uses: coreutils' sha256sum among them.
 func prepareTools(t *testing.T) {
@@ -65,7 +66,7 @@ func prepareSection(t *testing.T, fake *r2test.Fake) func(root, name string, env
 	text = text[:strings.Index(text, "if [ \"${1:-}\" = trim-only ]")]
 	return func(root, name string, environment ...string) (string, bool) {
 		command := exec.Command("bash", "-c", text+"\nroot=$1 gateInputs=$2 owner=shared\n"+section+
-			"\necho \"source=${ADAMIC_TYPESCRIPT_SOURCE}\"\n", "prepare", root, name)
+			"\necho \"source=${ADAMIC_TYPESCRIPT_SOURCE}\"\necho \"archive=${ADAMIC_CLANG_TSGO_ARCHIVE-unset}\"\n", "prepare", root, name)
 		command.Env = append(append(os.Environ(), "HOME="+t.TempDir()), environment...)
 		output, err := command.CombinedOutput()
 		return string(output), err == nil
@@ -101,6 +102,26 @@ func TestPrepareUnpacksWhatPublishWrote(t *testing.T) {
 	fake.Set(Prefix+chunk, append(held[:len(held)-1:len(held)-1], held[len(held)-1]^1), time.Now())
 	if output, ok := run(t.TempDir(), published.Name); ok || !strings.Contains(output, "gate inputs chunk "+chunk+" failed") {
 		t.Fatalf("a poisoned chunk: %v: %s", ok, output)
+	}
+}
+
+// The tests link the tree's own checker archive, a product (#nee3cfe): no archive reaches them by path, neither one in
+// the gate inputs nor one a box's env.sh still exports for its own gate, built from another tree.
+func TestNoCheckerArchiveReachesTheTests(t *testing.T) {
+	fake := r2test.New(t)
+	run := prepareSection(t, fake)
+	published, err := Publish(inputsFixture(t), 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, environment := range [][]string{nil, {"ADAMIC_CLANG_TSGO_ARCHIVE=/home/box/adamic-tools/gate-inputs/checker/tsgo.a"}} {
+		output, ok := run(t.TempDir(), published.Name, environment...)
+		if !ok {
+			t.Fatalf("prepare.sh: %s", output)
+		}
+		if !strings.Contains(output, "\narchive=unset\n") {
+			t.Fatalf("with %q, the tests would read a checker archive by path: %s", environment, output)
+		}
 	}
 }
 
