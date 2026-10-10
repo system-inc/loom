@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -230,6 +231,47 @@ func TestTopReadsStatusFilesTolerantly(t *testing.T) {
 	builds := readLedgerTail(reader.treeLedger, window)
 	if len(builds) != 2 || builds[0].Tree != "two" || builds[0].Event != treebuilder.Failed || builds[1].Tree != "one" {
 		t.Fatalf("the ledger's tail: %+v", builds)
+	}
+}
+
+// Only a terminal is one: a file, a pipe or a buffer isn't, so `loom top > f`, `| cat` and ssh without a terminal draw
+// one plain frame and exit instead of drawing forever. Mutant: a failed size ioctl taken as an 80 by 24 terminal.
+func TestTopOffATerminalDrawsOnceAndExits(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("HOME", directory)
+	file, _ := os.Create(filepath.Join(directory, "frame.txt"))
+	defer file.Close()
+	reading, writing, _ := os.Pipe()
+	defer reading.Close()
+	defer writing.Close()
+	for name, output := range map[string]io.Writer{"a file": file, "a pipe": writing, "a buffer": &strings.Builder{}} {
+		if _, isTerminal := openTerminal(output); isTerminal {
+			t.Fatalf("%s taken as a terminal", name)
+		}
+	}
+	exited := make(chan int, 1)
+	go func() {
+		exited <- top([]string{"--serve-root", filepath.Join(directory, "root"), "--trees", filepath.Join(directory, "trees"),
+			"--ledger", filepath.Join(directory, "trees.jsonl"), "--wire", "http://127.0.0.1:9", "--queue", "http://127.0.0.1:9"}, file, io.Discard)
+	}()
+	select {
+	case code := <-exited:
+		frame, _ := os.ReadFile(file.Name())
+		if code != 0 || strings.Count(string(frame), "\n") != 24 || strings.Contains(string(frame), "\033[") || !strings.Contains(string(frame), "no serve on this box") {
+			t.Fatalf("exit %d, frame:\n%q", code, frame)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("loom top into a file never exited")
+	}
+}
+
+// A background read that panics becomes the frame's note, and `loom top` goes on drawing with its terminal intact.
+// Mutant: no recover.
+func TestTopSurvivesAPanickingBackgroundRead(t *testing.T) {
+	reader := &topReader{serveRoot: t.TempDir(), treeCache: t.TempDir(), treeLedger: filepath.Join(t.TempDir(), "none"), poolNames: []string{"box-strict"}}
+	reader.safely(func() { panic("a pool answered something odd") })
+	if state := reader.fast(topNow); !strings.Contains(state.PoolsNote, "panicked") || !strings.Contains(state.PoolsNote, "a pool answered something odd") {
+		t.Fatalf("pools note %q", state.PoolsNote)
 	}
 }
 

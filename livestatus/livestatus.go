@@ -1,9 +1,9 @@
 // Package livestatus is what a Loom process on a box is doing right now, in a small file `loom top` reads: serve's
 // unit in hand, its totals and its recent units (ServePath), the runner's view of that unit (UnitPath: its phase, what
 // it fetched and from where, its tests so far), and Workshop's tree build in progress (TreePath). A Writer replaces
-// its file whole (a temporary file renamed over it), never more than once a second but for the one last write as it
-// closes, and keeps it under MaximumBytes; Read takes a missing, cut short or oversized file as an error, never a
-// crash. Nothing here is a record: a status lives only as long as the process writing it, which is why it carries its
+// its file whole (a temporary file renamed over it) from a goroutine of its own, never more than once a second but for
+// the one last write as it closes, and keeps it under MaximumBytes; Read takes a missing, cut short or oversized file
+// as an error, never a crash. Nothing here is a record: a status lives only as long as the process writing it, which is why it carries its
 // pid, and nothing reads it but a person's terminal.
 package livestatus
 
@@ -222,90 +222,154 @@ func bounded(status Status) Status {
 	return status
 }
 
-// A Writer keeps one status file. A nil Writer takes every call and writes nothing, so a process with no status file
-// needs no branch.
+// A Writer keeps one status file. Update only changes the status in memory and wakes the Writer's own goroutine, which
+// copies the status under the lock and writes it outside it, at most once a second: a stalled disk stalls that
+// goroutine alone, never a unit's tests or serve. A nil Writer takes every call and writes nothing, so a process with
+// no status file needs no branch.
 type Writer struct {
-	path    string
-	mutex   sync.Mutex
-	status  Status
-	written time.Time
-	dirty   bool
-	closed  bool
-	timer   *time.Timer
-	// now is the clock; tests move it.
-	now func() time.Time
-	// after schedules the next write; tests run it by hand.
-	after func(delay time.Duration, write func()) *time.Timer
+	path     string
+	mutex    sync.Mutex
+	status   Status
+	dirty    bool
+	closed   bool
+	wake     chan struct{}
+	done     chan struct{}
+	finished chan struct{}
 	// err is the last write's failure, for tests and the curious; a status that can't be written never stops its process.
 	err error
+	// write writes one status, spacing is the least time between two writes, and closeWait the longest Close waits for
+	// the last one; tests change them.
+	write     func(path string, status Status) error
+	spacing   time.Duration
+	closeWait time.Duration
 }
 
-// NewWriter starts a status file at path with status, stamped with this process's pid and the time, and writes it.
+// CloseWait is the longest Close waits for the last write, so a stalled disk never holds a unit's end.
+const CloseWait = 5 * time.Second
+
+// staleAfter is how old a temporary file beside a status must be before a new Writer takes it for a crashed write's.
+const staleAfter = time.Minute
+
+// NewWriter starts a status file at path with status, stamped with this process's pid and the time, and writes it as
+// soon as its goroutine can. A crashed writer's temporary files left beside it go.
 func NewWriter(path string, status Status) *Writer {
-	writer := &Writer{path: path, now: time.Now, after: time.AfterFunc}
-	return writer.start(status)
+	return newWriter(path, status, Write, MinimumSpacing, CloseWait)
 }
 
-func (writer *Writer) start(status Status) *Writer {
+func newWriter(path string, status Status, write func(path string, status Status) error, spacing, closeWait time.Duration) *Writer {
 	status.Pid = os.Getpid()
 	if status.StartedAt.IsZero() {
-		status.StartedAt = writer.now()
+		status.StartedAt = time.Now()
 	}
-	writer.status = status
-	writer.mutex.Lock()
-	writer.dirty = true
-	writer.writeLocked()
-	writer.mutex.Unlock()
+	sweepPartials(path, time.Now())
+	writer := &Writer{path: path, status: status, dirty: true, wake: make(chan struct{}, 1), done: make(chan struct{}),
+		finished: make(chan struct{}), write: write, spacing: spacing, closeWait: closeWait}
+	go writer.loop()
+	writer.signal()
 	return writer
 }
 
-// Update changes the status and writes it: now, when the last write is a second old, or else once that second is up.
+// sweepPartials removes the temporary files of path's status older than staleAfter: a write killed between its create
+// and its rename leaves one, and nothing else ever would. A younger one may be another writer's in flight.
+func sweepPartials(path string, now time.Time) {
+	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".partial-"+filepath.Base(path)+"-*"))
+	for _, match := range matches {
+		if info, err := os.Lstat(match); err == nil && info.Mode().IsRegular() && now.Sub(info.ModTime()) > staleAfter {
+			os.Remove(match)
+		}
+	}
+}
+
+// loop is the Writer's goroutine: each wake writes the status, once the last write is spacing old; Close's done writes
+// the last at once and ends it.
+func (writer *Writer) loop() {
+	defer close(writer.finished)
+	var written time.Time
+	for closing := false; !closing; {
+		select {
+		case <-writer.wake:
+		case <-writer.done:
+			closing = true
+		}
+		if wait := writer.spacing - time.Since(written); !closing && !written.IsZero() && wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+			case <-writer.done:
+				closing = true
+			}
+			timer.Stop()
+		}
+		if writer.flush() {
+			written = time.Now()
+		}
+	}
+}
+
+// flush writes the status if it changed since the last write: copied under the lock, written outside it.
+func (writer *Writer) flush() bool {
+	writer.mutex.Lock()
+	if !writer.dirty {
+		writer.mutex.Unlock()
+		return false
+	}
+	writer.status.UpdatedAt = time.Now()
+	status := copyStatus(writer.status)
+	writer.dirty = false
+	writer.mutex.Unlock()
+	err := writer.write(writer.path, status)
+	writer.mutex.Lock()
+	writer.err = err
+	writer.mutex.Unlock()
+	return true
+}
+
+func (writer *Writer) signal() {
+	select {
+	case writer.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Update changes the status in memory and wakes the goroutine that writes it; it never waits on the disk.
 func (writer *Writer) Update(change func(status *Status)) {
 	if writer == nil {
 		return
 	}
 	writer.mutex.Lock()
-	defer writer.mutex.Unlock()
 	if writer.closed {
+		writer.mutex.Unlock()
 		return
 	}
 	change(&writer.status)
 	writer.dirty = true
-	if wait := MinimumSpacing - writer.now().Sub(writer.written); wait > 0 {
-		if writer.timer == nil {
-			writer.timer = writer.after(wait, writer.scheduled)
-		}
-		return
-	}
-	writer.writeLocked()
+	writer.mutex.Unlock()
+	writer.signal()
 }
 
-// scheduled is the write a too-soon Update put off.
-func (writer *Writer) scheduled() {
-	writer.mutex.Lock()
-	defer writer.mutex.Unlock()
-	writer.timer = nil
-	if !writer.closed {
-		writer.writeLocked()
-	}
-}
-
-// Close writes the last status at once, if it changed since the last write, and writes nothing after.
+// Close writes the last status at once, if it changed since the last write, and nothing after; it waits for that write
+// no longer than closeWait.
 func (writer *Writer) Close() error {
 	if writer == nil {
 		return nil
 	}
 	writer.mutex.Lock()
-	defer writer.mutex.Unlock()
 	if writer.closed {
+		defer writer.mutex.Unlock()
 		return writer.err
 	}
 	writer.closed = true
-	if writer.timer != nil {
-		writer.timer.Stop()
-		writer.timer = nil
+	writer.mutex.Unlock()
+	close(writer.done)
+	timer := time.NewTimer(writer.closeWait)
+	defer timer.Stop()
+	select {
+	case <-writer.finished:
+	case <-timer.C:
+		return fmt.Errorf("the last write of %s is still running after %v", writer.path, writer.closeWait)
 	}
-	writer.writeLocked()
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
 	return writer.err
 }
 
@@ -316,24 +380,22 @@ func (writer *Writer) Status() Status {
 	}
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
-	status := writer.status
+	return copyStatus(writer.status)
+}
+
+// copyStatus is a status sharing nothing a later Update changes.
+func copyStatus(status Status) Status {
 	if status.Unit != nil {
 		unit := *status.Unit
 		unit.Fetches = append([]Fetch(nil), unit.Fetches...)
 		status.Unit = &unit
 	}
+	if status.Tree != nil {
+		tree := *status.Tree
+		status.Tree = &tree
+	}
 	status.Recent = append([]Recent(nil), status.Recent...)
 	return status
-}
-
-func (writer *Writer) writeLocked() {
-	if !writer.dirty {
-		return
-	}
-	writer.status.UpdatedAt = writer.now()
-	writer.err = Write(writer.path, writer.status)
-	writer.written = writer.now()
-	writer.dirty = false
 }
 
 // Write replaces the file at path with the status, bounded: a temporary file beside it, renamed over it, so a reader

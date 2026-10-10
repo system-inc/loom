@@ -66,6 +66,12 @@ func top(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	resized := make(chan os.Signal, 1)
 	signal.Notify(resized, syscall.SIGWINCH)
 	defer signal.Stop(resized)
+	// ^Z gives the terminal back before stopping; fg (or any continue) takes it again and redraws.
+	stopped, continued := make(chan os.Signal, 1), make(chan os.Signal, 1)
+	signal.Notify(stopped, syscall.SIGTSTP)
+	signal.Notify(continued, syscall.SIGCONT)
+	defer signal.Stop(stopped)
+	defer signal.Stop(continued)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -80,6 +86,12 @@ func top(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			if !open || key == 'q' || key == 'Q' || key == 3 {
 				return 0
 			}
+		case <-stopped:
+			terminal.suspend()
+			syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+			terminal.resume()
+		case <-continued:
+			terminal.resume()
 		case <-resized:
 		case <-ticker.C:
 		}

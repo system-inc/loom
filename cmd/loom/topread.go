@@ -150,6 +150,8 @@ type topReader struct {
 	units   []topUnit
 	pools   []topPool
 	queueAt *topQueue
+	// panicked says a background read panicked, shown in place of the pools' note.
+	panicked string
 }
 
 // newTopReader finds what this box holds: serve's root and settings, the tree builder's cache and ledger, and the
@@ -201,8 +203,11 @@ func (reader *topReader) fast(now time.Time) topState {
 	reader.mutex.Lock()
 	state.Caches, state.Units = reader.caches, reader.units
 	state.Pools, state.Queue = reader.pools, reader.queueAt
+	panicked := reader.panicked
 	reader.mutex.Unlock()
 	switch {
+	case panicked != "":
+		state.PoolsNote = panicked
 	case reader.tokenNote != "":
 		state.PoolsNote, state.QueueNote = reader.tokenNote, reader.tokenNote
 	case len(reader.poolNames) == 0:
@@ -550,11 +555,24 @@ func (reader *topReader) slow(readContext context.Context, caches, units, worker
 	}
 }
 
+// safely runs a background read, and a panic in it becomes the frame's note instead of ending `loom top` with the
+// terminal still raw: a panic outside the main goroutine runs none of its deferred restores.
+func (reader *topReader) safely(read func()) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			reader.mutex.Lock()
+			reader.panicked = fmt.Sprintf("a background read panicked, and the rest is still read: %v", recovered)
+			reader.mutex.Unlock()
+		}
+	}()
+	read()
+}
+
 // background keeps the slow part fresh until the context ends: the units and the Workers every 5 s, the caches every
 // 15 s.
 func (reader *topReader) background(readContext context.Context) {
 	for tick := 0; readContext.Err() == nil; tick++ {
-		reader.slow(readContext, tick%15 == 0, tick%5 == 0, tick%5 == 0)
+		reader.safely(func() { reader.slow(readContext, tick%15 == 0, tick%5 == 0, tick%5 == 0) })
 		select {
 		case <-readContext.Done():
 		case <-time.After(time.Second):

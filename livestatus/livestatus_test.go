@@ -102,62 +102,136 @@ func TestAStatusIsBounded(t *testing.T) {
 	}
 }
 
-// A writer writes at most once a second: an update within the second waits for it, every update in between lands in
-// that one write, and Close writes the last at once and nothing after. Mutants: every update written at once; the
-// put-off write never made; Close losing the last update.
+// A recordedWrite is one write a test's writer made: when, and the totals it wrote.
+type recordedWrite struct {
+	at    time.Time
+	units int
+}
+
+// recorder writes each status to its file and records it; with a gate, each write waits for the gate first, a stalled
+// disk.
+type recorder struct {
+	mutex  sync.Mutex
+	writes []recordedWrite
+	gate   chan struct{}
+}
+
+func (recorder *recorder) write(path string, status Status) error {
+	if recorder.gate != nil {
+		<-recorder.gate
+	}
+	recorder.mutex.Lock()
+	recorder.writes = append(recorder.writes, recordedWrite{at: time.Now(), units: status.Totals.Units})
+	recorder.mutex.Unlock()
+	return Write(path, status)
+}
+
+func (recorder *recorder) seen() []recordedWrite {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
+	return append([]recordedWrite(nil), recorder.writes...)
+}
+
+// A writer writes at most once per its spacing (a second, here 200 ms): updates within it wait, all of them landing in
+// the next write; Close writes the last at once and nothing is written after. Mutants: every update written at once;
+// the put-off write never made; Close losing the last update.
 func TestAWriterWritesAtMostOnceASecond(t *testing.T) {
 	path := ServePath(t.TempDir())
-	clock := time.Date(2026, 10, 10, 16, 0, 0, 0, time.UTC)
-	var scheduled []func()
-	writer := &Writer{path: path, now: func() time.Time { return clock }, after: func(delay time.Duration, write func()) *time.Timer {
-		if delay <= 0 || delay > MinimumSpacing {
-			t.Errorf("a write put off by %v", delay)
+	const spacing = 200 * time.Millisecond
+	recorder := &recorder{}
+	writer := newWriter(path, Status{Kind: KindServe, Worker: "home-000001"}, recorder.write, spacing, time.Second)
+	for units := 1; units <= 10; units++ {
+		writer.Update(func(status *Status) { status.Totals.Units = units })
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(3 * spacing)
+	writes := recorder.seen()
+	if len(writes) < 2 || len(writes) > 3 || writes[len(writes)-1].units != 10 {
+		t.Fatalf("%d writes for 11 updates in %v, the last of %d units", len(writes), 3*spacing, writes[len(writes)-1].units)
+	}
+	for index := 1; index < len(writes); index++ {
+		if gap := writes[index].at.Sub(writes[index-1].at); gap < spacing-10*time.Millisecond {
+			t.Fatalf("writes %d and %d %v apart", index-1, index, gap)
 		}
-		scheduled = append(scheduled, write)
-		return time.NewTimer(time.Hour)
-	}}
-	writer.start(Status{Kind: KindServe, Worker: "home-000001"})
-	units := func() int {
-		status, err := Read(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return status.Totals.Units
 	}
-	if status, _ := Read(path); status.Worker != "home-000001" || status.Pid != os.Getpid() {
-		t.Fatalf("the first status: %+v", status)
+	if status, err := Read(path); err != nil || status.Worker != "home-000001" || status.Pid != os.Getpid() || status.Totals.Units != 10 {
+		t.Fatalf("on disk: %+v %v", status, err)
 	}
-	clock = clock.Add(300 * time.Millisecond)
-	writer.Update(func(status *Status) { status.Totals.Units = 1 })
-	writer.Update(func(status *Status) { status.Totals.Units = 2 })
-	if units() != 0 || len(scheduled) != 1 {
-		t.Fatalf("within the second: %d units on disk, %d writes put off", units(), len(scheduled))
+	// 11 is written at once, its spacing passed; 12 comes within the next spacing, so only Close writes it.
+	writer.Update(func(status *Status) { status.Totals.Units = 11 })
+	time.Sleep(20 * time.Millisecond)
+	writer.Update(func(status *Status) { status.Totals.Units = 12 })
+	started := time.Now()
+	if err := writer.Close(); err != nil || time.Since(started) > spacing/2 {
+		t.Fatalf("Close: %v after %v", err, time.Since(started))
 	}
-	clock = clock.Add(700 * time.Millisecond)
-	scheduled[0]()
-	if units() != 2 {
-		t.Fatalf("the put-off write: %d units", units())
+	if status, _ := Read(path); status.Totals.Units != 12 {
+		t.Fatalf("closed with %d units on disk", status.Totals.Units)
 	}
-	clock = clock.Add(2 * time.Second)
-	writer.Update(func(status *Status) { status.Totals.Units = 3 })
-	if units() != 3 || len(scheduled) != 1 {
-		t.Fatalf("a second later: %d units, %d writes put off", units(), len(scheduled))
-	}
-	clock = clock.Add(100 * time.Millisecond)
-	writer.Update(func(status *Status) { status.Totals.Units = 4 })
-	if err := writer.Close(); err != nil || units() != 4 {
-		t.Fatalf("closed (%v): %d units", err, units())
-	}
-	writer.Update(func(status *Status) { status.Totals.Units = 5 })
-	scheduled[len(scheduled)-1]()
-	if units() != 4 {
-		t.Fatalf("after Close: %d units", units())
+	count := len(recorder.seen())
+	writer.Update(func(status *Status) { status.Totals.Units = 13 })
+	time.Sleep(2 * spacing)
+	if status, _ := Read(path); status.Totals.Units != 12 || len(recorder.seen()) != count || writer.Close() != nil {
+		t.Fatalf("after Close: %d units, %d writes", status.Totals.Units, len(recorder.seen()))
 	}
 	// A nil writer takes every call.
 	var none *Writer
 	none.Update(func(status *Status) { status.Totals.Units = 9 })
 	if none.Close() != nil || none.Status().Kind != "" {
 		t.Fatal("a nil writer")
+	}
+}
+
+// A stalled disk never holds an update: a hundred updates return while the write is stuck, the next write carries
+// the last of them, and Close gives up waiting after its bound, saying so. Mutant: the status written under the lock.
+func TestAStalledDiskNeverHoldsAnUpdate(t *testing.T) {
+	path := UnitPath(t.TempDir())
+	recorder := &recorder{gate: make(chan struct{})}
+	writer := newWriter(path, Status{Kind: KindUnit, Unit: &Unit{Run: "r", Unit: "u"}}, recorder.write, 10*time.Millisecond, 100*time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
+	updated := make(chan struct{})
+	go func() {
+		for units := 1; units <= 100; units++ {
+			writer.Update(func(status *Status) { status.Totals.Units = units })
+		}
+		close(updated)
+	}()
+	select {
+	case <-updated:
+	case <-time.After(2 * time.Second):
+		close(recorder.gate)
+		t.Fatal("updates waited on a stalled write")
+	}
+	started := time.Now()
+	if err := writer.Close(); err == nil || !strings.Contains(err.Error(), "still running") || time.Since(started) > time.Second {
+		t.Fatalf("Close on a stalled disk: %v after %v", err, time.Since(started))
+	}
+	close(recorder.gate)
+	time.Sleep(100 * time.Millisecond)
+	if status, err := Read(path); err != nil || status.Totals.Units != 100 {
+		t.Fatalf("once the disk came back: %+v %v", status, err)
+	}
+}
+
+// A new writer removes a crashed write's temporary file older than a minute beside its status, and leaves a younger
+// one, which may be another's write in flight, and another status's. Mutant: no sweep.
+func TestANewWriterSweepsStalePartials(t *testing.T) {
+	path := ServePath(t.TempDir())
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	stale := filepath.Join(filepath.Dir(path), ".partial-serve.json-111")
+	young := filepath.Join(filepath.Dir(path), ".partial-serve.json-222")
+	other := filepath.Join(filepath.Dir(path), ".partial-unit.json-333")
+	for _, partial := range []string{stale, young, other} {
+		os.WriteFile(partial, []byte(`{"kind":`), 0o644)
+	}
+	old := time.Now().Add(-2 * time.Minute)
+	os.Chtimes(stale, old, old)
+	os.Chtimes(other, old, old)
+	NewWriter(path, Status{Kind: KindServe}).Close()
+	for partial, kept := range map[string]bool{stale: false, young: true, other: true} {
+		if _, err := os.Stat(partial); (err == nil) != kept {
+			t.Errorf("%s: kept %v, want %v", filepath.Base(partial), err == nil, kept)
+		}
 	}
 }
 
