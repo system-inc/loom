@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Commands are the watcher's steps on Workshop: git in the configured clone, and the clone's own updater/publish.sh
@@ -27,9 +29,15 @@ func Commands(config Config, log io.Writer) Steps {
 		}
 		return strings.TrimSpace(stdout.String()), nil
 	}
+	// A script takes <out>/.release.lock itself (updater/release-lock.sh); run under the pass's own hold, it is handed
+	// that hold as its descriptor 3.
 	script := func(callContext context.Context, name string, arguments ...string) error {
 		command := exec.CommandContext(callContext, filepath.Join(config.Repository, "updater", name), arguments...)
 		command.Stdout, command.Stderr = log, log
+		if lock := held(callContext); lock != nil {
+			command.ExtraFiles = []*os.File{lock}
+			command.Env = append(os.Environ(), "LOOM_RELEASE_LOCK_FD=3")
+		}
 		if err := command.Run(); err != nil {
 			return fmt.Errorf("updater/%s %s: %w", name, strings.Join(arguments, " "), err)
 		}
@@ -67,7 +75,40 @@ func Commands(config Config, log io.Writer) Steps {
 		Upload: func(callContext context.Context) error {
 			return script(callContext, "upload.sh", config.Out, config.Destination)
 		},
+		Published: func(callContext context.Context) (Manifest, error) {
+			return FetchManifest(callContext, config.Base, true)
+		},
 	}
+}
+
+// FetchManifest is <base>/current.txt, what every box reads; fresh asks past any cache in front of the store.
+func FetchManifest(callContext context.Context, base string, fresh bool) (Manifest, error) {
+	location := strings.TrimSuffix(base, "/") + "/current.txt"
+	if fresh {
+		location += fmt.Sprintf("?read=%d", time.Now().UnixNano())
+	}
+	request, err := http.NewRequestWithContext(callContext, http.MethodGet, location, nil)
+	if err != nil {
+		return Manifest{}, err
+	}
+	request.Header.Set("Cache-Control", "no-cache")
+	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+	if err != nil {
+		return Manifest{}, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err == nil && response.StatusCode != http.StatusOK {
+		err = errors.New(response.Status)
+	}
+	if err != nil {
+		return Manifest{}, fmt.Errorf("%s/current.txt: %w", base, err)
+	}
+	manifest, err := ParseManifest(string(body))
+	if err != nil {
+		return Manifest{}, fmt.Errorf("%s/current.txt: %w", base, err)
+	}
+	return manifest, nil
 }
 
 // Promote makes the commit's own manifest, which publish.sh kept at manifests/<commit>.txt, the out directory's

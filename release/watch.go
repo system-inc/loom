@@ -49,6 +49,8 @@ type Steps struct {
 	Publish  func(context.Context, string, string) error         // publish.sh, with --canary <host> when one is given
 	Promote  func(string) error                                  // the commit's own manifest becomes current.txt
 	Upload   func(context.Context) error                         // upload.sh, blobs first and current.txt last
+	// Published is the current.txt the boxes read (<base>/current.txt), fetched past any cache.
+	Published func(context.Context) (Manifest, error)
 	// PoolSeen is when the host's serve last asked any pool it serves; nil leaves the pools unread.
 	PoolSeen func(context.Context, string) (time.Time, error)
 }
@@ -64,10 +66,11 @@ type Watcher struct {
 // ErrHeld is a pass that found another release holding the lock.
 var ErrHeld = errors.New("another release holds the lock")
 
-// Lock takes <out>/.release.lock without waiting, so two watchers (or a watcher and a person's rollback) never
-// publish at once: whoever holds it publishes, and anyone else's pass waits for the next. It returns the release. An out
-// directory that doesn't exist is refused, not made: the first release is published by hand (docs/updater.md).
-func Lock(out string) (func(), error) {
+// Lock takes <out>/.release.lock without waiting, so two watchers (or a watcher and a person's rollback, publish or
+// upload) never publish at once: whoever holds it publishes, and anyone else's pass waits for the next. It returns the
+// lock's file, whose Close releases it. An out directory that doesn't exist is refused, not made: the first release is
+// published by hand (docs/updater.md).
+func Lock(out string) (*os.File, error) {
 	path := filepath.Join(out, ".release.lock")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -80,7 +83,21 @@ func Lock(out string) (func(), error) {
 		}
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return func() { file.Close() }, nil
+	return file, nil
+}
+
+type heldKey struct{}
+
+// Holding is a context that carries the held lock to the steps, which hand it down to publish.sh and upload.sh: they
+// take the same lock themselves, and would otherwise find it held by the pass that runs them.
+func Holding(callContext context.Context, lock *os.File) context.Context {
+	return context.WithValue(callContext, heldKey{}, lock)
+}
+
+// held is the lock the context carries, or nil.
+func held(callContext context.Context) *os.File {
+	lock, _ := callContext.Value(heldKey{}).(*os.File)
+	return lock
 }
 
 func (watcher *Watcher) say(format string, arguments ...any) {
@@ -164,11 +181,12 @@ func short(commit string) string {
 // Tick is one pass: under the lock, it moves the release in hand on by at most one phase, or begins the branch's new
 // head. A pass that finds the lock held changes nothing and returns ErrHeld.
 func (watcher *Watcher) Tick(callContext context.Context) error {
-	unlock, err := Lock(watcher.Config.Out)
+	lock, err := Lock(watcher.Config.Out)
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer lock.Close()
+	callContext = Holding(callContext, lock)
 	state, err := ReadState(watcher.Config.State)
 	if err != nil {
 		return err
@@ -313,6 +331,15 @@ func describe(report *Report) string {
 	return text
 }
 
+// describeManifest is a manifest in a few words: the version every box follows, and the canary's.
+func describeManifest(manifest Manifest) string {
+	text := short(manifest.Top()) + " for every box"
+	if canary := manifest.CanaryVersion(); canary != "" {
+		text += fmt.Sprintf(", canary %s for %s", short(canary), strings.Join(manifest.Canary, ", "))
+	}
+	return text
+}
+
 // canary waits for the canary to report the release installed, its hooks passed and its services active.
 func (watcher *Watcher) canary(state *State) error {
 	report, err := watcher.heard(state, watcher.Config.Canary)
@@ -382,6 +409,26 @@ func (watcher *Watcher) soak(callContext context.Context, state *State) error {
 			watcher.stop(state, fmt.Sprintf("%s's serve isn't asking its pool: %s", canary, why))
 			return nil
 		}
+	}
+	// A person may have published by hand during the soak (a rollback is copying an older manifest over current.txt
+	// and uploading it): what they published stands, and the canary isn't promoted over it.
+	local, err := ReadPublished(watcher.Config.Out)
+	if err != nil {
+		return err
+	}
+	if local.CanaryVersion() != state.Commit {
+		watcher.stop(state, fmt.Sprintf("%s/current.txt no longer publishes the canary of %s (it reads %s); someone published by hand during the soak, and nothing is promoted over it",
+			watcher.Config.Out, short(state.Commit), describeManifest(local)))
+		return nil
+	}
+	remote, err := watcher.Steps.Published(callContext)
+	if err != nil {
+		return fmt.Errorf("reading what the boxes read before promoting %s: %w", short(state.Commit), err)
+	}
+	if remote.CanaryVersion() != state.Commit {
+		watcher.stop(state, fmt.Sprintf("%s/current.txt, what the boxes read, no longer publishes the canary of %s (it reads %s); someone published by hand during the soak, and nothing is promoted over it",
+			watcher.Config.Base, short(state.Commit), describeManifest(remote)))
+		return nil
 	}
 	if err := watcher.Steps.Promote(state.Commit); err != nil {
 		watcher.stop(state, "promoting: "+err.Error())
@@ -466,11 +513,12 @@ func (watcher *Watcher) Watch(callContext context.Context) {
 // host returns to it (its previous version, still on disk). It refuses while a release is moving, and when there is no
 // canary to end; rolling the whole fleet back is publishing an older manifest by hand (docs/updater.md).
 func Rollback(callContext context.Context, config Config, steps Steps, log io.Writer) error {
-	unlock, err := Lock(config.Out)
+	lock, err := Lock(config.Out)
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer lock.Close()
+	callContext = Holding(callContext, lock)
 	state, err := ReadState(config.State)
 	if err != nil {
 		return err
@@ -499,11 +547,11 @@ func Rollback(callContext context.Context, config Config, steps Steps, log io.Wr
 // Resume lets a stopped watcher release again once the canary is settled: the next new head releases, but the commit
 // that stopped it only with retry.
 func Resume(config Config, retry bool, log io.Writer) error {
-	unlock, err := Lock(config.Out)
+	lock, err := Lock(config.Out)
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer lock.Close()
 	state, err := ReadState(config.State)
 	if err != nil {
 		return err

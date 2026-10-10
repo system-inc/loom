@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -184,7 +183,7 @@ func releaseWatch(config release.Config, steps release.Steps, wire, home string,
 func releaseStatus(config release.Config, wire, home string, stdout, stderr io.Writer) int {
 	callContext, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	published, err := fetchManifest(callContext, config.Base)
+	published, err := release.FetchManifest(callContext, config.Base, false)
 	if err != nil {
 		fmt.Fprintf(stderr, "loom release status: %v\n", err)
 		return 3
@@ -209,29 +208,4 @@ func releaseStatus(config release.Config, wire, home string, stdout, stderr io.W
 		return 1
 	}
 	return 0
-}
-
-// fetchManifest is <base>/current.txt, what every box reads.
-func fetchManifest(callContext context.Context, base string) (release.Manifest, error) {
-	request, err := http.NewRequestWithContext(callContext, http.MethodGet, strings.TrimSuffix(base, "/")+"/current.txt", nil)
-	if err != nil {
-		return release.Manifest{}, err
-	}
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
-	if err != nil {
-		return release.Manifest{}, err
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err == nil && response.StatusCode != http.StatusOK {
-		err = errors.New(response.Status)
-	}
-	if err != nil {
-		return release.Manifest{}, fmt.Errorf("%s/current.txt: %w", base, err)
-	}
-	manifest, err := release.ParseManifest(string(body))
-	if err != nil {
-		return release.Manifest{}, fmt.Errorf("%s/current.txt: %w", base, err)
-	}
-	return manifest, nil
 }

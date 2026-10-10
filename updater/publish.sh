@@ -16,8 +16,12 @@
 # publish the out directory keeps the manifests current.txt names and the newest LOOM_PUBLISH_KEEP others (default
 # 10), and only the blobs those name; the rest go, file by file. LOOM_PUBLISH_PLATFORMS replaces the platforms
 # (default "linux/amd64 darwin/arm64").
+#
+# It holds <out>/.release.lock throughout (release-lock.sh), so it never runs beside the release watcher's pass or
+# another publish or upload, and refuses when the lock is held.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+. "${here}/release-lock.sh"
 usage() { echo "usage: updater/publish.sh [--canary <Host,Host>] <loom commit> <out directory>" >&2; exit 2; }
 canary=
 if [ "${1:-}" = --canary ]; then
@@ -36,6 +40,7 @@ commit=$(git -C "${repository}" rev-parse --verify --quiet "$1^{commit}") || { e
 out=$2
 mkdir -p "${out}/blobs" "${out}/manifests" || exit 1
 out=$(cd "${out}" && pwd)
+release_lock "${out}"
 [ -z "${canary}" ] || [ -f "${out}/current.txt" ] || { echo "publish: --canary keeps the published top section, and ${out}/current.txt doesn't exist" >&2; exit 1; }
 
 hash() {

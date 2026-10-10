@@ -50,7 +50,7 @@ STUB
 printf '#!/bin/bash\nSTUB_GO_VERSION=go1.27.0 exec %s "$@"\n' "${T}/bin/go" > "${T}/go-old"
 chmod +x "${T}/bin/go" "${T}/go-old"
 export PATH=${T}/bin:${PATH}
-cp "${here}/publish.sh" "${here}/upload.sh" "${T}/source/updater/"
+cp "${here}/publish.sh" "${here}/upload.sh" "${here}/release-lock.sh" "${T}/source/updater/"
 printf 'module github.com/system-inc/loom\n\ngo 1.27.0\n\ntoolchain go1.27.1\n' > "${T}/source/go.mod"
 git -C "${T}/source" init -q
 commit() { # commit <loom stamp> <runner stamp>: the source's new commit
@@ -396,6 +396,34 @@ check prune-keeps-newest '[ "$(ls ${T}/out/manifests)" = "${g}.txt" ] && [ ! -e 
 h=$(commit 8 8)
 LOOM_PUBLISH_KEEP=1 publish --canary Cloud "${h}"
 check prune-keeps-what-current-names '[ $(ls ${T}/out/manifests | wc -l) -eq 2 ] && [ -f ${T}/out/manifests/${g}.txt ] && [ -f ${T}/out/blobs/$(runnerOf ${g}) ] && [ -f ${T}/out/blobs/$(runnerOf ${h}) ]'
+
+# The release lock: publish.sh and upload.sh hold <out>/.release.lock, as the release watcher's pass does (an flock).
+# Held by another process, each refuses and changes nothing; handed down as LOOM_RELEASE_LOCK_FD, a descriptor on the
+# held lock, upload.sh runs under it; a descriptor open on another file is refused.
+perl -MFcntl=:flock -e 'open(my $lock, ">>", $ARGV[0]) or die; flock($lock, LOCK_EX) or die; open(my $ready, ">", $ARGV[1]) or die; close($ready);
+	select(undef, undef, undef, 0.1) until -e $ARGV[2]' "${T}/out/.release.lock" "${T}/locked" "${T}/unlock" &
+holder=$!
+for i in $(seq 1 100); do [ -e "${T}/locked" ] && break; sleep 0.1; done
+cp "${T}/out/current.txt" "${T}/current-before.txt"
+"${T}/source/updater/upload.sh" "${T}/out" "${T}/www2" > "${T}/run.log" 2>&1
+echo $? > "${T}/code"
+check upload-refuses-a-held-lock 'code 1 && grep -q "upload: .*/out/.release.lock is held" ${T}/run.log && [ ! -e ${T}/www2/current.txt ]'
+i=$(commit 9 9)
+"${T}/source/updater/publish.sh" "${i}" "${T}/out" > "${T}/run.log" 2>&1
+echo $? > "${T}/code"
+check publish-refuses-a-held-lock 'code 1 && grep -q "publish: .*/out/.release.lock is held" ${T}/run.log && [ ! -e ${T}/out/manifests/${i}.txt ] && cmp -s ${T}/out/current.txt ${T}/current-before.txt'
+touch "${T}/unlock"
+wait "${holder}"
+(
+	exec 8>> "${T}/out/.release.lock"
+	perl -MFcntl=:flock -e 'open(my $lock, ">>&=", 8) or exit 2; flock($lock, LOCK_EX | LOCK_NB) or exit 1' || exit 3
+	LOOM_RELEASE_LOCK_FD=8 "${T}/source/updater/upload.sh" "${T}/out" "${T}/www2"
+) > "${T}/run.log" 2>&1
+echo $? > "${T}/code"
+check upload-runs-under-a-handed-down-lock 'code 0 && cmp -s ${T}/www2/current.txt ${T}/out/current.txt'
+LOOM_RELEASE_LOCK_FD=8 "${T}/source/updater/upload.sh" "${T}/out" "${T}/www2" 8>> "${T}/elsewhere" > "${T}/run.log" 2>&1
+echo $? > "${T}/code"
+check upload-refuses-a-descriptor-on-another-file 'code 1 && grep -q "descriptor 8 (LOOM_RELEASE_LOCK_FD) isn.t open on" ${T}/run.log'
 
 # upload.sh to R2: a stub curl records each call's arguments and its standard input. Blobs go first, then the named
 # manifests, current.txt last; each URL is R2's S3 endpoint under the prefix, signed by curl, with its cache header;

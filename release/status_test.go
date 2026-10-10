@@ -347,6 +347,41 @@ func TestTheStepsOnWorkshop(t *testing.T) {
 	if err := steps.Promote(commit("d")); err == nil {
 		t.Fatal("promoted a manifest naming another commit")
 	}
+	// upload.sh takes <out>/.release.lock itself: run under a pass's hold, the hold is handed down and it uploads; run
+	// beside it, as a person runs it, it refuses and sends nothing.
+	os.MkdirAll(filepath.Join(clone, "updater"), 0o755)
+	for _, name := range []string{"upload.sh", "release-lock.sh"} {
+		content, err := os.ReadFile(filepath.Join("..", "updater", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(filepath.Join(clone, "updater", name), content, 0o755)
+	}
+	os.MkdirAll(filepath.Join(config.Out, "blobs"), 0o755)
+	for _, sha := range []string{strings.Repeat("1", 64), strings.Repeat("2", 64)} {
+		os.WriteFile(filepath.Join(config.Out, "blobs", sha), []byte(sha), 0o644)
+	}
+	config.Destination = filepath.Join(directory, "served")
+	var uploaded bytes.Buffer
+	steps = Commands(config, &uploaded)
+	lock, err := Lock(config.Out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beside, err := exec.Command(filepath.Join(clone, "updater", "upload.sh"), config.Out, config.Destination).CombinedOutput()
+	if err == nil || !strings.Contains(string(beside), ".release.lock is held") {
+		t.Fatalf("upload.sh beside a held lock: %v, %s", err, beside)
+	}
+	if _, err := os.Stat(filepath.Join(config.Destination, "current.txt")); err == nil {
+		t.Fatal("upload.sh beside a held lock sent current.txt")
+	}
+	if err := steps.Upload(Holding(context.Background(), lock)); err != nil {
+		t.Fatalf("upload.sh under the pass's own hold: %v\n%s", err, uploaded.String())
+	}
+	if content, _ := os.ReadFile(filepath.Join(config.Destination, "current.txt")); string(content) != manifestOf(commit("b")) {
+		t.Fatalf("uploaded current.txt:\n%s", content)
+	}
+	lock.Close()
 }
 
 // install does nothing where release.conf doesn't exist; where it does, it writes the hook, the probe and the unit,
