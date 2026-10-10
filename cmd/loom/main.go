@@ -69,7 +69,7 @@ const usage = `usage:
   loom store-audit [--r2 <key file>]
   loom build-tree --tree <dir> [--r2 <key file>] [--future <sha>] [--tree-key <key>] [--jobs N]
   loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--r2 <key file>] [--once]
-  loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--dry-run]
+  loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--lifecycle-unchecked] [--dry-run]
   loom gate-inputs check [--manifest-file <path>] [<name>]
 `
 

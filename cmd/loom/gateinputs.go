@@ -23,17 +23,17 @@ func gateInputsDefaults() (directory, manifestFile string) {
 // gateInputs publishes the gate inputs (Workshop, after the directory changes) or checks the published ones
 // (gateinputs/gateinputs.go):
 //
-//	loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--bucket <name>] [--read <url>] [--dry-run]
+//	loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--bucket <name>] [--read <url>] [--lifecycle-unchecked] [--dry-run]
 //	loom gate-inputs check [--manifest-file <path>] [--read <url>] [<name>]
 //
 // publish names the directory by its deterministic tar, writes its chunks and manifest under gate-inputs/ in the
 // bucket (nothing when that name is already whole there, and otherwise each only if missing), reads the manifest back
 // from the public domain, and only then writes the name to the manifest file, which the planner rereads before every
 // pull. It refuses a bucket whose lifecycle would expire
-// gate-inputs/, and says so when its key may not read the lifecycle. --dry-run packs and prints the name, and
+// gate-inputs/, and one it may not read the lifecycle of unless --lifecycle-unchecked says that was looked at otherwise. --dry-run packs and prints the name, and
 // writes nothing anywhere. check reads a manifest back as a runner would and exits 1 when it isn't whole.
 func gateInputs(arguments []string, stdout io.Writer, stderr io.Writer) int {
-	usage := "usage: loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--bucket <name>] [--read <url>] [--dry-run]\n" +
+	usage := "usage: loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--bucket <name>] [--read <url>] [--lifecycle-unchecked] [--dry-run]\n" +
 		"       loom gate-inputs check [--manifest-file <path>] [--read <url>] [<name>]"
 	if len(arguments) == 0 {
 		fmt.Fprintln(stderr, usage)
@@ -46,7 +46,8 @@ func gateInputs(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	switch arguments[0] {
 	case "publish":
 		directory := flags.String("dir", defaultDirectory, "the gate inputs' directory, as a box's env.sh names it")
-		dryRun := flags.Bool("dry-run", false, "pack and print the manifest's sha256; write nothing")
+		dryRun := flags.Bool("dry-run", false, "pack and print the name; write nothing")
+		lifecycleUnchecked := flags.Bool("lifecycle-unchecked", false, "publish though the key may not read the bucket's lifecycle, so nothing shows gate-inputs/ never expires")
 		storeFlags := addStoreFlags(flags)
 		if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() != 0 {
 			fmt.Fprintln(stderr, usage)
@@ -70,7 +71,7 @@ func gateInputs(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "gate-inputs publish:", err)
 			return 1
 		}
-		return publishGateInputs(*directory, *manifestFile, *store.Bucket, store.Read, stdout, stderr)
+		return publishGateInputs(*directory, *manifestFile, *store.Bucket, store.Read, *lifecycleUnchecked, stdout, stderr)
 	case "check":
 		read := flags.String("read", builder.PublicRead, "the public store, read direct")
 		if err := flags.Parse(arguments[1:]); err != nil || flags.NArg() > 1 {
@@ -98,11 +99,14 @@ func gateInputs(arguments []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 // publishGateInputs is publish past its flags: the lifecycle checked, the directory published, the file written last.
-func publishGateInputs(directory, manifestFile string, bucket r2.Bucket, read string, stdout, stderr io.Writer) int {
+func publishGateInputs(directory, manifestFile string, bucket r2.Bucket, read string, lifecycleUnchecked bool, stdout, stderr io.Writer) int {
 	rules, err := bucket.Lifecycle()
 	switch {
+	case errors.Is(err, r2.ErrLifecycleUnreadable) && !lifecycleUnchecked:
+		fmt.Fprintf(stderr, "gate-inputs publish: this key may not read the bucket's lifecycle, so nothing shows %s never expires, which is how the manifest of Oct 8 was lost: nothing published (read the lifecycle with a key that may, then pass --lifecycle-unchecked)\n", gateinputs.Prefix)
+		return 1
 	case errors.Is(err, r2.ErrLifecycleUnreadable):
-		fmt.Fprintf(stderr, "gate-inputs publish: this key may not read the bucket's lifecycle, so that %s never expires is unchecked\n", gateinputs.Prefix)
+		fmt.Fprintf(stderr, "gate-inputs publish: --lifecycle-unchecked: this key may not read the bucket's lifecycle, so that %s never expires is unchecked\n", gateinputs.Prefix)
 	case err != nil:
 		fmt.Fprintln(stderr, "gate-inputs publish:", err)
 		return 1

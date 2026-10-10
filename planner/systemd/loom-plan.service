@@ -7,8 +7,8 @@
 #
 # Token: ~/.loom/planner-token, scope coordinator, run "planner", read once at start: a re-minted token needs a restart.
 # Reads: ~/.loom/runner-pin (re-read every pull, the pool's runner sha256 in every test key); ~/.loom/gate-inputs-manifest
-# (re-read every pull, the gate inputs' name `loom gate-inputs publish` writes, checked once in the public
-# store's gate-inputs/: without it, or with a manifest the store doesn't hold whole, nothing is planned); ~/.loom/pools.json; ~/.loom/no-reuse
+# (re-read every pull, the gate inputs' name `loom gate-inputs publish` writes, checked in the public
+# store's gate-inputs/ at first and every hour: without it, or with a manifest the store doesn't hold whole, nothing is planned); ~/.loom/pools.json; ~/.loom/no-reuse
 # (optional); the clone ~/loom-planner/adamic (checked out per future, submodules over https); the gate tools
 # ~/loom-planner/tools, moved to origin's loom/planner-reads before every pull. Calls https://loom.system.inc and GitHub
 # over https. run.py (phase units) needs python3.

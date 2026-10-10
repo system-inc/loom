@@ -29,6 +29,7 @@ import (
 //	TestTheNameIsTheTarsSoACompressionChangeMovesNoKey
 //	a held manifest kept over its missing chunks: TestPublishReplacesAManifestWhoseChunksAreGone
 //	a Pin reading its file once, or keying on a manifest it didn't check: TestAPinRereadsItsFileAndChecksEachManifestOnce
+//	a Pin trusting a check forever, or a failed check: TestAPinChecksItsManifestAgainEveryHour
 //	HomeExpires missing a whole-bucket rule, or a rule on a key under the prefix: TestHomeExpiresNamesEveryRuleThatReachesThePrefix
 
 // git runs git in directory with no configuration but a fixed identity and times, and fails the test on an error.
@@ -437,5 +438,40 @@ func TestParseManifestRefusesAnythingElse(t *testing.T) {
 		if _, err := ParseManifest([]byte(bad)); err == nil {
 			t.Errorf("read %q", bad)
 		}
+	}
+}
+
+// A pin trusts a check for an hour and no longer: a chunk that goes missing (deleted by hand, or a lifecycle rule
+// added after the publish) stops the planning at the next check, and a manifest made whole again is taken again.
+func TestAPinChecksItsManifestAgainEveryHour(t *testing.T) {
+	fake := r2test.New(t)
+	published, err := Publish(inputsFixture(t), 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "gate-inputs-manifest")
+	WriteFile(file, published.Name)
+	now := time.Date(2026, 10, 10, 16, 0, 0, 0, time.UTC)
+	pin := &Pin{File: file, Read: fake.Public(), Client: fake.Server.Client(), Now: func() time.Time { return now }}
+	if _, _, err := pin.Current(); err != nil {
+		t.Fatal(err)
+	}
+	chunk := published.Manifest.Chunks[0]
+	held, _ := fake.Object(Prefix + chunk)
+	fake.Delete(Prefix + chunk)
+	now = now.Add(59 * time.Minute)
+	if _, _, err := pin.Current(); err != nil {
+		t.Fatalf("within the hour: %v", err)
+	}
+	now = now.Add(time.Minute)
+	if hash, _, err := pin.Current(); err == nil {
+		t.Fatalf("an hour on, a manifest missing chunk %.12s was keyed on: %s", chunk, hash)
+	}
+	if hash, _, err := pin.Current(); err == nil {
+		t.Fatalf("the pull after a failed check keyed on %s", hash)
+	}
+	fake.Set(Prefix+chunk, held, now)
+	if _, _, err := pin.Current(); err != nil {
+		t.Fatalf("made whole again: %v", err)
 	}
 }

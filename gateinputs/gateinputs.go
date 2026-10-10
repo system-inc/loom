@@ -463,37 +463,52 @@ func WriteFile(path, hash string) error {
 	return os.Rename(partial, path)
 }
 
+// RecheckEvery is how long a Pin trusts a check of the manifest it names before it checks it again.
+const RecheckEvery = time.Hour
+
 // A Pin is the planner's gate inputs: File, reread before every pull, so a publish reaches the next plan without a
-// restart, and each manifest it names checked once in the public domain, Read, before any unit is keyed on it.
+// restart, and the manifest it names checked in the public domain, Read, before any unit is keyed on it and again
+// every Every (RecheckEvery when zero), so a chunk that goes missing stops the planning within the hour. Now is the
+// clock (nil means time.Now).
 type Pin struct {
 	File    string
 	Read    string
 	Client  *http.Client
+	Every   time.Duration
+	Now     func() time.Time
 	current string
-	checked map[string]bool
+	checked map[string]time.Time
 }
 
-// Last is the manifest Current last returned, empty before the first.
+// Last is the name Current last returned, empty before the first.
 func (pin *Pin) Last() string {
 	return pin.current
 }
 
-// Current is the manifest File names, checked; moved says it differs from the one Current last returned. A file
-// that doesn't hold a sha256, or a manifest the public domain doesn't hold whole, is an error, and the pull that asked
-// keys nothing on it.
+// Current is the name File holds, checked; moved says it differs from the one Current last returned. A file that
+// doesn't hold a sha256, or a name whose manifest the public domain doesn't hold whole, is an error, and the pull that
+// asked keys nothing on it.
 func (pin *Pin) Current() (string, bool, error) {
 	hash, err := ReadFile(pin.File)
 	if err != nil {
 		return "", false, err
 	}
-	if !pin.checked[hash] {
+	now, every := time.Now(), pin.Every
+	if pin.Now != nil {
+		now = pin.Now()
+	}
+	if every <= 0 {
+		every = RecheckEvery
+	}
+	if checked, found := pin.checked[hash]; !found || now.Sub(checked) >= every {
 		if _, err := Check(pin.Read, pin.Client, hash); err != nil {
+			delete(pin.checked, hash)
 			return "", false, fmt.Errorf("the gate inputs %s names: %w", pin.File, err)
 		}
 		if pin.checked == nil {
-			pin.checked = map[string]bool{}
+			pin.checked = map[string]time.Time{}
 		}
-		pin.checked[hash] = true
+		pin.checked[hash] = now
 	}
 	moved := pin.current != "" && pin.current != hash
 	pin.current = hash

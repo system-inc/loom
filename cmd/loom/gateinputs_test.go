@@ -13,9 +13,10 @@ import (
 )
 
 // publish refuses a bucket whose lifecycle would expire gate-inputs/, writing nothing (the Oct 8 manifest lived in
-// blobs/ and was gone in 7 days); publishes, saying so, when its key may not read the lifecycle; and writes the
-// planner's manifest file only after the manifest reads back, and again on a republish that moved it.
-// Mutants that each fail it: the lifecycle check dropped; the file written before Publish; the move not said.
+// blobs/ and was gone in 7 days); refuses a bucket whose lifecycle its key may not read, unless --lifecycle-unchecked
+// says so, and then publishes saying so; and writes the planner's manifest file only after the manifest reads back,
+// and again on a republish that moved it. Mutants that each fail it: the lifecycle check dropped; an unreadable
+// lifecycle published past without the flag; the move not said.
 func TestPublishRefusesAnExpiringHomeAndWritesTheFileLast(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "gate-inputs")
 	os.MkdirAll(filepath.Join(directory, "css"), 0o755)
@@ -24,7 +25,7 @@ func TestPublishRefusesAnExpiringHomeAndWritesTheFileLast(t *testing.T) {
 	fake := r2test.New(t)
 	fake.Lifecycle = `<LifecycleConfiguration><Rule><ID>all</ID><Status>Enabled</Status><Filter></Filter><Expiration><Days>7</Days></Expiration></Rule></LifecycleConfiguration>`
 	var stdout, stderr bytes.Buffer
-	if code := publishGateInputs(directory, manifestFile, fake.Bucket(), fake.Public(), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), `rule "all"`) {
+	if code := publishGateInputs(directory, manifestFile, fake.Bucket(), fake.Public(), true, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), `rule "all"`) {
 		t.Fatalf("an expiring home: %d %q", code, stderr.String())
 	}
 	if keys := fake.Keys(""); len(keys) != 0 {
@@ -36,7 +37,14 @@ func TestPublishRefusesAnExpiringHomeAndWritesTheFileLast(t *testing.T) {
 	fake.Lifecycle, fake.LifecycleStatus = "", http.StatusForbidden
 	stdout.Reset()
 	stderr.Reset()
-	if code := publishGateInputs(directory, manifestFile, fake.Bucket(), fake.Public(), &stdout, &stderr); code != 0 || !strings.Contains(stderr.String(), "unchecked") {
+	if code := publishGateInputs(directory, manifestFile, fake.Bucket(), fake.Public(), false, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "--lifecycle-unchecked") {
+		t.Fatalf("an unreadable lifecycle: %d %q", code, stderr.String())
+	}
+	if keys := fake.Keys(""); len(keys) != 0 {
+		t.Fatalf("an unreadable lifecycle was published past: %v", keys)
+	}
+	stderr.Reset()
+	if code := publishGateInputs(directory, manifestFile, fake.Bucket(), fake.Public(), true, &stdout, &stderr); code != 0 || !strings.Contains(stderr.String(), "unchecked") {
 		t.Fatalf("an unreadable lifecycle: %d %q %q", code, stdout.String(), stderr.String())
 	}
 	first, err := gateinputs.ReadFile(manifestFile)
@@ -50,7 +58,7 @@ func TestPublishRefusesAnExpiringHomeAndWritesTheFileLast(t *testing.T) {
 	fake.LifecycleStatus = 0
 	stdout.Reset()
 	stderr.Reset()
-	if code := publishGateInputs(directory, manifestFile, fake.Bucket(), fake.Public(), &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "moved from "+first[:12]) || stderr.Len() != 0 {
+	if code := publishGateInputs(directory, manifestFile, fake.Bucket(), fake.Public(), false, &stdout, &stderr); code != 0 || !strings.Contains(stdout.String(), "moved from "+first[:12]) || stderr.Len() != 0 {
 		t.Fatalf("a republish that moved: %d %q %q", code, stdout.String(), stderr.String())
 	}
 	if second, _ := gateinputs.ReadFile(manifestFile); second == first {
