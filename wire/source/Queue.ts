@@ -202,6 +202,9 @@ export interface UnitEntry {
     reused: string | null;
     // What the unit needs to be placed (Planner, from cloud/fast-gate/unit-needs.json): placement only, never in the key.
     resources: Resources | null;
+    // The tree key of Workshop's build of the future's tree, which a test or product unit runs (Planner, #w7agfa9):
+    // placement only, never in the key.
+    tree: string | null;
     verdict: UnitVerdict | null;
 }
 
@@ -727,6 +730,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
                 decision: event.data.decision as UnitEntry['decision'],
                 reused: (event.data.reused ?? null) as string | null,
                 resources: (event.data.resources ?? null) as Resources | null,
+                tree: (event.data.tree ?? null) as string | null,
                 // The same key is the same verdict, so a reused one decides this tree too.
                 verdict: reused === null ? null : { ...reused, future: future.tree },
             });
@@ -944,6 +948,7 @@ export interface PlannedUnit {
     reason: string;
     reused: string | null;
     resources: Resources | null;
+    tree: string | null;
 }
 
 function isResources(value: unknown): value is Resources {
@@ -992,6 +997,12 @@ export async function checkPlan(body: string): Promise<PlannedUnit[] | { reason:
         if (item.resources !== undefined && item.resources !== null && !isResources(item.resources)) {
             return `unit ${item.name}'s resources is {memoryMegabytes, cpus}, each a positive whole number`;
         }
+        if (item.tree !== undefined && item.tree !== null && (typeof item.tree !== 'string' || !hashPattern.test(item.tree))) {
+            return `unit ${item.name}'s tree is a tree key, 64 lowercase hex digits`;
+        }
+        if (typeof item.tree === 'string' && item.keyParts.kind !== 'test' && item.keyParts.kind !== 'product') {
+            return `unit ${item.name} is a ${String(item.keyParts.kind)} unit, and only a test or product unit runs its tree's build`;
+        }
         if (names.has(item.name) || keys.has(item.unitKey)) {
             return `unit ${item.name} is planned twice`;
         }
@@ -1009,6 +1020,7 @@ export async function checkPlan(body: string): Promise<PlannedUnit[] | { reason:
             reason: typeof item.reason === 'string' ? item.reason : '',
             reused: typeof item.reused === 'string' ? item.reused : null,
             resources: isResources(item.resources) ? { memoryMegabytes: item.resources.memoryMegabytes, cpus: item.resources.cpus } : null,
+            tree: typeof item.tree === 'string' ? item.tree : null,
         });
     }
     return units;
@@ -1806,6 +1818,7 @@ export class Queue extends DurableObject<Env> {
                         reused: unit.reused,
                         verdict: reused,
                         ...(unit.resources === null ? {} : { resources: unit.resources }),
+                        ...(unit.tree === null ? {} : { tree: unit.tree }),
                     },
                 );
             }
@@ -2131,6 +2144,7 @@ export class Queue extends DurableObject<Env> {
                             decision: unit.decision,
                             reused: unit.reused,
                             ...(unit.resources === null ? {} : { resources: unit.resources }),
+                            ...(unit.tree === null ? {} : { tree: unit.tree }),
                         };
                     }),
                 };

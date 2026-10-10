@@ -48,6 +48,9 @@ type PlannedUnitWire struct {
 	// Resources is the unit's declared need (Planner's unit-needs), placement only, outside the key: a rerun alone is
 	// placed by it as the first placement was, or it lands on a tier that can't hold it.
 	Resources protocol.Resources `json:"resources"`
+	// Tree is the tree key of Workshop's build of the future's tree (planner.PlannedResult.Tree), on a test or product
+	// unit: what the placer names on its job, and what `loom build-trees` builds. Empty: the plan carried none.
+	Tree string `json:"tree,omitempty"`
 }
 
 // FutureSource lists the futures waiting for a verdict.

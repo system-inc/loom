@@ -903,6 +903,29 @@ describe("a plan's resources", function () {
     });
 });
 
+describe("a plan's tree key", function () {
+    it('rides from a test unit of the plan to unit.planned and the planned listing, placement only, and a plan without one replays the same', async function () {
+        const queue = await freshQueue();
+        await submit(queue, change(72));
+        const units = await planOf(['a', 'b']);
+        const tree = 'f'.repeat(64);
+        expect((await postPlan(queue, sha(72), [{ ...units[0], tree: 'F'.repeat(64) }, units[1]])).status).toBe(422);
+        expect((await postPlan(queue, sha(72), [{ ...units[0], tree: tree.slice(1) }, units[1]])).status).toBe(422);
+        const phase = { kind: 'phase', package: 'github.com/system-inc/adamic', select: { run: 'vet', skip: '' }, gateTools: 'a'.repeat(40) };
+        const phaseUnit = { name: 'phase:vet', unitKey: await unitKeyOf(phase), keyParts: phase, decision: 'run', reason: 'phase', tree: tree };
+        expect((await postPlan(queue, sha(72), [units[0], phaseUnit])).status).toBe(422);
+        expect((await postPlan(queue, sha(72), [{ ...units[0], tree: tree }, units[1]])).status).toBe(200);
+        const listed = (await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: { units: Record<string, unknown>[] }[] };
+        expect(listed.futures[0]?.units[0]).toMatchObject({ unitKey: units[0]?.unitKey, tree: tree });
+        expect(listed.futures[0]?.units[1]).not.toHaveProperty('tree');
+        const log = await logOf(queue);
+        const replayed = await replay(log);
+        expect(replayed.head).toBe((await (await queue.fetch('https://queue/head')).json() as { head: string }).head);
+        expect(replayed.futures.get(sha(72))?.units?.get(units[0]?.unitKey ?? '')?.tree).toBe(tree);
+        expect(replayed.futures.get(sha(72))?.units?.get(units[1]?.unitKey ?? '')?.tree).toBe(null);
+    });
+});
+
 describe('a withdrawn plan', function () {
     it('goes back to the planner while nothing judged it, logged with who and why, and never after a verdict', async function () {
         const queue = await freshQueue();
@@ -1099,7 +1122,7 @@ describe('a landing order', function () {
             const units = new Map(
                 verdicts.map(function (verdict, index) {
                     const key = String(index).repeat(64);
-                    return [key, { unitKey: key, name: `u${index}`, keyParts: {}, decision: 'run' as const, reused: null, resources: null, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
+                    return [key, { unitKey: key, name: `u${index}`, keyParts: {}, decision: 'run' as const, reused: null, resources: null, tree: null, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
                 }),
             );
             return { tree: sha(1), base: main, changes: [], units: units, empty: null, whole: null, decided: { run: 'r', status: 'green' }, voids: 0, judged: true };
