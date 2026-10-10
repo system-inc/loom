@@ -85,8 +85,11 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 		"self need":         func(j *Job) { j.Units[0].Needs = []string{"a"} },
 		"unknown toolchain": func(j *Job) { j.Units[0].Requires = []string{"wasi-sdk"} },
 		"unknown kind":      func(j *Job) { j.Units[0].Kind = "lint" },
-		"a test over 90 s": func(j *Job) {
-			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "test", 91
+		"a test over 15 minutes": func(j *Job) {
+			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "test", 901
+		},
+		"a build over 15 minutes": func(j *Job) {
+			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "build", 901
 		},
 		"a product over 600 s": func(j *Job) {
 			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "product", 601
@@ -130,6 +133,10 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 	phase.Units[0].Test = &TestJob{Repository: AdamicRepository, Sha: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), Phase: "wasi fixture-07", Tools: strings.Repeat("e", 40)}
 	if _, err := Expand(phase); err != nil {
 		t.Fatalf("a phase job of kind phase is refused: %v", err)
+	}
+	// A test or build unit runs to the build law's 15 minutes, never killed at 90 s for being slow (Kirk, Oct 10).
+	if KindCeilings["test"] != 900 || KindCeilings["build"] != 900 {
+		t.Fatalf("a test unit's ceiling is %d s and a build's %d s, want the 900 s hang ceiling", KindCeilings["test"], KindCeilings["build"])
 	}
 	// Each kind at its ceiling exactly is taken; one second over is refused above.
 	for kind, ceiling := range KindCeilings {
