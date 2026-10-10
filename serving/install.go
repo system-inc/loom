@@ -175,11 +175,11 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := writeChanged(paths.Hook, hookText, 0o755); err != nil {
+	if _, err := WriteChanged(paths.Hook, hookText, 0o755); err != nil {
 		return fmt.Errorf("the updater's hook: %w", err)
 	}
 	unit := Unit(config, worker)
-	changed, err := writeChanged(filepath.Join(paths.Units, UnitName), unit, 0o644)
+	changed, err := WriteChanged(filepath.Join(paths.Units, UnitName), unit, 0o644)
 	if err != nil {
 		return err
 	}
@@ -216,7 +216,7 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 
 // writeChanged writes content to path, beside it first and renamed over it so nothing reads half of it, unless path
 // already holds exactly that. It says whether it wrote.
-func writeChanged(path, content string, mode os.FileMode) (bool, error) {
+func WriteChanged(path, content string, mode os.FileMode) (bool, error) {
 	if held, err := os.ReadFile(path); err == nil && string(held) == content {
 		return false, nil
 	}

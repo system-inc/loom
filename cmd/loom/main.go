@@ -71,6 +71,8 @@ const usage = `usage:
   loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--r2 <key file>] [--once]
   loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--lifecycle-unchecked] [--dry-run]
   loom gate-inputs check [--manifest-file <path>] [<name>]
+  loom push [--config <push.conf>]
+  loom push install
 `
 
 func main() {
@@ -134,6 +136,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "gate-inputs" {
 		return gateInputs(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "push" {
+		return push(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "publish-token" {
 		return publishToken(arguments[1:], stdout, stderr)

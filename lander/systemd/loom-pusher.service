@@ -1,0 +1,27 @@
+# The lander's hands on Workshop (#83m6zw8, #nvq0tc8): one pass of `loom push` (cmd/loom/push.go, package lander),
+# which builds any block the queue opened, then fast-forwards the target branch (push.conf's branch, main unless it
+# names another) to each landing order's exact tested sha with the lander key (Host github-lander). Run by
+# loom-pusher.timer every 30 s. A pass that holds an order (GitHub's rules or the key refused it, or git failed) exits
+# 1, so the unit reads failed until a pass lands or has nothing to hold.
+#
+# Nobody copies this file. `loom push install` writes it and its timer into ~/.config/systemd/user and reloads systemd,
+# and the updater's hook ~/.loom/updated.d/60-push runs that after every release while ~/.loom/push.conf exists, so
+# the units travel with the release. Install never enables or starts the timer: landing is Kirk's call,
+#
+#   systemctl --user enable --now loom-pusher.timer      (enable, so a reboot keeps it: cutover.sh on)
+#   systemctl --user disable --now loom-pusher.timer     (cutover.sh off)
+#
+# Reads ~/.loom/push.conf (branch, queue, repository, state, secret; lander/config.go), the token secret
+# (~/.loom/token-secret) each call mints a ten-minute coordinator token from, and the lander's bare clone
+# ~/loom-lander/adamic.git, whose origin is git@github-lander:system-inc/adamic.git. One pass at a time:
+# ~/loom-lander/state/lock.
+[Unit]
+Description=Loom pusher: landing orders to adamic's target branch, fast-forward only, with the lander key
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.loom/bin/loom push
+StandardOutput=append:%h/loom-lander/pusher.log
+StandardError=append:%h/loom-lander/pusher.log
+TimeoutStartSec=600

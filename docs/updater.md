@@ -123,7 +123,7 @@ sed "s#HOME_DIRECTORY#${HOME}#g" updater/com.loom.update.plist > ~/Library/Launc
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.loom.update.plist
 ```
 
-Then point each Loom service at `~/.loom/bin/<name>` and give it a hook in `~/.loom/updated.d/`. A Linux box that serves a pool does both with `loom-serve` (docs/serving.md).
+Then point each Loom service at `~/.loom/bin/<name>` and give it a hook in `~/.loom/updated.d/`. A Linux box that serves a pool does both with `loom-serve` (docs/serving.md). The lander (Workshop) does both with `loom push install` once `~/.loom/push.conf` makes it the lander: it writes `loom-pusher.service`, `loom-pusher.timer` and the hook `60-push`, which installs each release's units again and never enables or starts the timer; that stays Kirk's call, `systemctl --user enable --now loom-pusher.timer` (package lander).
 
 ## Tests
 

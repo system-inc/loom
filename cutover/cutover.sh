@@ -8,7 +8,7 @@
 #
 #   on   the ruleset active; the lander's key present with write; every other deploy key read-only; the Mac's push-main
 #        callers (launchd gate-lane, star-train, pr-lane) booted out so they don't spin on GH013
-#   off  the ruleset disabled; the lander's key deleted, so GitHub refuses the lander; then loom-pusher.timer stopped on
+#   off  the ruleset disabled; the lander's key deleted, so GitHub refuses the lander; then loom-pusher.timer disabled on
 #        workshop, so the lander doesn't spin on refusals (GitHub's refusal is the guarantee, the stop is quiet); the
 #        Mac's callers bootstrapped
 #
@@ -229,7 +229,7 @@ case ${action} in
 		othersReadOnly
 		gh api -X PUT "repos/${repository}/rulesets/${ruleset}" -f enforcement=active --jq '"  ruleset \(.id) \(.enforcement)"'
 		if [ "${reference}" = main ]; then
-			ssh Workshop 'systemctl --user start loom-pusher.timer' && echo "  loom-pusher.timer started"
+			ssh Workshop 'systemctl --user enable --now loom-pusher.timer' && echo "  loom-pusher.timer enabled and started"
 			for agent in "${macAgents[@]}"; do
 				launchctl bootout "gui/$(id -u)/${agent}" 2> /dev/null && echo "  ${agent} booted out" || true
 			done
@@ -242,7 +242,7 @@ case ${action} in
 		gh api -X PUT "repos/${repository}/rulesets/${ruleset}" -f enforcement=disabled --jq '"  ruleset \(.id) \(.enforcement)"'
 		landerOff
 		if [ "${reference}" = main ]; then
-			ssh Workshop 'systemctl --user stop loom-pusher.timer' && echo "  loom-pusher.timer stopped"
+			ssh Workshop 'systemctl --user disable --now loom-pusher.timer' && echo "  loom-pusher.timer disabled and stopped"
 			for agent in "${macAgents[@]}"; do
 				agentLoaded "${agent}" || { launchctl bootstrap "gui/$(id -u)" "${HOME}/Library/LaunchAgents/${agent}.plist" && echo "  ${agent} bootstrapped"; }
 			done

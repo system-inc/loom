@@ -1,0 +1,15 @@
+#!/bin/sh
+# The updater's hook for the pusher (package lander), written by `loom push install`: after every release it installs
+# that release's loom-pusher.service and loom-pusher.timer, and never enables, starts or stops them. Only the lander
+# lands: without ~/.loom/push.conf this machine isn't it, and the hook passes having installed nothing. A release from
+# before `loom push` (a rollback past it) has nothing to install, so the units are left as they are and the hook passes.
+if [ ! -f "${HOME}/.loom/push.conf" ]; then
+	echo "60-push: no ${HOME}/.loom/push.conf, so this machine doesn't land; nothing installed"
+	exit 0
+fi
+loom=${LOOM_UPDATE_BIN:-${HOME}/.loom/bin}/loom
+if ! "${loom}" 2>&1 | grep -q '^  loom push install'; then
+	echo "60-push: ${loom} has no push install (a release from before it?); the pusher's units are left as they are"
+	exit 0
+fi
+exec "${loom}" push install
