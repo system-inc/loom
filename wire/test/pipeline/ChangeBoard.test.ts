@@ -104,7 +104,11 @@ describe('the board of changes', function () {
         const html = await page.text();
         expect(html).toContain(`<script nonce="${nonce}">`);
         expect(html).toContain("fetch('/board/changes', { headers: { Authorization: 'Bearer ' + token }");
+        expect(html).toContain("['loom', 'token.' + token]");
         expect(html).not.toContain('chg_');
+        // The policy forbids inline style attributes, so the page carries none: every style is under its nonce.
+        expect(html).not.toMatch(/ style="/);
+        expect(html).toContain('<link rel="icon" href="/favicon.svg" type="image/svg+xml">');
     });
 });
 
@@ -163,5 +167,18 @@ describe('the board of changes, live', function () {
         const viewer = await openBoard(bearer);
         expect(viewer.response.headers.get('Sec-WebSocket-Protocol')).toBe('loom');
         viewer.socket.close();
+    });
+});
+
+describe("Loom's mark", function () {
+    it('is served as the favicon, an SVG on its indigo tile, to anyone', async function () {
+        const response = await call('/favicon.svg');
+        expect(response.status).toBe(200);
+        expect(response.headers.get('Content-Type')).toBe('image/svg+xml');
+        const svg = await response.text();
+        expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg"')).toBe(true);
+        expect(svg).toContain('#1a1540');
+        expect(svg).toContain('#f2c14e');
+        expect(svg).not.toContain('<script');
     });
 });

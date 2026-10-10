@@ -4,9 +4,10 @@
 
 import { handleAction } from './Actions';
 import { ChangeBoardName, changeBoardOf, ChangeBoardSubprotocol } from './ChangeBoard';
-import { renderChangeBoardPage } from './ChangeBoardPage';
 import { handleChanges, queueOf } from './Changes';
 import { jsonResponse } from './Http';
+import { renderLoomLivePage } from './LoomLivePage';
+import { loomFavicon } from './LoomMark';
 import type { TokenScope } from './Token';
 import { authorize, pageResponse } from './Worker';
 
@@ -64,7 +65,7 @@ export default {
                 return jsonResponse(405, { error: 'use GET' }, { Allow: 'GET' });
             }
             const nonce = crypto.randomUUID().replace(/-/g, '');
-            return pageResponse(renderChangeBoardPage(nonce), nonce, new URL(request.url).host);
+            return pageResponse(renderLoomLivePage(nonce), nonce, new URL(request.url).host);
         }
         // The page's live view: the board token comes only as the subprotocol token.<token>, beside loom, so it is in no
         // URL a server logs; the board object answers with loom alone.
@@ -95,6 +96,11 @@ export default {
                 return claims;
             }
             return changeBoardOf(environment).fetch('https://board/changes');
+        }
+        if (path === '/favicon.svg') {
+            return new Response(loomFavicon(), {
+                headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' },
+            });
         }
         if (path === '/') {
             return new Response('Loom pipeline. The endpoints are in docs/contracts.md.\n', {
