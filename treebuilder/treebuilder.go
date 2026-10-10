@@ -1,5 +1,5 @@
 // Package treebuilder is Workshop's tree builder (`loom build-trees`, #w7agfa9): beside the placer, it builds the tree
-// of every future Queue lists planned whose build the action store lacks, so the placer can name a build on each test
+// of every future Queue lists planned, and every base tree Judge asks for (requests.go), whose build the action store lacks, so the placer can name a build on each test
 // unit and a runner only fetches and runs. The tree key comes from the plan (judge.PlannedUnitWire.Tree, which the
 // planner read where the tree was); the build is `loom build-tree` on the future's commit checked out keyless into the
 // builder's own clone, under build-tree's floors, admission and bounded caches, one tree at a time.
@@ -24,6 +24,7 @@ import (
 	"github.com/system-inc/loom/jsonlines"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
+	"github.com/system-inc/loom/protocol"
 )
 
 // The events a Record holds.
@@ -290,9 +291,27 @@ func Wanted(futures []judge.PlannedFuture) ([]Want, []string) {
 	return wants, problems
 }
 
-// A Builder builds the listed futures' trees the store lacks, one at a time.
+// Requested lists the trees Judge asked for as wants, the commit as the future checked out, in the order asked: a
+// base's tree serves every future on that base, so they go ahead of the listing's. A request whose tree isn't a
+// tree key, whose commit isn't a full commit, or whose Go isn't a release is named, never built.
+func Requested(requests []Request) ([]Want, []string) {
+	wants, problems := []Want{}, []string{}
+	for _, request := range requests {
+		if !protocol.Sha256Pattern.MatchString(request.Tree) || !protocol.CommitPattern.MatchString(request.Commit) || !protocol.GoVersionPattern.MatchString(request.Go) {
+			problems = append(problems, fmt.Sprintf("Judge's request %+v isn't a tree key, a commit and a Go release", request))
+			continue
+		}
+		wants = append(wants, Want{Tree: request.Tree, Future: request.Commit, Go: request.Go})
+	}
+	return wants, problems
+}
+
+// A Builder builds the listed futures' trees the store lacks, and the trees Judge asked for, one at a time.
 type Builder struct {
 	Source judge.FutureSource // Queue's planned listing (judge.HTTPFutures)
+	// Requests are the trees Judge asked for (ReadRequests over its request file), built ahead of the listing's: a
+	// base's tree, which a rerun on it waits for. Nil asks for none.
+	Requests func() ([]Request, error)
 	// Indexed says whether the action store holds trees/<tree>.json.
 	Indexed func(tree string) (bool, error)
 	// Floor refuses while a filesystem a build writes is under its floor (builder.CheckFloor over build-tree's watches
@@ -321,14 +340,23 @@ func (builder *Builder) note(line string) {
 	}
 }
 
-// BuildOnce builds the first listed tree the store lacks whose last build doesn't stand failed, and says whether it
-// ran a build (well or badly). A tree another build put up meanwhile is left; one refused under the floor waits.
+// BuildOnce builds the first tree the store lacks whose last build doesn't stand failed, Judge's requests ahead of the
+// listing's, and says whether it ran a build (well or badly). A tree another build put up meanwhile is left; one refused under the floor waits.
 func (builder *Builder) BuildOnce() (bool, error) {
 	futures, err := builder.Source.Planned()
 	if err != nil {
 		return false, err
 	}
 	wants, problems := Wanted(futures)
+	if builder.Requests != nil {
+		requests, err := builder.Requests()
+		if err != nil {
+			return false, fmt.Errorf("Judge's requests: %w", err)
+		}
+		requested, refused := Requested(requests)
+		problems = append(problems, refused...)
+		wants = append(requested, wants...)
+	}
 	for _, problem := range problems {
 		builder.note(problem + ": not built")
 	}

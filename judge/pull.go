@@ -231,7 +231,10 @@ func (puller Puller) pullOne(future PlannedFuture) (bool, error) {
 	}
 	loop, job := puller.jobOf(future, run, events)
 	loop.Runs, job.Earlier = EventRuns{Read: runsOf(run, events, earlier), Log: puller.Log}, order
-	if _, err = loop.JudgeFuture(job); err != nil {
+	if _, err = loop.JudgeFuture(job); errors.Is(err, ErrWaiting) {
+		// A rerun waits on its base's tree: nothing was posted or rerun, and a later pass judges it.
+		return false, nil
+	} else if err != nil {
 		return false, err
 	}
 	puller.keepRows(future, attempt, run, events)

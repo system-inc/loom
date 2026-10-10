@@ -25,12 +25,12 @@ import (
 // buildTreesSettings are `loom build-trees`'s flags, parsed in one place so the shipped unit's command line is
 // checked against them (treebuilder/systemd/loom-build-trees.service).
 type buildTreesSettings struct {
-	queue, tokenFile, clone, ledgerPath, logs, cache *string
-	jobs, compile                                    *int
-	floorGB, tempFloorGB, goCacheGB                  *uint64
-	bound, keep, interval                            *time.Duration
-	once                                             *bool
-	store                                            storeFlags
+	queue, tokenFile, clone, ledgerPath, requests, logs, cache *string
+	jobs, compile                                              *int
+	floorGB, tempFloorGB, goCacheGB                            *uint64
+	bound, keep, interval                                      *time.Duration
+	once                                                       *bool
+	store                                                      storeFlags
 }
 
 func parseBuildTreesFlags(arguments []string, stderr io.Writer) (buildTreesSettings, error) {
@@ -42,6 +42,7 @@ func parseBuildTreesFlags(arguments []string, stderr io.Writer) (buildTreesSetti
 	settings.tokenFile = flags.String("token-file", "", "file holding the coordinator token, which reads Queue's planned listing")
 	settings.clone = flags.String("clone", filepath.Join(home, "loom-trees", "adamic"), "the builder's own clone of "+protocol.AdamicRepository+", made when missing; each future is checked out in it keyless")
 	settings.ledgerPath = flags.String("ledger", filepath.Join(home, "loom-trees", "trees.jsonl"), "what was built, by tree key, which the placer reads; one builder holds it at a time")
+	settings.requests = flags.String("requests", filepath.Join(home, "loom-trees", "requests.jsonl"), "the trees Judge asks for, base trees its reruns wait on (loom judge --tree-requests), built ahead of the listing's")
 	settings.logs = flags.String("logs", filepath.Join(home, "loom-trees", "logs"), "each build's build-tree output, <tree key>.log")
 	settings.cache = flags.String("cache", filepath.Join(home, "loom-builder", "trees"), "build-tree's --cache, the base of each tree's own build directory")
 	settings.jobs = flags.Int("jobs", 8, "build-tree's --jobs")
@@ -58,13 +59,13 @@ func parseBuildTreesFlags(arguments []string, stderr io.Writer) (buildTreesSetti
 		return settings, err
 	}
 	if *settings.queue == "" || *settings.tokenFile == "" || *settings.bound <= 0 || flags.NArg() != 0 {
-		return settings, errors.New("usage: loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--logs <dir>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--bound 2h] [--keep 168h] [--interval 10s] [--once]")
+		return settings, errors.New("usage: loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--requests <file>] [--logs <dir>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--bound 2h] [--keep 168h] [--interval 10s] [--once]")
 	}
 	return settings, nil
 }
 
 // buildTrees is Workshop's tree builder's loop (package treebuilder), beside `loom place`: every tree a planned future
-// runs that the action store lacks is built, one at a time, by this binary's own `loom build-tree` in a child process
+// runs, and every base tree Judge asks for (--requests), that the action store lacks is built, one at a time, by this binary's own `loom build-tree` in a child process
 // (a build that dies, or is killed at --bound, takes only itself), on the future's commit checked out keyless in the
 // builder's own clone, and recorded in the ledger the placer reads.
 func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
@@ -123,7 +124,10 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	defer stop()
 	checkout := planner.GitCheckout(*settings.clone)
 	loop := &treebuilder.Builder{
-		Source:  judge.HTTPFutures{Base: *settings.queue, Token: strings.TrimSpace(string(token))},
+		Source: judge.HTTPFutures{Base: *settings.queue, Token: strings.TrimSpace(string(token))},
+		Requests: func() ([]treebuilder.Request, error) {
+			return treebuilder.ReadRequests(*settings.requests, *settings.keep, time.Now())
+		},
 		Indexed: store.TreeIndexed,
 		Floor:   func() error { return builder.CheckFloor(watched, nil) },
 		Build: func(want treebuilder.Want) error {
