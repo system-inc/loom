@@ -136,9 +136,9 @@ func TestAProductTheStoreCantGiveWholeBreaksTheUnitAndTheCommandNeverRuns(t *tes
 		"a size the manifest doesn't say": {func(store *productStore) {
 			store.build(productKey, map[string]string{cached + "lint": "x"}, nil, func(manifest *builder.Manifest) { manifest.Outputs[0].Bytes = 2 })
 		}, "the manifest says 2"},
-		"a ref that names no manifest": {func(store *productStore) {
+		"a ref that isn't a hash": {func(store *productStore) {
 			store.objects["refs/action/"+productKey] = []byte("latest")
-		}, "not in the action store"},
+		}, "not a manifest's sha256"},
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
