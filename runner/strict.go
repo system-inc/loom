@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -235,8 +236,11 @@ func (run *unitRun) runTest(runContext context.Context) string {
 // from the same public repository, built here as separate arguments (--phase, and --unit when the line names one),
 // never shell text. Its output streams as the unit's, under run.stream's heartbeat, and its exit decides the unit, as
 // the box decides a stage (Judge's phase rule). Failed: run.py exited non-zero or ran out of the unit's time. Broken:
-// the tools couldn't be readied or the runner was stopped.
+// the tools couldn't be readied or the runner was stopped. gofmt's phase isn't run.py's: the runner runs it itself.
 func (run *unitRun) runPhase(runContext context.Context, job *protocol.TestJob, environment map[string]string, tree string, root string, out string, deadline time.Time) string {
+	if job.Phase == protocol.GofmtPhase {
+		return run.runGofmt(runContext, job, environment, tree, deadline)
+	}
 	tools := filepath.Join(root, "adamic-gate-tools", job.Tools)
 	if err := readyTools(runContext, tree, tools, job.Tools, packageEnvironment(environment, protocol.TestPackage{})); err != nil {
 		run.fail(protocol.PhaseStart, fmt.Errorf("readying the gate tools at %s: %w (the instance's, never the change's)", job.Tools, err))
@@ -264,6 +268,82 @@ func (run *unitRun) runPhase(runContext context.Context, job *protocol.TestJob, 
 		run.say(fmt.Sprintf("phase %s: %s", job.Phase, describeOutcome(outcome)))
 		return protocol.StatusFailed
 	}
+}
+
+// gofmtSkipped are the trees the gofmt phase doesn't check, as adamic's landing check (cloud/integration/lane-checks.py)
+// skipped them: cohere is its own module, held gofmt-clean by its own test, and stage3/upstream is upstream's code.
+var gofmtSkipped = []string{"cohere/", "stage3/upstream/"}
+
+// gofmtPaths are the change's .go files the gofmt phase checks: each still a regular file in the tree (a path the
+// change deleted, or one that is now a link or a directory, isn't a Go file to format), outside gofmtSkipped.
+func gofmtPaths(tree string, changed []string) []string {
+	paths := []string{}
+	for _, path := range changed {
+		if !strings.HasSuffix(path, ".go") || slices.ContainsFunc(gofmtSkipped, func(prefix string) bool { return strings.HasPrefix(path, prefix) }) {
+			continue
+		}
+		if info, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(path))); err == nil && info.Mode().IsRegular() {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+// runGofmt runs the gofmt phase, which run.py doesn't hold: gofmt -l from the tree's own Go (adamic's setup puts its
+// toolchain on the environment's PATH, so no gate tools are readied) over the change's .go files and nothing else. A
+// file the change didn't touch never reds it: adamic's main holds an unformatted file today, and a whole-tree gofmt
+// would red every future. Failed: gofmt said anything (each file it lists is named) or exited non-zero, or ran out of
+// the unit's time. Passed: it said nothing and exited 0, or the change left no .go file in the tree to check. Broken:
+// gofmt couldn't be started or the runner was stopped.
+func (run *unitRun) runGofmt(runContext context.Context, job *protocol.TestJob, environment map[string]string, tree string, deadline time.Time) string {
+	paths := gofmtPaths(tree, job.ChangedPaths)
+	if len(paths) == 0 {
+		run.say(fmt.Sprintf("phase gofmt: none of the change's %d paths is a .go file in the tree, so there is nothing to check", len(job.ChangedPaths)))
+		return protocol.StatusPassed
+	}
+	gofmtContext, cancel := context.WithDeadline(runContext, deadline)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	started := time.Now()
+	// "--" ends gofmt's flags, though CheckTestJob already refuses a path with a leading dash.
+	state, err := run.goCommand(gofmtContext, append([]string{"gofmt", "-l", "--"}, paths...), packageEnvironment(environment, protocol.TestPackage{}), tree, &stdout, &stderr)
+	if err != nil {
+		run.fail(protocol.PhaseStart, fmt.Errorf("starting gofmt: %w (the instance's, never the change's)", err))
+		return protocol.StatusBroken
+	}
+	for _, output := range []struct {
+		stream string
+		buffer *bytes.Buffer
+	}{{"stdout", &stdout}, {"stderr", &stderr}} {
+		for _, line := range strings.Split(strings.TrimRight(output.buffer.String(), "\n"), "\n") {
+			if line != "" {
+				run.emitter.emit(outputEvent(output.stream, []byte(line)))
+			}
+		}
+	}
+	outcome := exitOutcome{interrupted: runContext.Err() != nil, timedOut: runContext.Err() == nil && gofmtContext.Err() != nil}
+	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+		outcome.signal = signalName(status.Signal())
+	} else {
+		code := state.ExitCode()
+		outcome.code = &code
+	}
+	run.emitExit(outcome, state, time.Since(started))
+	switch {
+	case outcome.interrupted:
+		run.fail(protocol.PhaseRun, fmt.Errorf("the runner was stopped before gofmt finished"))
+		return protocol.StatusBroken
+	case outcome.code != nil && *outcome.code == 0 && !outcome.timedOut && stdout.Len() == 0 && stderr.Len() == 0:
+		run.say(fmt.Sprintf("phase gofmt: %d .go files formatted", len(paths)))
+		return protocol.StatusPassed
+	}
+	for _, line := range strings.Split(strings.TrimRight(stdout.String(), "\n"), "\n") {
+		if line != "" {
+			run.say(line + " isn't gofmt-formatted")
+		}
+	}
+	run.say(fmt.Sprintf("phase gofmt: %s over %d .go files", describeOutcome(outcome), len(paths)))
+	return protocol.StatusFailed
 }
 
 // toolsRepository is where a phase job's gate tools are fetched from: the public repository (a test points it at a
@@ -438,7 +518,8 @@ func (run *unitRun) runPackage(testContext context.Context, testPackage protocol
 	return result
 }
 
-// goCommand runs argv (go, from the environment's PATH) in its own process group in directory and waits for it.
+// goCommand runs argv (go or gofmt, from the environment's PATH) in its own process group in directory and waits for
+// it.
 func (run *unitRun) goCommand(commandContext context.Context, argv []string, environment []string, directory string, stdout io.Writer, stderr io.Writer) (*os.ProcessState, error) {
 	path := ""
 	for _, variable := range environment {
