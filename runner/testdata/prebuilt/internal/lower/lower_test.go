@@ -90,6 +90,14 @@ func TestModules(t *testing.T) {
 	}
 }
 
+// TestListBuildMode lists a package's build in another mode, as buildcache's GoInputs keys the checker archive.
+func TestListBuildMode(t *testing.T) {
+	output, err := exec.Command("go", "list", "-deps", "-json", "-buildmode=c-archive", "github.com/system-inc/adamic/internal/uses").CombinedOutput()
+	if err != nil || !strings.Contains(string(output), `"ImportPath": "example.com/dep"`) {
+		t.Fatalf("go list -buildmode=c-archive: %v: %s", err, output)
+	}
+}
+
 // TestListUpdates asks a module proxy for newer versions.
 func TestListUpdates(t *testing.T) {
 	if output, err := exec.Command("go", "list", "-m", "-u", "all").CombinedOutput(); err != nil {
