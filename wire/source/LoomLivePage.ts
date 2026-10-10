@@ -290,7 +290,6 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     var onTheWay = ['queued', 'building', 'testing', 'parked'];
     var stepIcons = ${JSON.stringify(stepIcons)};
     var phaseIcons = ${JSON.stringify(phaseIcons)};
-    var phaseWords = { queued: 'setup', building: 'building', testing: 'testing', parked: 'parked' };
     var finishedIcons = { landed: 'FlagCheckered', witnessed: 'CheckCircle', red: 'XCircle', refused: 'XCircle' };
     var icons = ${JSON.stringify(iconMarkup([...stepIcons, ...Object.values(phaseIcons), 'XCircle', 'CheckCircle'], 16))};
     var stages = [['Posted', 'owners submit'], ['Block', 'the next block forms'], ['Build', 'products, once each'], ['Test', 'only what changed'], ['Verdict', 'by written rule'], ['Landed', 'main moves']];
@@ -461,6 +460,8 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         if (finished.length > 0) {
             list.appendChild(element('span', 'line-break', 'Finished'));
             finished.slice(0, 8).forEach(function (change) { list.appendChild(lineCard(change, 0)); });
+            // The board keeps a day of finished changes; past the newest eight, say how many more there are.
+            if (finished.length > 8) { list.appendChild(element('span', 'empty', (finished.length - 8) + ' more finished today, the oldest not shown')); }
         }
     }
 
