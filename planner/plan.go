@@ -40,7 +40,7 @@ type PlannedResult struct {
 // package's test binary from it, and a phase job, run on a checkout, takes only the tree's npm packages from it, since
 // no runner installs them (#v03v751).
 func ReadsTreeBuild(kind string) bool {
-	return kind == "test" || kind == "product" || kind == "phase"
+	return kind == "test" || kind == "build" || kind == "product" || kind == "phase"
 }
 
 // PlanTree plans every package with tests on a checked-out tree: one test unit per package, keyed by KeyFor and

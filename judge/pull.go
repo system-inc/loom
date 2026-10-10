@@ -485,7 +485,7 @@ type PoolEntry struct {
 // WarmUnit says why a unit's attempt counts as warm, empty when it counts: only a test unit keyed on one of
 // warmRunners is judged by where it ran (WarmAttempt); every other unit counts as today.
 func WarmUnit(pools []PoolEntry, warmRunners map[string]bool, unit PlanUnit, attempt Attempt) string {
-	if unit.Kind != "test" || !warmRunners[unit.Runner] {
+	if (unit.Kind != "test" && unit.Kind != "build") || !warmRunners[unit.Runner] {
 		return ""
 	}
 	return WarmAttempt(pools, attempt)

@@ -91,6 +91,11 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	if job.Tree != "" && job.Phase == "" {
 		return run.runPrebuilt(runContext, job, root, started, deadline)
 	}
+	if job.Build {
+		// A build job's builds run on its tree's build, never on a checkout, where every test may build.
+		run.fail(protocol.PhaseStart, fmt.Errorf("refused: a build job names no tree build to run on: Loom's, never the change's"))
+		return protocol.StatusBroken
+	}
 	if tree == "" {
 		// /tmp/adamic for a strict runner: the checkout the instance's opening clones, kept across units.
 		tree = filepath.Join(root, "adamic")

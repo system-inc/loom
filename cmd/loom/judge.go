@@ -194,7 +194,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				}
 				unit.Resources = need
 				fit := judge.FitPools(table, parts.Kind, parts.Tools.Runner, need)
-				if parts.Kind == "test" && warmRunner[parts.Tools.Runner] {
+				if (parts.Kind == "test" || parts.Kind == "build") && warmRunner[parts.Tools.Runner] {
 					// A unit keyed on a warm runner reruns only where each unit starts on an empty Go cache.
 					fit = judge.ColdPools(fit)
 				}
