@@ -278,8 +278,11 @@ func TestThePullerReadsAUnitsKindFromItsKey(t *testing.T) {
 		Read: func(string) ([]protocol.Event, error) {
 			return []protocol.Event{{Unit: unit, Type: "started"}, {Unit: unit, Type: "exit", Code: code(1)}, {Unit: unit, Type: "finished", Status: "failed"}}, nil
 		},
-		Rerun: func(json.RawMessage, string) ([]protocol.Event, error) { t.Fatal("a phase red was rerun alone"); return nil, nil },
-		Main:  NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now, RequireTestLog: true},
+		Rerun: func(json.RawMessage, string) ([]protocol.Event, error) {
+			t.Fatal("a phase red was rerun alone")
+			return nil, nil
+		},
+		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now, RequireTestLog: true},
 	})
 	if judged, err := puller.PullOnce(); err != nil || judged != 1 || queue.Posts[tree][0].Decision.Status != "red" {
 		t.Fatalf("judged %d (%v): want the phase red by its exit", judged, err)

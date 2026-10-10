@@ -158,6 +158,7 @@ type Loop struct {
 // platform the units ran on.
 type CensusConfig struct {
 	Rows     []CensusRow
+	Heavy    []HeavyUnit // the gate tools' heavy-units.tsv
 	Landed   Landed
 	Platform string
 }
@@ -358,7 +359,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 	if loop.Census != nil && verdict.Status == Passed {
 		// A unit is a whole package, so a skip, the pass that covers it and its siblings all run in it: the unit's census
 		// is the batch's for its package. Its red is structural, the box's census step, so nothing is rerun for it.
-		census := Census(source.Events, loop.Census.Rows, loop.Census.Landed, loop.Census.Platform)
+		census := Census(source.Events, loop.Census.Rows, loop.Census.Heavy, loop.Census.Landed, loop.Census.Platform)
 		if census.Failed() {
 			verdict.Status, verdict.Cause, verdict.RuleId = Failed, CauseChange, RuleCensus
 			verdict.censusFailing = census.Failing

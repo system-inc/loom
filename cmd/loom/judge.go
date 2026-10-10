@@ -55,6 +55,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	void := flags.String("void", "", "post one listed future's run as void and exit, <tree>:<attempt> (the attempt Queue lists); needs --cause")
 	cause := flags.String("cause", "", "with --void, why the run is void, which leads the decision's problems")
 	censusRows := flags.String("census-rows", "", "the skip census's rows, comma-separated files (the tools tree's skips.json and census-extra.json); every unit whose tests pass is held to it")
+	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
 	censusGit := flags.String("census-git", "", "with --census-rows, a clone of Adamic whose origin answers whether a pending skip's awaited branch is on main")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -126,7 +127,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Stale: judge.StaleAfter,
 	})
 	if *censusRows != "" {
-		census, err := censusConfig(strings.Split(*censusRows, ","), *censusGit)
+		census, err := censusConfig(strings.Split(*censusRows, ","), *censusHeavy, *censusGit)
 		if err != nil {
 			fmt.Fprintln(stderr, "judge:", err)
 			return 1
@@ -227,8 +228,17 @@ func (futures parityFutures) Planned() ([]judge.PlannedFuture, error) {
 
 // censusConfig loads the census's rows and binds its pending check to a clone of Adamic. The units run on the pool's
 // platform, so rows with platforms are held to its GOOS.
-func censusConfig(paths []string, repository string) (*judge.CensusConfig, error) {
+func censusConfig(paths []string, heavyPath, repository string) (*judge.CensusConfig, error) {
 	config := &judge.CensusConfig{Platform: strings.Split(poolPlatform, "/")[0]}
+	if heavyPath != "" {
+		content, err := os.ReadFile(heavyPath)
+		if err != nil {
+			return nil, err
+		}
+		if config.Heavy, err = judge.ParseHeavyUnits(string(content)); err != nil {
+			return nil, err
+		}
+	}
 	for _, path := range paths {
 		file, err := os.Open(path)
 		if err != nil {

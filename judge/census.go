@@ -66,6 +66,7 @@ type Landed func(branch string) (bool, error)
 type CensusResult struct {
 	Lines                                               []string
 	Skips, Required, Unknown, Pending, Overdue, Covered int
+	Heavy                                               int      // declared heavy deferrals, classed heavy
 	Failing                                             []string // "<class> <package> <test>" for each skip that fails the census
 }
 
@@ -75,7 +76,7 @@ func (result CensusResult) Failed() bool { return result.Required+result.Unknown
 
 // Summary is skipcensus's last line.
 func (result CensusResult) Summary() string {
-	return fmt.Sprintf("skips=%d required-input=%d unknown=%d pending=%d covered=%d", result.Skips, result.Required, result.Unknown, result.Pending, result.Covered)
+	return fmt.Sprintf("skips=%d required-input=%d unknown=%d pending=%d covered=%d heavy=%d", result.Skips, result.Required, result.Unknown, result.Pending, result.Covered, result.Heavy)
 }
 
 var (
@@ -104,10 +105,77 @@ func checkPending(row CensusRow) error {
 	return nil
 }
 
+// A HeavyUnit is one declared heavy deferral (the gate tools' cloud/fast-gate/heavy-units.tsv): a test or family
+// whose coverage the fast gate leaves to main's whole gate or the 30-minute canary, and the owner paged on its red.
+type HeavyUnit struct {
+	Package string
+	Test    string
+	Owner   string
+	Seconds float64
+	Why     string
+}
+
+// ParseHeavyUnits reads heavy-units.tsv as run.py's heavyUnits does: package, test or family, owner, budget seconds
+// and why, tab-separated; a malformed, unnamed, patterned or repeated row fails closed.
+func ParseHeavyUnits(text string) ([]HeavyUnit, error) {
+	units := []HeavyUnit{}
+	seen := map[string]bool{}
+	for number, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(strings.TrimRight(line, "\r"), "\t")
+		if len(fields) != 5 || slices.ContainsFunc(fields, func(field string) bool { return strings.TrimSpace(field) == "" }) {
+			return nil, fmt.Errorf("heavy-units.tsv:%d: a heavy unit needs package, test or family, owner, seconds, why", number+1)
+		}
+		seconds, err := strconv.ParseFloat(fields[3], 64)
+		if err != nil || seconds <= 0 || !strings.HasPrefix(fields[1], "Test") || strings.ContainsAny(fields[1], "*?[]") {
+			return nil, fmt.Errorf("heavy-units.tsv:%d: an invalid heavy unit name or budget", number+1)
+		}
+		if seen[fields[0]+" "+fields[1]] {
+			return nil, fmt.Errorf("heavy-units.tsv:%d: heavy unit %s %s is declared twice", number+1, fields[0], fields[1])
+		}
+		seen[fields[0]+" "+fields[1]] = true
+		units = append(units, HeavyUnit{Package: fields[0], Test: fields[1], Owner: fields[2], Seconds: seconds, Why: fields[4]})
+	}
+	return units, nil
+}
+
+var familyShard = regexp.MustCompile(`^(Unit\d+|Points\d+|_\d+)$`)
+
+// familyMember is run.py's: a top-level test is the requested name or one of its split's generated shards (the name
+// then Unit<n>, Points<n> or _<n>), never a bare prefix.
+func familyMember(name, requested string) bool {
+	rest, found := strings.CutPrefix(name, requested)
+	return found && (rest == "" || familyShard.MatchString(rest))
+}
+
+// heavyDeclaration is the declaration a heavy skip of package and test falls under, as run.py's heavyUnit finds it:
+// the exact test, a subtest of it, or a shard of its family. More than one is ambiguous, and fails closed.
+func heavyDeclaration(units []HeavyUnit, pkg, test string) (HeavyUnit, bool) {
+	test = strings.TrimSuffix(test, " (setup)")
+	matches := []HeavyUnit{}
+	for _, unit := range units {
+		if unit.Package == pkg && (test == unit.Test || strings.HasPrefix(test, unit.Test+"/") || familyMember(strings.SplitN(test, "/", 2)[0], unit.Test)) {
+			matches = append(matches, unit)
+		}
+	}
+	if len(matches) != 1 {
+		return HeavyUnit{}, false
+	}
+	return matches[0], true
+}
+
+var heavyDeferred = regexp.MustCompile(`heavy: deferred\b`)
+
 // Census classes every skip in events, which are the batch's units' test2json events in plan order, read whole first
 // because a pass later in the batch covers an earlier skip of the same test. platform is the GOOS the units ran on.
 // Without landed, a pending skip can't be checked and reads unknown.
-func Census(events []TestEvent, rows []CensusRow, landed Landed, platform string) CensusResult {
+//
+// First, as run.py's checkCensus does, its heavy census (heavyCensus): a skip whose output says "heavy: deferred" is
+// classed heavy when heavy-units.tsv declares it, and unknown otherwise, and never reaches the skip rows; any other
+// skip is classed by the rows.
+func Census(events []TestEvent, rows []CensusRow, heavy []HeavyUnit, landed Landed, platform string) CensusResult {
 	result := CensusResult{Lines: []string{}, Failing: []string{}}
 	classed := []TestEvent{}
 	passed := map[string]bool{}
@@ -138,6 +206,17 @@ func Census(events []TestEvent, rows []CensusRow, landed Landed, platform string
 			continue
 		}
 		result.Skips++
+		if heavyDeferred.MatchString(messages[key]) {
+			if declared, found := heavyDeclaration(heavy, event.Package, event.Test); found {
+				result.Heavy++
+				line("heavy\t%s\t%s\t%s\t%.1f s\t%s", event.Package, event.Test, declared.Owner, declared.Seconds, declared.Why)
+			} else {
+				result.Unknown++
+				fail("unknown", event)
+				line("unknown\t%s\t%s\theavy: deferred, and heavy-units.tsv declares no such unit", event.Package, event.Test)
+			}
+			continue
+		}
 		if last, ok := lastPass[key]; ok && last > position {
 			result.Covered++
 			line("covered\t%s\t%s\tpassed later in the same batch", event.Package, event.Test)

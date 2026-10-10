@@ -71,8 +71,8 @@ func TestTheLiveTableLoads(t *testing.T) {
 
 // skipcensus's TestHistoricalPlainSkips over the same fixture and table: 33 skips, 17 required inputs, none unknown.
 func TestTheRealLogReadsAsSkipcensusReadsIt(t *testing.T) {
-	result := Census(loadEvents(t, "plain-skips.jsonl"), loadRows(t, "skips.json"), nil, "linux")
-	if result.Summary() != "skips=33 required-input=17 unknown=0 pending=0 covered=0" || !result.Failed() {
+	result := Census(loadEvents(t, "plain-skips.jsonl"), loadRows(t, "skips.json"), nil, nil, "linux")
+	if result.Summary() != "skips=33 required-input=17 unknown=0 pending=0 covered=0 heavy=0" || !result.Failed() {
 		t.Fatalf("%s, failed %v\n%s", result.Summary(), result.Failed(), strings.Join(result.Lines, "\n"))
 	}
 	if len(result.Failing) != 17 || !strings.HasPrefix(result.Failing[0], "required-input ") {
@@ -118,13 +118,13 @@ func TestEachSkipClass(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			result := Census(c.events, rows, c.landed, "linux")
+			result := Census(c.events, rows, nil, c.landed, "linux")
 			if result.Failed() != c.failed || c.count(result) != 1 {
 				t.Fatalf("%s failed %v, want failed %v\n%s", result.Summary(), result.Failed(), c.failed, strings.Join(result.Lines, "\n"))
 			}
 		})
 	}
-	if result := Census(skipOf("TestDarwin", "darwin only"), rows, nil, "darwin"); !result.Failed() {
+	if result := Census(skipOf("TestDarwin", "darwin only"), rows, nil, nil, "darwin"); !result.Failed() {
 		t.Fatal("a platform row held off its platform")
 	}
 }
@@ -136,7 +136,7 @@ func TestTheCensusMutantsSkipsFailTheLiveTable(t *testing.T) {
 	for _, shard := range []string{"TestWASIUnit00", "TestWASIUnit35"} {
 		events = append(events, skipOf(shard, "gate mutant 3: a deferred red that must reach the census")...)
 	}
-	result := Census(events, loadRows(t, "skips.json", "census-extra.json"), func(string) (bool, error) { return false, nil }, "linux")
+	result := Census(events, loadRows(t, "skips.json", "census-extra.json"), nil, func(string) (bool, error) { return false, nil }, "linux")
 	if !result.Failed() || result.Unknown != 2 || strings.Join(result.Failing, ",") != "unknown "+nativePackage+" TestWASIUnit00,unknown "+nativePackage+" TestWASIUnit35" {
 		t.Fatalf("%s %v", result.Summary(), result.Failing)
 	}
@@ -148,5 +148,58 @@ func TestFinishedKeepsTheTestEventsForTheCensus(t *testing.T) {
 	finished, _ := FinishedFromEvents([]protocol.Event{started(), {Type: "output", Text: output + "\n" + skip + "\n" + `{"Action":"output","Package":"p","Output":"ok\n"}`}, {Type: "finished", Status: "passed"}})
 	if len(finished.Events) != 2 || finished.Events[0].Output != "why\n" || finished.Events[1].Action != "skip" {
 		t.Fatalf("events %+v", finished.Events)
+	}
+}
+
+const lintPackage = "github.com/system-inc/adamic/stage1/cohere/lint"
+
+func heavySkip(test, message string) []TestEvent {
+	return []TestEvent{{Action: "output", Package: lintPackage, Test: test, Output: "    lint_test.go:40: " + message + "\n"}, {Action: "skip", Package: lintPackage, Test: test}}
+}
+
+// The live heavy-units.tsv (devtools/fast-gate 348ac0ff) declares stage1/cohere/lint's TestCompilerAndStage1Agree_CheckerSanitized.
+func TestADeclaredHeavyDeferralIsClassedHeavyAndAnyOtherIsRed(t *testing.T) {
+	content, err := os.ReadFile("testdata/census/heavy-units.tsv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	heavy, err := ParseHeavyUnits(string(content))
+	if err != nil || len(heavy) != 1 {
+		t.Fatalf("heavy units %+v (%v)", heavy, err)
+	}
+	cases := []struct {
+		name   string
+		events []TestEvent
+		failed bool
+	}{
+		{"the declared test", heavySkip("TestCompilerAndStage1Agree_CheckerSanitized", "heavy: deferred to main's whole gate"), false},
+		{"a subtest of it", heavySkip("TestCompilerAndStage1Agree_CheckerSanitized/all", "heavy: deferred"), false},
+		{"a shard of its family", heavySkip("TestCompilerAndStage1Agree_CheckerSanitizedUnit03", "heavy: deferred"), false},
+		{"an undeclared heavy deferral", heavySkip("TestSomethingElse", "heavy: deferred"), true},
+		{"a bare prefix is not its family", heavySkip("TestCompilerAndStage1Agree_CheckerSanitizedExtra", "heavy: deferred"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			result := Census(c.events, nil, heavy, nil, "linux")
+			if result.Failed() != c.failed || (!c.failed && result.Heavy != 1) {
+				t.Fatalf("%s failed %v, want failed %v\n%s", result.Summary(), result.Failed(), c.failed, strings.Join(result.Lines, "\n"))
+			}
+		})
+	}
+	// With no heavy-units.tsv, a heavy deferral is never excused.
+	if result := Census(heavySkip("TestCompilerAndStage1Agree_CheckerSanitized", "heavy: deferred"), nil, nil, nil, "linux"); !result.Failed() {
+		t.Fatal("a heavy deferral passed with nothing declaring it")
+	}
+	for _, bad := range []string{"p\tTestA\towner\t10\n", "p\tTestA\towner\tten\twhy\n", "p\tTest*\towner\t10\twhy\n", "p\tTestA\to\t10\twhy\np\tTestA\to\t10\twhy\n"} {
+		if _, err := ParseHeavyUnits(bad); err == nil {
+			t.Fatalf("read %q as heavy units", bad)
+		}
+	}
+}
+
+func TestAnAmbiguousHeavyDeclarationFailsClosed(t *testing.T) {
+	heavy := []HeavyUnit{{Package: lintPackage, Test: "TestA", Owner: "o", Seconds: 10, Why: "w"}, {Package: lintPackage, Test: "TestA/sub", Owner: "o", Seconds: 10, Why: "w"}}
+	if result := Census(heavySkip("TestA/sub", "heavy: deferred"), nil, heavy, nil, "linux"); !result.Failed() {
+		t.Fatalf("%s: a skip two declarations claim was excused", result.Summary())
 	}
 }
