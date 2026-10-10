@@ -3,7 +3,9 @@
 // projection: a snapshot and then each change as Queue pushes it, over the stream at /board/stream, or the same
 // snapshot every two seconds when the stream can't open. Plain HTML and inline script under the response's CSP nonce,
 // nothing loaded from elsewhere. The board token rides after the # once; the page keeps it in this browser and takes
-// it out of the address bar, and it goes to the stream only as a subprotocol. Parts the log can't feed yet (the
+// it out of the address bar, and it goes to the stream only as a subprotocol. Above the track, the headline (builds
+// tested in the last hour, main's reds and their trend) is read from /ui/headline every ten seconds, the Headline
+// object's follow of the Queue's log, each number saying how old its read is. Parts the log can't feed yet (the
 // block, the build) keep their place and say what they wait on. A landing gets a celebration and, once the viewer
 // turns sound on, a chime made in the page. A witness of main decided green never lands: it finishes as witnessed,
 // the whole track done, its last step named for it.
@@ -59,6 +61,19 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .label { font: 600 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .note { font-size: 12px; color: var(--muted); }
+.pulse { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; }
+.pulse .panel { gap: 10px; }
+.pulse .figure { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 16px; min-width: 0; }
+.pulse .big { font-size: 52px; font-weight: 700; line-height: 1; }
+.pulse .big[data-state="red"] { color: var(--failed); }
+.pulse .big[data-state="green"] { color: var(--passed); }
+.pulse .trend { font-size: 14px; color: var(--muted); white-space: nowrap; }
+.pulse .trend[data-state="down"] { color: var(--passed); }
+.pulse .trend[data-state="up"] { color: var(--failed); }
+.pulse .source { font-size: 11px; color: var(--faint); }
+.spark { flex: 1 1 96px; display: flex; align-items: flex-end; gap: 3px; height: 40px; min-width: 0; }
+.spark span { flex: 1; min-height: 2px; border-radius: 2px; background: var(--violet); opacity: .75; }
+.spark span:last-child { opacity: 1; background: var(--gold); }
 .track { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
 .step { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--step); min-width: 0; transition: all .4s; }
 .step .head { display: flex; align-items: center; gap: 8px; }
@@ -151,7 +166,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 @keyframes burst { 0% { transform: scale(.6); opacity: 0; } 30% { transform: scale(1.06); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
 @keyframes fade { 0% { opacity: 0; } 8% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .piece { display: none; } }
-@media (max-width: 900px) { .cols, .pair { grid-template-columns: 1fr; } .track { grid-template-columns: repeat(3, minmax(0, 1fr)); } .overlay .word { font-size: 52px; } }
+@media (max-width: 900px) { .pulse .big { font-size: 40px; } .cols, .pair { grid-template-columns: 1fr; } .track { grid-template-columns: repeat(3, minmax(0, 1fr)); } .overlay .word { font-size: 52px; } }
 </style>
 </head>
 <body>
@@ -166,6 +181,18 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         <button type="button" class="toggle" id="hear">Hear a landing</button>
     </div>
 </header>
+<section class="pulse" aria-label="The headline">
+    <article class="panel">
+        <span class="label">Builds tested, last hour</span>
+        <div class="figure"><b class="mono big" id="tested">&ndash;</b><div class="spark" id="spark" role="img" aria-label="Builds tested in each five minutes of the last hour"></div></div>
+        <span class="source" id="tested-source">a future's whole verdict, green or red; a void tested nothing and isn't counted</span>
+    </article>
+    <article class="panel">
+        <span class="label">Main's reds</span>
+        <div class="figure"><b class="mono big" id="main-red">&ndash;</b><span class="mono trend" id="main-trend"></span></div>
+        <span class="source" id="main-source">units red on the last witness of main's tip</span>
+    </article>
+</section>
 <section class="track" id="track" aria-label="Where the change is"></section>
 <section class="cols">
     <article class="panel" id="panel-posted">
@@ -655,9 +682,71 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         once();
     }
 
+    // ---------- The headline ----------
+
+    function clockTime(at) {
+        var date = new Date(at);
+        return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
+    }
+
+    function sourceLine(id, words, readAt) {
+        var node = document.getElementById(id);
+        node.replaceChildren();
+        node.appendChild(document.createTextNode(words + ' \\u00B7 read '));
+        var age = element('span', 'mono', '');
+        age.dataset.from = readAt;
+        node.appendChild(age);
+        node.appendChild(document.createTextNode(' ago'));
+    }
+
+    function renderPulse(reading) {
+        document.getElementById('tested').textContent = String(reading.testedLastHour);
+        var spark = document.getElementById('spark');
+        spark.replaceChildren();
+        var most = Math.max.apply(null, reading.buckets.concat([1]));
+        reading.buckets.forEach(function (count) {
+            var bar = element('span');
+            bar.style.height = Math.max(5, Math.round(count / most * 100)) + '%';
+            spark.appendChild(bar);
+        });
+        spark.setAttribute('aria-label', 'Builds tested in each five minutes of the last hour: ' + reading.buckets.join(', '));
+        sourceLine('tested-source', 'a whole verdict, green or red; ' + reading.voidLastHour + ' void not counted', reading.readAt);
+        var red = document.getElementById('main-red');
+        var trend = document.getElementById('main-trend');
+        trend.textContent = '';
+        delete trend.dataset.state;
+        if (reading.mainRed === null) {
+            red.textContent = '\\u2013';
+            delete red.dataset.state;
+            sourceLine('main-source', 'no witness of main\\u2019s tip decided yet', reading.readAt);
+            return;
+        }
+        red.textContent = String(reading.mainRed.red);
+        red.dataset.state = reading.mainRed.red > 0 ? 'red' : 'green';
+        var first = reading.mainTrend[0];
+        if (first && reading.mainTrend.length > 1 && first.red !== reading.mainRed.red) {
+            var change = reading.mainRed.red - first.red;
+            trend.textContent = (change < 0 ? '\\u25BC ' : '\\u25B2 ') + Math.abs(change) + ' since ' + clockTime(first.at);
+            trend.dataset.state = change < 0 ? 'down' : 'up';
+        }
+        sourceLine('main-source', 'units red on main ' + reading.mainRed.main.slice(0, 8) + '\\u2019s witness, ' + clockTime(reading.mainRed.at), reading.readAt);
+    }
+
+    function readPulse() {
+        if (!token) { return; }
+        fetch('/ui/headline', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+            .then(function (response) {
+                return response.ok ? response.json() : Promise.reject(new Error('the headline answered ' + response.status));
+            })
+            .then(function (reading) { renderPulse(reading); tick(); })
+            .catch(function (error) { document.getElementById('tested-source').textContent = error.message; })
+            .finally(function () { setTimeout(readPulse, 10000); });
+    }
+
     setInterval(tick, 1000);
     render();
     connect();
+    readPulse();
 })();
 </script>
 </body>
