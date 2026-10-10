@@ -1769,9 +1769,14 @@ export class Queue extends DurableObject<Env> {
             // A parity run with the box record's selection runs exactly those packages, uncached.
             const select = state.changes.get(future.changes[0] ?? '')?.record.select;
             if (select !== undefined) {
-                const planned = units.map(function (unit) {
-                    return String(unit.keyParts.package);
-                });
+                // A phase unit (vet, build, smoke) belongs to no selected package, so only test units are compared.
+                const planned = units
+                    .filter(function (unit) {
+                        return unit.keyParts.kind !== 'phase';
+                    })
+                    .map(function (unit) {
+                        return String(unit.keyParts.package);
+                    });
                 if (!sortedEqual([...new Set(planned)], select.packages) || units.some((unit) => unit.decision !== 'run')) {
                     return jsonResponse(422, { error: `a parity plan runs exactly the ${select.packages.length} selected packages, every unit run, none reused` });
                 }

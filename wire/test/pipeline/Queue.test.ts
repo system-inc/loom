@@ -1023,7 +1023,12 @@ describe('a parity run', function () {
         expect((await postPlan(queue, sha(8), units)).status).toBe(422);
         expect((await postPlan(queue, sha(8), units.slice(0, 1))).status).toBe(422);
         expect((await postPlan(queue, sha(8), [units[0], { ...units[1], decision: 'reuse' }])).status).toBe(422);
-        expect((await postPlan(queue, sha(8), units.slice(0, 2))).status).toBe(200);
+        // Phase units ride along, outside the package comparison; a wrong test package still refuses with them.
+        const phaseParts = { kind: 'phase', phase: 'vet', tools: { runner: 'e'.repeat(64) }, gateInputs: 'f'.repeat(64) };
+        const phase = { name: 'phase/vet', unitKey: await unitKeyOf(phaseParts), keyParts: phaseParts, decision: 'run', reason: 'new key' };
+        expect((await postPlan(queue, sha(8), [units[0], units[2], phase])).status).toBe(422);
+        const planned = await postPlan(queue, sha(8), [...units.slice(0, 2), phase]);
+        expect(planned.status, await planned.clone().text()).toBe(200);
         expect(id).toMatch(/^chg_/);
     });
 
