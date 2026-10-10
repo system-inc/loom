@@ -15,13 +15,9 @@ import (
 func ProbeTools(runnerShaFile string) (Tools, error) {
 	tools := Tools{WasiSdk: os.Getenv("WASI_SDK_VERSION")}
 	if runnerShaFile != "" {
-		content, err := os.ReadFile(runnerShaFile)
-		if err != nil {
-			return Tools{}, fmt.Errorf("the pinned runner: %w", err)
-		}
-		tools.Runner = strings.TrimSpace(string(content))
-		if !Sha256Hex(tools.Runner) {
-			return Tools{}, fmt.Errorf("the pinned runner in %s isn't a sha256: %q", runnerShaFile, tools.Runner)
+		var err error
+		if tools.Runner, err = ReadRunnerPin(runnerShaFile); err != nil {
+			return Tools{}, err
 		}
 	}
 	tools.Go = firstLine("go", "env", "GOVERSION")
@@ -36,4 +32,18 @@ func firstLine(name string, arguments ...string) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.SplitN(string(output), "\n", 2)[0])
+}
+
+// ReadRunnerPin reads the pinned runner's sha256, which every test key holds. The steady planner reads it before each
+// pull, so a runner switch moves every key from the next pull on, with no restart (Loom, Oct 10 02:5xZ).
+func ReadRunnerPin(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("the pinned runner: %w", err)
+	}
+	runner := strings.TrimSpace(string(content))
+	if !Sha256Hex(runner) {
+		return "", fmt.Errorf("the pinned runner in %s isn't a sha256: %q", path, runner)
+	}
+	return runner, nil
 }

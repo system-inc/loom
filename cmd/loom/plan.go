@@ -74,6 +74,14 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				continue
 			}
 		}
+		if err := repin(&tools, *runnerShaFile, stdout); err != nil {
+			fmt.Fprintln(stderr, "plan:", err)
+			if *once {
+				return 1
+			}
+			time.Sleep(*interval)
+			continue
+		}
 		count, err := planner.PullOnce(client, planner.GitCheckout(*repository), *gateTools, tools, planner.HTTPIndex{Client: client}, *only, gateInputs)
 		if count > 0 {
 			fmt.Fprintf(stdout, "planned %d futures\n", count)
@@ -89,6 +97,20 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		time.Sleep(*interval)
 	}
+}
+
+// repin rereads the runner pin before a pull. A runner switch rewrites it, and keying on the old runner would plan every
+// test unit for a runner no longer serving it; a pin that doesn't read as a sha256 refuses the pull.
+func repin(tools *planner.Tools, runnerShaFile string, stdout io.Writer) error {
+	runner, err := planner.ReadRunnerPin(runnerShaFile)
+	if err != nil {
+		return err
+	}
+	if runner != tools.Runner {
+		fmt.Fprintf(stdout, "runner pin moved: %.12s to %.12s, every test key moves with it\n", tools.Runner, runner)
+		tools.Runner = runner
+	}
+	return nil
 }
 
 // refreshGateTools moves the gate tools checkout to its origin's branch tip.
