@@ -196,7 +196,15 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	build.Held = ""
 	binariesStarted := time.Now()
-	built := build.Binaries(packages)
+	// Only the binaries the store lacks are compiled: each package's is keyed on its closure and asked for first.
+	inputs, err := build.BinaryInputs(identity.Go, identity.Goos, identity.Goarch)
+	if err != nil {
+		return fail(fmt.Errorf("the test binaries' inputs: %w", err))
+	}
+	built, reuse := build.KeyedBinaries(store, packages, inputs, nil)
+	for _, note := range reuse.Notes {
+		fmt.Fprintln(stderr, "build-tree:", note)
+	}
 	binarySeconds := time.Since(binariesStarted).Seconds()
 	phase("source and modules", nil)
 	source, err := builder.SourceChunks(*tree, installs)
@@ -255,6 +263,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"tree": identity.Tree, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json", "indexWritten": indexWritten,
 		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products), "productsFetched": len(held.Held()),
 		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
+		"binariesKeyed": reuse.Keyed, "binariesHeld": reuse.Held, "binariesCompiled": reuse.Compiled, "binaryKeySeconds": reuse.KeySeconds, "binaryLookupSeconds": reuse.LookupSeconds,
 		"seconds": time.Since(started).Seconds(), "sourceChunks": len(source.Chunks), "sourceBytes": source.Bytes(),
 		"sourceChunksSent": source.Sent, "sourceBytesSent": source.SentBytes, "node": treeIndex.Node,
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),

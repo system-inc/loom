@@ -89,6 +89,10 @@ type TreePackage struct {
 	Error     string   `json:"error,omitempty"`
 	// Failure says whose Error is: ChangeFailure or WorkshopFailure (empty: Workshop's).
 	Failure string `json:"failure,omitempty"`
+	// BinaryKey is the key its binary is stored under (binaries.go), empty when it wasn't keyed; BinaryHeld says the
+	// store held that binary, so this build compiled none and Binary is the stored blob (Bytes, unread, is 0).
+	BinaryKey  string `json:"binaryKey,omitempty"`
+	BinaryHeld bool   `json:"binaryHeld,omitempty"`
 }
 
 // TestPackages lists every package of the tree with tests, for this platform, compiling nothing.
@@ -328,7 +332,7 @@ func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 		started := time.Now()
 		result := TreePackage{Package: test.Package, Directory: test.Directory, Products: []string{}}
 		binary := filepath.Join(build.Out, strings.ReplaceAll(test.Package, "/", "_")+".test")
-		command := exec.Command("go", "test", "-c", "-p", build.perJob(), "-o", binary, "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
+		command := exec.Command("go", append(append([]string{"test"}, testBinaryFlags...), "-p", build.perJob(), "-o", binary, "./"+filepath.ToSlash(filepath.Clean(test.Directory)))...)
 		command.Dir = build.Tree
 		command.Env = build.shared()
 		if output, err := command.CombinedOutput(); err != nil {
@@ -683,7 +687,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 				built.Failure = WorkshopFailure
 			}
 		}
-		if built.Error == "" {
+		if built.Error == "" && !built.BinaryHeld {
 			content, err := os.ReadFile(filepath.Join(binaries, strings.ReplaceAll(built.Package, "/", "_")+".test"))
 			if err != nil {
 				return fmt.Errorf("package %s: %w", built.Package, err)
@@ -692,7 +696,12 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 			if err != nil {
 				return err
 			}
-			if built.Binary, err = store.PutBlob(blob); err != nil {
+			// A keyed binary goes up as its key's action, as a product does; one whose ref names other bytes fails the
+			// package, as a product's conflict does.
+			if built.Binary, err = publishBinary(store, built.BinaryKey, blob); errors.As(err, &ConflictError{}) {
+				built.Error, built.Failure, err = err.Error()+"\n", WorkshopFailure, nil
+			}
+			if err != nil {
 				return fmt.Errorf("package %s: %w", built.Package, err)
 			}
 		}
@@ -896,6 +905,9 @@ func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 		}
 		if !productKeyPattern.MatchString(built.Binary) {
 			return poisoned("package %s's binary is %q", name, built.Binary)
+		}
+		if built.BinaryKey != "" && !productKeyPattern.MatchString(built.BinaryKey) {
+			return poisoned("package %s's binary key is %q", name, built.BinaryKey)
 		}
 		if built.Directory != "" && !filepath.IsLocal(filepath.FromSlash(built.Directory)) {
 			return poisoned("package %s's directory is %q", name, built.Directory)
