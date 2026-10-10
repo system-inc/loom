@@ -62,7 +62,7 @@ const usage = `usage:
   loom submit-token [--days N] <owner>
   loom build-token <builder> [--days N]
   loom coordinator-token <service> [--days N]
-  loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--once]
+  loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--once] [--dry-run]
   loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>]
   loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--packages a,b] [--list]
   loom fetch-actions --cache <dir> [--read <url>] <productKey>...

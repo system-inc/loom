@@ -42,7 +42,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0) {
-		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once]")
+		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run]")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
