@@ -26,7 +26,9 @@ import (
 //	a strict runner's root anything but /tmp: TestAStrictRunnersRootIsTmpAndOthersKeepTheirOwn
 //	the unit's own GOCACHE or ADAMIC_BUILD_CACHE_DIR dropped, or GOCACHEPROG kept: TestEachTestUnitBuildsOnAGoCacheOfItsOwn
 //	a phase job run without --phase-jobs: TestAPhaseJobRunsRunPyFromTheGateToolsAtItsCommit
-//	gofmt over the whole tree, its listed files ignored, or a deleted path handed to it: TestTheGofmtPhaseChecksOnlyTheChangesGoFiles
+//	gofmt over the whole tree, its listed files ignored, a deleted path handed to it, a linked or escaping path
+//	skipped, the stage3/upstream/ skip dropped, or only the first batch run: TestTheGofmtPhaseChecksOnlyTheChangesGoFiles
+//	gofmt found on PATH, or of any Go release: TestTheGofmtPhaseChecksOnlyTheChangesGoFiles, TestTheGofmtPhaseRunsOnlyTheKeysGofmt
 
 const testSha = "0123456789abcdef0123456789abcdef01234567"
 
@@ -479,56 +481,112 @@ func TestAPhaseJobRunsRunPyFromTheGateToolsAtItsCommit(t *testing.T) {
 	}
 }
 
-// The gofmt phase is the runner's own: gofmt -l, from the tree's Go on the environment's PATH and with no gate tools
-// readied, over the change's .go files still in the tree and no other file. An unformatted file the change touched
-// fails it, named; formatted files pass it beside an unformatted one the change didn't touch (adamic's main holds one)
-// and one under cohere/, which lane-checks.py skipped too; a change with no .go file in the tree, or only a deleted
-// one, passes without running gofmt.
+// The gofmt phase is the runner's own: gofmt -l, from GOROOT/bin of the go the unit's environment runs (never a gofmt
+// found on PATH) and with no gate tools readied, over the change's .go files still in the tree and no other file, in
+// batches. An unformatted file the change touched fails it, named, in whichever batch it falls; formatted files pass it
+// beside an unformatted one the change didn't touch (adamic's main holds one) and ones under cohere/ and
+// stage3/upstream/, which lane-checks.py skipped too; a change with no .go file in the tree, or only a deleted one,
+// passes without running gofmt. A changed .go path that is a link, or reaches outside the tree through a linked
+// directory, fails it, named.
 func TestTheGofmtPhaseChecksOnlyTheChangesGoFiles(t *testing.T) {
 	fixture := newStrictFixture(t, 0)
-	goroot, err := exec.Command("go", "env", "GOROOT").Output()
-	if err != nil {
-		t.Fatalf("go env GOROOT: %v", err)
-	}
-	// The tree's toolchain, as adamic's setup leaves it on PATH: here the Go running this test.
-	prepareScript = []byte("#!/bin/bash\nprintf 'PATH=%s\\0HOME=%s\\0' \"" + filepath.Join(strings.TrimSpace(string(goroot)), "bin") + ":/usr/bin:/bin\" \"${HOME}\" > \"$5\"\n")
+	goroot, version := gofmtToolchain(t)
+	// A gofmt on PATH ahead of the toolchain's, as an instance's own might be: silent, so any file passes it.
+	decoy := filepath.Join(fixture.directory, "decoy")
+	os.MkdirAll(decoy, 0o755)
+	os.WriteFile(filepath.Join(decoy, "gofmt"), []byte("#!/bin/bash\ntouch \""+filepath.Join(fixture.directory, "decoy-ran")+"\"\n"), 0o755)
+	prepareScript = []byte("#!/bin/bash\nprintf 'PATH=%s\\0HOME=%s\\0' \"" + decoy + ":" + filepath.Join(goroot, "bin") + ":/usr/bin:/bin\" \"${HOME}\" > \"$5\"\n")
 	// No gate tools exist anywhere: a gofmt phase that readied them would break.
 	original := toolsRepository
 	toolsRepository = filepath.Join(fixture.directory, "no-tools")
 	t.Cleanup(func() { toolsRepository = original })
+	originalBatch := gofmtBatchPaths
+	gofmtBatchPaths = 2
+	t.Cleanup(func() { gofmtBatchPaths = originalBatch })
+	outside := filepath.Join(fixture.directory, "outside")
 	for path, content := range map[string]string{
-		"formatted.go": "package a\n\nconst A = 1\n", "b/unformatted.go": "package b\nconst  B=2\n",
-		"untouched.go": "package a\nconst  C=3\n", "cohere/skipped.go": "package cohere\nconst  D=4\n", "README.md": "#  a\n",
+		"formatted.go": "package a\n\nconst A = 1\n", "c/one.go": "package c\n\nconst One = 1\n", "b/unformatted.go": "package b\nconst  B=2\n",
+		"untouched.go": "package a\nconst  C=3\n", "cohere/skipped.go": "package cohere\nconst  D=4\n",
+		"stage3/upstream/skipped.go": "package upstream\nconst  E=5\n", "README.md": "#  a\n",
 	} {
 		os.MkdirAll(filepath.Dir(filepath.Join(fixture.tree, path)), 0o755)
 		os.WriteFile(filepath.Join(fixture.tree, path), []byte(content), 0o644)
 	}
+	os.MkdirAll(outside, 0o755)
+	os.WriteFile(filepath.Join(outside, "x.go"), []byte("package x\n"), 0o644)
+	os.Symlink(outside, filepath.Join(fixture.tree, "linked"))
+	os.Symlink("formatted.go", filepath.Join(fixture.tree, "link.go"))
 	options := fixture.options(t)
 	options.PhaseJobs = true
 	for _, test := range []struct {
 		changed []string
 		status  string
 		ran     bool
+		says    string
 	}{
-		{[]string{"README.md", "b/unformatted.go", "formatted.go"}, protocol.StatusFailed, true},
-		{[]string{"README.md", "cohere/skipped.go", "formatted.go"}, protocol.StatusPassed, true},
-		{[]string{"README.md"}, protocol.StatusPassed, false},
-		{[]string{"deleted.go", "formatted.go"}, protocol.StatusPassed, true},
-		{[]string{"deleted.go"}, protocol.StatusPassed, false},
+		{[]string{"README.md", "b/unformatted.go", "formatted.go"}, protocol.StatusFailed, true, "loom-runner: b/unformatted.go isn't gofmt-formatted"},
+		{[]string{"formatted.go", "c/one.go", "b/unformatted.go"}, protocol.StatusFailed, true, "loom-runner: b/unformatted.go isn't gofmt-formatted"},
+		{[]string{"README.md", "cohere/skipped.go", "stage3/upstream/skipped.go", "formatted.go", "c/one.go"}, protocol.StatusPassed, true, "2 .go files formatted"},
+		{[]string{"README.md"}, protocol.StatusPassed, false, "nothing to check"},
+		{[]string{"deleted.go", "formatted.go"}, protocol.StatusPassed, true, "1 .go files formatted"},
+		{[]string{"deleted.go"}, protocol.StatusPassed, false, "nothing to check"},
+		{[]string{"formatted.go", "link.go"}, protocol.StatusFailed, false, "link.go is a symbolic link"},
+		{[]string{"formatted.go", "linked/x.go"}, protocol.StatusFailed, false, "linked/x.go can't be read inside the tree"},
 	} {
 		job := protocol.TestJob{Repository: protocol.AdamicRepository, Sha: testSha, Base: strings.Repeat("b", 40), Phase: protocol.GofmtPhase,
-			Tools: strings.Repeat("e", 40), ChangedPaths: test.changed}
+			Tools: strings.Repeat("e", 40), ChangedPaths: test.changed, Go: version}
 		result, events, _ := runUnit(t, testJobUnit(job), options)
 		said := strings.Join(outputLines(events, "runner"), "\n")
-		if result.Status != test.status || (len(eventsOfType(events, "exit")) == 1) != test.ran {
-			t.Fatalf("gofmt over %v: %s, %d exits, want %s (ran %v); errors %q, said %q", test.changed, result.Status, len(eventsOfType(events, "exit")), test.status, test.ran, errorPhases(events), said)
+		if result.Status != test.status || (len(eventsOfType(events, "exit")) == 1) != test.ran || !strings.Contains(said, test.says) {
+			t.Fatalf("gofmt over %v: %s, %d exits, want %s (ran %v) saying %q; errors %q, said %q", test.changed, result.Status, len(eventsOfType(events, "exit")), test.status, test.ran, test.says, errorPhases(events), said)
 		}
-		if named := strings.Contains(said, "loom-runner: b/unformatted.go isn't gofmt-formatted"); named != (test.status == protocol.StatusFailed) || strings.Contains(said, "loom-runner: formatted.go isn't") {
-			t.Errorf("gofmt over %v said %q", test.changed, said)
+		if strings.Contains(said, "loom-runner: formatted.go isn't") || strings.Contains(said, "one.go isn't") || strings.Contains(said, "untouched.go") || strings.Contains(said, "skipped.go") {
+			t.Errorf("gofmt over %v named a formatted file, one the change didn't touch, or one lane-checks skipped: %q", test.changed, said)
 		}
-		if strings.Contains(said, "untouched.go") || strings.Contains(said, "skipped.go") {
-			t.Errorf("gofmt over %v reached a file the change didn't touch or lane-checks skipped: %q", test.changed, said)
-		}
+	}
+	if fixture.exists("decoy-ran") {
+		t.Error("the phase ran the gofmt on PATH, not its toolchain's")
+	}
+}
+
+// gofmtToolchain is the toolchain running this test, standing in for the tree's: its GOROOT and GOVERSION.
+func gofmtToolchain(t *testing.T) (string, string) {
+	t.Helper()
+	output, err := exec.Command("go", "env", "GOROOT", "GOVERSION").Output()
+	lines := strings.Fields(string(output))
+	if err != nil || len(lines) < 2 {
+		t.Fatalf("go env GOROOT GOVERSION: %v %q", err, output)
+	}
+	return lines[0], lines[1]
+}
+
+// The gofmt phase runs only a gofmt the key's Go release built, beside the go the tree runs: a gofmt of another
+// release, or none there, breaks the unit (the instance's, never the change's) and runs nothing.
+func TestTheGofmtPhaseRunsOnlyTheKeysGofmt(t *testing.T) {
+	fixture := newStrictFixture(t, 0)
+	goroot, version := gofmtToolchain(t)
+	os.MkdirAll(fixture.tree, 0o755)
+	os.WriteFile(filepath.Join(fixture.tree, "unformatted.go"), []byte("package a\nconst  B=2\n"), 0o644)
+	options := fixture.options(t)
+	options.PhaseJobs = true
+	job := protocol.TestJob{Repository: protocol.AdamicRepository, Sha: testSha, Base: strings.Repeat("b", 40), Phase: protocol.GofmtPhase,
+		Tools: strings.Repeat("e", 40), ChangedPaths: []string{"unformatted.go"}, Go: "go1.0"}
+	prepareScript = []byte("#!/bin/bash\nprintf 'PATH=%s\\0HOME=%s\\0' \"" + filepath.Join(goroot, "bin") + ":/usr/bin:/bin\" \"${HOME}\" > \"$5\"\n")
+	result, events, _ := runUnit(t, testJobUnit(job), options)
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "the unit's key names \"go1.0\"") || len(eventsOfType(events, "exit")) != 0 {
+		t.Fatalf("a gofmt of %s under a key naming go1.0: %s; errors %q", version, result.Status, errorPhases(events))
+	}
+	// A go whose GOROOT holds no gofmt.
+	empty := filepath.Join(fixture.directory, "empty-goroot")
+	stub := filepath.Join(fixture.directory, "stub-go")
+	os.MkdirAll(empty, 0o755)
+	os.MkdirAll(stub, 0o755)
+	os.WriteFile(filepath.Join(stub, "go"), []byte("#!/bin/bash\necho \""+empty+"\"\n"), 0o755)
+	prepareScript = []byte("#!/bin/bash\nprintf 'PATH=%s\\0HOME=%s\\0' \"" + stub + ":/usr/bin:/bin\" \"${HOME}\" > \"$5\"\n")
+	job.Go = version
+	result, events, _ = runUnit(t, testJobUnit(job), options)
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "no gofmt at "+filepath.Join(empty, "bin", "gofmt")) {
+		t.Fatalf("no gofmt beside the go: %s; errors %q", result.Status, errorPhases(events))
 	}
 }
 

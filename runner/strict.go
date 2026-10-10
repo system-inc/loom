@@ -7,8 +7,10 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -274,42 +276,145 @@ func (run *unitRun) runPhase(runContext context.Context, job *protocol.TestJob, 
 // skipped them: cohere is its own module, held gofmt-clean by its own test, and stage3/upstream is upstream's code.
 var gofmtSkipped = []string{"cohere/", "stage3/upstream/"}
 
-// gofmtPaths are the change's .go files the gofmt phase checks: each still a regular file in the tree (a path the
-// change deleted, or one that is now a link or a directory, isn't a Go file to format), outside gofmtSkipped.
-func gofmtPaths(tree string, changed []string) []string {
-	paths := []string{}
+// gofmtBatchPaths and gofmtBatchBytes bound one gofmt run's paths, so a change of any size stays far under the
+// system's argument limit: the paths go to as many runs as they need.
+var gofmtBatchPaths, gofmtBatchBytes = 1000, 128 << 10
+
+// gofmtPaths are the change's .go files the gofmt phase checks, outside gofmtSkipped, each looked up through the tree
+// opened as a root, so no link takes a path outside it. A path the change deleted is skipped. problems are the changed
+// .go paths that can't be checked as a Go file of the tree, each of which fails the phase: a symbolic link (which
+// lane-checks.py, reading the blob, failed), a path reaching outside the tree through a linked directory, and anything
+// else that isn't a regular file.
+func gofmtPaths(tree string, changed []string) (paths []string, problems []string, err error) {
+	root, err := os.OpenRoot(tree)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	paths = []string{}
 	for _, path := range changed {
 		if !strings.HasSuffix(path, ".go") || slices.ContainsFunc(gofmtSkipped, func(prefix string) bool { return strings.HasPrefix(path, prefix) }) {
 			continue
 		}
-		if info, err := os.Lstat(filepath.Join(tree, filepath.FromSlash(path))); err == nil && info.Mode().IsRegular() {
+		info, err := root.Lstat(filepath.FromSlash(path))
+		switch {
+		case errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR):
+			// The change deleted it.
+		case err != nil:
+			problems = append(problems, fmt.Sprintf("%s can't be read inside the tree: %v", path, err))
+		case info.Mode()&fs.ModeSymlink != 0:
+			problems = append(problems, path+" is a symbolic link, not a Go file")
+		case !info.Mode().IsRegular():
+			problems = append(problems, path+" isn't a regular file")
+		default:
 			paths = append(paths, path)
 		}
 	}
-	return paths
+	return paths, problems, nil
 }
 
-// runGofmt runs the gofmt phase, which run.py doesn't hold: gofmt -l from the tree's own Go (adamic's setup puts its
-// toolchain on the environment's PATH, so no gate tools are readied) over the change's .go files and nothing else. A
-// file the change didn't touch never reds it: adamic's main holds an unformatted file today, and a whole-tree gofmt
-// would red every future. Failed: gofmt said anything (each file it lists is named) or exited non-zero, or ran out of
-// the unit's time. Passed: it said nothing and exited 0, or the change left no .go file in the tree to check. Broken:
-// gofmt couldn't be started or the runner was stopped.
+// gofmtBatches splits the paths into runs of at most gofmtBatchPaths paths and about gofmtBatchBytes of arguments.
+func gofmtBatches(paths []string) [][]string {
+	batches := [][]string{}
+	var batch []string
+	size := 0
+	for _, path := range paths {
+		if len(batch) > 0 && (len(batch) == gofmtBatchPaths || size+len(path)+1 > gofmtBatchBytes) {
+			batches = append(batches, batch)
+			batch, size = nil, 0
+		}
+		batch = append(batch, path)
+		size += len(path) + 1
+	}
+	if len(batch) > 0 {
+		batches = append(batches, batch)
+	}
+	return batches
+}
+
+// gofmtTool is the gofmt the phase runs: bin/gofmt under the GOROOT of the go the unit's environment runs in the tree.
+// adamic's setup leaves GOTOOLCHAIN=auto, under which go switches to the go.mod toolchain and a gofmt found on PATH
+// does not, so PATH's gofmt could be any release. It is taken only when go version says the Go release the unit's key
+// names (the job's Go) built it.
+func (run *unitRun) gofmtTool(gofmtContext context.Context, environment []string, tree string, want string) (string, error) {
+	var output, stderr bytes.Buffer
+	state, err := run.goCommand(gofmtContext, []string{"go", "env", "GOROOT"}, environment, tree, &output, &stderr)
+	if err != nil || !state.Success() {
+		return "", fmt.Errorf("go env GOROOT failed (%v): %s", err, strings.TrimSpace(stderr.String()))
+	}
+	goroot := strings.TrimSpace(output.String())
+	if !filepath.IsAbs(goroot) {
+		return "", fmt.Errorf("go env GOROOT says %q, not an absolute path", goroot)
+	}
+	gofmt := filepath.Join(goroot, "bin", "gofmt")
+	if info, err := os.Stat(gofmt); err != nil || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("no gofmt at %s, beside the go the tree runs", gofmt)
+	}
+	output.Reset()
+	stderr.Reset()
+	state, err = run.goCommand(gofmtContext, []string{"go", "version", gofmt}, environment, tree, &output, &stderr)
+	if err != nil || !state.Success() {
+		return "", fmt.Errorf("go version %s failed (%v): %s", gofmt, err, strings.TrimSpace(stderr.String()))
+	}
+	_, built, _ := strings.Cut(strings.TrimSpace(output.String()), ": ")
+	if fields := strings.Fields(built); len(fields) == 0 || len(strings.Fields(want)) == 0 || fields[0] != strings.Fields(want)[0] {
+		return "", fmt.Errorf("%s was built by %q, and the unit's key names %q", gofmt, built, want)
+	}
+	return gofmt, nil
+}
+
+// runGofmt runs the gofmt phase, which run.py doesn't hold: gofmt -l (gofmtTool's, so no gate tools are readied)
+// over the change's .go files and nothing else, in batches. A file the change didn't touch never reds it: adamic's
+// main holds an unformatted file today, and a whole-tree gofmt would red every future. Failed: a changed .go path
+// that can't be checked (gofmtPaths' problems), or gofmt said anything (each file it lists is named) or exited
+// non-zero, or ran out of the unit's time. Passed: it said nothing and exited 0, or the change left no .go file in the
+// tree to check. Broken: no gofmt of the key's Go release, gofmt couldn't be started, or the runner was stopped.
 func (run *unitRun) runGofmt(runContext context.Context, job *protocol.TestJob, environment map[string]string, tree string, deadline time.Time) string {
-	paths := gofmtPaths(tree, job.ChangedPaths)
+	paths, problems, err := gofmtPaths(tree, job.ChangedPaths)
+	if err != nil {
+		run.fail(protocol.PhaseStart, fmt.Errorf("opening the tree: %w (the instance's, never the change's)", err))
+		return protocol.StatusBroken
+	}
+	if len(problems) > 0 {
+		for _, problem := range problems {
+			run.say("phase gofmt: " + problem)
+		}
+		return protocol.StatusFailed
+	}
 	if len(paths) == 0 {
 		run.say(fmt.Sprintf("phase gofmt: none of the change's %d paths is a .go file in the tree, so there is nothing to check", len(job.ChangedPaths)))
 		return protocol.StatusPassed
 	}
 	gofmtContext, cancel := context.WithDeadline(runContext, deadline)
 	defer cancel()
-	var stdout, stderr bytes.Buffer
-	started := time.Now()
-	// "--" ends gofmt's flags, though CheckTestJob already refuses a path with a leading dash.
-	state, err := run.goCommand(gofmtContext, append([]string{"gofmt", "-l", "--"}, paths...), packageEnvironment(environment, protocol.TestPackage{}), tree, &stdout, &stderr)
+	unitEnvironment := packageEnvironment(environment, protocol.TestPackage{})
+	gofmt, err := run.gofmtTool(gofmtContext, unitEnvironment, tree, job.Go)
 	if err != nil {
-		run.fail(protocol.PhaseStart, fmt.Errorf("starting gofmt: %w (the instance's, never the change's)", err))
+		run.fail(protocol.PhaseStart, fmt.Errorf("the gofmt to run: %w (the instance's, never the change's)", err))
 		return protocol.StatusBroken
+	}
+	var stdout, stderr bytes.Buffer
+	var userTime, systemTime time.Duration
+	outcome, code := exitOutcome{}, 0
+	started := time.Now()
+	for _, batch := range gofmtBatches(paths) {
+		// "--" ends gofmt's flags, though CheckTestJob already refuses a path with a leading dash.
+		state, err := run.goCommand(gofmtContext, append([]string{gofmt, "-l", "--"}, batch...), unitEnvironment, tree, &stdout, &stderr)
+		if err != nil {
+			run.fail(protocol.PhaseStart, fmt.Errorf("starting gofmt: %w (the instance's, never the change's)", err))
+			return protocol.StatusBroken
+		}
+		userTime, systemTime = userTime+state.UserTime(), systemTime+state.SystemTime()
+		if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			outcome.signal = signalName(status.Signal())
+			break
+		}
+		if code == 0 {
+			code = state.ExitCode()
+		}
+		if gofmtContext.Err() != nil {
+			break
+		}
 	}
 	for _, output := range []struct {
 		stream string
@@ -321,14 +426,12 @@ func (run *unitRun) runGofmt(runContext context.Context, job *protocol.TestJob, 
 			}
 		}
 	}
-	outcome := exitOutcome{interrupted: runContext.Err() != nil, timedOut: runContext.Err() == nil && gofmtContext.Err() != nil}
-	if status, ok := state.Sys().(syscall.WaitStatus); ok && status.Signaled() {
-		outcome.signal = signalName(status.Signal())
-	} else {
-		code := state.ExitCode()
+	outcome.interrupted, outcome.timedOut = runContext.Err() != nil, runContext.Err() == nil && gofmtContext.Err() != nil
+	if outcome.signal == "" {
 		outcome.code = &code
 	}
-	run.emitExit(outcome, state, time.Since(started))
+	run.emitter.emit(protocol.Event{Type: "exit", Code: outcome.code, Signal: outcome.signal, TimedOut: outcome.timedOut,
+		WallSeconds: seconds(time.Since(started)), UserSeconds: seconds(userTime), SystemSeconds: seconds(systemTime)})
 	switch {
 	case outcome.interrupted:
 		run.fail(protocol.PhaseRun, fmt.Errorf("the runner was stopped before gofmt finished"))

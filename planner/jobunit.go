@@ -92,12 +92,16 @@ func goTestJob(parts KeyParts, sha string, changed []string) (*protocol.TestJob,
 
 // phaseJob is the phase job of a phase unit: its run.py unit line at the gate tools commit its key names, at sha
 // merged onto base. gofmt's (protocol.GofmtPhase), which the runner runs itself, is keyed on the change's paths, so it
-// carries them, checked against the key as goTestJob checks a test's; any other phase carries none. Any env a phase
-// job can't say is refused.
+// carries them, checked against the key as goTestJob checks a test's, and its key's Go release; any other phase carries
+// neither. Any env a phase job can't say is refused, and so is a gofmt with no paths but a witness's (CheckTestJob).
 func phaseJob(parts KeyParts, sha, base string, changed []string) (*protocol.TestJob, error) {
 	line := parts.Select.Run
 	test := &protocol.TestJob{Repository: protocol.AdamicRepository, Sha: sha, Base: base, GateInputs: parts.GateInputs,
 		Phase: line, Tools: parts.GateTools}
+	if line == protocol.GofmtPhase {
+		// The runner runs only the gofmt that the key's Go release built.
+		test.Go = parts.Tools.Go
+	}
 	for name, value := range parts.Env {
 		switch {
 		case GateEnvironment[name] == value:

@@ -95,7 +95,7 @@ func phaseJob() TestJob {
 
 // A phase job is the same checked data in its other form: a phase line and the gate tools' commit, never packages.
 func TestAPhaseJobIsChecked(t *testing.T) {
-	for _, phase := range []string{"vet", "wasi fixture-07", "stage3 adamic:compile", "catalog 12", GofmtPhase} {
+	for _, phase := range []string{"vet", "wasi fixture-07", "stage3 adamic:compile", "catalog 12"} {
 		job := phaseJob()
 		job.Phase = phase
 		if err := CheckTestJob(job); err != nil {
@@ -117,8 +117,7 @@ func TestAPhaseJobIsChecked(t *testing.T) {
 		"an uppercase phase":          func(job *TestJob) { job.Phase = "Vet" },
 		"a line break in the phase":   func(job *TestJob) { job.Phase = "vet\nid" },
 		"changed paths beside run.py": func(job *TestJob) { job.ChangedPaths = []string{"a.go"} },
-		"a unit for gofmt":            func(job *TestJob) { job.Phase, job.ChangedPaths = GofmtPhase+" a.go", []string{"a.go"} },
-		"a gofmt path climbing out":   func(job *TestJob) { job.Phase, job.ChangedPaths = GofmtPhase, []string{"../a.go"} },
+		"a Go release beside run.py":  func(job *TestJob) { job.Go = "go1.27.1" },
 	}
 	for name, change := range refused {
 		job := phaseJob()
@@ -127,10 +126,39 @@ func TestAPhaseJobIsChecked(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// gofmt's phase job alone carries the change's paths: they are what it checks.
+}
+
+func gofmtJob() TestJob {
 	job := phaseJob()
-	job.Phase, job.ChangedPaths = GofmtPhase, []string{"internal/lower/lower.go", "README.md"}
-	if err := CheckTestJob(job); err != nil {
-		t.Errorf("a gofmt phase job carrying its paths refused: %v", err)
+	job.Phase, job.ChangedPaths, job.Go = GofmtPhase, []string{"internal/lower/lower.go", "README.md"}, "go1.27.1"
+	return job
+}
+
+// gofmt's phase job alone carries the change's paths, which are what it checks, and the Go release its key names,
+// whose gofmt alone it runs. With no paths it checks nothing, so only a witness (base equal to sha) may have none.
+// Mutant: the empty-paths refusal dropped.
+func TestAGofmtPhaseJobIsChecked(t *testing.T) {
+	if err := CheckTestJob(gofmtJob()); err != nil {
+		t.Fatalf("a gofmt phase job carrying its paths and Go refused: %v", err)
+	}
+	witness := gofmtJob()
+	witness.ChangedPaths, witness.Base = nil, witness.Sha
+	if err := CheckTestJob(witness); err != nil {
+		t.Errorf("a witness's gofmt, with no paths, refused: %v", err)
+	}
+	refused := map[string]func(job *TestJob){
+		"a unit for gofmt":            func(job *TestJob) { job.Phase = GofmtPhase + " a.go" },
+		"a gofmt path climbing out":   func(job *TestJob) { job.ChangedPaths = []string{"../a.go"} },
+		"no paths and not a witness":  func(job *TestJob) { job.ChangedPaths = nil },
+		"no Go release":               func(job *TestJob) { job.Go = "" },
+		"a Go release that isn't one": func(job *TestJob) { job.Go = "1.27; id" },
+		"a Go release on a go test":   func(job *TestJob) { *job = testJob(); job.Go = "go1.27.1" },
+	}
+	for name, change := range refused {
+		job := gofmtJob()
+		change(&job)
+		if err := CheckTestJob(job); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

@@ -79,7 +79,7 @@ func TestTheGofmtPhaseCarriesTheChangesPathsOnlyWhenTheyMatch(t *testing.T) {
 		t.Fatalf("gofmt keyed on its change's paths got no job: %v", err)
 	}
 	if _, err := protocol.Expand(protocol.Job{Name: "future", Units: []protocol.JobUnit{unit}}); err != nil || unit.Kind != "phase" || unit.Test.Phase != protocol.GofmtPhase ||
-		strings.Join(unit.Test.ChangedPaths, ",") != "a.go,b.go" || unit.Test.Base != base || unit.Test.Tools != gofmt.GateTools {
+		strings.Join(unit.Test.ChangedPaths, ",") != "a.go,b.go" || unit.Test.Base != base || unit.Test.Tools != gofmt.GateTools || unit.Test.Go != "go1.27.1" {
 		t.Fatalf("gofmt's job is %+v (%v)", unit.Test, err)
 	}
 	for name, changed := range map[string][]string{"a path short": {"a.go"}, "another path": {"a.go", "c.go"}, "no paths": {}, "no record": nil} {
@@ -92,10 +92,18 @@ func TestTheGofmtPhaseCarriesTheChangesPathsOnlyWhenTheyMatch(t *testing.T) {
 	if _, err := FutureJobUnit(key, vet, sha, base, []string{"b.go", "a.go"}); err == nil {
 		t.Error("a run.py phase keyed on changed paths got a job carrying them")
 	}
-	// Keyed on no paths (the change touched none), gofmt carries none, and the runner passes it with nothing to check.
+	// Keyed on no paths, gofmt would check nothing: refused, but for a witness, whose base is its sha.
 	gofmt.Env = GateEnvironment
-	if unit, err := FutureJobUnit(key, gofmt, sha, base, nil); err != nil || len(unit.Test.ChangedPaths) != 0 {
-		t.Errorf("gofmt keyed on no paths came out %+v (%v)", unit.Test, err)
+	if _, err := FutureJobUnit(key, gofmt, sha, base, nil); err == nil {
+		t.Error("gofmt keyed on no paths, on a change, got a job that checks nothing")
+	}
+	if unit, err := FutureJobUnit(key, gofmt, sha, sha, nil); err != nil || len(unit.Test.ChangedPaths) != 0 {
+		t.Errorf("a witness's gofmt came out %+v (%v)", unit.Test, err)
+	}
+	// A key with no Go release can't name the gofmt to run.
+	gofmt.Tools.Go = ""
+	if _, err := FutureJobUnit(key, gofmt, sha, sha, nil); err == nil {
+		t.Error("gofmt keyed on no Go release got a job")
 	}
 }
 

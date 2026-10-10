@@ -23,6 +23,9 @@ var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // since what it checks is exactly them.
 const GofmtPhase = "gofmt"
 
+// goVersionPattern is a Go release as go env GOVERSION names it (go1.27.1, go1.28rc1), with any experiments after it.
+var goVersionPattern = regexp.MustCompile(`^go1\.[0-9]+(\.[0-9]+)?((rc|beta)[0-9]+)?( X:[a-z0-9,]+)?$`)
+
 // phaseNamePattern is a phase of the box fast gate as run.py names it (coverage, vet, wasi, ...).
 var phaseNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
@@ -60,6 +63,9 @@ type TestJob struct {
 	// Tools is the gate tools' commit in the same public repository, whose cloud/fast-gate/run.py a phase job runs:
 	// the ref its phase unit was keyed on. A phase job's only.
 	Tools string `json:"tools,omitempty"`
+	// Go is the Go release the gofmt phase's key names (keyParts.tools.go, go env GOVERSION): the runner runs only a
+	// gofmt that release built. A gofmt phase job's only.
+	Go string `json:"go,omitempty"`
 }
 
 // A TestPackage is one package's go test: its import path and its -run and -skip patterns.
@@ -104,9 +110,17 @@ func CheckTestJob(job TestJob) error {
 			return fmt.Errorf("phase %q: gofmt names no unit, it checks the change's paths", job.Phase)
 		case fields[0] != GofmtPhase && len(job.ChangedPaths) > 0:
 			return fmt.Errorf("phase %q carries changed paths, and only gofmt's phase job checks them", job.Phase)
+		case fields[0] == GofmtPhase && !goVersionPattern.MatchString(job.Go):
+			return fmt.Errorf("go %q: a gofmt phase job names the Go release its key holds, as go env GOVERSION says it", job.Go)
+		case fields[0] == GofmtPhase && len(job.ChangedPaths) == 0 && job.Base != job.Sha:
+			// Only a witness, the base run against itself, changes nothing; any other gofmt with no paths checks nothing.
+			return fmt.Errorf("a gofmt phase job with no changed paths would check nothing, and only a witness (base equal to sha) has none")
 		}
 	} else if job.Tools != "" {
 		return fmt.Errorf("tools names a phase job's gate tools, and this job has no phase")
+	}
+	if job.Go != "" && job.Phase != GofmtPhase {
+		return fmt.Errorf("go names the gofmt phase's Go release, and this job isn't gofmt's")
 	}
 	if len(job.Packages) == 0 && job.Phase == "" {
 		return fmt.Errorf("a test job names at least one package")
