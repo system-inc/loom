@@ -31,7 +31,17 @@ type testPool struct {
 	askers []string // "<worker> <whether it said its cpus>" per ask
 	events map[string][]protocol.Event
 	refuse bool
-	server *httptest.Server
+	// lives are the live statuses posted, in order, with when; refuseLive answers every live post 404, as a wire from
+	// before the live route does.
+	lives      []postedLive
+	refuseLive bool
+	server     *httptest.Server
+}
+
+// A postedLive is one live status a serve posted to its pool.
+type postedLive struct {
+	at   time.Time
+	body []byte
 }
 
 func newTestPool(t *testing.T, units ...protocol.Unit) *testPool {
@@ -68,6 +78,18 @@ func newTestPool(t *testing.T, units ...protocol.Unit) *testPool {
 			pool.taken = append(pool.taken, unit.Unit)
 			pool.mutex.Unlock()
 			json.NewEncoder(writer).Encode(unit)
+		case request.URL.Path == "/pools/codex/live" && request.Method == http.MethodPost:
+			pool.mutex.Lock()
+			defer pool.mutex.Unlock()
+			if pool.refuseLive {
+				http.NotFound(writer, request)
+				return
+			}
+			if request.Header.Get("Authorization") != "Bearer "+testPoolToken {
+				http.Error(writer, "not this pool's token", http.StatusForbidden)
+				return
+			}
+			pool.lives = append(pool.lives, postedLive{at: time.Now(), body: body})
 		case strings.HasSuffix(request.URL.Path, "/events") && request.Method == http.MethodPost:
 			if request.Header.Get("Authorization") != "Bearer "+testToken {
 				http.Error(writer, "no token", http.StatusUnauthorized)

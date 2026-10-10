@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -81,6 +82,8 @@ type ServeOptions struct {
 	machine *machine
 	// alongside says whether a unit may run beside others; nil means slots.go's alongside. Tests let a command unit.
 	alongside func(unit protocol.Unit) bool
+	// liveEvery is how often serve posts its live status to its pool (servelive.go); zero means liveEvery's 10 s.
+	liveEvery time.Duration
 }
 
 // A ServeSummary is how a serving runner ended: how many units it ran and how each finished, how long it
@@ -178,6 +181,28 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	// What the units in hand may hold between them: every thread, and nine tenths of the memory, since a share's memory
 	// is a ceiling its cgroup kills at, never an average.
 	capacity := share{cpus: machine.cpus, memoryMegabytes: machine.memoryMegabytes * 9 / 10}
+	// The live status the pool keeps for the board (servelive.go), posted from its own goroutine until serve returns.
+	poster := &livePoster{options: options, client: unitOptions.Client, disks: disks, limit: unitOptions.BlobCacheBytes,
+		status: liveStatus{Worker: options.Worker, Release: Version, Runner: selfSha256(), StartedAt: started.UTC().Format(time.RFC3339Nano), Units: []liveStatusUnit{}}}
+	if root != "" {
+		poster.blobs = blobDirectory(root)
+	}
+	if options.Units > 1 {
+		poster.status.Slots = &liveSlots{Units: options.Units, Cpus: capacity.cpus, MemoryMegabytes: capacity.memoryMegabytes}
+	}
+	if options.liveEvery == 0 {
+		options.liveEvery = liveEvery
+	}
+	posterContext, stopPoster := context.WithCancel(context.Background())
+	posted := make(chan struct{})
+	go func() {
+		poster.loop(posterContext, options.liveEvery)
+		close(posted)
+	}()
+	defer func() {
+		stopPoster()
+		<-posted
+	}()
 	// Every unit runs in a cgroup of its own where systemd delegated one, a unit run alone on the whole machine's share,
 	// so every unit's timing says its peak memory and a unit past its memory is killed alone.
 	cgroups, err := delegatedCgroups()
@@ -230,6 +255,21 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	holding := share{}
 	aloneInHand := false
 	finished := make(chan finish, options.Units)
+	// publish puts the units in hand, the shares they hold and the totals on the live status, oldest unit first.
+	publish := func() {
+		units := []liveStatusUnit{}
+		for hand := range hands {
+			units = append(units, liveUnitOf(hand.unit, hand.started, hand.share))
+		}
+		slices.SortFunc(units, func(left, right liveStatusUnit) int { return strings.Compare(left.StartedAt, right.StartedAt) })
+		poster.update(func(status *liveStatus) {
+			status.Units = units
+			if status.Slots != nil {
+				status.Slots.HeldCpus, status.Slots.HeldMemoryMegabytes = holding.cpus, holding.memoryMegabytes
+			}
+			status.Totals = liveTotals{Units: summary.Units, Passed: summary.Passed, Failed: summary.Failed, Broken: summary.Broken}
+		})
+	}
 	settle := func(done finish) {
 		delete(hands, done.hand)
 		if done.hand.alone {
@@ -254,6 +294,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		default:
 			summary.Broken++
 		}
+		publish()
 		if done.had {
 			unhad = 0
 			return
@@ -306,6 +347,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			ownOptions.LiveStatus, ownRunners.live = "", nil
 		}
 		live.Update(func(status *livestatus.Status) { status.Unit = hand.live })
+		publish()
 		go func() {
 			result, had := ownRunners.run(serveContext, unit, ownOptions)
 			if unitShare != nil && unitShare.cgroup != nil {
@@ -372,6 +414,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			}
 			summary.Unfit = unfit
 			live.Update(func(status *livestatus.Status) { status.Unfit = unfit })
+			poster.update(func(status *liveStatus) { status.Unfit = unfit })
 		}
 		if summary.Unfit != "" {
 			rest(askUntil, options.UnfitPause)
@@ -403,6 +446,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			live.Update(func(status *livestatus.Status) {
 				status.Totals.Units, status.Totals.Broken = status.Totals.Units+1, status.Totals.Broken+1
 			})
+			publish()
 			fmt.Fprintf(options.Report, "loom-runner serve: %v\n", err)
 			continue
 		case err != nil:

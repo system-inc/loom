@@ -69,6 +69,9 @@ On Workshop, the token for each pool: `~/.loom/bin/loom pool token box-strict --
 
 ## Watching a box
 
+Serve posts its live status to its pool every 10 s (`POST /pools/<pool>/live` with its pool token, docs/protocol.md "The pool"): its release and runner, when it started, the units in hand with their deadlines and shares, its slots, its lowest disk against its floor, its blob cache against its bound, why it is unfit, and its totals, with one last post when it stops. The pool keeps the newest per worker, and the board reads every pool's in `GET /pools/<pool>`'s `live`, with the token and fetch it already uses. A post the wire refuses is said once in serve's journal and never touches serving.
+
+
 `~/.loom/bin/loom top` (every box has the `loom` binary beside `loom-runner`) is the box's live view, refreshed every second until `q`: the CPUs, memory and each disk Loom writes against its floor, serve's kept blobs and sources, Loom's systemd user units, serve's unit in hand from its `loom-live` files, the units it ran, and, on Workshop, the tree the builder builds (`~/loom-builder/trees/loom-live/tree.json`, written by `loom build-tree`) and its ledger's last builds. The pools and Queue's line come from the Workers with a token the box already holds: a board token minted for each read from `~/.loom/token-secret` where there is one (Workshop, the Mac), which reads every pool in `~/.loom/pools.json` and Queue; else serve's own pool token, for its pool alone, which today's wire refuses (a pool token reaches only its pool's `next`), so on a box the pools panel says so until the wire lets a pool token read its own pool's status. Without either token the panels say so. No token is printed, and `loom top` writes nothing but the terminal. `loom top --once` draws one plain frame (80 by 24 off a terminal); `loom top --board` is the board of gate lines it drew before.
 
 ## Tests
