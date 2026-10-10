@@ -1,6 +1,5 @@
-# The queue's bridge to git (#vwsgnxm): one pass of `loom queue-bridge` (cmd/loom/queuebridge.go, package queuebridge),
-# which posts git's facts for every unchecked change and, while queue-bridge.conf says decides = yes, today's gate's
-# verdict for every unplanned future. Run by loom-queue-bridge.timer every 60 s.
+# The queue's bridge to git on Workshop (#vwsgnxm): one pass of `loom queue-bridge` (cmd/loom/queuebridge.go, package
+# queuebridge), which posts git's facts for every unchecked change. Run by loom-queue-bridge.timer every 60 s.
 #
 # Nobody copies this file. `loom queue-bridge install` writes it and its timer into ~/.config/systemd/user and reloads
 # systemd, and the updater's hook ~/.loom/updated.d/61-queue-bridge runs that after every release while
@@ -10,9 +9,10 @@
 #   systemctl --user disable --now loom-queue-bridge.timer
 #
 # Reads ~/.loom/queue-bridge.conf (queuebridge/config.go), the token secret each call mints a ten-minute coordinator
-# token from, and the adamic clone it names. One pass at a time: <state>/lock.
+# token from, and the adamic clone it names (~/loom-queue-bridge/adamic, a `git clone --no-checkout` of
+# git@github-lander:system-inc/adamic.git). One pass at a time: <state>/lock.
 [Unit]
-Description=Loom queue bridge: git's facts for every submitted change, and today's gate's verdicts while it decides
+Description=Loom queue bridge: git's facts for every submitted change
 
 [Service]
 Type=oneshot
@@ -20,4 +20,4 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.loom/bin/loom queue-bridge
 StandardOutput=append:%h/.loom/queue-bridge.log
 StandardError=append:%h/.loom/queue-bridge.log
-TimeoutStartSec=3600
+TimeoutStartSec=600

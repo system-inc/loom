@@ -35,7 +35,7 @@ func newBridgeFixture(t *testing.T) *bridgeFixture {
 	t.Cleanup(server.Close)
 	secret := filepath.Join(root, "token-secret")
 	os.WriteFile(secret, []byte(strings.Repeat("s", 64)+"\n"), 0o600)
-	os.WriteFile(made.config, []byte("queue = "+server.URL+"\nstate = "+made.state+"\nsecret = "+secret+"\nrepository = "+root+"\ndecides = yes\n"), 0o644)
+	os.WriteFile(made.config, []byte("queue = "+server.URL+"\nstate = "+made.state+"\nsecret = "+secret+"\nrepository = "+root+"\n"), 0o644)
 	return made
 }
 
@@ -48,8 +48,8 @@ func (made *bridgeFixture) pass() (int, string) {
 	return code, stdout.String() + stderr.String()
 }
 
-// A pass reads the queue with a token, decides while queue-bridge.conf says so, and keeps its memory; one pass at a time.
-func TestQueueBridgeOnePassAtATimeAndItsMemoryKept(t *testing.T) {
+// A pass reads the queue with a token and carries facts only, never asking for futures or landings; one pass at a time.
+func TestQueueBridgeOnePassAtATime(t *testing.T) {
 	made := newBridgeFixture(t)
 	os.MkdirAll(made.state, 0o755)
 	lock, err := os.OpenFile(filepath.Join(made.state, "lock"), os.O_CREATE|os.O_WRONLY, 0o644)
@@ -64,26 +64,8 @@ func TestQueueBridgeOnePassAtATimeAndItsMemoryKept(t *testing.T) {
 		t.Fatalf("while another pass holds the lock: exit %d, asked %q: %s", code, made.requests, output)
 	}
 	syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	if code, output := made.pass(); code != 0 || strings.Join(made.requests, ",") != "GET /submissions?state=unchecked,GET /futures?state=unplanned" {
-		t.Fatalf("once free: exit %d, asked %q: %s", code, made.requests, output)
-	}
-	if held, err := os.ReadFile(filepath.Join(made.state, "memory.json")); err != nil || !strings.Contains(string(held), `"queued": []`) {
-		t.Fatalf("memory: %v\n%s", err, held)
-	}
-	// A memory it can't read stops the pass, so no verdict is posted twice.
-	os.WriteFile(filepath.Join(made.state, "memory.json"), []byte("{not json"), 0o644)
-	if code, output := made.pass(); code != 3 || len(made.requests) != 0 || !strings.Contains(output, "memory.json") {
-		t.Fatalf("a broken memory: exit %d, asked %q: %s", code, made.requests, output)
-	}
-}
-
-// decides = no carries git's facts only: the futures are never asked for.
-func TestQueueBridgeThatDoesntDecideOnlyCarriesFacts(t *testing.T) {
-	made := newBridgeFixture(t)
-	content, _ := os.ReadFile(made.config)
-	os.WriteFile(made.config, []byte(strings.Replace(string(content), "decides = yes", "decides = no", 1)), 0o644)
 	if code, output := made.pass(); code != 0 || strings.Join(made.requests, ",") != "GET /submissions?state=unchecked" {
-		t.Fatalf("exit %d, asked %q: %s", code, made.requests, output)
+		t.Fatalf("once free: exit %d, asked %q: %s", code, made.requests, output)
 	}
 }
 

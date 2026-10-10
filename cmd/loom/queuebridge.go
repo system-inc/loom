@@ -1,12 +1,9 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,12 +16,11 @@ import (
 	"github.com/system-inc/loom/queuebridge"
 )
 
-// queueBridge is `loom queue-bridge`, the bridge's one pass (package queuebridge), which loom-queue-bridge.timer (or the
-// launchd agent on macOS) runs every 60 s on the machine whose ~/.loom/queue-bridge.conf makes it the bridge: git's
-// facts for every unchecked change, then today's gate's verdicts while it decides. What it did is kept in
-// <state>/memory.json between passes. It exits 0 after a pass (or when another pass holds the lock), 2 on a bad command
-// line and 3 when its settings or its memory can't be read. `loom queue-bridge install` is the updater hook's: it
-// installs the release's units and never starts them.
+// queueBridge is `loom queue-bridge`, the bridge's one pass (package queuebridge), which loom-queue-bridge.timer runs
+// every 60 s on the machine whose ~/.loom/queue-bridge.conf makes it the bridge: git's facts for every unchecked change.
+// It exits 0 after a pass (or when another pass holds the lock), 1 when it couldn't read the queue, 2 on a bad command
+// line and 3 when its settings can't be read. `loom queue-bridge install` is the updater hook's: it installs the
+// release's units and never starts them.
 func queueBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "install" {
 		return queueBridgeInstall(arguments[1:], stdout, stderr)
@@ -32,7 +28,7 @@ func queueBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	home, _ := os.UserHomeDir()
 	flags := flag.NewFlagSet("queue-bridge", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", queuebridge.HomePaths(home).Config, "the bridge's settings: queue, repository, state, secret, push-main, requeue, decides")
+	configPath := flags.String("config", queuebridge.HomePaths(home).Config, "the bridge's settings: queue, repository, state, secret")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "usage: loom queue-bridge [--config <queue-bridge.conf>]")
 		return 2
@@ -57,7 +53,8 @@ func queueBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 3
 	}
 	defer lock.Close()
-	// One pass at a time: a pass still running when the timer fires again is left to finish, and this one is a no-op.
+	// One pass at a time: a pass still reading git when the timer fires again is left to finish, and this one is a
+	// no-op, so the bridge's readings never overlap (docs/queue.md).
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return 0
 	}
@@ -66,49 +63,26 @@ func queueBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "loom queue-bridge: %v\n", err)
 		return 3
 	}
-	// The memory keeps a verdict from being posted twice, so one that can't be read stops the pass rather than starting
-	// it empty.
-	memoryPath := filepath.Join(config.State, "memory.json")
-	memory := queuebridge.Memory{}
-	if held, err := os.ReadFile(memoryPath); err == nil {
-		if err := json.Unmarshal(held, &memory); err != nil {
-			fmt.Fprintf(stderr, "loom queue-bridge: %s: %v\n", memoryPath, err)
-			return 3
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(stderr, "loom queue-bridge: %v\n", err)
-		return 3
-	}
 	log := func(text string) {
 		fmt.Fprintf(stdout, "%s queue-bridge: %s\n", time.Now().UTC().Format("2006-01-02T15:04:05Z"), text)
 	}
-	bridge := queuebridge.Bridge{Queue: queuebridge.HTTPQueue{Base: config.Queue, Secret: secret},
-		Gate: queuebridge.Clone{Repository: config.Repository, PushMain: config.PushMain, RequeueSh: config.Requeue}, Decides: config.Decides, Log: log}
-	bridge.Tick(&memory)
-	// Lists, never null, as memory.json has always held them.
-	for _, list := range []*[]string{&memory.Queued, &memory.Posted, &memory.Requeued, &memory.Ruled} {
-		if *list == nil {
-			*list = []string{}
-		}
-	}
-	encoded, _ := json.MarshalIndent(memory, "", " ")
-	if err := os.WriteFile(memoryPath+".new", encoded, 0o644); err != nil {
-		fmt.Fprintf(stderr, "loom queue-bridge: %v\n", err)
-		return 3
-	}
-	if err := os.Rename(memoryPath+".new", memoryPath); err != nil {
-		fmt.Fprintf(stderr, "loom queue-bridge: %v\n", err)
-		return 3
+	bridge := queuebridge.Bridge{Queue: queuebridge.HTTPQueue{Base: config.Queue, Secret: secret}, Gate: queuebridge.Clone{Repository: config.Repository}, Log: log}
+	if !bridge.Tick() {
+		return 1
 	}
 	return 0
 }
 
 // queueBridgeInstall is `loom queue-bridge install`, which the updater's hook 61-queue-bridge runs after every release:
-// the release's units written where systemd or launchd reads them, never enabled, loaded or started (queuebridge.Install).
+// the release's loom-queue-bridge units written where systemd reads them, never enabled or started (queuebridge.Install).
 func queueBridgeInstall(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) != 0 {
 		fmt.Fprintln(stderr, "usage: loom queue-bridge install")
 		return 2
+	}
+	if runtime.GOOS != "linux" {
+		fmt.Fprintf(stderr, "loom queue-bridge install: the bridge is a systemd user unit, and this is %s\n", runtime.GOOS)
+		return 3
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -122,7 +96,7 @@ func queueBridgeInstall(arguments []string, stdout io.Writer, stderr io.Writer) 
 		}
 		return string(output), nil
 	}
-	if err := queuebridge.Install(queuebridge.HomePaths(home), home, runtime.GOOS, systemctl, stdout); err != nil {
+	if err := queuebridge.Install(queuebridge.HomePaths(home), home, systemctl, stdout); err != nil {
 		fmt.Fprintf(stderr, "loom queue-bridge install: %v\n", err)
 		return 1
 	}
