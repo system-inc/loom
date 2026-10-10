@@ -33,6 +33,9 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "witness" {
 		return judgeWitness(arguments[1:], stdout, stderr)
 	}
+	if len(arguments) > 0 && arguments[0] == "gate" {
+		return judgeGate(arguments[1:], stdout, stderr)
+	}
 	flags := flag.NewFlagSet("judge", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	queue := flags.String("queue", "", "loom-pipeline's base URL")
@@ -387,4 +390,93 @@ func judgeWitness(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 3
 	}
 	return 0
+}
+
+// judgeGate gates the gate through the new path (#82tz9ty, #4rtjr81): it reads Queue's log, rebuilds the newest decided
+// batch of each mutant in the suite (its future is the mutant's own tree, a parity run) and of the canary of main's tip,
+// reads each as GateTheGate does, prints one line per mutant and the verdict, and exits 0 only when the tools may promote.
+func judgeGate(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	flags := flag.NewFlagSet("judge gate", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	queue := flags.String("queue", "", "loom-pipeline's base URL")
+	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
+	suitePath := flags.String("suite", "", "the gate-mutant suite, Adamic's cloud/gate-mutants.tsv")
+	canaryTree := flags.String("canary", "", "the tree of main's canary, a parity run of main's tip")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if *queue == "" || *tokenFile == "" || *suitePath == "" {
+		fmt.Fprintln(stderr, "usage: loom judge gate --queue <url> --token-file <path> --suite <gate-mutants.tsv> [--canary <tree>]")
+		return 2
+	}
+	token, err := os.ReadFile(*tokenFile)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge gate:", err)
+		return 2
+	}
+	suiteText, err := os.ReadFile(*suitePath)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge gate:", err)
+		return 2
+	}
+	events, err := judge.HTTPLog{Base: *queue, Token: strings.TrimSpace(string(token))}.Events()
+	if err != nil {
+		fmt.Fprintln(stderr, "judge gate:", err)
+		return 2
+	}
+	lines, promote, err := gateReport(string(suiteText), events, *canaryTree)
+	if err != nil {
+		fmt.Fprintln(stderr, "judge gate:", err)
+		return 2
+	}
+	for _, line := range lines {
+		fmt.Fprintln(stdout, line)
+	}
+	if !promote {
+		return 1
+	}
+	return 0
+}
+
+// gateReport is judgeGate's reading of a log: a line per mutant (its name, sha and JudgeMutant's word, or "unread"
+// when its future has no decided batch), the canary's, and GateTheGate's verdict last.
+func gateReport(suiteText string, events []judge.LogEvent, canaryTree string) ([]string, bool, error) {
+	suite, err := judge.ParseMutants(suiteText)
+	if err != nil {
+		return nil, false, err
+	}
+	batches, err := judge.DecidedBatches(events)
+	if err != nil {
+		return nil, false, err
+	}
+	lines := []string{}
+	readings := map[string]judge.Reading{}
+	for _, mutant := range suite {
+		post, found := batches[mutant.Sha]
+		if !found {
+			lines = append(lines, fmt.Sprintf("%s %s unread: no decided batch for its future yet", mutant.Name, mutant.Sha[:8]))
+			continue
+		}
+		reading, err := judge.ReadingOf(mutant.Sha, post)
+		if err != nil {
+			return nil, false, fmt.Errorf("mutant %s: %w", mutant.Name, err)
+		}
+		readings[mutant.Name] = reading
+		lines = append(lines, fmt.Sprintf("%s %s %s (run %s, %s at %q, %d passed)", mutant.Name, mutant.Sha[:8], judge.JudgeMutant(mutant, reading), post.Run, reading.Status, reading.FirstStep, reading.PassedTests))
+	}
+	canary := judge.Reading{Status: "unread"}
+	if post, found := batches[canaryTree]; canaryTree != "" && found {
+		if canary, err = judge.ReadingOf(canaryTree, post); err != nil {
+			return nil, false, fmt.Errorf("canary: %w", err)
+		}
+	}
+	lines = append(lines, fmt.Sprintf("canary %s %s with %d passed", strings.TrimSpace(canaryTree), canary.Status, canary.PassedTests))
+	verdict := judge.GateTheGate(suite, readings, canary)
+	if verdict.Promote {
+		return append(lines, "promote: every mutant reads as declared and main's canary is green"), true, nil
+	}
+	for _, reason := range verdict.Hold {
+		lines = append(lines, "hold: "+reason)
+	}
+	return lines, false, nil
 }

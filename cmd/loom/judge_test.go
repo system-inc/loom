@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -114,5 +116,48 @@ func TestJudgeWitnessExitsOneOnAKeyFaultAndThreeWhenIncomplete(t *testing.T) {
 				t.Fatalf("exit %d, output %q %q", code, out.String(), errors.String())
 			}
 		})
+	}
+}
+
+func TestTheGateReadsEachMutantsNewestDecidedBatchFromTheLog(t *testing.T) {
+	plainSha, censusSha, canary := strings.Repeat("a", 40), strings.Repeat("c", 40), strings.Repeat("e", 40)
+	suite := "plain-wrong-answer-leaf\t" + plainSha + "\ttests\tstatecopy Test[A-Z]\n" + "deferred-red-reaches-census\t" + censusSha + "\tcensus\n"
+	unit := func(tree, run, key, status, cause, rule, inline string, passed int) judge.LogEvent {
+		causeJSON := "null"
+		if cause != "" {
+			causeJSON = `"` + cause + `"`
+		}
+		record := `{"unitKey":"` + key + `","future":"` + tree + `","run":"` + run + `","status":"` + status + `","cause":` + causeJSON + `,"rule":"` + rule +
+			`","tests":{"sha256":"` + strings.Repeat("0", 64) + `","passed":` + strconv.Itoa(passed) + `,"failed":0,"skipped":0,"inline":[` + inline + `]}}`
+		return judge.LogEvent{Type: "verdict.decided", Subject: judge.LogSubject{Future: tree, UnitKey: key, Run: run}, Data: json.RawMessage(`{"verdict":` + record + `}`)}
+	}
+	decided := func(seq int64, tree, run, status, red string) judge.LogEvent {
+		return judge.LogEvent{Seq: seq, Type: "verdict.decided", Subject: judge.LogSubject{Future: tree, Run: run},
+			Data: json.RawMessage(`{"decision":{"status":"` + status + `","red":[` + red + `],"excused":[],"problems":[]},"rule":"judge-v1"}`)}
+	}
+	failing := `{"package":"github.com/system-inc/adamic/stage3/census/latent/statecopy","test":"TestPublishedCopyModeIsPrivate","outcome":"fail"}`
+	events := []judge.LogEvent{
+		unit(plainSha, "p-1", "k1", "failed", "change", "judge-v1", failing, 3), decided(1, plainSha, "p-1", "red", `"k1"`),
+		unit(censusSha, "c-1", "k2", "void", "infra", "judge-v1", "", 0), decided(2, censusSha, "c-1", "void", ""),
+		unit(censusSha, "c-2", "k2", "failed", "change", "judge-v1 census", "", 40), decided(3, censusSha, "c-2", "red", `"k2"`),
+		unit(canary, "m-1", "k3", "passed", "", "judge-v1", "", 612), decided(4, canary, "m-1", "green", ""),
+	}
+	lines, promote, err := gateReport(suite, events, canary)
+	if err != nil || !promote {
+		t.Fatalf("promote %v (%v):\n%s", promote, err, strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(lines[1], "deferred-red-reaches-census cccccccc ok (run c-2, red at \"census\"") {
+		t.Fatalf("census mutant line %q: want its newest decided run, c-2", lines[1])
+	}
+	// The plain mutant reading green instead: a wrong reading holds the tools and names it.
+	events[1] = decided(1, plainSha, "p-1", "green", "")
+	events[0] = unit(plainSha, "p-1", "k1", "passed", "", "judge-v1", "", 3)
+	lines, promote, _ = gateReport(suite, events, canary)
+	if promote || !strings.Contains(strings.Join(lines, "\n"), "plain-wrong-answer-leaf aaaaaaaa wrong green") || !strings.Contains(strings.Join(lines, "\n"), "hold: mutant plain-wrong-answer-leaf: wrong green") {
+		t.Fatalf("a wrong reading promoted or wasn't named:\n%s", strings.Join(lines, "\n"))
+	}
+	// No canary read: held.
+	if _, promote, _ := gateReport(suite, events[:6], canary); promote {
+		t.Fatal("promoted without a canary reading")
 	}
 }

@@ -159,7 +159,7 @@ func ReadingOf(sha string, post FuturePost) (Reading, error) {
 	for _, key := range post.Decision.Red {
 		red[key] = true
 	}
-	failures, skips := []string{}, []string{}
+	failures, skips, censusRed := []string{}, []string{}, false
 	for _, raw := range post.Verdicts {
 		var record struct {
 			UnitKey string   `json:"unitKey"`
@@ -176,6 +176,7 @@ func ReadingOf(sha string, post FuturePost) (Reading, error) {
 			}
 		}
 		if red[record.UnitKey] && record.Rule == RuleCensus {
+			censusRed = true
 			// A census red's tests passed: its kick names the skips the census refused.
 			for _, refused := range post.Decision.Kicks[record.UnitKey].Tests {
 				skips = append(skips, refused.Package+" "+refused.Test)
@@ -183,7 +184,7 @@ func ReadingOf(sha string, post FuturePost) (Reading, error) {
 		}
 	}
 	switch {
-	case reading.Status == "red" && len(failures) == 0 && len(skips) > 0:
+	case reading.Status == "red" && len(failures) == 0 && censusRed:
 		reading.FirstStep, reading.FirstFailure = "census", strings.Join(skips, "\n")
 	case reading.Status == "red":
 		reading.FirstStep, reading.FirstFailure = "tests", strings.Join(failures, "\n")
