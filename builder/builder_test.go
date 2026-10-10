@@ -515,6 +515,14 @@ func TestAFetchRefusesOutputPathsARunnerShouldntWrite(t *testing.T) {
 	if err := checkOutputPaths([]Output{{Path: product + "/bin/tool"}, {Path: product + ".inputs"}}); err != nil {
 		t.Fatalf("an honest product's paths: %v", err)
 	}
+	if err := checkOutputPaths([]Output{{Path: "test"}, {Path: "source.tar"}, {Path: "index.json"}, {Path: "cache/" + product + "/bin/tool"}, {Path: "cache/" + product + ".inputs"}}); err != nil {
+		t.Fatalf("a tree build's paths: %v", err)
+	}
+	for _, path := range []string{"cache/loose", "cache/../" + product + "/x", "tests", "cache/" + product, "source.tar/x"} {
+		if checkOutputPaths([]Output{{Path: path}}) == nil {
+			t.Errorf("%q was taken as a tree build's path", path)
+		}
+	}
 }
 
 func TestAFetchCanLeaveOutWhatClangBuilt(t *testing.T) {

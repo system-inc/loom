@@ -260,12 +260,37 @@ func (store Store) Fetch(key, directory string) error {
 	return nil
 }
 
+// FetchAction is Fetch, named for a tree build's actions: each output lands at its own path under directory.
+func (store Store) FetchAction(key, directory string) error {
+	return store.Fetch(key, directory)
+}
+
 // productKeyPattern is a buildcache key, the first part of every output path.
 var productKeyPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// buildcachePath is a product's file under its buildcache key, <key>/<file>, or its description beside it, <key>.inputs.
+func buildcachePath(path string) bool {
+	first, rest, nested := strings.Cut(path, "/")
+	if nested {
+		return productKeyPattern.MatchString(first) && rest != ""
+	}
+	return strings.HasSuffix(first, ".inputs") && productKeyPattern.MatchString(strings.TrimSuffix(first, ".inputs"))
+}
+
+// treePath is a tree build's output (PublishTree): a package's test binary, the tree's source archive, the tree's
+// index, or a product under cache/.
+func treePath(path string) bool {
+	switch path {
+	case "test", "source.tar", "index.json":
+		return true
+	}
+	rest, under := strings.CutPrefix(path, "cache/")
+	return under && buildcachePath(rest)
+}
+
 // checkOutputPaths refuses a manifest whose outputs a runner shouldn't write: a path that isn't local (empty,
-// absolute, or climbing out with ..), one not under a buildcache key (<key>/<file>, or <key>.inputs beside it), or
-// one listed twice.
+// absolute, or climbing out with ..), one that's neither a product's (<key>/<file>, <key>.inputs) nor a tree build's
+// (test, source.tar, index.json, cache/<key>/...), or one listed twice.
 func checkOutputPaths(outputs []Output) error {
 	seen := map[string]bool{}
 	for _, output := range outputs {
@@ -273,11 +298,7 @@ func checkOutputPaths(outputs []Output) error {
 		if !filepath.IsLocal(local) || filepath.ToSlash(filepath.Clean(local)) != output.Path {
 			return fmt.Errorf("output path %q isn't a clean local path", output.Path)
 		}
-		first, rest, nested := strings.Cut(output.Path, "/")
-		switch {
-		case nested && productKeyPattern.MatchString(first) && rest != "":
-		case !nested && strings.HasSuffix(first, ".inputs") && productKeyPattern.MatchString(strings.TrimSuffix(first, ".inputs")):
-		default:
+		if !buildcachePath(output.Path) && !treePath(output.Path) {
 			return fmt.Errorf("output path %q isn't under a buildcache key", output.Path)
 		}
 		if seen[output.Path] {

@@ -68,6 +68,7 @@ const usage = `usage:
   loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--packages a,b] [--list]
   loom fetch-actions --cache <dir> [--read <url>] [--skip-native] <productKey>...
   loom store-audit --write <https://pipeline/actions> [--token-file <path>] [--index <dir>]
+  loom build-tree --tree <dir> --write <https://pipeline/actions> [--future <sha>] [--jobs N]
 `
 
 func main() {
@@ -122,6 +123,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "store-audit" {
 		return storeAudit(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "build-tree" {
+		return buildTree(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "publish-token" {
 		return publishToken(arguments[1:], stdout, stderr)
