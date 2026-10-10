@@ -17,6 +17,7 @@ import (
 
 	"github.com/system-inc/loom/housecache"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/toolchains"
 	"github.com/system-inc/loom/updater"
 )
 
@@ -32,10 +33,13 @@ const UnitName = "loom-serve.service"
 type Config struct {
 	Pool      string
 	PhaseJobs bool
+	// Has is the toolchains this box claims for its pool, which serve probes before it asks for anything (--has).
+	Has []string
 }
 
 // ReadConfig reads serve.conf as the updater reads update.conf: key = value lines, # comments, blank lines skipped.
-// pool is required and is a name the wire takes; phase-jobs is yes or no, no when absent. Any other key or line is
+// pool is required and is a name the wire takes; phase-jobs is yes or no, no when absent. has is the toolchains this box
+// claims, go,clang,node,wasiSdk, each one a probe exists for (package toolchains), none when absent. Any other key or line is
 // refused, so a typo never serves the wrong pool quietly.
 func ReadConfig(content string) (Config, error) {
 	config := Config{}
@@ -65,8 +69,14 @@ func ReadConfig(content string) (Config, error) {
 			default:
 				return Config{}, fmt.Errorf("serve.conf line %d: phase-jobs is yes or no, not %q", number+1, value)
 			}
+		case "has":
+			claims, err := toolchains.Parse(value)
+			if err != nil {
+				return Config{}, fmt.Errorf("serve.conf line %d: has: %w", number+1, err)
+			}
+			config.Has = claims
 		default:
-			return Config{}, fmt.Errorf("serve.conf line %d: no setting %q (pool, phase-jobs)", number+1, key)
+			return Config{}, fmt.Errorf("serve.conf line %d: no setting %q (pool, phase-jobs, has)", number+1, key)
 		}
 	}
 	if config.Pool == "" {
@@ -84,6 +94,9 @@ func Unit(config Config, worker, houseCache string) string {
 	}
 	if houseCache != "" {
 		flags += " --house-cache " + houseCache
+	}
+	if len(config.Has) > 0 {
+		flags += " --has " + strings.Join(config.Has, ",")
 	}
 	lines := strings.Split(unitTemplate, "\n")
 	for index, line := range lines {

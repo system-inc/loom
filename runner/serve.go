@@ -17,6 +17,7 @@ import (
 
 	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/toolchains"
 )
 
 // ServeOptions are what a serving runner needs beyond each unit's own Options. docs/protocol.md, "The pool",
@@ -45,6 +46,13 @@ type ServeOptions struct {
 	MinimumFreeMegabytes int64
 	// UnfitPause is how long serve waits before looking at an unfit disk again. Zero means 30 s.
 	UnfitPause time.Duration
+	// Has is the toolchains this box claims for its pool (serve.conf's has, docs/serving.md). Serve probes each one
+	// (package toolchains) before it asks for anything, and a box whose claim doesn't hold is unfit and asks for
+	// nothing, so it never takes units that would skip (Oct 10, #qm8bchp: box-strict claimed wasiSdk, and no box could
+	// link for wasm32-wasi). A release reload starts serve again, so every release is probed. Empty claims nothing.
+	Has []string
+	// ProbeEvery is how often an unfit box probes its claims again and says what still fails. Zero means an hour.
+	ProbeEvery time.Duration
 	// Releases is where a unit's runner is fetched by its sha256 when the unit names one other than this runner
 	// (runners.go). Empty means DefaultReleases.
 	Releases string
@@ -63,6 +71,8 @@ type ServeOptions struct {
 	// trim clears what earlier units left on a strict runner's root, and an exclusive one's HOME (prepare.sh trim-only);
 	// nil means that script.
 	trim func(trimContext context.Context, root string, exclusive bool, report io.Writer) error
+	// checkToolchains probes the claims; nil means toolchains.Check with HOME's adamic toolchain. Tests plant one.
+	checkToolchains func(checkContext context.Context, claims []string) []toolchains.Failure
 }
 
 // A ServeSummary is how a serving runner ended: how many units it ran and how each finished, how long it
@@ -124,6 +134,15 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	if options.trim == nil {
 		options.trim = trimRoot
 	}
+	if options.ProbeEvery == 0 {
+		options.ProbeEvery = time.Hour
+	}
+	if options.checkToolchains == nil {
+		options.checkToolchains = func(checkContext context.Context, claims []string) []toolchains.Failure {
+			home, _ := os.UserHomeDir()
+			return toolchains.Check(checkContext, claims, toolchains.Environment(home))
+		}
+	}
 	// The disks a unit writes: its workspace's, and a strict runner's root, where its test job keeps the checkout.
 	disks := []string{unitOptions.WorkspaceParent}
 	root := unitOptions.Root
@@ -147,6 +166,10 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	}()
 	summary := ServeSummary{}
 	failures := 0
+	// claimsUnfit is why the toolchains this box claims don't hold, from the last probe at probed; empty when they do.
+	claimsUnfit, probed := "", time.Time{}
+	// unfitByClaims says the unfit summary.Unfit names came from the claims, which say themselves when they hold again.
+	unfitByClaims := false
 	live := startLive(options, started)
 	defer func() {
 		live.Update(func(status *livestatus.Status) {
@@ -190,13 +213,34 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			cancel()
 			unfit = unfitDisk(options, disks)
 		}
-		if unfit != summary.Unfit {
-			if unfit != "" {
-				fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; asking for no unit until there is room\n", unfit)
+		// The claims are probed once a serve starts and, while one fails, every ProbeEvery after; each probe says what it
+		// found, so an unfit box's journal names why once an hour.
+		if unfit == "" && len(options.Has) > 0 && (probed.IsZero() || (claimsUnfit != "" && time.Since(probed) >= options.ProbeEvery)) {
+			found := []string{}
+			for _, failure := range options.checkToolchains(serveContext, options.Has) {
+				found = append(found, failure.String())
+			}
+			claimsUnfit, probed = strings.Join(found, "; "), time.Now()
+			if claimsUnfit != "" {
+				fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; asking for no unit, and probing again in %v\n", claimsUnfit, options.ProbeEvery)
 			} else {
+				fmt.Fprintf(options.Report, "loom-runner serve: every toolchain it claims works: %s\n", strings.Join(options.Has, ", "))
+			}
+		}
+		if unfit == "" {
+			unfit = claimsUnfit
+		}
+		if unfit != summary.Unfit {
+			switch {
+			case unfit != "" && unfit == claimsUnfit:
+				// Said where it was probed.
+			case unfit != "":
+				fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; asking for no unit until there is room\n", unfit)
+			case !unfitByClaims:
 				fmt.Fprintf(options.Report, "loom-runner serve: room again; asking for units\n")
 			}
 			summary.Unfit = unfit
+			unfitByClaims = unfit != "" && unfit == claimsUnfit
 			live.Update(func(status *livestatus.Status) { status.Unfit = unfit })
 		}
 		if summary.Unfit != "" {

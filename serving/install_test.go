@@ -12,23 +12,25 @@ import (
 )
 
 func TestServeConfReadsAPoolAndRefusesAnythingElse(t *testing.T) {
-	config, err := ReadConfig("# Cloud\npool = box-strict\n\n  phase-jobs=yes  \n")
-	if err != nil || config != (Config{Pool: "box-strict", PhaseJobs: true}) {
+	config, err := ReadConfig("# Cloud\npool = box-strict\n\n  phase-jobs=yes  \nhas = go, clang,node,wasiSdk\n")
+	if err != nil || !reflect.DeepEqual(config, Config{Pool: "box-strict", PhaseJobs: true, Has: []string{"go", "clang", "node", "wasiSdk"}}) {
 		t.Fatalf("read %+v, %v", config, err)
 	}
 	if config, err := ReadConfig("pool=box-phase\nphase-jobs = no\n"); err != nil || config.PhaseJobs {
 		t.Fatalf("phase-jobs = no read %+v, %v", config, err)
 	}
 	for name, content := range map[string]string{
-		"no pool":               "phase-jobs = yes\n",
-		"an empty pool":         "pool =\n",
-		"a pool with a space":   "pool = box strict\n",
-		"a specifier":           "pool = box%h\n",
-		"a path":                "pool = ../board\n",
-		"a pool named twice":    "pool = box-strict\npool = box-phase\n",
-		"phase-jobs as true":    "pool = box-phase\nphase-jobs = true\n",
-		"a setting it lacks":    "pool = box-strict\nworker = cloud\n",
-		"a line with no equals": "pool = box-strict\nbox-phase\n",
+		"no pool":                     "phase-jobs = yes\n",
+		"an empty pool":               "pool =\n",
+		"a pool with a space":         "pool = box strict\n",
+		"a specifier":                 "pool = box%h\n",
+		"a path":                      "pool = ../board\n",
+		"a pool named twice":          "pool = box-strict\npool = box-phase\n",
+		"phase-jobs as true":          "pool = box-phase\nphase-jobs = true\n",
+		"a setting it lacks":          "pool = box-strict\nworker = cloud\n",
+		"a line with no equals":       "pool = box-strict\nbox-phase\n",
+		"a toolchain no probe checks": "pool = box-strict\nhas = go,rust\n",
+		"a toolchain claimed twice":   "pool = box-strict\nhas = go,go\n",
 	} {
 		if config, err := ReadConfig(content); err == nil {
 			t.Errorf("%s: read %+v", name, config)
@@ -73,6 +75,9 @@ func TestTheUnitServesTheConfiguredPoolStrictAndDrainsOnReload(t *testing.T) {
 	}
 	if phase := Unit(Config{Pool: "box-phase", PhaseJobs: true}, "cloud-4f1d2c", ""); !strings.Contains(phase, "serve --strict --phase-jobs --pool https://runs.loom.system.inc/pools/box-phase ") {
 		t.Fatalf("a phase box's unit:\n%s", phase)
+	}
+	if claims := Unit(Config{Pool: "box-strict", Has: []string{"go", "wasiSdk"}}, "cloud-4f1d2c", ""); !strings.Contains(claims, "serve --strict --has go,wasiSdk --pool https://runs.loom.system.inc/pools/box-strict ") {
+		t.Fatalf("a box claiming toolchains:\n%s", claims)
 	}
 	for _, line := range []string{
 		"ExecStartPre=/usr/bin/install -m 600 %h/.loom/serve-token %t/loom-serve/pool-token",
