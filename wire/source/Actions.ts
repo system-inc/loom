@@ -21,6 +21,8 @@ import { verifyToken, type TokenClaims } from './Token';
 export const ActionRefPrefix = 'refs/action/';
 export const BuilderMetadata = 'builder';
 export const MaximumManifestBytes = 1024 * 1024;
+// A blob is named by its sha256 and never replaced, so the edge and every reader may keep it forever (#k62gwdt).
+export const ImmutableBlob = 'public, max-age=31536000, immutable';
 
 export interface ActionEnvironment {
     PublicStore: R2Bucket;
@@ -167,7 +169,7 @@ export async function handleAction(request: Request, environment: ActionEnvironm
         if (request.method === 'HEAD') {
             return headBlob(environment.PublicStore, hash);
         }
-        return (await putBlob(environment.PublicStore, hash, request)).response;
+        return (await putBlob(environment.PublicStore, hash, request, ImmutableBlob)).response;
     }
     return putActionRef(environment.PublicStore, hash, claims.run, request);
 }

@@ -1,6 +1,6 @@
 import { env, exports } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
-import { actionRef, canonicalManifest, checkManifest, handleAction, type ActionOutput } from '../../source/Actions';
+import { actionRef, canonicalManifest, checkManifest, handleAction, ImmutableBlob, type ActionOutput } from '../../source/Actions';
 import { freshRun, Origin, randomBytes, sha256Hex, TestSecret, token } from '../Helpers';
 
 const environment = { PublicStore: env.PublicStore, LOOM_TOKEN_SECRET: TestSecret };
@@ -58,6 +58,8 @@ describe('the action store', function () {
         const stored = await env.PublicStore.get(actionRef(key));
         expect(await stored?.text()).toBe(manifest);
         expect(stored?.customMetadata).toEqual({ builder: 'workshop' });
+        // Its blobs are immutable for the edge: named by their hash, never replaced.
+        expect((await env.PublicStore.head(`blobs/${manifest}`))?.httpMetadata?.cacheControl).toBe(ImmutableBlob);
         // The same bytes again, from any builder, is a quiet no-op that names who built it first.
         const again = await answer(`/actions/${key}`, { method: 'PUT', bearer: await token('home', 'build'), body: manifest + '\n' });
         expect(again.status).toBe(200);

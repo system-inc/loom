@@ -260,6 +260,8 @@ describe('the public store', function () {
         expect((await call(path, { method: 'HEAD', bearer: coordinator })).status).toBe(200);
         expect((await call(path, { bearer: coordinator })).status).toBe(405);
         expect(await env.PublicStore.head(`blobs/${sha256}`)).not.toBeNull();
+        // loom-wire's blobs carry no Cache-Control of their own; only the action store marks its blobs immutable.
+        expect((await env.PublicStore.head(`blobs/${sha256}`))?.httpMetadata?.cacheControl).toBeUndefined();
         // The private store never saw it.
         expect(await env.Store.head(`blobs/${sha256}`)).toBeNull();
     });
