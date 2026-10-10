@@ -355,7 +355,7 @@ func (cache sourceCache) assemble(assembleContext context.Context, held *heldSou
 		done.unpacked++
 	}
 	if err = os.MkdirAll(tree, 0o755); err == nil {
-		err = os.WriteFile(filepath.Join(source, sourceMarker), []byte(held.sum+"\n"), 0o444)
+		err = os.WriteFile(filepath.Join(source, sourceMarker), markerContent(held.sum), 0o444)
 	}
 	if err != nil {
 		return done, err

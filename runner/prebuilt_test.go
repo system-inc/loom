@@ -1187,7 +1187,7 @@ func TestAnUnmarkedSourceIsUnpackedAgain(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(hollow, "junk")); err == nil {
 		t.Error("the unmarked source was trusted")
 	}
-	if marker, err := os.ReadFile(filepath.Join(hollow, sourceMarker)); err != nil || strings.TrimSpace(string(marker)) != fixture.tree.source {
+	if marker, err := os.ReadFile(filepath.Join(hollow, sourceMarker)); err != nil || string(marker) != string(markerContent(fixture.tree.source)) {
 		t.Errorf("the source's marker: %q %v", marker, err)
 	}
 }

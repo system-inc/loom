@@ -38,6 +38,7 @@ import (
 //	a fetched chunk's hash unchecked, or a cached one's: TestACorruptChunkIsNeverAssembled
 //	a kept tree on tmpfs made into another: TestAKeptTreeOnTmpfsIsNeverMadeIntoAnother
 //	a marker written inside a source's tree, or a module cache's: TestARunnerAddsNothingInsideATree
+//	the marker's name and content left as an older layout's: TestASourceOfAnotherLayoutIsNeverTrusted
 //	a kept chunk matched by its blob alone, not its range and count: TestAKeptChunkIsMatchedWholeNotByItsBlob
 
 // describeTree describes every entry under directory: its type and mode, a link's target, a file's bytes.
@@ -780,6 +781,51 @@ func TestARunnerAddsNothingInsideATree(t *testing.T) {
 		}
 		if strings.Join(names, " ") != sourceMarker+" "+sourceTreeName {
 			t.Errorf("%s holds %q, not its marker and its tree", sum, names)
+		}
+	}
+}
+
+// A source of another layout is never trusted, in either direction. One a release before this one left (its tree at
+// <sha256>/ itself, <sha256>/.loom-source naming its sha256) reads here as unmarked, and is moved away and made again,
+// the source and the module cache alike, and the unit passes. And this release's source holds nothing an older release
+// reads as its marker, so a rollback makes it again too. (The review's proof, Oct 10.)
+func TestASourceOfAnotherLayoutIsNeverTrusted(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	if result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t)); result.Status != protocol.StatusPassed {
+		t.Fatalf("first: %s; errors %q", result.Status, errorPhases(events))
+	}
+	sources := filepath.Join(fixture.directory, "root", sourceDirectoryName)
+	sums := []string{fixture.tree.source, fixture.tree.modules}
+	// An older release reads a source as whole when <sha256>/.loom-source holds its sha256.
+	for _, sum := range sums {
+		for _, path := range []string{filepath.Join(sources, sum, ".loom-source"), filepath.Join(sources, sum, sourceTreeName, ".loom-source")} {
+			if content, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(content)) == sum {
+				t.Errorf("%s reads as whole to an older release", path)
+			}
+		}
+	}
+	// The older layout, as that release left it.
+	for _, sum := range sums {
+		directory := filepath.Join(sources, sum)
+		tree := filepath.Join(directory, sourceTreeName)
+		entries, _ := os.ReadDir(tree)
+		for _, entry := range entries {
+			must(t, os.Rename(filepath.Join(tree, entry.Name()), filepath.Join(directory, entry.Name())))
+		}
+		must(t, os.Remove(tree))
+		must(t, os.Remove(filepath.Join(directory, sourceMarker)))
+		must(t, os.WriteFile(filepath.Join(directory, ".loom-source"), []byte(sum+"\n"), 0o444))
+	}
+	for run := range 2 {
+		result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+		if result.Status != protocol.StatusPassed {
+			t.Fatalf("run %d after the older layout: %s; errors %q", run, result.Status, errorPhases(events))
+		}
+	}
+	sameTree(t, filepath.Join(sources, fixture.tree.source, sourceTreeName), fixtureFiles())
+	for _, sum := range sums {
+		if _, err := os.Lstat(filepath.Join(sources, sum, ".loom-source")); err == nil {
+			t.Errorf("the older layout's %s was kept", sum)
 		}
 	}
 }

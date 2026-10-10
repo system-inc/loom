@@ -49,12 +49,22 @@ var keepSources = 4
 const unpackingPrefix = ".unpacking-"
 const sourceRemovingPrefix = ".removing-"
 
-// sourceMarker is the file a whole source's directory holds beside its tree, naming its sha256, and sourceTreeName the
-// tree's own directory there, which holds the archive's entries and nothing else.
+// sourceMarker is the file a whole source's directory holds beside its tree, naming its layout and its sha256
+// (markerContent), and sourceTreeName the tree's own directory there, which holds the archive's entries and nothing
+// else. A change to the layout changes the marker's name and its layout: a release before this one kept the tree at
+// <sha256>/ itself with <sha256>/.loom-source naming its sha256 (a review, Oct 10: this release trusted that marker and
+// ran tests in a tree/ that wasn't there), so each release reads the other's sources as unmarked, and moves them away
+// and makes them again.
 const (
-	sourceMarker   = ".loom-source"
+	sourceMarker   = ".loom-source-tree"
+	sourceLayout   = "loom-source-layout 2"
 	sourceTreeName = "tree"
 )
+
+// markerContent is what source sum's marker holds: the layout, then the sum.
+func markerContent(sum string) []byte {
+	return []byte(sourceLayout + "\n" + sum + "\n")
+}
 
 // A sourceCache is a runner's unpacked sources, under its root.
 type sourceCache struct {
@@ -108,7 +118,7 @@ func (held *heldSource) tree() string {
 // whole reports whether the source's directory holds its completion marker, naming it.
 func (held *heldSource) whole() bool {
 	content, err := os.ReadFile(filepath.Join(held.directory, sourceMarker))
-	return err == nil && strings.TrimSpace(string(content)) == held.sum
+	return err == nil && string(content) == string(markerContent(held.sum))
 }
 
 // lockFile holds a shared lock on source sum's lock file, the one at its path once the lock is held: a removal unlinks
@@ -201,7 +211,7 @@ func (cache sourceCache) unpack(unpackContext context.Context, held *heldSource,
 	defer lock.Close()
 	scratch := lock.Name()
 	if err = builder.Unpack(contextReader{unpackContext, archive}, filepath.Join(scratch, sourceTreeName), nil); err == nil {
-		err = os.WriteFile(filepath.Join(scratch, sourceMarker), []byte(held.sum+"\n"), 0o444)
+		err = os.WriteFile(filepath.Join(scratch, sourceMarker), markerContent(held.sum), 0o444)
 	}
 	if err != nil {
 		os.RemoveAll(scratch)
