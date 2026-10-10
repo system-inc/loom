@@ -865,3 +865,22 @@ func TestAUnitsBrokenExitFinishesItBroken(t *testing.T) {
 		t.Fatalf("exit 2 without brokenExit: %s", result.Status)
 	}
 }
+
+// The started event names the runner by its binary's sha256, the hash a unit's key carries as tools.runner, so the
+// judge can refuse an attempt run by another runner. Mutant: any other hash (or none) fails here.
+func TestTheStartedEventNamesTheRunnersOwnSha256(t *testing.T) {
+	unit := testUnit("sh", "-c", "echo hi")
+	_, events, _ := runUnit(t, unit, testOptions(t))
+	path, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(content)
+	if started := eventsOfType(events, "started"); len(started) != 1 || started[0].RunnerSha256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("started names %+v, the binary is %x", started, sum)
+	}
+}

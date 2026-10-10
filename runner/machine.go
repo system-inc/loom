@@ -1,11 +1,15 @@
 package runner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"math"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // A machine is what a started event says about where the unit runs.
@@ -29,6 +33,28 @@ func describeMachine() machine {
 	}
 	return machine{name: name, cpus: cpus, memoryMegabytes: int(memory >> 20)}
 }
+
+// selfSha256 is the running binary's sha256, 64 lowercase hex, read once from /proc/self/exe (the executable's path
+// where there is no /proc). A unit's key names its runner by this hash (tools.runner), so the started event carries it
+// and the judge can refuse an attempt run by a runner its key wasn't made for (Loom, 01:52Z Oct 10). "" when unreadable.
+var selfSha256 = sync.OnceValue(func() string {
+	path := "/proc/self/exe"
+	if _, err := os.Stat(path); err != nil {
+		if path, err = os.Executable(); err != nil {
+			return ""
+		}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+})
 
 // parseCpuMax reads cgroup v2's cpu.max, "<quota> <period>" in microseconds or "max <period>" for no
 // quota, and returns the quota in whole CPUs rounded up, or 0 for none.

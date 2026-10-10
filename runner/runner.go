@@ -176,6 +176,7 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 		Type:             "started",
 		Machine:          machine.name,
 		RunnerVersion:    Version,
+		RunnerSha256:     selfSha256(),
 		Cpus:             machine.cpus,
 		MemoryMegabytes:  machine.memoryMegabytes,
 		InputHashes:      inputHashes,
