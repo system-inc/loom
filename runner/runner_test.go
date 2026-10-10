@@ -599,8 +599,10 @@ func TestAProcessThatLeftTheGroupCantHoldTheUnitOpen(t *testing.T) {
 	if _, err := os.Stat("/usr/bin/perl"); err != nil {
 		t.Skip("needs perl for setsid")
 	}
-	// The child starts its own session, so the group kill can't reach it, and keeps stdout open.
-	unit := testUnit("/usr/bin/perl", "-MPOSIX", "-e", `$| = 1; if (fork) { exit 0 } POSIX::setsid(); print "$$\n"; sleep 30`)
+	// The child starts its own session, so the group kill can't reach it, and keeps stdout open. The parent exits only once
+	// the child has written to a pipe after its setsid: a parent gone first lets the group kill take the child while it is
+	// still in the group, and the unit ends with no process outside it (a loaded machine did that now and then).
+	unit := testUnit("/usr/bin/perl", "-MPOSIX", "-e", `$| = 1; pipe(my $read, my $write) or die; if (fork) { close $write; <$read>; exit 0 } close $read; POSIX::setsid(); print "$$\n"; print $write "out\n"; close $write; sleep 30`)
 	options := testOptions(t)
 	options.OutputGrace = 300 * time.Millisecond
 	began := time.Now()
