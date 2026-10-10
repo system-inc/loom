@@ -76,7 +76,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .spark span:last-child { opacity: 1; background: var(--gold); }
 .track { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
 .step { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--step); min-width: 0; transition: all .4s; }
-.step .head { display: flex; align-items: center; gap: 8px; }
+.step .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .step .name { font-weight: 650; }
 .step .time { margin-left: auto; font-size: 12px; color: var(--muted); }
 .step .icon { display: inline-flex; color: var(--off); flex: none; }
@@ -108,6 +108,16 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .posted[data-phase="testing"] .phase { color: var(--running); }
 .posted[data-phase="testing"] .phase .icon { animation: beat 1s ease-in-out infinite; }
 .posted[data-phase="parked"] .phase { color: var(--void); }
+.posted[data-phase="landed"] .phase, .posted[data-phase="witnessed"] .phase { color: var(--passed); }
+.posted[data-phase="red"] .phase, .posted[data-phase="refused"] .phase { color: var(--failed); }
+.posted.finished { background: transparent; }
+.posted.finished b { color: var(--soft); }
+.units { display: flex; height: 4px; border-radius: 999px; overflow: hidden; background: var(--rule); margin-top: 6px; }
+.units span { display: block; height: 100%; }
+.units .passed { background: var(--passed); }
+.units .failed { background: var(--failed); }
+.units .void { background: var(--void); }
+.line-break { font-size: 11px; color: var(--faint); letter-spacing: .08em; text-transform: uppercase; margin-top: 6px; }
 .list { display: flex; flex-direction: column; gap: 8px; }
 .empty { color: var(--faint); font-size: 13px; }
 .block { display: flex; align-items: center; gap: 18px; }
@@ -196,8 +206,8 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 <section class="track" id="track" aria-label="Where the change is"></section>
 <section class="cols">
     <article class="panel" id="panel-posted">
-        <span class="label">Posted</span>
-        <span class="note"><span class="mono">POST /changes</span>, in submit order</span>
+        <span class="label">The line</span>
+        <span class="note">each change on its way, in submit order, then the last day's finished</span>
         <div class="list" id="posted"></div>
     </article>
     <div class="middle">
@@ -281,6 +291,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     var stepIcons = ${JSON.stringify(stepIcons)};
     var phaseIcons = ${JSON.stringify(phaseIcons)};
     var phaseWords = { queued: 'setup', building: 'building', testing: 'testing', parked: 'parked' };
+    var finishedIcons = { landed: 'FlagCheckered', witnessed: 'CheckCircle', red: 'XCircle', refused: 'XCircle' };
     var icons = ${JSON.stringify(iconMarkup([...stepIcons, ...Object.values(phaseIcons), 'XCircle', 'CheckCircle'], 16))};
     var stages = [['Posted', 'owners submit'], ['Block', 'the next block forms'], ['Build', 'products, once each'], ['Test', 'only what changed'], ['Verdict', 'by written rule'], ['Landed', 'main moves']];
     var panels = ['panel-posted', 'panel-block', 'panel-build', 'panel-test', 'panel-verdict', 'panel-landed'];
@@ -388,30 +399,69 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         if (line) { headline.appendChild(document.createTextNode(' \\u00B7 ' + line.owner)); }
     }
 
+    // What a change is doing, in the log's own terms: waiting for its future, waiting for its plan, judged unit by unit,
+    // a void attempt running again, or how it finished.
+    function lineWord(change) {
+        if (change.state === 'queued') { return change.future ? 'waiting for its plan' : 'in line for its future'; }
+        if (change.state === 'building') { return 'building its tree'; }
+        if (change.state === 'testing') {
+            if (voided(change)) { return 'void, running again'; }
+            if (change.units.planned === 0) { return 'planned, nothing to run'; }
+            return 'judged ' + finishedUnits(change.units) + ' of ' + change.units.planned;
+        }
+        if (change.state === 'red') { return 'red, ' + change.units.failed + ' of ' + change.units.planned + ' failed'; }
+        return { parked: 'parked', landed: 'landed', witnessed: 'witnessed, main green', refused: 'refused' }[change.state] || change.state;
+    }
+
+    function lineCard(change, place) {
+        var finished = onTheWay.indexOf(change.state) < 0;
+        var card = element('div', (finished ? 'posted finished' : 'posted') + (drawn.has(change.change) ? '' : ' new'));
+        drawn.add(change.change);
+        var top = element('span', 'top');
+        top.appendChild(element('b', null, change.owner));
+        if (place) { top.appendChild(element('span', 'mono place', '#' + place)); }
+        card.appendChild(top);
+        var units = change.units;
+        card.appendChild(element('span', 'mono meta', change.sha.slice(0, 12) + (units.planned > 0 ? ' \\u00B7 ' + units.planned + ' units' : '')));
+        if (units.planned > 0) {
+            var bar = element('span', 'units');
+            bar.setAttribute('role', 'img');
+            var tally = units.passed + ' passed, ' + units.failed + ' failed, ' + units.void + ' void of ' + units.planned;
+            bar.setAttribute('aria-label', tally);
+            bar.title = tally;
+            ['passed', 'failed', 'void'].forEach(function (kind) {
+                if (units[kind] > 0) {
+                    var part = element('span', kind);
+                    part.style.width = (units[kind] / units.planned * 100) + '%';
+                    bar.appendChild(part);
+                }
+            });
+            card.appendChild(bar);
+        }
+        card.dataset.phase = change.state;
+        var phase = element('span', 'phase');
+        phase.appendChild(icon(finished ? finishedIcons[change.state] || 'CheckCircle' : phaseIcons[change.state]));
+        phase.appendChild(element('span', null, lineWord(change)));
+        var since = element('span', 'mono since', finished ? took(change) : '');
+        if (!finished) { since.dataset.from = change.stateSince || change.firstSeenAt; }
+        phase.appendChild(since);
+        card.appendChild(phase);
+        return card;
+    }
+
     function renderPosted() {
         var list = document.getElementById('posted');
         list.replaceChildren();
-        var line = sorted(function (change) { return onTheWay.indexOf(change.state) >= 0; });
-        line.sort(function (left, right) { return Date.parse(left.firstSeenAt) - Date.parse(right.firstSeenAt); });
-        if (line.length === 0) { list.appendChild(element('span', 'empty', 'Waiting for the first change.')); }
-        line.forEach(function (change, index) {
-            var card = element('div', drawn.has(change.change) ? 'posted' : 'posted new');
-            drawn.add(change.change);
-            var top = element('span', 'top');
-            top.appendChild(element('b', null, change.owner));
-            top.appendChild(element('span', 'mono place', '#' + (index + 1)));
-            card.appendChild(top);
-            card.appendChild(element('span', 'mono meta', change.sha.slice(0, 12) + (change.units.planned > 0 ? ' \\u00B7 ' + change.units.planned + ' units' : '')));
-            card.dataset.phase = change.state;
-            var phase = element('span', 'phase');
-            phase.appendChild(icon(phaseIcons[change.state]));
-            phase.appendChild(element('span', null, phaseWords[change.state]));
-            var since = element('span', 'mono since', '');
-            since.dataset.from = change.stateSince || change.firstSeenAt;
-            phase.appendChild(since);
-            card.appendChild(phase);
-            list.appendChild(card);
-        });
+        var waiting = sorted(function (change) { return onTheWay.indexOf(change.state) >= 0; });
+        waiting.sort(function (left, right) { return Date.parse(left.firstSeenAt) - Date.parse(right.firstSeenAt); });
+        var finished = sorted(function (change) { return onTheWay.indexOf(change.state) < 0; });
+        finished.sort(function (left, right) { return Date.parse(right.finishedAt || right.updatedAt) - Date.parse(left.finishedAt || left.updatedAt); });
+        if (waiting.length === 0) { list.appendChild(element('span', 'empty', 'Nothing in the line.')); }
+        waiting.forEach(function (change, index) { list.appendChild(lineCard(change, index + 1)); });
+        if (finished.length > 0) {
+            list.appendChild(element('span', 'line-break', 'Finished'));
+            finished.slice(0, 8).forEach(function (change) { list.appendChild(lineCard(change, 0)); });
+        }
     }
 
     function renderTests(line) {
