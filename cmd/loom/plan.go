@@ -22,15 +22,15 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	repository := flags.String("repository", "", "a local clone of the repository the futures are in")
 	gateTools := flags.String("gate-tools", "", "the gate tools checkout, for executors.txt's reads lines")
 	gateToolsRef := flags.String("gate-tools-ref", "", "a branch of the gate tools' origin to fetch and check out before each pull")
-	runner := flags.String("runner", "", "the runner binary, whose sha256 is in every key")
+	runnerShaFile := flags.String("runner-sha-file", "", "the file holding the pool's pinned runner sha256, in every key")
 	interval := flags.Duration("interval", 10*time.Second, "time between pulls")
 	once := flags.Bool("once", false, "pull once and exit")
 	only := flags.String("future", "", "plan only this future (its tree sha) and leave every other unplanned")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
-	if *queue == "" || *tokenFile == "" || *repository == "" || *gateTools == "" {
-		fmt.Fprintln(stderr, "usage: loom plan --queue <url> --token-file <path> --repository <clone> --gate-tools <dir> [--gate-tools-ref <branch>] [--runner <binary>] [--interval 10s] [--once] [--future <tree sha>]")
+	if *queue == "" || *tokenFile == "" || *repository == "" || *gateTools == "" || *runnerShaFile == "" {
+		fmt.Fprintln(stderr, "usage: loom plan --queue <url> --token-file <path> --repository <clone> --gate-tools <dir> [--gate-tools-ref <branch>] --runner-sha-file <path> [--interval 10s] [--once] [--future <tree sha>]")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -38,7 +38,7 @@ func plan(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "plan:", err)
 		return 1
 	}
-	tools, err := planner.ProbeTools(*runner)
+	tools, err := planner.ProbeTools(*runnerShaFile)
 	if err != nil {
 		fmt.Fprintln(stderr, "plan: tools:", err)
 		return 1
