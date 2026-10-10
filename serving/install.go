@@ -214,7 +214,7 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 	return nil
 }
 
-// writeChanged writes content to path, beside it first and renamed over it so nothing reads half of it, unless path
+// WriteChanged writes content to path, beside it first and renamed over it so nothing reads half of it, unless path
 // already holds exactly that. It says whether it wrote.
 func WriteChanged(path, content string, mode os.FileMode) (bool, error) {
 	if held, err := os.ReadFile(path); err == nil && string(held) == content {
