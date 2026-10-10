@@ -31,7 +31,7 @@ say() { echo "loom-runner prepare: $*"; }
 # that is the runner's alone (exclusive), what they left in HOME's caches too. A shared machine's HOME is other work's.
 freeMegabytes() { df -Pm "${HOME}" "${root}" | awk 'NR > 1 {print $4}' | sort -n | head -1; }
 trimLeftovers() {
-	rm -rf "${root}"/go-build* "${root}"/Test* "${root}"/adamic-npm/replaced-* "${root}"/adamic-npm/*.staging-* 2> /dev/null
+	rm -rf "${root}"/go-build* "${root}"/Test* "${root}"/adamic-npm/replaced-* "${root}"/adamic-npm/*.staging-* "${root}"/adamic-tools/staging-* 2> /dev/null
 	find "${root}/adamic-gate" -mindepth 1 -maxdepth 1 ! -name 'markdown-width-*' -exec rm -rf {} + 2> /dev/null
 	rm -rf "${root}"/adamic-stage3-lane-* 2> /dev/null
 	if [ "${owner}" = exclusive ]; then
@@ -167,19 +167,27 @@ fi
 
 # The gate inputs, from Loom's public store by hash under gate-inputs/, where `loom gate-inputs publish` writes them and no
 # lifecycle expires them: a manifest of chunks of one tar.gz and its total, every hash checked (gateinputs/gateinputs.go).
+# The marker naming what is unpacked goes first and comes back last, and the inputs are unpacked in staging and moved
+# into place whole, so a unit that fails anywhere between (a full disk, its deadline) leaves no marker naming inputs that
+# aren't there, and the next unit fetches them again. Staging goes when this ends, however it ends, short of a kill,
+# whose leavings the next trim takes.
 tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs
 if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/null)" != "${gateInputs}" ]; then
 	fetch() { curl -fsS --retry 3 -o "$2" "https://artifacts.loom.system.inc/gate-inputs/$1" && echo "$1  $2" | sha256sum -c --quiet; }
 	staging=${tools}/staging-$$
-	mkdir -p "${staging}" && fetch "${gateInputs}" "${staging}/manifest" || { say "gate inputs manifest ${gateInputs} unreadable"; exit 2; }
+	trap 'rm -rf "${staging}"' EXIT
+	rm -f "${tools}/gate-inputs.manifest"
+	mkdir -p "${staging}/unpacked" && fetch "${gateInputs}" "${staging}/manifest" || { say "gate inputs manifest ${gateInputs} unreadable"; exit 2; }
 	while read -r hash; do
 		[[ ${hash} =~ ^[0-9a-f]{64}$ ]] || { say "gate inputs manifest holds a line that isn't a hash"; exit 2; }
 		fetch "${hash}" "${staging}/part" && cat "${staging}/part" >> "${staging}/gate-inputs.tar.gz" || { say "gate inputs chunk ${hash} failed"; exit 2; }
 	done < <(grep -v '^total ' "${staging}/manifest")
 	echo "$(sed -n 's/^total //p' "${staging}/manifest")  ${staging}/gate-inputs.tar.gz" | sha256sum -c --quiet || { say "gate inputs total hash differs"; exit 2; }
-	[ -e "${inputs}" ] && mv "${inputs}" "${staging}/replaced"
-	tar -C "${tools}" -xzf "${staging}/gate-inputs.tar.gz" && echo "${gateInputs}" > "${tools}/gate-inputs.manifest" || { say "gate inputs unpack failed"; exit 2; }
+	tar -C "${staging}/unpacked" -xzf "${staging}/gate-inputs.tar.gz" && [ -d "${staging}/unpacked/gate-inputs" ] || { say "gate inputs unpack failed"; exit 2; }
+	{ [ ! -e "${inputs}" ] || mv "${inputs}" "${staging}/replaced"; } && mv "${staging}/unpacked/gate-inputs" "${inputs}" &&
+		echo "${gateInputs}" > "${tools}/gate-inputs.manifest" || { say "the gate inputs couldn't be moved into place"; exit 2; }
 	rm -rf "${staging}"
+	trap - EXIT
 fi
 if [ -n "${gateInputs}" ]; then
 	export ADAMIC_TYPESCRIPT_SOURCE=${inputs}/typescript ADAMIC_CYCLE_LEDGER_ROOT=${inputs}/cycle-ledger

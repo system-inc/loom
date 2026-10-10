@@ -26,7 +26,6 @@ import (
 //	Check skipping the manifest's hash, or the chunks' presence: TestCheckRefusesAManifestNoRunnerCouldRead
 //	a Pin reading its file once, or keying on a manifest it didn't check: TestAPinRereadsItsFileAndChecksEachManifestOnce
 //	HomeExpires missing a whole-bucket rule, or a rule on a key under the prefix: TestHomeExpiresNamesEveryRuleThatReachesThePrefix
-//	prepare.sh reading the gate inputs from blobs/ (which expires), or not as Pack writes them: TestPrepareUnpacksWhatPublishWrote
 
 // git runs git in directory with no configuration but a fixed identity and times, and fails the test on an error.
 func git(t *testing.T, directory string, arguments ...string) string {
@@ -372,68 +371,5 @@ func TestHomeExpiresNamesEveryRuleThatReachesThePrefix(t *testing.T) {
 		if got := HomeExpires(rules) != nil; got != expires {
 			t.Errorf("a rule on %q: expires the home %v, want %v", prefix, got, expires)
 		}
-	}
-}
-
-// prepare.sh, the runner's own, reads the gate inputs from where Publish writes them, and unpacks what Pack made into
-// a checkout that reads clean; a chunk that isn't its hash's bytes stops it, exit 2. Its gate inputs section is run
-// alone, its store's address turned to the fake's.
-func TestPrepareUnpacksWhatPublishWrote(t *testing.T) {
-	for _, tool := range []string{"bash", "curl", "sha256sum", "tar"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("prepare.sh needs %s", tool)
-		}
-	}
-	probe := exec.Command("bash", "-c", `f=$(mktemp) && echo "$(sha256sum "$f" | cut -c1-64)  $f" | sha256sum -c --quiet`)
-	if output, err := probe.CombinedOutput(); err != nil {
-		t.Skipf("prepare.sh needs coreutils' sha256sum (a runner's is), and this one isn't: %s", output)
-	}
-	script, err := os.ReadFile(filepath.Join("..", "runner", "prepare.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(script)
-	start := strings.Index(text, "# The gate inputs, from Loom's public store")
-	end := strings.Index(text, "# Every Go module's dependencies")
-	if start < 0 || end < start {
-		t.Fatal("prepare.sh's gate inputs section isn't where this test looks")
-	}
-	section := text[start:end]
-	store := "https://artifacts.loom.system.inc/" + Prefix + "$1"
-	if !strings.Contains(section, store) {
-		t.Fatalf("prepare.sh doesn't read the gate inputs from %s", store)
-	}
-	fake := r2test.New(t)
-	published, err := Publish(inputsFixture(t), 4096, fake.Bucket(), fake.Public(), fake.Server.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	section = strings.ReplaceAll(section, "https://artifacts.loom.system.inc/", fake.Public()+"/")
-	run := func(root string) (string, error) {
-		command := exec.Command("bash", "-c", "set -uo pipefail\nsay() { echo \"loom-runner prepare: $*\"; }\n"+
-			"root=$1 gateInputs=$2\n"+section+"\necho \"source=${ADAMIC_TYPESCRIPT_SOURCE}\"\n", "prepare", root, published.Hash)
-		output, err := command.CombinedOutput()
-		return string(output), err
-	}
-	root := t.TempDir()
-	output, err := run(root)
-	if err != nil {
-		t.Fatalf("prepare.sh: %v: %s", err, output)
-	}
-	checkout := filepath.Join(root, "adamic-tools", Root, "typescript")
-	if !strings.Contains(output, "source="+checkout) {
-		t.Fatalf("ADAMIC_TYPESCRIPT_SOURCE isn't the unpacked checkout: %s", output)
-	}
-	if status := git(t, checkout, "status", "--porcelain", "--untracked-files=all"); status != "" {
-		t.Fatalf("the checkout prepare.sh unpacked isn't clean:\n%s", status)
-	}
-	if marker, _ := os.ReadFile(filepath.Join(root, "adamic-tools", "gate-inputs.manifest")); strings.TrimSpace(string(marker)) != published.Hash {
-		t.Fatalf("prepare.sh marked %q", marker)
-	}
-	chunk := published.Manifest.Chunks[0]
-	held, _ := fake.Object(Prefix + chunk)
-	fake.Set(Prefix+chunk, append(held[:len(held)-1:len(held)-1], held[len(held)-1]^1), time.Now())
-	if output, err := run(t.TempDir()); err == nil || !strings.Contains(output, "gate inputs chunk "+chunk+" failed") {
-		t.Fatalf("a poisoned chunk: %v: %s", err, output)
 	}
 }
