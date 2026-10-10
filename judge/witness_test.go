@@ -35,3 +35,10 @@ func TestAWitnessThatCheckedEveryReuseAndFoundNothingIsClean(t *testing.T) {
 		t.Fatalf("report %+v: a run unit's red is an ordinary red, not a key fault", report)
 	}
 }
+
+func TestAWitnessVoidKeepsItFromCounting(t *testing.T) {
+	plan := []PlannedUnitWire{{UnitKey: "a", Decision: "reuse"}}
+	if report := CompareWitness(plan, []Verdict{verdict("a", Void, CauseInfra)}); report.Clean() {
+		t.Fatalf("report %+v: a void witness can't vouch for the reuse", report)
+	}
+}
