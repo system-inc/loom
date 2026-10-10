@@ -23,12 +23,14 @@ import (
 // deterministic: entries sorted by name, every time the epoch, no owner, a file's mode 0644 or 0755 by its executable
 // bit, and a gzip header with no name and no time, so the same files always make the same bytes and the same sha256.
 
-// An archiveEntry is a regular file read from File, or, with Link set, a symbolic link to Link.
+// An archiveEntry is a regular file read from File, or, with Link set, a symbolic link to Link, or, with neither, a
+// regular file (0644) holding Content, made in memory: a tree's manifest (tracked.go), which is never in the checkout.
 type archiveEntry struct {
 	Name       string
 	File       string
 	Executable bool
 	Link       string
+	Content    []byte
 }
 
 // writeArchive is the gzipped tar of entries, deterministically.
@@ -43,18 +45,22 @@ func writeArchive(entries []archiveEntry) ([]byte, error) {
 			return nil, fmt.Errorf("%s is in the archive twice", entry.Name)
 		}
 		header := &tar.Header{Name: entry.Name, ModTime: time.Unix(0, 0), Format: tar.FormatPAX}
-		var file *os.File
-		if entry.Link != "" {
+		var file io.ReadCloser
+		switch {
+		case entry.Link != "":
 			header.Typeflag, header.Linkname, header.Mode = tar.TypeSymlink, entry.Link, 0o777
-		} else {
+		case entry.File == "":
+			file = io.NopCloser(bytes.NewReader(entry.Content))
+			header.Typeflag, header.Size, header.Mode = tar.TypeReg, int64(len(entry.Content)), 0o644
+		default:
 			opened, err := os.Open(entry.File)
 			if err != nil {
 				return nil, err
 			}
 			file = opened
-			info, err := file.Stat()
+			info, err := opened.Stat()
 			if err != nil {
-				file.Close()
+				opened.Close()
 				return nil, err
 			}
 			header.Typeflag, header.Size, header.Mode = tar.TypeReg, info.Size(), 0o644

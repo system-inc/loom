@@ -215,10 +215,21 @@ func TestAOneFileChangeSendsOneChunk(t *testing.T) {
 		if _, _, err = PublishTree(store, &index, t.TempDir(), t.TempDir(), &again, nil); err != nil {
 			t.Fatal(err)
 		}
-		if most := min(step+1, 2); again.Sent < 1 || again.Sent > most || fake.Count("PUT", "blobs/") != again.Sent {
-			t.Fatalf("change %d sent %d chunks (%d blob PUTs) of %d, not 1 to %d", step, again.Sent, fake.Count("PUT", "blobs/"), len(again.Chunks), most)
+		// The manifest's HEAD, commit and files change with every commit, each a chunk of its own
+		// (TestTheManifestsChunksMoveOnlyWithTheirRepository).
+		manifest := 0
+		for _, chunk := range again.Chunks {
+			if strings.HasPrefix(chunk.First, TrackedDirectory+"/") && !slices.Contains(source.Chunks, chunk) {
+				manifest++
+			}
+		}
+		if most := min(step+1, 2); manifest != 3 || again.Sent-manifest < 1 || again.Sent-manifest > most || fake.Count("PUT", "blobs/") != again.Sent {
+			t.Fatalf("change %d sent %d chunks (%d blob PUTs, %d the manifest's) of %d, not 1 to %d and the manifest's 3", step, again.Sent, fake.Count("PUT", "blobs/"), manifest, len(again.Chunks), most)
 		}
 		for _, chunk := range again.Chunks {
+			if strings.HasPrefix(chunk.First, TrackedDirectory+"/") {
+				continue
+			}
 			if !slices.Contains(source.Chunks, chunk) && (chunk.First < source.Chunks[holder].First || chunk.Last > source.Chunks[holder+1].Last) {
 				t.Errorf("change %d: chunk %q to %q is new, outside the changed file's chunk and the next", step, chunk.First, chunk.Last)
 			}
@@ -250,6 +261,13 @@ func TestTheChunksUnpackToTheWholeArchivesTree(t *testing.T) {
 		}
 	}
 	want, got := treeOf(t, whole), treeOf(t, assembled)
+	// The manifest is the source's beside the tracked files (TestTheManifestIsGitsOwnOutput reads it).
+	for _, name := range []string{TrackedDirectory, TrackedDirectory + "/HEAD", TrackedDirectory + "/commit", TrackedDirectory + "/files"} {
+		if _, ok := got[name]; !ok {
+			t.Fatalf("the chunks' tree has no %s", name)
+		}
+		delete(got, name)
+	}
 	if len(want) < 120 || !maps(want, got) {
 		t.Fatalf("the chunks' tree differs from the whole archive's: %d entries against %d", len(got), len(want))
 	}

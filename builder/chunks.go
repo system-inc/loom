@@ -23,7 +23,8 @@ import (
 // A chunk is a run of the tree's tracked paths in byte order, the order the whole archive had, so it covers a range,
 // first to last, and no two chunks' ranges meet. Where a run ends depends only on each path and its size, never on
 // the order a listing gave or on any other file: after a path whose hash, read as a fraction, falls under its weight
-// (its size and a tar header) over chunkTarget, and around any path that weighs chunkTarget alone. A one-file change
+// (its size and a tar header) over chunkTarget, around any path that weighs chunkTarget alone, and around each file of
+// the tree's manifest (tracked.go). A one-file change
 // that keeps the file's size so changes the one chunk holding it; one that changes its size can move the cut after it
 // (two chunks), and one that grows it past chunkTarget makes it a chunk of its own, cutting its old chunk in two
 // (three). Measured on
@@ -71,8 +72,10 @@ func (source Source) Bytes() int64 {
 	return total
 }
 
-// SourceChunks is the tree's tracked files, submodules included (git ls-files --recurse-submodules), as chunks. A
-// tracked symbolic link goes in as a link, and one Unpack would refuse fails here, at build time.
+// SourceChunks is the tree's tracked files, submodules included (git ls-files --recurse-submodules), and its manifest
+// (TrackedManifest: what git answers about each repository in it, which a source with no .git can't ask), as chunks. A
+// tracked symbolic link goes in as a link, and one Unpack would refuse fails here, at build time, as does a tree
+// whose manifest can't be made.
 func SourceChunks(tree string) (Source, error) {
 	command := exec.Command("git", "ls-files", "--recurse-submodules", "-z")
 	command.Dir = tree
@@ -86,21 +89,39 @@ func SourceChunks(tree string) (Source, error) {
 			names = append(names, name)
 		}
 	}
-	return ChunkFiles(tree, names)
+	manifest, err := TrackedManifest(tree)
+	if err != nil {
+		return Source{}, err
+	}
+	return chunkSource(tree, names, manifest)
 }
 
-// A sourceFile is one tracked path and its weight.
+// A sourceFile is one path and its weight. One alone is a chunk of its own, whatever it weighs.
 type sourceFile struct {
 	entry  archiveEntry
 	weight int64
+	alone  bool
 }
 
 // ChunkFiles is the named paths of tree, in whatever order they come, as chunks: each regular file and symbolic link
 // (a link Unpack would refuse fails here), in byte order, cut where cutAfter says. Each chunk is archived as the whole
 // source was, deterministically, all of them at once.
 func ChunkFiles(tree string, names []string) (Source, error) {
-	files := make([]sourceFile, 0, len(names))
+	return chunkSource(tree, names, nil)
+}
+
+// chunkSource is ChunkFiles with the manifest's files beside the named paths, each a chunk of its own: a repository's
+// files list then changes only its own chunk, when that repository moves, and the HEAD that changes on every commit
+// takes no tracked file's chunk with it. A tracked path where the manifest goes is refused.
+func chunkSource(tree string, names []string, manifest []archiveEntry) (Source, error) {
+	files := make([]sourceFile, 0, len(names)+len(manifest))
+	for _, entry := range manifest {
+		files = append(files, sourceFile{entry: entry, weight: int64(len(entry.Content)) + tarHeaderWeight, alone: true})
+	}
 	for _, name := range names {
+		if len(manifest) > 0 && (name == TrackedDirectory || strings.HasPrefix(name, TrackedDirectory+"/")) {
+			return Source{}, fmt.Errorf("the tree tracks %s, where its source carries its manifest", name)
+		}
 		full := filepath.Join(tree, filepath.FromSlash(name))
 		info, err := os.Lstat(full)
 		if err != nil {
@@ -148,8 +169,8 @@ func ChunkFiles(tree string, names []string) (Source, error) {
 	return source, nil
 }
 
-// chunkRuns sorts files by name and cuts them into runs: before a file that weighs chunkTarget alone, and after one
-// cutAfter picks. A name listed twice is refused.
+// chunkRuns sorts files by name and cuts them into runs: before a file that weighs chunkTarget alone or is to be alone,
+// and after one cutAfter picks. A name listed twice is refused.
 func chunkRuns(files []sourceFile) ([][]sourceFile, error) {
 	files = append([]sourceFile{}, files...)
 	sort.Slice(files, func(left, right int) bool { return files[left].entry.Name < files[right].entry.Name })
@@ -159,7 +180,7 @@ func chunkRuns(files []sourceFile) ([][]sourceFile, error) {
 		if index > 0 && files[index-1].entry.Name == file.entry.Name {
 			return nil, fmt.Errorf("%s is in the source twice", file.entry.Name)
 		}
-		if file.weight >= chunkTarget && index > start {
+		if (file.weight >= chunkTarget || file.alone) && index > start {
 			runs, start = append(runs, files[start:index]), index
 		}
 		if cutAfter(file) {
@@ -172,11 +193,12 @@ func chunkRuns(files []sourceFile) ([][]sourceFile, error) {
 	return runs, nil
 }
 
-// cutAfter reports whether a chunk ends after file: always for one that weighs chunkTarget alone, and otherwise when
-// its path's hash, read as a fraction of the whole, is under its weight over chunkTarget. That is the chance a chunk
-// ends there, so a chunk weighs chunkTarget on average, and it hangs on the file's own path and size alone.
+// cutAfter reports whether a chunk ends after file: always for one that weighs chunkTarget alone or is to be alone, and
+// otherwise when its path's hash, read as a fraction of the whole, is under its weight over chunkTarget. That is the
+// chance a chunk ends there, so a chunk weighs chunkTarget on average, and it hangs on the file's own path and size
+// alone.
 func cutAfter(file sourceFile) bool {
-	if file.weight >= chunkTarget {
+	if file.weight >= chunkTarget || file.alone {
 		return true
 	}
 	sum := sha256.Sum256([]byte("loom-source-chunk\n" + file.entry.Name))
