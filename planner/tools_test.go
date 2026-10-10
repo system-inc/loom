@@ -3,8 +3,11 @@ package planner
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // The tools part's runner is the pinned sha from its file, never a guess: a file with anything but a sha256 refuses,
@@ -43,5 +46,34 @@ func TestTreeGoVersionIsAskedInTheTree(t *testing.T) {
 	os.WriteFile(filepath.Join(bin, "go"), []byte("#!/bin/bash\necho 'go: no toolchain' >&2\nexit 1\n"), 0o755)
 	if _, err := TreeGoVersion(tree); err == nil || !strings.Contains(err.Error(), "no toolchain") {
 		t.Fatalf("a go that can't say its release gave %v", err)
+	}
+}
+
+// A go that doesn't answer (a toolchain fetch from a proxy it can't reach) is killed at the bound, with everything it
+// started, and the tree is refused naming itself and the bound, so planning never stalls on it. Mutants: no bound, and
+// only go killed, not its group.
+func TestTreeGoVersionIsBounded(t *testing.T) {
+	bin, tree := t.TempDir(), t.TempDir()
+	child := filepath.Join(bin, "child")
+	os.WriteFile(filepath.Join(bin, "go"), []byte("#!/bin/bash\nsleep 30 &\necho $! > \""+child+"\"\nwait\n"), 0o755)
+	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	started := time.Now()
+	_, err := treeGoVersion(tree, 300*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), tree) || !strings.Contains(err.Error(), "within 300ms") || time.Since(started) > 4*time.Second {
+		t.Fatalf("a go that never answers gave %v after %v, want the tree and the bound named at once", err, time.Since(started))
+	}
+	content, _ := os.ReadFile(child)
+	pid, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	if err != nil {
+		t.Fatalf("the stub go's child: %q", content)
+	}
+	for deadline := time.Now().Add(3 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatal("what go started outlived the bound")
+		}
+	}
+	if TreeGoVersionBound < time.Minute || TreeGoVersionBound > 10*time.Minute {
+		t.Errorf("the bound is %v, want a few minutes", TreeGoVersionBound)
 	}
 }
