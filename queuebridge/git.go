@@ -219,7 +219,8 @@ func (clone Clone) revertOf(base, sha string) (any, error) {
 	return nil, nil
 }
 
-// Facts are what git says about a submitted change, read from origin through the clone. A GitError when git can't
+// Facts are what git says about a submitted change, read from origin through the clone, with its submodule pins each
+// proven keyless-fetchable or not (PinsOf). A GitError when git can't
 // say: the change then stays unchecked for the next pass.
 func (clone Clone) Facts(sha, base string) (map[string]any, error) {
 	// main's head, asked of origin: a witness is of main's tip only when this is its sha (#6gj7n9p).
@@ -264,6 +265,10 @@ func (clone Clone) Facts(sha, base string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	pins, err := clone.PinsOf(sha)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{"shaExists": true, "baseIsAncestor": baseIsAncestor, "baseOnMain": baseOnMain, "diffPaths": diffPaths,
-		"historyPaths": history, "gateNamed": gateNamed, "revertOf": reverts, "mainHead": head}, nil
+		"historyPaths": history, "gateNamed": gateNamed, "revertOf": reverts, "pins": pins, "mainHead": head}, nil
 }
