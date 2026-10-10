@@ -7,6 +7,8 @@
 #	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep> <root> <exclusive | shared>
 #	prepare.sh environment <tree> <gate inputs sha256 or ""> <environment file> <root>
 #	prepare.sh trim-only <root> <exclusive | shared>
+#	prepare.sh pin-url <url>
+#	prepare.sh pin-urls <tree>
 #
 # environment readies only what a prebuilt test job's binaries run with (prebuilt.go), over <tree>, the tree's source
 # the runner already unpacked from the action store, its npm packages among it: the instance's adamic toolchain
@@ -27,8 +29,42 @@
 #
 # trim-only runs the trim alone and exits 0: a strict serve that finds its disk too full to take a unit runs it once
 # (serve.go, #zzmz489), then looks again.
+#
+# pin-url prints the https url a submodule url is fetched from and exits 0, or prints why it can't be and exits 3: the
+# one rule for pin urls, which the queue bridge's PinUrl follows to the letter (queuebridge/pins_test.go runs both on one
+# table). pin-urls checks every url the .gitmodules of <tree> and of each submodule checked out under it names, at
+# every depth, and exits 3 naming the first it refuses.
 set -uo pipefail
 say() { echo "loom-runner prepare: $*"; }
+# pinUrl <url>: a repository on github.com over https, or git@github.com: read as https, owner/name and nothing else.
+# Any other host (a house address among them), protocol, credential in the url or relative path is refused.
+pinUrl() {
+	local LC_ALL=C
+	if [[ $1 =~ ^(https://github\.com/|git@github\.com:)([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)$ ]] && [[ ${BASH_REMATCH[2]} != *..* ]]; then
+		echo "https://github.com/${BASH_REMATCH[2]}"
+		return 0
+	fi
+	echo "it isn't a github.com repository over https (or git@github.com:, read as https), the only place a runner fetches a pin from"
+	return 3
+}
+# pinUrls <tree>: every submodule url at every depth under <tree> follows pinUrl, or the first that doesn't is named.
+pinUrls() {
+	local directory key url why
+	for directory in "$1" $(git -C "$1" submodule foreach --quiet --recursive 'echo "${toplevel}/${sm_path}"' 2> /dev/null); do
+		while read -r key url; do
+			why=$(pinUrl "${url}") || { say "refused: submodule ${url} in ${directory}: ${why}"; return 3; }
+		done < <(git -C "${directory}" config -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
+	done
+	return 0
+}
+if [ "${1:-}" = pin-url ]; then
+	pinUrl "${2:-}"
+	exit $?
+fi
+if [ "${1:-}" = pin-urls ]; then
+	pinUrls "${2:-}"
+	exit $?
+fi
 # Disk: on an instance that runs one unit at a time, what earlier units left on its root is no one's, and on a machine
 # that is the runner's alone (exclusive), what they left in HOME's caches too. A shared machine's HOME is other work's.
 freeMegabytes() { df -Pm "${HOME}" "${root}" | awk 'NR > 1 {print $4}' | sort -n | head -1; }
@@ -113,19 +149,17 @@ if [ "${mode}" = checkout ]; then
 		say "refused: ${sha} doesn't descend from its base ${base}"
 		exit 3
 	fi
-	# Submodules: each must be on GitHub over HTTPS (after the ssh rewrite), public, fetched with no credentials.
-	while read -r _ url; do
-		case ${url} in
-			https://github.com/* | git@github.com:*) ;;
-			*) say "refused: submodule ${url} isn't on GitHub"; exit 3 ;;
-		esac
-	done < <(git -C "${tree}" config -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
+	# Submodules: each must be on GitHub over HTTPS (after the ssh rewrite), public, fetched with no credentials, by
+	# pinUrl's rule at every depth: the tree's own before anything is fetched, and the deeper ones once their parents are
+	# checked out (the queue bridge refused any change that breaks it before a runner saw it, so this is the second line).
+	pinUrls "${tree}" || exit 3
 	if ! git -C "${tree}" submodule update -q --init --recursive; then
 		say "the submodule update failed; making the submodules again"
 		git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
 		rm -rf "${tree}/.git/modules"
 		retry git -C "${tree}" submodule update -q --init --recursive || { say "the submodules of ${sha} can't be fetched"; exit 2; }
 	fi
+	pinUrls "${tree}" || exit 3
 
 	# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance, and only on a machine that is the
 	# runner's alone, since it installs into HOME. A shared machine's own toolchain serves, or the unit is unfit there.

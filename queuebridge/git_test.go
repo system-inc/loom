@@ -17,6 +17,7 @@ import (
 //	a Python test only docs name counted as gate logic: TestAPythonTestAScriptNamesIsGateLogicAndOneOnlyDocsNameIsNot
 //	a revert matched by anything but its exact inverse: TestARevertOfAMainCommitIsNamedAndAnythingElseIsNone
 //	main's head read from the local ref: TestMainsHeadIsOriginsOwnEvenWhenTheShasFetchFails
+//	an origin that needs a key fetched from: TestAnOriginThatIsntHttpsIsRefusedBeforeAnyFetch
 //	main fetched without its refspec (a bare clone then has no origin/main): TestABareCloneOfThePublicRemoteReadsMain
 //	any failed fetch read as "origin lacks the sha": TestARemoteThatCantBeReadChecksNothingThisTick
 //	a git exit code left unchecked: TestGitsExitCodeIsCheckedEverywhere
@@ -163,6 +164,23 @@ func TestABareCloneOfThePublicRemoteReadsMain(t *testing.T) {
 	}
 	if followed := gitIn(t, bare, "rev-parse", "refs/remotes/origin/main"); followed != landed {
 		t.Fatalf("origin/main is %s", followed)
+	}
+}
+
+// An origin that would need a key is refused before anything is fetched from it, whatever key this machine holds.
+func TestAnOriginThatIsntHttpsIsRefusedBeforeAnyFetch(t *testing.T) {
+	made := newWorld(t)
+	before := gitIn(t, made.work, "rev-parse", "origin/main")
+	made.pushFromAnotherTree(t)
+	for _, origin := range []string{"git@github.com:system-inc/adamic.git", "git@github-lander:system-inc/adamic.git", "ssh://git@github.com/system-inc/adamic.git", "http://10.101.1.1/adamic.git"} {
+		gitIn(t, made.work, "remote", "set-url", "origin", origin)
+		var gitError *GitError
+		if facts, err := made.clone.Facts(made.base, made.base); !errors.As(err, &gitError) || !strings.Contains(err.Error(), "isn't https") {
+			t.Errorf("%s: facts %v, %v", origin, facts, err)
+		}
+	}
+	if after := gitIn(t, made.work, "rev-parse", "origin/main"); after != before {
+		t.Fatalf("origin/main moved to %s: something was fetched", after)
 	}
 }
 

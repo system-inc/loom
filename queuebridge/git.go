@@ -26,21 +26,43 @@ func (err *GitError) Error() string {
 }
 
 // Clone is git's facts through this machine's clone of adamic, whose origin is the public
-// https://github.com/system-inc/adamic.git: the bridge is keyless (only the pusher holds a key). A bare clone does, since
-// main is fetched by an explicit refspec into refs/remotes/origin/main.
+// https://github.com/system-inc/adamic.git: the bridge is keyless (only the pusher holds a key), by construction rather
+// than by the machine's settings. Facts refuses an origin that isn't https (a local path, as the tests' is, is no key
+// either), and every git runs in keyless() with credential.helper emptied. A bare clone does, since main is fetched by
+// an explicit refspec into refs/remotes/origin/main.
 type Clone struct {
 	Repository string
+	// mirror is where a pin's github.com url is fetched from, for the tests' stand-in GitHub; nil fetches the url.
+	mirror func(string) string
 }
 
-// run runs a command with a time limit: its stdout, stderr and exit code, and an error when it couldn't run or ran out
-// of time.
+// keyless is the whole environment every git of the bridge runs in, made from nothing rather than added to the
+// process's, so no inherited GIT_CONFIG_COUNT, GIT_CONFIG_PARAMETERS or credential variable reaches git: no global
+// or system settings (no insteadOf rewriting https to ssh, no credential helper), no ~/.netrc (HOME is /dev/null), no
+// prompt and no ssh. PATH and TMPDIR are the process's, and LC_ALL=C keeps git's words the ones the bridge reads.
+func keyless() []string {
+	environment := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.DevNull, "XDG_CONFIG_HOME=" + os.DevNull, "GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=/bin/false", "SSH_ASKPASS=/bin/false", "GIT_SSH_COMMAND=false", "LC_ALL=C"}
+	if temporary := os.Getenv("TMPDIR"); temporary != "" {
+		environment = append(environment, "TMPDIR="+temporary)
+	}
+	return environment
+}
+
+// gitArguments are git's arguments for a command in repository, with any credential helper emptied first.
+func gitArguments(repository string, arguments ...string) []string {
+	return append([]string{"-c", "credential.helper=", "-C", repository}, arguments...)
+}
+
+// run runs a command with a time limit, in environment when it isn't nil (the whole environment, nothing of the
+// process's): its stdout, stderr and exit code, and an error when it couldn't run or ran out of time.
 func run(limit time.Duration, directory string, environment []string, stdin []byte, name string, arguments ...string) (string, string, int, error) {
 	runContext, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
 	command := exec.CommandContext(runContext, name, arguments...)
 	command.Dir = directory
 	if environment != nil {
-		command.Env = append(os.Environ(), environment...)
+		command.Env = environment
 	}
 	if stdin != nil {
 		command.Stdin = bytes.NewReader(stdin)
@@ -67,7 +89,7 @@ func (clone Clone) gitRun(arguments []string, allowed ...int) (string, string, i
 	if len(allowed) == 0 {
 		allowed = []int{0}
 	}
-	stdout, stderr, code, err := run(5*time.Minute, "", nil, nil, "git", append([]string{"-C", clone.Repository}, arguments...)...)
+	stdout, stderr, code, err := run(5*time.Minute, "", keyless(), nil, "git", gitArguments(clone.Repository, arguments...)...)
 	what := strings.Join(arguments[:min(2, len(arguments))], " ")
 	if err != nil {
 		return "", "", code, &GitError{fmt.Sprintf("git %s: %v", what, err)}
@@ -87,7 +109,7 @@ func (clone Clone) git(arguments []string, allowed ...int) (string, error) {
 
 // holds is whether the clone holds sha as a commit, asked without fetching.
 func (clone Clone) holds(sha string) bool {
-	_, _, code, err := run(time.Minute, "", nil, nil, "git", "-C", clone.Repository, "cat-file", "-e", sha+"^{commit}")
+	_, _, code, err := run(time.Minute, "", keyless(), nil, "git", gitArguments(clone.Repository, "cat-file", "-e", sha+"^{commit}")...)
 	return err == nil && code == 0
 }
 
@@ -185,11 +207,11 @@ func (clone Clone) gateNamedOf(sha string, diffPaths []string) ([]map[string]any
 
 // patchId is the stable patch id of older..newer, or "" when there's no diff.
 func (clone Clone) patchId(older, newer string) string {
-	diff, _, _, err := run(5*time.Minute, "", nil, nil, "git", "-C", clone.Repository, "diff", older, newer)
+	diff, _, _, err := run(5*time.Minute, "", keyless(), nil, "git", gitArguments(clone.Repository, "diff", older, newer)...)
 	if err != nil || diff == "" {
 		return ""
 	}
-	out, _, _, err := run(5*time.Minute, "", nil, []byte(diff), "git", "-C", clone.Repository, "patch-id", "--stable")
+	out, _, _, err := run(5*time.Minute, "", keyless(), []byte(diff), "git", gitArguments(clone.Repository, "patch-id", "--stable")...)
 	if fields := strings.Fields(out); err == nil && len(fields) > 0 {
 		return fields[0]
 	}
@@ -223,6 +245,15 @@ func (clone Clone) revertOf(base, sha string) (any, error) {
 // proven keyless-fetchable or not (PinsOf). A GitError when git can't
 // say: the change then stays unchecked for the next pass.
 func (clone Clone) Facts(sha, base string) (map[string]any, error) {
+	// Keyless by construction: an origin that would need a key (ssh, an alias like github-lander) is refused before
+	// anything is fetched from it, and the change waits.
+	origin, err := clone.git([]string{"remote", "get-url", "origin"})
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasPrefix(origin, "https://") && !filepath.IsAbs(origin) {
+		return nil, &GitError{fmt.Sprintf("the clone's origin %q isn't https: the bridge reads the public repository with no key", origin)}
+	}
 	// main's head, asked of origin: a witness is of main's tip only when this is its sha (#6gj7n9p).
 	head, err := clone.mainHead()
 	if err != nil {

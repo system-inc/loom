@@ -35,16 +35,16 @@ The Queue refuses any batch on such a future whose run, or a run a record says i
 
 Every runner fetches every submodule pin with no key, so the bridge proves each pin the same way before the queue clears a change (#yt2jw5q). git's facts carry `pins`: every gitlink in the change's tree at any depth (adamic's `cohere`, cohere's `cohere/TypeScript`), each as `{path, url, sha, fetchable, reason?}`.
 
-- **The url** is what the parent commit's `.gitmodules` names for the path, with `./` and `../` resolved against the parent's url.
+- **The url** follows one rule, shared with the runner's `prepare.sh` (`pinUrl`; `queuebridge/pins_test.go` runs both on one table). It must be a repository on github.com over https, as `owner/name`, or `git@github.com:owner/name`, which both read as https. Any other url is refused by name and never fetched: another host (a house address among them), ssh, a credential in the url, or a relative path.
 - **fetchable** comes from a keyless fetch of that sha from that url, shallow and blob-less, into a scratch store that is removed afterwards.
-  - The fetch sees no global or system git settings, so no `insteadOf` rewrites https to ssh and no credential helper runs.
-  - `HOME` is the scratch, so no `~/.netrc` is read. No prompt runs and no ssh.
-  - A pin that fetches is followed into its own tree.
-- **Unfetchable, with its reason:**
-  - an ssh url, or a url that isn't http(s);
-  - a path `.gitmodules` doesn't name;
-  - a commit the remote refuses (`not our ref`, an unadvertised object, a repository that isn't found or wants a login).
-- **Unknown.** Any other failure says nothing about the pin: a host that won't resolve, a timeout, GitHub's 5xx. The bridge posts no facts that tick, and the change waits. It is never refused or passed on a guess.
+  - Every git the bridge runs gets an environment built from nothing, not added to the process's. So no inherited `GIT_CONFIG_COUNT` or `GIT_CONFIG_PARAMETERS` reaches it, no global or system settings (no `insteadOf`, no credential helper), and `credential.helper` is emptied on the command line too.
+  - `HOME` is `/dev/null`, so no `~/.netrc` is read. No prompt runs, and `GIT_SSH_COMMAND=false` stops ssh.
+  - The bridge's own clone must have an https origin (a local path, in tests): any other origin is refused before anything is fetched.
+  - A pin that fetches is followed into its own tree, four levels deep (`PinDepth`). A pin nested deeper is listed unfetchable, named, and never fetched.
+- **Unfetchable, with our reason** (never git's words): a url the rule refuses; a path `.gitmodules` doesn't name; a commit GitHub won't give a fetch with no key (`not our ref`, an unadvertised object); a repository that isn't public (not found, a login asked for).
+- **Unknown.** Any other failure says nothing about the pin: throttling (403, 429), GitHub's 5xx, a host that won't resolve, a timeout. The bridge posts no facts that tick, and the change waits. It is never refused or passed on a guess.
+
+`prepare.sh` holds the same rule at every depth on a runner: its tree's urls before anything is fetched, and every nested one once its parent is checked out (`prepare.sh pin-urls <tree>`). It's a second line, since the queue refused any change that breaks the rule before a runner saw it.
 
 The queue refuses a change whose pins aren't all fetchable before any future is built. The refusal is logged and names each unfetchable pin. Facts without `pins` are no clearance, like facts without `historyPaths`. So the queue's pins rule ships only once the bridge that posts pins is the one running.
 
