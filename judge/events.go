@@ -14,7 +14,7 @@ import (
 
 // FinishedFromEvents reads one unit's last attempt from its run's events (protocol.Event, as the coordinator records
 // them) into what Decide needs. Infra comes from structure only (Loom's binding rule): a kill is the runner's exit
-// event saying it saw a signal or hit the deadline; a placement error is neverPlaced; a finish the runner marked broken
+// event saying it saw a signal, and its deadline is the unit over budget; a placement error is neverPlaced; a finish the runner marked broken
 // for any other reason is refused (the machine couldn't run it). Nothing a test printed decides infra: a test that
 // panics saying "exceeded its deadline" exits with a code and no signal, and reads failed. Tests come from any test2json
 // lines in the output events, and a test that never reached pass, fail or skip keeps its last action, which Decide reads
@@ -56,7 +56,12 @@ func FinishedFromEvents(events []protocol.Event) (finished Finished, found bool)
 				attempt.Exit = *event.Code
 			}
 			attempt.WallSeconds = event.WallSeconds
-			killed = event.Signal != "" || event.TimedOut
+			// The runner's own deadline is the unit's budget run out (Kirk's build law, Oct 10 03:0xZ): Loom's, named
+			// over budget and never retried, since the same unit runs over again. Only a signal from outside is a kill.
+			killed = event.Signal != "" && !event.TimedOut
+			if event.TimedOut {
+				finished.OverBudget = OverBudgetDeadline
+			}
 		case "uploaded":
 			outputs = append(outputs, event.Sha256)
 			if event.Path == TestLogPath {
