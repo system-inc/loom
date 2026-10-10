@@ -195,7 +195,7 @@ func InstallHouseCache(paths HouseCachePaths, systemctl Systemctl, report io.Wri
 			return err
 		}
 		fmt.Fprintf(report, "loom house-cache install: %s started\n", HouseCacheUnitName)
-	case changed || !sameFile(filepath.Join(paths.Proc, pid, "exe"), paths.Binary):
+	case changed || !SameFile(filepath.Join(paths.Proc, pid, "exe"), paths.Binary):
 		if _, err := systemctl("restart", HouseCacheUnitName); err != nil {
 			return err
 		}

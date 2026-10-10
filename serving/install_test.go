@@ -279,6 +279,10 @@ func TestTheHookRunsInstallServeOrPassesOnARollback(t *testing.T) {
 	if err != nil || hook.Mode().Perm() != 0o755 {
 		t.Fatalf("the hook: %v, %v", hook, err)
 	}
+	// The health probe puts serve's state in the updater's every report.
+	if probe, err := os.ReadFile(served.paths.Probe); err != nil || !strings.Contains(string(probe), `units="loom-serve.service"`) {
+		t.Fatalf("the probe: %v\n%s", err, probe)
+	}
 	run := func(runner string) (int, string) {
 		bin := t.TempDir()
 		os.WriteFile(filepath.Join(bin, "loom-runner"), []byte(runner), 0o755)

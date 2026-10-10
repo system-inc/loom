@@ -6,16 +6,22 @@
 # Runs on Linux and on macOS's bash 3.2:
 #
 #	updater/update_test.sh
-#	sed 's/\[ "${got}" = "${sha}" \] ||/true ||/' loom-update.sh > m.sh && updater/update_test.sh m.sh                     # fails 2: a corrupted blob installs
+#	sed 's/\[ "${got}" = "${sha}" \] ||/true ||/' loom-update.sh > m.sh && updater/update_test.sh m.sh                     # fails 3: a corrupted blob installs
 #	sed 's/alive "${holder}" \&\& return 1/true/' loom-update.sh > m.sh && updater/update_test.sh m.sh                     # fails 1: runs overlap
 #	sed 's/mkdir "${lock}\/takeover-${holder}" 2> \/dev\/null || return 1/return 1/' loom-update.sh > m.sh && updater/update_test.sh m.sh   # fails 3: a stale lock holds forever
 #	sed 's/ \&\& ps -p .*$//' loom-update.sh > m.sh && updater/update_test.sh m.sh                                        # fails 3: a reused pid holds the lock
 #	sed 's/\[ "$(current hooked)" = "${version}" \] ||/true ||/' loom-update.sh > m.sh && updater/update_test.sh m.sh      # fails 2: a failed hook never runs again
-#	sed 's/|| !ended\[sections - 1\]) fail/) fail/' loom-update.sh > m.sh && updater/update_test.sh m.sh                   # fails 3: a cut manifest installs
 #	sed 's/ \&\&$/ \&\& true ||/' loom-update.sh > m.sh && updater/update_test.sh m.sh                                        # fails 1: a corrupt house cache blob installs
-#	sed 's#"${base}/current.txt"#"${house:-${base}}/current.txt"#' loom-update.sh > m.sh && updater/update_test.sh m.sh    # fails 4: the house cache's stale current.txt
+#	sed 's#"${base}/${source}"#"${house:-${base}}/${source}"#' loom-update.sh > m.sh && updater/update_test.sh m.sh          # fails 4: the house cache's stale current.txt
 #	sed 's/\[ -n "${asking}" \] \&\& say/[ -n "${asking}" ] \&\& refuse/' loom-update.sh > m.sh && updater/update_test.sh m.sh # fails 2: no fallback past the house cache
 #	sed 's/ \&\& asking=$//' loom-update.sh > m.sh && updater/update_test.sh m.sh                                         # fails 2: a failed house cache asked for every file
+#	sed 's/|| !ended\[sections - 1\]) fail/) fail/' loom-update.sh > m.sh && updater/update_test.sh m.sh                   # fails 4: a cut manifest installs
+#	sed 's/^hold=$(setting hold .*$/hold=/' loom-update.sh > m.sh && updater/update_test.sh m.sh                             # fails 8: a hold is ignored
+#	sed 's/^case "${hold}" in "" | current | "${version}") ;; \*) refuse/case "${hold}" in *) ;; esac; case x in y) refuse/' loom-update.sh > m.sh && updater/update_test.sh m.sh   # fails 1: a hold takes another version's manifest
+#	sed 's/-mmin +4/-mmin +99999/' loom-update.sh > m.sh && updater/update_test.sh m.sh                                   # fails 1: a quiet machine never reports again
+#	sed 's/\[ -n "${reporting:-}" \] \&\& post "$\*"/true/' loom-update.sh > m.sh && updater/update_test.sh m.sh            # fails 2: a refusal goes unreported
+#	sed 's/^services() {$/services() { return 0/' loom-update.sh > m.sh && updater/update_test.sh m.sh                       # fails 4: no service is reported
+# (chmod +x m.sh first.)
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
 updater=$(cd "$(dirname "${1:-${here}/loom-update.sh}")" && pwd)/$(basename "${1:-${here}/loom-update.sh}")
@@ -103,6 +109,13 @@ now() { cat "${T}/$1/.loom/$2" 2> /dev/null; } # now <home> <version | previous 
 runs() { cat "${T}/$1/.loom/bin/$2"; }        # runs <home> <name>: what ~/.loom/bin/<name> is
 blobs() { grep -c '"GET /blobs/' "${T}/access.log"; }
 code() { [ "$(cat "${T}/code")" = "$1" ]; }
+# reported <host> <field>: that field of the host's last report, as JSON (every report must parse as JSON).
+reported() {
+	python3 -c 'import json, sys
+reports = [json.loads(line) for line in open(sys.argv[1])]
+print(json.dumps([report for report in reports if report["host"] == sys.argv[2]][-1].get(sys.argv[3])))' "${T}/reports" "$1" "$2" 2> /dev/null
+}
+reports() { wc -l < "${T}/reports" | tr -d ' '; }
 
 a=$(commit 1 1)
 publish "${a}"
@@ -110,7 +123,8 @@ hook workshop
 update workshop Workshop /report
 check first-install 'code 0 && [ "$(now workshop version)" = "${a}" ] && [ "$(runs workshop loom-runner)" = "runner 1 ${platform}" ] && [ -x ${T}/workshop/.loom/bin/loom ] && [ "$(cat ${T}/workshop.hooks)" = "${a} none 1" ] && [ ! -e ${T}/workshop/.loom/previous ] && [ "$(blobs)" = 2 ] && [ "$(now workshop hooked)" = "${a}" ]'
 check first-install-links '[ "$(readlink ${T}/workshop/.loom/bin/loom)" = "../versions/${a}/loom" ] && [ ! -e ${T}/workshop/.loom/update.lock ] && [ "$(tail -1 ${T}/out/current.txt)" = "end $(awk "NF == 3" ${T}/out/current.txt | wc -l | tr -d " ")" ]'
-check first-install-reports 'python3 -c "import json,sys; r=[json.loads(l) for l in open(\"${T}/reports\")]; sys.exit(0 if len(r) == 1 and (r[0][\"host\"], r[0][\"version\"], r[0][\"previous\"]) == (\"Workshop\", \"${a}\", \"\") and r[0][\"at\"].endswith(\"Z\") else 1)" && [ "$(cat ${T}/workshop/.loom/reported)" = "${a}" ]'
+check first-install-reports 'python3 -c "import json,sys; r=[json.loads(l) for l in open(\"${T}/reports\")]; sys.exit(0 if len(r) == 1 and (r[0][\"host\"], r[0][\"version\"], r[0][\"previous\"]) == (\"Workshop\", \"${a}\", \"\") and r[0][\"at\"].endswith(\"Z\") else 1)" && grep -q "\"version\":\"${a}\"" ${T}/workshop/.loom/reported'
+check first-install-reports-its-state '[ "$(reported Workshop hooked)" = "\"${a}\"" ] && [ "$(reported Workshop held)" = "\"\"" ] && [ "$(reported Workshop refused)" = "\"\"" ] && [ "$(reported Workshop services)" = "[]" ] && [ "$(reported Workshop updated)" = "\"$(now workshop updated)\"" ] && now workshop updated | grep -q "^20[0-9-]*T[0-9:]*Z$"'
 
 lines=$(wc -l < "${T}/workshop/.loom/update.log")
 update workshop Workshop /report
@@ -134,6 +148,7 @@ corrupt=$(awk -v platform="${platform}" '$1 == "loom-runner" && $2 == platform {
 echo "runner evil ${platform}" > "${T}/www/blobs/${corrupt}"
 update workshop Workshop /report
 check corrupted-blob-refused 'code 1 && grep -q "refused: loom-runner from .*/blobs/${corrupt} hashes to " ${T}/run.log && [ "$(now workshop version)" = "${b}" ] && [ "$(now workshop previous)" = "${a}" ]'
+check refusal-reported 'reported Workshop refused | grep -q "^\"loom-runner from .*/blobs/${corrupt} hashes to " && [ "$(reported Workshop version)" = "\"${b}\"" ]'
 check corrupted-blob-installs-nothing '[ ! -e ${T}/workshop/.loom/versions/${c} ] && [ -z "$(ls -A ${T}/workshop/.loom/versions | grep -v -e "^${a}$" -e "^${b}$")" ] && [ $(wc -l < ${T}/workshop.hooks) -eq 2 ] && [ "$(runs workshop loom-runner)" = "runner 2 ${platform}" ] && [ ! -e ${T}/workshop/.loom/update.lock ]'
 publish "${c}"
 update workshop Workshop /report
@@ -166,7 +181,7 @@ check rollback-ends-the-canary 'code 0 && [ "$(now cloud version)" = "${b}" ]'
 update home Home /nowhere
 check report-failure-is-not-fatal 'code 0 && [ "$(now home version)" = "${b}" ] && grep -q "report of ${b} to .* failed" ${T}/home/.loom/update.log && [ ! -e ${T}/home/.loom/reported ]'
 update home Home /report
-check report-retried 'code 0 && [ "$(cat ${T}/home/.loom/reported)" = "${b}" ] && [ "$(tail -1 ${T}/reports | python3 -c "import json,sys; print(json.load(sys.stdin)[\"host\"])")" = Home ]'
+check report-retried 'code 0 && grep -q "\"version\":\"${b}\"" ${T}/home/.loom/reported &&[ "$(tail -1 ${T}/reports | python3 -c "import json,sys; print(json.load(sys.stdin)[\"host\"])")" = Home ]'
 
 # A hook that fails runs again on the next run, which finds the version installed, and stops once it passes.
 mkdir -p "${T}/flaky/.loom/updated.d"
@@ -190,6 +205,63 @@ mkdir -p "${T}/sun2/.loom" && printf '# the release store\nbase = %s/\nhost=Sun2
 HOME=${T}/sun2 "${updater}" > "${T}/run.log" 2>&1
 echo $? > "${T}/code"
 check settings-from-update-conf 'code 0 && [ "$(now sun2 version)" = "${b}" ] && grep -q " Sun2 installed ${b}" ${T}/sun2/.loom/update.log'
+
+# Health probes: each health.d probe's lines are the report's services, kept to their shape and quoted as JSON; a
+# failing probe says so. The same state isn't sent again for 5 minutes, but any change is sent at once.
+mkdir -p "${T}/probed/.loom/health.d"
+printf '#!/bin/sh\ncat %s\n' "${T}/probe.out" > "${T}/probed/.loom/health.d/50-serve"
+printf '#!/bin/sh\nexit 3\n' > "${T}/probed/.loom/health.d/60-broken"
+chmod +x "${T}/probed/.loom/health.d/50-serve" "${T}/probed/.loom/health.d/60-broken"
+printf 'loom-serve.service active running restarts=0 note="a\\b"\n!!! not a probe line\nloom-serve.service\n' > "${T}/probe.out"
+update probed Probed /report
+check services-reported 'code 0 && [ "$(reported Probed services)" = "[\"loom-serve.service active running restarts=0 note=\\\"a\\\\b\\\"\", \"60-broken probe-failed\"]" ]'
+sent=$(reports)
+update probed Probed /report
+check same-state-not-sent-again 'code 0 && [ "$(reports)" = "${sent}" ]'
+printf 'loom-serve.service activating auto-restart restarts=1\n' > "${T}/probe.out"
+update probed Probed /report
+check changed-state-sent-at-once 'code 0 && [ "$(reports)" = "$((sent + 1))" ] && reported Probed services | grep -q "activating auto-restart restarts=1"'
+aged() { python3 -c 'import os, sys, time; os.utime(sys.argv[1], (time.time() - int(sys.argv[2]),) * 2)' "$1" "$2"; } # aged <file> <seconds>
+aged "${T}/probed/.loom/reported" 180
+update probed Probed /report
+check same-state-not-sent-within-5-minutes 'code 0 && [ "$(reports)" = "$((sent + 1))" ]'
+aged "${T}/probed/.loom/reported" 330
+update probed Probed /report
+check state-sent-every-5-minutes 'code 0 && [ "$(reports)" = "$((sent + 2))" ]'
+
+# A hold: "current" keeps the version installed and reads no current.txt; a version keeps (or brings) the machine on
+# that one, from its own manifest; either way the log says so once and every report carries it. A version with no
+# manifest is refused, nothing switched, and removing the hold follows current.txt again.
+update frozen Frozen /report
+printf 'hold = current\n' > "${T}/frozen/.loom/update.conf"
+republish "${c}"
+reads=$(grep -c '"GET /current.txt' "${T}/access.log")
+update frozen Frozen /report
+update frozen Frozen /report
+check hold-current-stays 'code 0 && [ "$(now frozen version)" = "${b}" ] && [ "$(grep -c "\"GET /current.txt" ${T}/access.log)" = "${reads}" ] && [ $(grep -c "held at current by the hold setting" ${T}/frozen/.loom/update.log) -eq 1 ] && [ "$(now frozen held)" = current ]'
+check hold-current-reported '[ "$(reported Frozen held)" = "\"current\"" ] && [ "$(reported Frozen version)" = "\"${b}\"" ]'
+update thawed Thawed /report
+check hold-holds-only-its-machine 'code 0 && [ "$(now thawed version)" = "${c}" ] && [ "$(reported Thawed held)" = "\"\"" ]'
+printf '# debugging\nhold = %s\n' "${a}" > "${T}/frozen/.loom/update.conf"
+update frozen Frozen /report
+check hold-version-brings-it 'code 0 && [ "$(now frozen version)" = "${a}" ] && [ "$(now frozen previous)" = "${b}" ] && [ "$(runs frozen loom-runner)" = "runner 1 ${platform}" ] && grep -q "held at ${a} by the hold setting" ${T}/frozen/.loom/update.log && grep -q "\"GET /manifests/${a}.txt" ${T}/access.log'
+update frozen Frozen /report
+check hold-version-stays 'code 0 && [ "$(now frozen version)" = "${a}" ] && [ "$(reported Frozen held)" = "\"${a}\"" ] && [ "$(reported Frozen version)" = "\"${a}\"" ]'
+printf 'hold = 0123456789abcdef0123456789abcdef01234567\n' > "${T}/frozen/.loom/update.conf"
+update frozen Frozen /report
+check hold-without-manifest-refused 'code 1 && grep -q "refused: fetching .*/manifests/0123456789abcdef0123456789abcdef01234567.txt" ${T}/run.log && [ "$(now frozen version)" = "${a}" ] && reported Frozen refused | grep -q manifests/0123456789abcdef'
+sed "s/^version .*/version ${a}/" "${T}/www/manifests/${b}.txt" > "${T}/www/manifests/fedcba9876543210fedcba9876543210fedcba98.txt"
+printf 'hold = fedcba9876543210fedcba9876543210fedcba98\n' > "${T}/frozen/.loom/update.conf"
+update frozen Frozen /report
+check hold-on-another-versions-manifest-refused 'code 1 && grep -q "manifests/fedcba9876543210fedcba9876543210fedcba98.txt names version ${a}, not the held fedcba98" ${T}/run.log && [ "$(now frozen version)" = "${a}" ]'
+printf 'hold = 0123456789abcdef0123456789abcdef01234567\n' > "${T}/frozen/.loom/update.conf"
+update frozen Frozen /report
+printf 'hold = ../evil\n' > "${T}/frozen/.loom/update.conf"
+update frozen Frozen /report
+check hold-not-a-name-refused 'code 1 && grep -q "hold .../evil. is neither current nor" ${T}/run.log && [ "$(now frozen version)" = "${a}" ]'
+: > "${T}/frozen/.loom/update.conf"
+update frozen Frozen /report
+check hold-removed-follows-current 'code 0 && [ "$(now frozen version)" = "${c}" ] && grep -q "hold at 0123456789abcdef0123456789abcdef01234567 removed: following current.txt again" ${T}/frozen/.loom/update.log && [ ! -e ${T}/frozen/.loom/held ] && [ "$(reported Frozen held)" = "\"\"" ]'
 
 # Overlap: a run held in its hook keeps the lock; a second run beside it changes nothing. The hook leaves a service
 # running, which must not keep the lock once the first run ends.
