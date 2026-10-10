@@ -9,6 +9,8 @@
 #	base    LOOM_UPDATE_BASE     where current.txt and blobs/<sha256> are served (required)
 #	host    LOOM_UPDATE_HOST     this machine's name for the manifest's canary hosts (default: hostname -s)
 #	report  LOOM_UPDATE_REPORT   a URL each new version is POSTed to as {host, version, previous, at} (optional)
+#	house-cache  LOOM_UPDATE_HOUSE_CACHE  the house cache, http://<host>:<port>, asked first for every blob (optional;
+#	                                      docs/house-cache.md): current.txt is always the base's
 #
 # A version installs into ~/.loom/versions/<version>/ beside its SHA256SUMS. Services run ~/.loom/bin/<name>, a
 # symlink to that version's file, each replaced by renaming a new symlink over it; ~/.loom/version names the version
@@ -37,8 +39,14 @@ setting() { # setting <key> <environment value>: the value, from the environment
 base=$(setting base "${LOOM_UPDATE_BASE:-}")
 host=$(setting host "${LOOM_UPDATE_HOST:-}")
 report=$(setting report "${LOOM_UPDATE_REPORT:-}")
+house=$(setting house-cache "${LOOM_UPDATE_HOUSE_CACHE:-}")
 [ -n "${host}" ] || host=$(hostname -s)
 base=${base%/}
+house=${house%/}
+# The house cache serves a blob at its own address and the base's path: <house>/releases/blobs/<sha256> for a base of
+# https://artifacts.loom.system.inc/releases.
+rest=${base#*://}
+case "${rest}" in */*) base_path=/${rest#*/} ;; *) base_path= ;; esac
 
 say() { # say <line>: one line to update.log and to stderr.
 	local line
@@ -231,7 +239,7 @@ if [ -d "${target}" ]; then
 else
 	staging=${versions}/.${version}.$$
 	mkdir "${staging}" || refuse "making ${staging}"
-	downloaded=0 linked=0
+	downloaded=0 linked=0 housed=0
 	while read -r sha name; do
 		# A file an installed version holds, still hashing to its name, is linked from it.
 		kept=
@@ -246,15 +254,24 @@ else
 			continue
 		fi
 		temporary=${staging}/.${name}.download
-		curl -fsS -m 600 -o "${temporary}" "${base}/blobs/${sha}" || refuse "downloading ${name} (${base}/blobs/${sha})"
-		got=$(hash "${temporary}")
-		[ "${got}" = "${sha}" ] || refuse "${name} from ${base}/blobs/${sha} hashes to ${got}; nothing installed, ${installed:-nothing} stays"
+		# The house cache first, when there is one: what it can't give whole and hashing to its name (down, slow,
+		# lacking it, corrupt) the base gives, so a bad house cache costs a download, never a wrong byte.
+		if [ -n "${house}" ] && curl -fsS --connect-timeout 2 -m 600 -o "${temporary}" "${house}${base_path}/blobs/${sha}" 2> /dev/null &&
+			[ "$(hash "${temporary}")" = "${sha}" ]; then
+			housed=$((housed + 1))
+		else
+			[ -n "${house}" ] && say "the house cache ${house} didn't give ${name} whole (blobs/${sha}); fetching it from ${base}" && rm -f "${temporary}"
+			curl -fsS -m 600 -o "${temporary}" "${base}/blobs/${sha}" || refuse "downloading ${name} (${base}/blobs/${sha})"
+			got=$(hash "${temporary}")
+			[ "${got}" = "${sha}" ] || refuse "${name} from ${base}/blobs/${sha} hashes to ${got}; nothing installed, ${installed:-nothing} stays"
+		fi
 		chmod 755 "${temporary}" && mv "${temporary}" "${staging}/${name}" || refuse "installing ${name}"
 		downloaded=$((downloaded + 1))
 	done < "${manifest}"
 	cp "${manifest}" "${staging}/SHA256SUMS" && mv "${staging}" "${target}" || refuse "installing ${target}"
 	staging=
 	fetched="${downloaded} downloaded, ${linked} linked"
+	[ -n "${house}" ] && fetched="${downloaded} downloaded (${housed} through the house cache), ${linked} linked"
 fi
 
 # Each bin link to the new version's file, then the version files, version last.

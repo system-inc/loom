@@ -12,6 +12,9 @@
 #	sed 's/ \&\& ps -p .*$//' loom-update.sh > m.sh && updater/update_test.sh m.sh                                        # fails 3: a reused pid holds the lock
 #	sed 's/\[ "$(current hooked)" = "${version}" \] ||/true ||/' loom-update.sh > m.sh && updater/update_test.sh m.sh      # fails 2: a failed hook never runs again
 #	sed 's/|| !ended\[sections - 1\]) fail/) fail/' loom-update.sh > m.sh && updater/update_test.sh m.sh                   # fails 3: a cut manifest installs
+#	sed 's/ \&\&$/ \&\& true ||/' loom-update.sh > m.sh && updater/update_test.sh m.sh                                        # fails 1: a corrupt house cache blob installs
+#	sed 's#"${base}/current.txt"#"${house:-${base}}/current.txt"#' loom-update.sh > m.sh && updater/update_test.sh m.sh    # fails 4: the house cache's stale current.txt
+#	sed 's/\[ -n "${house}" \] \&\& say/[ -n "${house}" ] \&\& refuse/' loom-update.sh > m.sh && updater/update_test.sh m.sh # fails 2: no fallback past the house cache
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
 updater=$(cd "$(dirname "${1:-${here}/loom-update.sh}")" && pwd)/$(basename "${1:-${here}/loom-update.sh}")
@@ -231,6 +234,36 @@ check new-pidless-lock-holds 'code 0 && grep -q "another run holds" ${T}/run.log
 touch -t 202001010000 "${T}/workshop/.loom/update.lock"
 update workshop Workshop /report
 check old-pidless-lock-taken-over 'code 0 && [ "$(now workshop version)" = "${e}" ] && grep -q "took over the lock of run none" ${T}/workshop/.loom/update.log && [ ! -e ${T}/workshop/.loom/update.lock ]'
+
+# The house cache (docs/house-cache.md): each blob is asked of it first, at its address and the base's path, and taken
+# only whole and hashing to its name; current.txt is always the base's. Here it is a second server on a copy of the
+# served blobs, holding a stale current.txt that names an older release.
+mkdir -p "${T}/house/blobs"
+cp "${T}/www/blobs/"* "${T}/house/blobs/"
+cp "${T}/out/manifests/${c}.txt" "${T}/house/current.txt"
+python3 "${T}/server.py" "${T}/house" "${T}/house-reports" "${T}/house-port" 2> "${T}/house-access.log" &
+houseServer=$!
+for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -s "${T}/house-port" ] && break; sleep 0.2; done
+house=http://127.0.0.1:$(cat "${T}/house-port")
+housed() { # housed <home>: one updater run as that machine, its update.conf naming the house cache
+	mkdir -p "${T}/$1/.loom" && printf 'base = %s\nhouse-cache = %s/\n' "${base}" "${house}" > "${T}/$1/.loom/update.conf"
+	HOME=${T}/$1 LOOM_UPDATE_HOST=$1 "${updater}" > "${T}/run.log" 2>&1
+	echo $? > "${T}/code"
+}
+before=$(blobs)
+housed chonchon
+check house-cache-gives-the-blobs 'code 0 && [ "$(now chonchon version)" = "${e}" ] && [ "$(blobs)" = "${before}" ] && [ $(grep -c "\"GET /blobs/" ${T}/house-access.log) -eq 2 ] && grep -q "installed ${e}, previous none (2 downloaded (2 through the house cache), 0 linked)" ${T}/chonchon/.loom/update.log'
+check house-cache-never-gives-current '! grep -q current.txt ${T}/house-access.log && [ "$(runs chonchon loom-runner)" = "runner 5 ${platform}" ]'
+houseRunner=$(awk -v platform="${platform}" '$1 == "loom-runner" && $2 == platform { print $3 }' "${T}/out/manifests/${e}.txt")
+echo "runner evil ${platform}" > "${T}/house/blobs/${houseRunner}"
+before=$(blobs)
+housed corrupted
+check house-cache-corrupt-blob-refused 'code 0 && [ "$(now corrupted version)" = "${e}" ] && [ "$(runs corrupted loom-runner)" = "runner 5 ${platform}" ] && [ "$(blobs)" = $((before + 1)) ] && grep -q "the house cache .* didn.t give loom-runner whole" ${T}/corrupted/.loom/update.log'
+kill "${houseServer}" 2> /dev/null
+wait "${houseServer}" 2> /dev/null
+before=$(blobs)
+housed downstairs
+check house-cache-down-falls-back 'code 0 && [ "$(now downstairs version)" = "${e}" ] && [ "$(blobs)" = $((before + 2)) ] && [ $(grep -c "the house cache .* didn.t give" ${T}/downstairs/.loom/update.log) -eq 2 ]'
 
 # publish.sh's guards: the wrong compiler, too little disk, and a Go main it doesn't ship each refuse before any
 # build, and change nothing in the out directory.

@@ -11,7 +11,9 @@ loom-runner version
 
 `serve` is for machines Loom can't ssh into (docs/protocol.md, "The pool"): it asks the pool for a unit (`POST <pool>/next`), runs it as `run` would, each unit posting its own events to the wire it names, and asks again, until less than a minute remains before `--until`. Events go to `--log` or nowhere; stdout gets one summary line at the end (units, passed, failed, broken, seconds). It exits 0 at the deadline, on `SIGHUP` once the unit in hand finishes (a drain), or on `SIGTERM` (which breaks the unit in hand), and 2 when the pool refuses its token. Its started events name the worker as the machine. A unit whose test job names another runner is started by serve, then runs on that runner, fetched by its sha256 from the release store into `<root>/loom-runners` (`--releases`), checked to be a loom-runner for this platform, and run as `run` with serve's own settings and the unit on its stdin, continuing its stream; one that can't be had, or exits without starting the unit, is the unit's void, named (docs/serving.md).
 
-`install-serve` readies a Linux box's `loom-serve.service` from `~/.loom/serve.conf` and `~/.loom/serve-token`, writes the updater's hook, enables serve, and starts or reloads it only when it isn't running this unit and this release; the hook runs it after every release (docs/serving.md).
+`--house-cache <url>` (or `LOOM_HOUSE_CACHE`), on `run` and `serve`, is the house cache: every blob, product archive and runner wanted by its sha256 is asked of it first and read from the store when it can't give it whole, every hash checked either way; serve passes it to a runner it hands a unit to by the environment (docs/house-cache.md).
+
+`install-serve` readies a Linux box's `loom-serve.service` from `~/.loom/serve.conf`, `~/.loom/serve-token` and the `house-cache` line of `~/.loom/update.conf`, writes the updater's hook, enables serve, and starts or reloads it only when it isn't running this unit and this release; the hook runs it after every release (docs/serving.md).
 
 Flags go before the unit. Exit codes: `0` passed, `1` failed, `2` broken (or the unit couldn't be read).
 
