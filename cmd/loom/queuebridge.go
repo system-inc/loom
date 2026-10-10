@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/queuebridge"
 )
 
@@ -32,7 +31,7 @@ func queueBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	home, _ := os.UserHomeDir()
 	flags := flag.NewFlagSet("queue-bridge", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", queuebridge.HomePaths(home).Config, "the bridge's settings: queue, repository, state, secret")
+	configPath := flags.String("config", queuebridge.HomePaths(home).Config, "the bridge's settings: queue, repository, state, token")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "usage: loom queue-bridge [--config <queue-bridge.conf>]")
 		return 2
@@ -62,15 +61,17 @@ func queueBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return 0
 	}
-	secret, err := protocol.ReadTokenSecret(config.Secret)
-	if err != nil {
-		fmt.Fprintf(stderr, "loom queue-bridge: %v\n", err)
+	// Its own coordinator token, minted for it: the bridge never reads the wire's secret.
+	held, err := os.ReadFile(config.Token)
+	token := strings.TrimSpace(string(held))
+	if err != nil || token == "" {
+		fmt.Fprintf(stderr, "loom queue-bridge: the bridge's token (loom coordinator-token queue-bridge --days N > %s): %v\n", config.Token, err)
 		return 3
 	}
 	log := func(text string) {
 		fmt.Fprintf(stdout, "%s queue-bridge: %s\n", time.Now().UTC().Format("2006-01-02T15:04:05Z"), text)
 	}
-	bridge := queuebridge.Bridge{Queue: queuebridge.HTTPQueue{Base: config.Queue, Secret: secret}, Gate: queuebridge.Clone{Repository: config.Repository}, Log: log}
+	bridge := queuebridge.Bridge{Queue: queuebridge.HTTPQueue{Base: config.Queue, Token: token}, Gate: queuebridge.Clone{Repository: config.Repository}, Log: log}
 	if !bridge.Tick() {
 		return 1
 	}

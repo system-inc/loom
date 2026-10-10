@@ -21,11 +21,11 @@ import (
 func TestQueueBridgeConfReadsEachSettingOverWorkshopsDefaults(t *testing.T) {
 	home := "/home/ahra"
 	if config, err := ReadConfig("", home); err != nil || config != DefaultConfig(home) ||
-		config.Repository != "/home/ahra/loom-queue-bridge/adamic.git" || config.Secret != "/home/ahra/.loom/token-secret" {
+		config.Repository != "/home/ahra/loom-queue-bridge/adamic.git" || config.Token != "/home/ahra/.loom/queue-bridge.token" {
 		t.Fatalf("an empty queue-bridge.conf read %+v, %v", config, err)
 	}
-	config, err := ReadConfig("# rehearsal\n  queue=http://127.0.0.1:8787  \nrepository = ~/adamic\nstate = /tmp/state\nsecret = ~/s\n", home)
-	want := Config{Queue: "http://127.0.0.1:8787", Repository: "/home/ahra/adamic", State: "/tmp/state", Secret: "/home/ahra/s"}
+	config, err := ReadConfig("# rehearsal\n  queue=http://127.0.0.1:8787  \nrepository = ~/adamic\nstate = /tmp/state\ntoken = ~/t\n", home)
+	want := Config{Queue: "http://127.0.0.1:8787", Repository: "/home/ahra/adamic", State: "/tmp/state", Token: "/home/ahra/t"}
 	if err != nil || config != want {
 		t.Fatalf("read %+v, %v", config, err)
 	}
