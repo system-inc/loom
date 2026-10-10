@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,13 +14,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/system-inc/loom/coordinator"
 	"github.com/system-inc/loom/judge"
+	"github.com/system-inc/loom/placer"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/treebuilder"
 )
 
 // judgeLoop is the judge's pull loop on the coordinator host, beside `loom plan` (#82tz9ty): every future Queue holds
@@ -37,6 +41,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return judgeGate(arguments[1:], stdout, stderr)
 	}
 	flags := flag.NewFlagSet("judge", flag.ContinueOnError)
+	home, _ := os.UserHomeDir()
 	flags.SetOutput(stderr)
 	queue := flags.String("queue", "", "loom's base URL")
 	tokenFile := flags.String("token-file", "", "file holding the coordinator token")
@@ -63,6 +68,10 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	censusHeavy := flags.String("census-heavy", "", "with --census-rows, the gate tools' cloud/fast-gate/heavy-units.tsv: declared heavy deferrals, classed heavy")
 	censusGit := flags.String("census-git", "", "with --census-rows, a clone of Adamic whose origin answers whether a pending skip's awaited branch is on main")
 	treeGit := flags.String("tree-git", "", "a clone of Adamic holding the commits Workshop built (the tree builder's): a rerun on a unit's base runs that commit's tree build, keyed from it; without it, every rerun on a base is void, base tree not built")
+	treeRequests := flags.String("tree-requests", "", "the tree builder's request file (loom build-trees --requests): a base tree the store lacks is asked for there, and a rerun on it waits for its index; without it, such a rerun is void, base tree not built")
+	treeLedger := flags.String("tree-ledger", filepath.Join(home, "loom-trees", "trees.jsonl"), "the tree builder's ledger, read for a base tree's build that failed")
+	userHome, _ := os.UserHomeDir()
+	placedLedger := flags.String("placed", filepath.Join(userHome, "loom-placer", "placed.jsonl"), "the placer's ledger, read for when each decided run was placed: its unit rows' queue wait")
 	storeFlags := addStoreFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -76,7 +85,6 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "judge:", err)
 		return 1
 	}
-	home, _ := os.UserHomeDir()
 	secret, err := protocol.ReadTokenSecret(filepath.Join(home, ".loom", "token-secret"))
 	if err != nil {
 		fmt.Fprintln(stderr, "judge:", err)
@@ -87,6 +95,16 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "judge:", err)
 		return 1
+	}
+	// A base tree the store lacks is asked of the tree builder, and a rerun on it waits for it (#6ygdzat).
+	bases := &baseTrees{git: *treeGit, indexed: store.TreeIndexed, wait: placer.TreeWaitBound, now: time.Now, keyed: map[string]planner.TreeIdentity{},
+		newest: func(tree string) (treebuilder.Record, bool, error) { return treebuilder.Newest(*treeLedger, tree) }}
+	if *treeRequests != "" {
+		if bases.requests, err = treebuilder.OpenRequests(*treeRequests); err != nil {
+			fmt.Fprintln(stderr, "judge:", err)
+			return 1
+		}
+		defer bases.requests.Close()
 	}
 	var slots []coordinator.Machine
 	for range *local {
@@ -140,7 +158,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			if err := json.Unmarshal(keyParts, &parts); err != nil {
 				return nil, fmt.Errorf("a planned unit's keyParts: %w", err)
 			}
-			tree, void, err := rerunTree(*treeGit, store.TreeIndexed, sha, tree)
+			tree, void, err := bases.rerunTree(sha, tree)
 			if err != nil {
 				return nil, err
 			}
@@ -202,6 +220,10 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Stale: judge.StaleAfter,
 	})
 	puller.Loop.RequireRunner = *requireRunner
+	puller.Loop.BaseReady = bases.ready
+	// Each decided run's unit rows go to the store's bucket, the placer's ledger saying when the run was placed (#g1jvdbq).
+	puller.Rows, puller.Placed = judge.BucketRows{Bucket: store.Bucket}, placedFrom(*placedLedger)
+	puller.Report = func(line string) { fmt.Fprintln(stdout, line) }
 	puller.Loop.Warm = warmRule(warmRunner, *warmAttempts, *poolsPath)
 	if *poolsPath != "" {
 		// A failure is rerun with the need NeedOf reads now; when that's more than its attempt was placed with, it's
@@ -692,30 +714,145 @@ func loadNeeds(repository string) (planner.UnitNeeds, error) {
 	return planner.LoadUnitNeeds(directory)
 }
 
-// rerunTree is the tree build a rerun at sha runs (#v03v751): planned, the unit's plan's, for a rerun on the future,
-// and for one on its base (planned empty) the base commit's, keyed from treeGit as the planner keys a tree
-// (planner.ReadCommitIdentity) and run only once indexed says the store holds it. A base whose tree isn't built (not
-// in treeGit, not keyable, its index not up, or no --tree-git) is void's cause, named: never red, and never built on a
-// runner. Building base trees on demand is #6ygdzat's. A store that can't be read is an error, for the pass to try
-// again.
-func rerunTree(treeGit string, indexed func(tree string) (bool, error), sha, planned string) (string, string, error) {
+// baseTrees are the tree builds Judge's reruns on a future's base run (#v03v751, #6ygdzat): each base commit keyed
+// from git, a clone holding the commits Workshop built, as the planner keys a tree (planner.ReadCommitIdentity), and,
+// when the store lacks its index, asked of the tree builder through requests (treebuilder.Requests), once. A rerun on
+// that base waits, nothing rerun, until the index is up; it's void, named, never red and never built on a runner, when
+// the base can't be keyed, the builder's build of it stands failed, or the index isn't up within wait of the request.
+type baseTrees struct {
+	git      string
+	indexed  func(tree string) (bool, error)
+	requests *treebuilder.Requests                               // nil: the judge asks the builder for nothing
+	newest   func(tree string) (treebuilder.Record, bool, error) // the builder's ledger
+	wait     time.Duration
+	now      func() time.Time
+	keyed    map[string]planner.TreeIdentity
+}
+
+// baseTreeKeep is how long a request is kept: one older is asked anew, and waited on from then.
+const baseTreeKeep = 24 * time.Hour
+
+// state is base's tree and whether a rerun on it waits, or why it's void.
+func (trees *baseTrees) state(base string) (tree, void string, waiting bool, err error) {
+	if trees.git == "" {
+		return "", "base tree not built: the judge has no --tree-git to key base " + base + "'s tree", false, nil
+	}
+	identity, keyed := trees.keyed[base]
+	if !keyed {
+		if identity, err = planner.ReadCommitIdentity(trees.git, base); err != nil {
+			return "", fmt.Sprintf("base tree not built: keying base %s: %v", base, err), false, nil
+		}
+		trees.keyed[base] = identity
+	}
+	tree = identity.Key()
+	held, err := trees.indexed(tree)
+	if err != nil {
+		return "", "", false, fmt.Errorf("reading base %s's tree index trees/%s.json: %w", base, tree, err)
+	}
+	if held {
+		return tree, "", false, nil
+	}
+	record, found, err := trees.newest(tree)
+	if err != nil {
+		return "", "", false, fmt.Errorf("the tree builder's ledger, for base %s's tree %s: %w", base, tree, err)
+	}
+	builder := "the tree builder has no record of it"
+	if found {
+		builder = "the tree builder's newest record: " + record.String()
+	}
+	now := trees.now()
+	if found && record.Standing(now) {
+		return "", fmt.Sprintf("base tree not built: trees/%s.json, base %s's, wasn't built on Workshop (%s)", tree, base, builder), false, nil
+	}
+	if trees.requests == nil {
+		return "", fmt.Sprintf("base tree not built: trees/%s.json, base %s's, isn't in the store, and the judge asks the builder for nothing (no --tree-requests)", tree, base), false, nil
+	}
+	if err := trees.requests.Compact(baseTreeKeep, now); err != nil {
+		return "", "", false, fmt.Errorf("compacting the tree requests: %w", err)
+	}
+	asked, err := trees.requests.Ask(treebuilder.Request{Tree: tree, Commit: base, Go: identity.Go, At: now.UTC().Format(time.RFC3339)})
+	if err != nil {
+		return "", "", false, err
+	}
+	if waited := now.Sub(asked.Asked()); waited < trees.wait {
+		return tree, "", true, nil
+	}
+	return "", fmt.Sprintf("base tree not built: trees/%s.json, base %s's, isn't in the store %v after the judge asked for it (%s)", tree, base, trees.wait, builder), false, nil
+}
+
+// ready is judge.Loop's BaseReady: ErrWaiting while base's tree is being built, nil once a rerun on it may go.
+func (trees *baseTrees) ready(base string) error {
+	tree, _, waiting, err := trees.state(base)
+	if err != nil {
+		return err
+	}
+	if waiting {
+		return fmt.Errorf("%w: base %s's tree %s is being built on Workshop", judge.ErrWaiting, base, tree)
+	}
+	return nil
+}
+
+// rerunTree is the tree build a rerun at sha runs: planned, the unit's plan's, for a rerun on the future, and for one
+// on its base (planned empty) the base's, or void's cause, named. A base still waiting is ErrWaiting, as ready says.
+func (trees *baseTrees) rerunTree(sha, planned string) (string, string, error) {
 	if planned != "" {
 		return planned, "", nil
 	}
-	if treeGit == "" {
-		return "", "base tree not built: the judge has no --tree-git to key base " + sha + "'s tree", nil
+	tree, void, waiting, err := trees.state(sha)
+	if err == nil && waiting {
+		err = fmt.Errorf("%w: base %s's tree %s is being built on Workshop", judge.ErrWaiting, sha, tree)
 	}
-	identity, err := planner.ReadCommitIdentity(treeGit, sha)
+	return tree, void, err
+}
+
+// placedFrom reads when a run was placed from the placer's ledger at path, without the placer's lock: the newest record
+// naming the run. The ledger only grows between compactions, so each ask reads only the lines appended since the last
+// one into an index by run; a compaction (a new file renamed over it) or a cut-back (a smaller file) reads it whole
+// again. A ledger that can't be read places nothing, and the rows say no queue wait.
+func placedFrom(path string) judge.PlacedOf {
+	index := &placedIndex{path: path}
+	return index.placed
+}
+
+// A placedIndex is the placer ledger's placed time by run, as of offset bytes into the file it last read.
+type placedIndex struct {
+	mutex  sync.Mutex
+	path   string
+	file   os.FileInfo
+	offset int64
+	at     map[string]string
+}
+
+func (index *placedIndex) placed(run string) (string, bool) {
+	index.mutex.Lock()
+	defer index.mutex.Unlock()
+	info, err := os.Stat(index.path)
 	if err != nil {
-		return "", fmt.Sprintf("base tree not built: keying base %s: %v", sha, err), nil
+		return "", false
 	}
-	tree := identity.Key()
-	held, err := indexed(tree)
-	if err != nil {
-		return "", "", fmt.Errorf("reading base %s's tree index trees/%s.json: %w", sha, tree, err)
+	if index.file == nil || !os.SameFile(index.file, info) || info.Size() < index.offset {
+		index.offset, index.at = 0, map[string]string{}
 	}
-	if !held {
-		return "", fmt.Sprintf("base tree not built: trees/%s.json, base %s's, isn't in the store", tree, sha), nil
+	index.file = info
+	if info.Size() > index.offset {
+		file, err := os.Open(index.path)
+		if err != nil {
+			return "", false
+		}
+		defer file.Close()
+		appended := make([]byte, info.Size()-index.offset)
+		read, _ := file.ReadAt(appended, index.offset)
+		appended = appended[:read]
+		// Only whole lines: a line the placer is still writing is read on the next ask.
+		whole := bytes.LastIndexByte(appended, '\n') + 1
+		for _, line := range bytes.Split(appended[:whole], []byte("\n")) {
+			var record placer.Record
+			if json.Unmarshal(line, &record) == nil && record.Run != "" && record.At != "" {
+				index.at[record.Run] = record.At
+			}
+		}
+		index.offset += int64(whole)
 	}
-	return tree, "", nil
+	at, found := index.at[run]
+	return at, found
 }

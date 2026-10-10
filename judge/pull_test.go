@@ -3,6 +3,7 @@ package judge
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -694,5 +695,55 @@ func TestAnOverBudgetUnitIsVoidNeverRedFlakeOrGreen(t *testing.T) {
 				t.Fatalf("run %s infra %q, %d reruns, quarantine %v; want %s %q, %d", post.Decision.Status, infra, reruns, post.Quarantine, c.status, c.infra, c.reruns)
 			}
 		})
+	}
+}
+
+// A failure whose base's tree is being built waits (#6ygdzat): the pass reruns nothing, posts nothing and fails
+// nothing, and once the tree is up a later pass reruns it on both and posts. Mutants: the base asked after the
+// candidate's rerun; a wait taken for the pass's error.
+func TestARerunWaitsOnItsBasesTree(t *testing.T) {
+	done := strings.Repeat("d", 40)
+	unit := strings.Repeat("1", 64)
+	units := []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"package":"p"}`), Decision: "run", Tree: strings.Repeat("7", 64)}}
+	change := PlannedChange{Change: "chg_A", Sha: done, Base: baseTree, Owner: "system_adamic_library"}
+	reruns, asked := []string{}, []string{}
+	queue := &StubQueue{}
+	building := true
+	puller := Puller{
+		Source: listedFutures{{Future: done, Base: baseTree, Change: change, Units: units}},
+		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
+		Read:   func(run string) ([]protocol.Event, error) { return finishedStream(unit, "failed"), nil },
+		Rerun: func(_ json.RawMessage, _ protocol.Resources, sha, _ string) ([]protocol.Event, error) {
+			reruns = append(reruns, sha[:1])
+			if sha == baseTree {
+				return finishedStream("job-on-base", "passed"), nil
+			}
+			return finishedStream("job-on-candidate", "failed"), nil
+		},
+		Main:  NoMainRecords{},
+		Queue: queue,
+		Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: func() time.Time { return time.Date(2026, 10, 10, 20, 0, 0, 0, time.UTC) },
+			BaseReady: func(base string) error {
+				asked = append(asked, base)
+				if building {
+					return fmt.Errorf("%w: base %s's tree is being built", ErrWaiting, base)
+				}
+				return nil
+			}},
+	}
+	for range 2 {
+		if judged, err := puller.PullOnce(); judged != 0 || err != nil {
+			t.Fatalf("while its base's tree builds: judged %d, %v", judged, err)
+		}
+	}
+	if len(reruns) != 0 || len(queue.Posts[done]) != 0 || len(asked) != 2 || asked[0] != baseTree {
+		t.Fatalf("while waiting: reruns %v, posts %v, asked %v", reruns, queue.Posts, asked)
+	}
+	building = false
+	if judged, err := puller.PullOnce(); judged != 1 || err != nil {
+		t.Fatalf("once its base's tree is up: judged %d, %v", judged, err)
+	}
+	if strings.Join(reruns, ",") != "d,b" || len(queue.Posts[done]) != 1 || queue.Posts[done][0].Decision.Status != "red" {
+		t.Fatalf("reruns %v, posts %+v", reruns, queue.Posts[done])
 	}
 }

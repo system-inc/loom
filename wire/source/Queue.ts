@@ -1114,8 +1114,9 @@ export async function checkPlan(body: string): Promise<PlannedUnit[] | { reason:
         if (item.tree !== undefined && item.tree !== null && (typeof item.tree !== 'string' || !hashPattern.test(item.tree))) {
             return `unit ${item.name}'s tree is a tree key, 64 lowercase hex digits`;
         }
-        if (typeof item.tree === 'string' && item.keyParts.kind !== 'test' && item.keyParts.kind !== 'product') {
-            return `unit ${item.name} is a ${String(item.keyParts.kind)} unit, and only a test or product unit runs its tree's build`;
+        // A phase unit names its tree too: its job takes the tree's npm packages from Workshop's build (#v03v751).
+        if (typeof item.tree === 'string' && item.keyParts.kind !== 'test' && item.keyParts.kind !== 'product' && item.keyParts.kind !== 'phase') {
+            return `unit ${item.name} is a ${String(item.keyParts.kind)} unit, and only a test, product or phase unit runs its tree's build`;
         }
         if (names.has(item.name) || keys.has(item.unitKey)) {
             return `unit ${item.name} is planned twice`;

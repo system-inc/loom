@@ -3,7 +3,9 @@
 // projection: a snapshot and then each change as Queue pushes it, over the stream at /board/stream, or the same
 // snapshot every two seconds when the stream can't open. Plain HTML and inline script under the response's CSP nonce,
 // nothing loaded from elsewhere. The board token rides after the # once; the page keeps it in this browser and takes
-// it out of the address bar, and it goes to the stream only as a subprotocol. Parts the log can't feed yet (the
+// it out of the address bar, and it goes to the stream only as a subprotocol. Above the track, the headline (builds
+// tested in the last hour, main's reds and their trend) is read from /ui/headline every ten seconds, the Headline
+// object's follow of the Queue's log, each number saying how old its read is. Parts the log can't feed yet (the
 // block, the build) keep their place and say what they wait on. A landing gets a celebration and, once the viewer
 // turns sound on, a chime made in the page. A witness of main decided green never lands: it finishes as witnessed,
 // the whole track done, its last step named for it.
@@ -59,9 +61,22 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .label { font: 600 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .note { font-size: 12px; color: var(--muted); }
+.pulse { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; }
+.pulse .panel { gap: 10px; }
+.pulse .figure { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 16px; min-width: 0; }
+.pulse .big { font-size: 52px; font-weight: 700; line-height: 1; }
+.pulse .big[data-state="red"] { color: var(--failed); }
+.pulse .big[data-state="green"] { color: var(--passed); }
+.pulse .trend { font-size: 14px; color: var(--muted); white-space: nowrap; }
+.pulse .trend[data-state="down"] { color: var(--passed); }
+.pulse .trend[data-state="up"] { color: var(--failed); }
+.pulse .source { font-size: 11px; color: var(--faint); }
+.spark { flex: 1 1 96px; display: flex; align-items: flex-end; gap: 3px; height: 40px; min-width: 0; }
+.spark span { flex: 1; min-height: 2px; border-radius: 2px; background: var(--violet); opacity: .75; }
+.spark span:last-child { opacity: 1; background: var(--gold); }
 .track { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
 .step { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border); background: var(--step); min-width: 0; transition: all .4s; }
-.step .head { display: flex; align-items: center; gap: 8px; }
+.step .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .step .name { font-weight: 650; }
 .step .time { margin-left: auto; font-size: 12px; color: var(--muted); }
 .step .icon { display: inline-flex; color: var(--off); flex: none; }
@@ -93,6 +108,16 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .posted[data-phase="testing"] .phase { color: var(--running); }
 .posted[data-phase="testing"] .phase .icon { animation: beat 1s ease-in-out infinite; }
 .posted[data-phase="parked"] .phase { color: var(--void); }
+.posted[data-phase="landed"] .phase, .posted[data-phase="witnessed"] .phase { color: var(--passed); }
+.posted[data-phase="red"] .phase, .posted[data-phase="refused"] .phase { color: var(--failed); }
+.posted.finished { background: transparent; }
+.posted.finished b { color: var(--soft); }
+.units { display: flex; height: 4px; border-radius: 999px; overflow: hidden; background: var(--rule); margin-top: 6px; }
+.units span { display: block; height: 100%; }
+.units .passed { background: var(--passed); }
+.units .failed { background: var(--failed); }
+.units .void { background: var(--void); }
+.line-break { font-size: 11px; color: var(--faint); letter-spacing: .08em; text-transform: uppercase; margin-top: 6px; }
 .list { display: flex; flex-direction: column; gap: 8px; }
 .empty { color: var(--faint); font-size: 13px; }
 .block { display: flex; align-items: center; gap: 18px; }
@@ -151,7 +176,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 @keyframes burst { 0% { transform: scale(.6); opacity: 0; } 30% { transform: scale(1.06); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
 @keyframes fade { 0% { opacity: 0; } 8% { opacity: 1; } 85% { opacity: 1; } 100% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .piece { display: none; } }
-@media (max-width: 900px) { .cols, .pair { grid-template-columns: 1fr; } .track { grid-template-columns: repeat(3, minmax(0, 1fr)); } .overlay .word { font-size: 52px; } }
+@media (max-width: 900px) { .pulse .big { font-size: 40px; } .cols, .pair { grid-template-columns: 1fr; } .track { grid-template-columns: repeat(3, minmax(0, 1fr)); } .overlay .word { font-size: 52px; } }
 </style>
 </head>
 <body>
@@ -166,11 +191,23 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         <button type="button" class="toggle" id="hear">Hear a landing</button>
     </div>
 </header>
+<section class="pulse" aria-label="The headline">
+    <article class="panel">
+        <span class="label">Builds tested, last hour</span>
+        <div class="figure"><b class="mono big" id="tested">&ndash;</b><div class="spark" id="spark" role="img" aria-label="Builds tested in each five minutes of the last hour"></div></div>
+        <span class="source" id="tested-source">a future's whole verdict, green or red; a void tested nothing and isn't counted</span>
+    </article>
+    <article class="panel">
+        <span class="label">Main's reds</span>
+        <div class="figure"><b class="mono big" id="main-red">&ndash;</b><span class="mono trend" id="main-trend"></span></div>
+        <span class="source" id="main-source">units red on the last witness of main's tip</span>
+    </article>
+</section>
 <section class="track" id="track" aria-label="Where the change is"></section>
 <section class="cols">
     <article class="panel" id="panel-posted">
-        <span class="label">Posted</span>
-        <span class="note"><span class="mono">POST /changes</span>, in submit order</span>
+        <span class="label">The line</span>
+        <span class="note">each change on its way, in submit order, then the last day's finished</span>
         <div class="list" id="posted"></div>
     </article>
     <div class="middle">
@@ -254,6 +291,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     var stepIcons = ${JSON.stringify(stepIcons)};
     var phaseIcons = ${JSON.stringify(phaseIcons)};
     var phaseWords = { queued: 'setup', building: 'building', testing: 'testing', parked: 'parked' };
+    var finishedIcons = { landed: 'FlagCheckered', witnessed: 'CheckCircle', red: 'XCircle', refused: 'XCircle' };
     var icons = ${JSON.stringify(iconMarkup([...stepIcons, ...Object.values(phaseIcons), 'XCircle', 'CheckCircle'], 16))};
     var stages = [['Posted', 'owners submit'], ['Block', 'the next block forms'], ['Build', 'products, once each'], ['Test', 'only what changed'], ['Verdict', 'by written rule'], ['Landed', 'main moves']];
     var panels = ['panel-posted', 'panel-block', 'panel-build', 'panel-test', 'panel-verdict', 'panel-landed'];
@@ -361,30 +399,69 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         if (line) { headline.appendChild(document.createTextNode(' \\u00B7 ' + line.owner)); }
     }
 
+    // What a change is doing, in the log's own terms: waiting for its future, waiting for its plan, judged unit by unit,
+    // a void attempt running again, or how it finished.
+    function lineWord(change) {
+        if (change.state === 'queued') { return change.future ? 'waiting for its plan' : 'in line for its future'; }
+        if (change.state === 'building') { return 'building its tree'; }
+        if (change.state === 'testing') {
+            if (voided(change)) { return 'void, running again'; }
+            if (change.units.planned === 0) { return 'planned, nothing to run'; }
+            return 'judged ' + finishedUnits(change.units) + ' of ' + change.units.planned;
+        }
+        if (change.state === 'red') { return 'red, ' + change.units.failed + ' of ' + change.units.planned + ' failed'; }
+        return { parked: 'parked', landed: 'landed', witnessed: 'witnessed, main green', refused: 'refused' }[change.state] || change.state;
+    }
+
+    function lineCard(change, place) {
+        var finished = onTheWay.indexOf(change.state) < 0;
+        var card = element('div', (finished ? 'posted finished' : 'posted') + (drawn.has(change.change) ? '' : ' new'));
+        drawn.add(change.change);
+        var top = element('span', 'top');
+        top.appendChild(element('b', null, change.owner));
+        if (place) { top.appendChild(element('span', 'mono place', '#' + place)); }
+        card.appendChild(top);
+        var units = change.units;
+        card.appendChild(element('span', 'mono meta', change.sha.slice(0, 12) + (units.planned > 0 ? ' \\u00B7 ' + units.planned + ' units' : '')));
+        if (units.planned > 0) {
+            var bar = element('span', 'units');
+            bar.setAttribute('role', 'img');
+            var tally = units.passed + ' passed, ' + units.failed + ' failed, ' + units.void + ' void of ' + units.planned;
+            bar.setAttribute('aria-label', tally);
+            bar.title = tally;
+            ['passed', 'failed', 'void'].forEach(function (kind) {
+                if (units[kind] > 0) {
+                    var part = element('span', kind);
+                    part.style.width = (units[kind] / units.planned * 100) + '%';
+                    bar.appendChild(part);
+                }
+            });
+            card.appendChild(bar);
+        }
+        card.dataset.phase = change.state;
+        var phase = element('span', 'phase');
+        phase.appendChild(icon(finished ? finishedIcons[change.state] || 'CheckCircle' : phaseIcons[change.state]));
+        phase.appendChild(element('span', null, lineWord(change)));
+        var since = element('span', 'mono since', finished ? took(change) : '');
+        if (!finished) { since.dataset.from = change.stateSince || change.firstSeenAt; }
+        phase.appendChild(since);
+        card.appendChild(phase);
+        return card;
+    }
+
     function renderPosted() {
         var list = document.getElementById('posted');
         list.replaceChildren();
-        var line = sorted(function (change) { return onTheWay.indexOf(change.state) >= 0; });
-        line.sort(function (left, right) { return Date.parse(left.firstSeenAt) - Date.parse(right.firstSeenAt); });
-        if (line.length === 0) { list.appendChild(element('span', 'empty', 'Waiting for the first change.')); }
-        line.forEach(function (change, index) {
-            var card = element('div', drawn.has(change.change) ? 'posted' : 'posted new');
-            drawn.add(change.change);
-            var top = element('span', 'top');
-            top.appendChild(element('b', null, change.owner));
-            top.appendChild(element('span', 'mono place', '#' + (index + 1)));
-            card.appendChild(top);
-            card.appendChild(element('span', 'mono meta', change.sha.slice(0, 12) + (change.units.planned > 0 ? ' \\u00B7 ' + change.units.planned + ' units' : '')));
-            card.dataset.phase = change.state;
-            var phase = element('span', 'phase');
-            phase.appendChild(icon(phaseIcons[change.state]));
-            phase.appendChild(element('span', null, phaseWords[change.state]));
-            var since = element('span', 'mono since', '');
-            since.dataset.from = change.stateSince || change.firstSeenAt;
-            phase.appendChild(since);
-            card.appendChild(phase);
-            list.appendChild(card);
-        });
+        var waiting = sorted(function (change) { return onTheWay.indexOf(change.state) >= 0; });
+        waiting.sort(function (left, right) { return Date.parse(left.firstSeenAt) - Date.parse(right.firstSeenAt); });
+        var finished = sorted(function (change) { return onTheWay.indexOf(change.state) < 0; });
+        finished.sort(function (left, right) { return Date.parse(right.finishedAt || right.updatedAt) - Date.parse(left.finishedAt || left.updatedAt); });
+        if (waiting.length === 0) { list.appendChild(element('span', 'empty', 'Nothing in the line.')); }
+        waiting.forEach(function (change, index) { list.appendChild(lineCard(change, index + 1)); });
+        if (finished.length > 0) {
+            list.appendChild(element('span', 'line-break', 'Finished'));
+            finished.slice(0, 8).forEach(function (change) { list.appendChild(lineCard(change, 0)); });
+        }
     }
 
     function renderTests(line) {
@@ -655,9 +732,71 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         once();
     }
 
+    // ---------- The headline ----------
+
+    function clockTime(at) {
+        var date = new Date(at);
+        return String(date.getHours()).padStart(2, '0') + ':' + String(date.getMinutes()).padStart(2, '0');
+    }
+
+    function sourceLine(id, words, readAt) {
+        var node = document.getElementById(id);
+        node.replaceChildren();
+        node.appendChild(document.createTextNode(words + ' \\u00B7 read '));
+        var age = element('span', 'mono', '');
+        age.dataset.from = readAt;
+        node.appendChild(age);
+        node.appendChild(document.createTextNode(' ago'));
+    }
+
+    function renderPulse(reading) {
+        document.getElementById('tested').textContent = String(reading.testedLastHour);
+        var spark = document.getElementById('spark');
+        spark.replaceChildren();
+        var most = Math.max.apply(null, reading.buckets.concat([1]));
+        reading.buckets.forEach(function (count) {
+            var bar = element('span');
+            bar.style.height = Math.max(5, Math.round(count / most * 100)) + '%';
+            spark.appendChild(bar);
+        });
+        spark.setAttribute('aria-label', 'Builds tested in each five minutes of the last hour: ' + reading.buckets.join(', '));
+        sourceLine('tested-source', 'a whole verdict, green or red; ' + reading.voidLastHour + ' void not counted', reading.readAt);
+        var red = document.getElementById('main-red');
+        var trend = document.getElementById('main-trend');
+        trend.textContent = '';
+        delete trend.dataset.state;
+        if (reading.mainRed === null) {
+            red.textContent = '\\u2013';
+            delete red.dataset.state;
+            sourceLine('main-source', 'no witness of main\\u2019s tip decided yet', reading.readAt);
+            return;
+        }
+        red.textContent = String(reading.mainRed.red);
+        red.dataset.state = reading.mainRed.red > 0 ? 'red' : 'green';
+        var first = reading.mainTrend[0];
+        if (first && reading.mainTrend.length > 1 && first.red !== reading.mainRed.red) {
+            var change = reading.mainRed.red - first.red;
+            trend.textContent = (change < 0 ? '\\u25BC ' : '\\u25B2 ') + Math.abs(change) + ' since ' + clockTime(first.at);
+            trend.dataset.state = change < 0 ? 'down' : 'up';
+        }
+        sourceLine('main-source', 'units red on main ' + reading.mainRed.main.slice(0, 8) + '\\u2019s witness, ' + clockTime(reading.mainRed.at), reading.readAt);
+    }
+
+    function readPulse() {
+        if (!token) { return; }
+        fetch('/ui/headline', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+            .then(function (response) {
+                return response.ok ? response.json() : Promise.reject(new Error('the headline answered ' + response.status));
+            })
+            .then(function (reading) { renderPulse(reading); tick(); })
+            .catch(function (error) { document.getElementById('tested-source').textContent = error.message; })
+            .finally(function () { setTimeout(readPulse, 10000); });
+    }
+
     setInterval(tick, 1000);
     render();
     connect();
+    readPulse();
 })();
 </script>
 </body>

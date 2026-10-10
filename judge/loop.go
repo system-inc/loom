@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -189,7 +190,15 @@ type Loop struct {
 	// Warm, when set, says whether a run's attempt of a unit ran on a warm shared cache (Release, Oct 10 02:43Z), from
 	// a list Fabric reads off the worker's serve log; such an attempt is placed again cold before it decides anything.
 	Warm func(run string, unit PlanUnit, attempt Attempt) (bool, error)
+	// BaseReady, when set, is asked of a future's base before any failure is rerun alone on the candidate and on main
+	// (#6ygdzat): an ErrWaiting while Workshop builds the base's tree, which the rerun on it runs, so nothing is rerun and
+	// the future waits for a later pass; nil once the rerun may go, its tree up or never coming (then it's void, named).
+	BaseReady func(base string) error
 }
+
+// ErrWaiting is a future that can't be judged yet and isn't anything's failure: a rerun waits on its base's tree.
+// The pass leaves it for a later one.
+var ErrWaiting = errors.New("waiting")
 
 // CensusConfig is what the census step reads: the tools tree's rows, whether an awaited branch is on main, and the
 // platform the units ran on.
@@ -443,6 +452,12 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 
 // rerunBoth runs the unit alone on the candidate and on main at the base, and reads main's record for it.
 func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *Verdict) error {
+	// Before either rerun: a candidate rerun spent while the base's tree is built would run again every pass.
+	if loop.BaseReady != nil {
+		if err := loop.BaseReady(job.Base); err != nil {
+			return err
+		}
+	}
 	candidate, err := loop.Fabric.RerunAlone(unit.UnitKey, job.Future)
 	if err != nil {
 		return err
@@ -458,6 +473,7 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 	verdict.Attempts = append(verdict.Attempts, candidate.Attempt, main.Attempt)
 	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256, OverBudget: candidate.OverBudget}
 	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256, OverBudget: main.OverBudget}
+	evidence.SameTree = job.Future == job.Base
 	evidence.MainRecorded = nil
 	if found {
 		evidence.MainRecorded = recorded

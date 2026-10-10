@@ -4,6 +4,7 @@
 
 import { ChangeBoardName, changeBoardOf, ChangeBoardSubprotocol } from './ChangeBoard';
 import { handleChanges, queueOf } from './Changes';
+import { headlineOf } from './Headline';
 import { jsonResponse } from './Http';
 import { renderLoomLivePage } from './LoomLivePage';
 import { loomFavicon } from './LoomMark';
@@ -11,6 +12,8 @@ import type { TokenScope } from './Token';
 import { authorize, pageResponse } from './Worker';
 
 export { ChangeBoard } from './ChangeBoard';
+
+export { Headline } from './Headline';
 
 export { Queue } from './Queue';
 
@@ -93,6 +96,17 @@ export default {
                 return claims;
             }
             return changeBoardOf(environment).fetch('https://board/changes');
+        }
+        // The page's own reads live under /ui/, beside nothing the API answers. The headline needs a board token.
+        if (path === '/ui/headline') {
+            if (request.method !== 'GET') {
+                return jsonResponse(405, { error: 'use GET' }, { Allow: 'GET' });
+            }
+            const claims = await authorize(request, environment, ChangeBoardName, { scopes: ['board'], queryScopes: [] });
+            if (claims instanceof Response) {
+                return claims;
+            }
+            return headlineOf(environment).fetch('https://headline/headline');
         }
         if (path === '/favicon.svg') {
             return new Response(loomFavicon(), {

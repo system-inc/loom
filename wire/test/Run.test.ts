@@ -188,6 +188,12 @@ describe('events', function () {
             event(run, 'a', 0, 'cached', { key: inputA, fromRun: 7, events: inputB }),
             event(run, 'a', 0, 'cached', { key: inputA, fromRun: 'r-earlier', events: 'abc' }),
             event(run, 'a', 0, 'cached', { key: inputA, fromRun: 'r-earlier', events: inputB, status: 'passed' }),
+            event(run, 'a', 0, 'timing'),
+            event(run, 'a', 0, 'timing', { timing: { fetchSeconds: -1 } }),
+            event(run, 'a', 0, 'timing', { timing: { peakMegabytes: 1.5 } }),
+            event(run, 'a', 0, 'timing', { timing: { queueSeconds: 3 } }),
+            event(run, 'a', 0, 'timing', { timing: [1] }),
+            event(run, 'a', 0, 'timing', { timing: { testSeconds: 4 }, status: 'passed' }),
         ];
         for (const line of broken) {
             const response = await postEvents(run, runner, [line]);

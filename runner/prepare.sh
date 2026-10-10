@@ -7,6 +7,7 @@
 #	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep> <root> <exclusive | shared>
 #	prepare.sh environment <tree> <gate inputs sha256 or ""> <environment file> <root>
 #	prepare.sh trim-only <root> <exclusive | shared>
+#	prepare.sh submodules <tree> <root>
 #	prepare.sh pin-url <url>
 #	prepare.sh pin-urls <tree>
 #
@@ -29,6 +30,9 @@
 #
 # trim-only runs the trim alone and exits 0: a strict serve that finds its disk too full to take a unit runs it once
 # (serve.go, #zzmz489), then looks again.
+#
+# submodules readies <tree>'s submodules alone, as a checkout does after its commit, and exits with the update's status:
+# it is for the runner's tests, which run it against local repositories, and the runner never passes it.
 #
 # pin-url prints the https url a submodule url is fetched from and exits 0, or prints why it can't be and exits 3: the
 # one rule for pin urls, which the queue bridge's PinUrl follows to the letter (queuebridge/pins_test.go runs both on one
@@ -91,6 +95,8 @@ fi
 mode=checkout
 if [ "${1:-}" = environment ]; then
 	mode=environment tree=${2:-} sha= base= gateInputs=${3:-} environmentFile=${4:-} trim=keep root=${5:-} owner=shared
+elif [ "${1:-}" = submodules ]; then
+	mode=submodules tree=${2:-} sha= base= gateInputs= environmentFile= trim=keep root=${3:-} owner=shared
 else
 	tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6 root=$7 owner=${8:-shared}
 fi
@@ -106,6 +112,71 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 G
 export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:
 export GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2=/dev/null
 
+# GitHub turns away anonymous fetches when many instances check out at once, so each step retries with backoff.
+# LOOM_PREPARE_ATTEMPTS is for the runner's tests; the runner never passes it, so a unit always gets four.
+retry() {
+	local attempt attempts=${LOOM_PREPARE_ATTEMPTS:-4}
+	for attempt in $(seq 1 "${attempts}"); do
+		"$@" && return 0
+		[ "${attempt}" -lt "${attempts}" ] && sleep $((attempt * 10 + RANDOM % 10))
+	done
+	return 1
+}
+# A submodule clone killed midway (a unit's deadline, a stop) leaves its .git file naming a gitdir that isn't a
+# repository: Home, Oct 10, held only objects/pack/tmp_pack_* under .git/modules/cohere/modules/TypeScript. Every update
+# after it fails on that submodule ("could not get a repository handle"), so each such .git file goes, and its gitdir
+# with it when that lies inside the checkout's own .git, and the update clones that submodule again. Whole ones are kept.
+# It fails closed: a checkout whose .git it can't enter clears nothing, and a gitdir is removed only when it resolves
+# inside that .git, so a .git file naming any other directory never costs that directory.
+clearSubmoduleStubs() {
+	local pointer gitdir inside resolved
+	inside=$(cd "${tree:?}/.git" 2> /dev/null && pwd -P)
+	[ -n "${inside}" ] || { say "can't enter ${tree}/.git, so no stub is cleared"; return 1; }
+	while IFS= read -r -d '' pointer; do
+		gitdir=$(sed -n 's/^gitdir: //p' "${pointer}")
+		case ${gitdir} in /*) ;; *) gitdir=$(dirname "${pointer}")/${gitdir} ;; esac
+		git --git-dir="${gitdir}" rev-parse -q --verify HEAD > /dev/null 2>&1 && continue
+		resolved=$(cd "${gitdir}" 2> /dev/null && pwd -P)
+		case ${resolved:-/nowhere}/ in "${inside:?}"/?*) rm -rf "${resolved:?}" ;; esac
+		rm -f "${pointer:?}"
+		say "cleared ${pointer#"${tree}/"}: the gitdir it names isn't a repository"
+	done < <(find "${tree}" \( -name .git -type d -prune \) -o \( -name node_modules -prune \) -o \( -name .git -type f -print0 \))
+}
+# The submodules, at the commits the checkout records. A failed update first clears what a killed clone left and tries
+# again, keeping every submodule that is whole; only when that fails too are they all made again, and a kill during
+# that leaves stubs the next unit clears the same way. The whole step holds <tree>/.git/loom-submodules.lock: runners
+# that share a root (the coordinator's slots on one box run with one ~/loom-test-root) would otherwise see each other's
+# clone in progress as a stub. A prepare killed holding it lets go with its process. Where flock is missing (a developer's
+# Mac running the tests), or the lock can't be made (a .git it can't enter, where the update fails and nothing is
+# cleared anyway), the step runs unlocked.
+makeSubmodules() {
+	local status
+	if exec 8> "${tree:?}/.git/loom-submodules.lock"; then
+		command -v flock > /dev/null && flock 8
+	else
+		say "can't make ${tree}/.git/loom-submodules.lock, so the submodules are made unlocked"
+	fi
+	updateSubmodules
+	status=$?
+	exec 8>&-
+	return "${status}"
+}
+updateSubmodules() {
+	git -C "${tree}" submodule update -q --init --recursive && return 0
+	say "the submodule update failed; clearing what a killed clone left and updating again"
+	clearSubmoduleStubs || return 1
+	retry git -C "${tree}" submodule update -q --init --recursive && return 0
+	say "the submodule update failed again; making the submodules again"
+	git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
+	rm -rf "${tree:?}/.git/modules"
+	clearSubmoduleStubs || return 1
+	retry git -C "${tree}" submodule update -q --init --recursive
+}
+if [ "${mode}" = submodules ]; then
+	makeSubmodules
+	exit
+fi
+
 [ "${trim}" = trim ] && trimLeftovers
 free=$(freeMegabytes)
 [ "${free:-0}" -ge 1500 ] || { say "only ${free} MB free after trimming"; exit 2; }
@@ -117,16 +188,6 @@ if [ "${mode}" = checkout ]; then
 		say "the kept checkout's configuration names a helper or rewrite; making it again"
 		rm -rf "${tree}"
 	fi
-	# GitHub turns away anonymous fetches when many instances check out at once, so each step retries with backoff.
-	# LOOM_PREPARE_ATTEMPTS is for the runner's tests; the runner never passes it, so a unit always gets four.
-	retry() {
-		local attempt attempts=${LOOM_PREPARE_ATTEMPTS:-4}
-		for attempt in $(seq 1 "${attempts}"); do
-			"$@" && return 0
-			[ "${attempt}" -lt "${attempts}" ] && sleep $((attempt * 10 + RANDOM % 10))
-		done
-		return 1
-	}
 	if [ ! -d "${tree}/.git" ]; then
 		[ "${free:-0}" -ge 4500 ] || { say "only ${free} MB free, too little to clone"; exit 2; }
 		retry git clone -q --filter=blob:none "${repository}" "${tree}" || { say "cloning ${repository} failed"; exit 2; }
@@ -154,14 +215,9 @@ if [ "${mode}" = checkout ]; then
 	fi
 	# Submodules: each must be on GitHub over HTTPS (after the ssh rewrite), public, fetched with no credentials, by
 	# pinUrl's rule at every depth: the tree's own before anything is fetched, and the deeper ones once their parents are
-	# checked out (the queue bridge refused any change that breaks it before a runner saw it, so this is the second line).
+	# checked out (the queue bridge refused any branch that breaks it before a runner saw it, so this is the second line).
 	pinUrls "${tree}" || exit 3
-	if ! git -C "${tree}" submodule update -q --init --recursive; then
-		say "the submodule update failed; making the submodules again"
-		git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
-		rm -rf "${tree}/.git/modules"
-		retry git -C "${tree}" submodule update -q --init --recursive || { say "the submodules of ${sha} can't be fetched"; exit 2; }
-	fi
+	makeSubmodules || { say "the submodules of ${sha} can't be fetched"; exit 2; }
 	pinUrls "${tree}" || exit 3
 
 	# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance, and only on a machine that is the

@@ -80,6 +80,21 @@ func TestTheRuleTable(t *testing.T) {
 			e.Candidate, e.Main = rerun(Passed), rerun(Failed, ascii)
 			return e
 		}(), true, Failed, CauseChange, "", ""},
+		{"a witness's one tree fails alone, then passes alone: a flake, never the change's", func() Evidence {
+			e := failedFirst(ascii)
+			e.Candidate, e.Main, e.SameTree = rerun(Failed, ascii), rerun(Passed), true
+			return e
+		}(), true, Passed, CauseFlake, "", ""},
+		{"a witness's one tree passes alone, then fails alone: a flake, never main's or the change's", func() Evidence {
+			e := failedFirst(ascii)
+			e.Candidate, e.Main, e.SameTree = rerun(Passed), rerun(Failed, ascii), true
+			return e
+		}(), true, Passed, CauseFlake, "", ""},
+		{"a witness's one tree fails alone both times: red", func() Evidence {
+			e := failedFirst(ascii)
+			e.Candidate, e.Main, e.SameTree = rerun(Failed, ascii), rerun(Failed, ascii), true
+			return e
+		}(), true, Failed, CauseChange, "", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
