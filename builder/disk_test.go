@@ -170,7 +170,7 @@ func goCache(t *testing.T) (string, []string, string) {
 	t.Helper()
 	cache := t.TempDir()
 	os.MkdirAll(filepath.Join(cache, "ab"), 0o755)
-	os.WriteFile(filepath.Join(cache, "README"), make([]byte, 5000), 0o644)
+	os.WriteFile(filepath.Join(cache, "README"), []byte("This directory holds cached build artifacts from the Go build system.\nRun \"go clean -cache\" if the directory is getting too large.\n"), 0o644)
 	os.WriteFile(filepath.Join(cache, "trim.txt"), []byte("1"), 0o644)
 	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
 	entries := []string{}
@@ -437,5 +437,30 @@ func TestTreeCachePassesOverAHeldOldTree(t *testing.T) {
 	}
 	if _, err = os.Stat(oldDirectory + ".lock"); !os.IsNotExist(err) {
 		t.Fatal("the old tree's lock file outlived it")
+	}
+}
+
+// A trim leaves an entry go used since its walk, and refuses a directory that isn't a Go build cache.
+func TestATrimLeavesWhatWasUsedSinceItsWalk(t *testing.T) {
+	cache, entries, _ := goCache(t)
+	trimWalked = func() {
+		now := time.Now()
+		os.Chtimes(entries[0], now, now)
+	}
+	t.Cleanup(func() { trimWalked = nil })
+	removed, err := TrimGoCache(cache, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(entries[0]); err != nil {
+		t.Fatal("an entry used after the walk was removed")
+	}
+	if removed != 800 {
+		t.Fatalf("removed %d, not the 800 the next eight oldest hold", removed)
+	}
+	notACache := t.TempDir()
+	os.WriteFile(filepath.Join(notACache, strings.Repeat("0", 64)+"-a"), make([]byte, 1000), 0o644)
+	if _, err = TrimGoCache(notACache, 1); err == nil || !strings.Contains(err.Error(), "no Go build cache README") {
+		t.Fatalf("a directory that isn't a Go build cache: %v", err)
 	}
 }

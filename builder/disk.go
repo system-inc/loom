@@ -252,6 +252,9 @@ func TreeDone(base, directory string, published bool, lock *TreeLock) error {
 // goCacheEntry is a file of Go's build cache: an action or an output, <two hex>/<64 hex>-a or -d.
 var goCacheEntry = regexp.MustCompile(`^[0-9a-f]{64}-[ad]$`)
 
+// trimWalked, when set, runs between a trim's walk and its removals, so a test can use an entry in between.
+var trimWalked func()
+
 // recentlyUsed is how recently an entry of Go's build cache must have been used to be left alone by a trim: go
 // marks an entry used by touching it at most hourly, so one used in the last day may be what a running go process is
 // about to read.
@@ -274,6 +277,10 @@ func TrimGoCache(directory string, limit uint64) (uint64, error) {
 	}
 	if err != nil {
 		return 0, err
+	}
+	// Only a directory go itself made is trimmed: a GOCACHE pointed somewhere else by mistake is refused whole.
+	if readme, err := os.ReadFile(filepath.Join(directory, "README")); err != nil || !strings.Contains(string(readme), "Go build system") {
+		return 0, fmt.Errorf("%s holds no Go build cache README, so it isn't trimmed", directory)
 	}
 	lock, err := os.OpenFile(filepath.Join(directory, "loom-trim.lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
@@ -309,10 +316,17 @@ func TrimGoCache(directory string, limit uint64) (uint64, error) {
 		return 0, err
 	}
 	sort.Slice(entries, func(left, right int) bool { return entries[left].modified.Before(entries[right].modified) })
+	if trimWalked != nil {
+		trimWalked()
+	}
 	target, removed := limit/4*3, uint64(0)
 	for _, old := range entries {
 		if total-removed <= target || time.Since(old.modified) < recentlyUsed {
 			break
+		}
+		// One go used since the walk is in use again: it stays.
+		if info, err := os.Stat(old.path); err != nil || !info.ModTime().Equal(old.modified) {
+			continue
 		}
 		if err = os.Remove(old.path); err != nil && !os.IsNotExist(err) {
 			return removed, err
