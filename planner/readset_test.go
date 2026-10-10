@@ -423,3 +423,72 @@ func TestConcurrentRecordsKeepEveryPath(t *testing.T) {
 		}
 	}
 }
+
+// Read sets are off unless a command names their directory, so the shipped planner keys every unit as before them.
+// Mutant that fails it: the planner keyed on ~/.loom/read-sets by default.
+func TestReadSetsAreOffByDefault(t *testing.T) {
+	if ReadSetsDirectory != "" {
+		t.Fatalf("read sets are on by default, from %s", ReadSetsDirectory)
+	}
+}
+
+// A verdict under a key on a read set is reused only once a traced run of that key came back clean (unit-reads
+// review, finding 2). A set is measured: a run whose reads depend on what it read (A says which B to read) could pass
+// under a key whose set lacks the B it read, and a later change to only that B would reuse the pass. A run that read
+// only what its key holds reads the same wherever the key agrees, so one clean trace at the key makes every verdict
+// under it good. A key with no set reuses as before. Mutants that each fail it: a set-keyed verdict reused with no
+// clean trace; a clean trace never letting it be reused.
+func TestAVerdictOnAReadSetIsReusedOnlyAfterACleanTrace(t *testing.T) {
+	useReadSets(t)
+	fixture := newReadSetFixture(t)
+	tools := Tools{Go: "go1.27.0"}
+	plan := func(index MemoryIndex) PlannedResult {
+		t.Helper()
+		results, err := PlanTree(fixture.tree, fixture.gateTools, tools, index, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("planned %d units, want p's", len(results))
+		}
+		return results[0]
+	}
+	passed := func(result PlannedResult) MemoryIndex {
+		return MemoryIndex{result.UnitKey: Verdict{UnitKey: result.UnitKey, Status: "passed", Run: "earlier"}}
+	}
+	coarse := plan(MemoryIndex{})
+	if again := plan(passed(coarse)); coarse.KeyParts.ReadSet != "" || again.Decision != "reuse" {
+		t.Fatalf("a unit with no read set: decision %s (%s), want reuse", again.Decision, again.Reason)
+	}
+	parts, pairs, err := baseKey(fixture.tree, fixture.gateTools, Unit{Kind: "test", Package: fixture.unit.Package, Directory: "p",
+		Environment: GateEnvironment, Products: []string{}}, tools, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codeKey, err := CodeKey(parts, pairs.files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RecordReadSet(ReadSetsDirectory, codeKey, parts, ReadSet{Paths: []string{"sub/data.txt"}}); err != nil {
+		t.Fatal(err)
+	}
+	keyed := plan(MemoryIndex{})
+	if keyed.KeyParts.ReadSet == "" {
+		t.Fatal("the recorded set didn't key the unit")
+	}
+	if unchecked := plan(passed(keyed)); unchecked.Decision != "run" || !strings.Contains(unchecked.Reason, "come back clean") {
+		t.Fatalf("a set-keyed pass with no clean trace: decision %s (%s), want run", unchecked.Decision, unchecked.Reason)
+	}
+	if err := RecordTraceClean(ReadSetsDirectory, keyed.UnitKey); err != nil {
+		t.Fatal(err)
+	}
+	if checked := plan(passed(keyed)); checked.Decision != "reuse" {
+		t.Fatalf("a set-keyed pass whose key traced clean: decision %s (%s), want reuse", checked.Decision, checked.Reason)
+	}
+	if err := ForgetTraceClean(ReadSetsDirectory, keyed.UnitKey); err != nil {
+		t.Fatal(err)
+	}
+	if forgotten := plan(passed(keyed)); forgotten.Decision != "run" {
+		t.Fatalf("a key whose clean trace was taken back still reuses: %s", forgotten.Decision)
+	}
+}

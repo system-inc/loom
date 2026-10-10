@@ -19,7 +19,9 @@ import (
 // held, and what the run reached inside the submodules is recorded under the unit's code key (--read-sets), so the
 // next plan keys the unit on the submodule files it reads instead of the submodules' commits. A run that reached a
 // path beyond its key's read set is Loom's void: named on stderr, its findings marked beyondKey, its key listed in the
-// no-reuse file so no plan reuses its verdict, and its set grown by what it read, which moves the unit's next key.
+// no-reuse file so no plan reuses its verdict, its clean record taken back, and its set grown by what it read, which
+// moves the unit's next key. A run of a key on a read set with no finding is recorded clean, which is what lets the
+// planner reuse a verdict under that key (planner.UncheckedReadSets).
 func readsCheck(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("reads-check", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -29,7 +31,7 @@ func readsCheck(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tracePath := flags.String("trace", "", "the unit's strace-format trace (strace -f --decode-fds=path -e trace="+planner.TraceCalls+")")
 	unitKey := flags.String("unit-key", "", "the unit's key, carried on each finding")
 	keyPartsPath := flags.String("key-parts", "", "the unit's key parts as the plan posted them (a keyParts object, or a planned unit holding one): checks the trace against its read set and records what it read")
-	readSets := flags.String("read-sets", planner.ReadSetsDirectory, "the read sets the planner keys units on, with --key-parts")
+	readSets := flags.String("read-sets", planner.DefaultReadSetsDirectory, "with --key-parts, the read sets it records into and checks against, and where a clean trace of a key on one is recorded")
 	noReuse := flags.String("no-reuse", planner.NoReuseFile, "with --key-parts, the no-reuse file a key whose run read beyond its read set is listed in")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -121,6 +123,10 @@ func readsCheckKeyed(tree, gateTools, importPath, unitKey, keyPartsPath, readSet
 			fmt.Fprintln(stderr, "reads-check: listing the key as no-reuse:", err)
 			return 1
 		}
+		if err := planner.ForgetTraceClean(readSets, key); err != nil {
+			fmt.Fprintln(stderr, "reads-check: taking back the key's clean trace:", err)
+			return 1
+		}
 		fmt.Fprintf(stderr, "reads-check: %s, unit %s: %s; its read set is now %.12s, and %s lists its key\n", importPath, key, why, recorded, noReuse)
 	}
 	if owners := len(check.Findings) - len(beyond); owners > 0 {
@@ -128,6 +134,13 @@ func readsCheckKeyed(tree, gateTools, importPath, unitKey, keyPartsPath, readSet
 	}
 	if len(check.Findings) > 0 {
 		return 1
+	}
+	if parts.ReadSet != "" {
+		// A clean trace of a key on a read set is what lets the planner reuse a verdict under it.
+		if err := planner.RecordTraceClean(readSets, key); err != nil {
+			fmt.Fprintln(stderr, "reads-check: recording the clean trace:", err)
+			return 1
+		}
 	}
 	return 0
 }

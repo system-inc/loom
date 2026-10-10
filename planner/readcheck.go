@@ -270,6 +270,9 @@ func CheckTrace(tree, gateTools string, parts KeyParts, trace io.Reader) (TraceC
 	var keyed *ReadSet
 	expected := at.parts
 	if parts.ReadSet != "" {
+		if ReadSetsDirectory == "" {
+			return TraceCheck{}, fmt.Errorf("unit %s is keyed on read set %.12s, and no read sets directory is named", parts.Package, parts.ReadSet)
+		}
 		set, err := LoadReadSet(ReadSetsDirectory, parts.ReadSet)
 		if err != nil {
 			return TraceCheck{}, err

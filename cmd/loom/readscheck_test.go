@@ -62,9 +62,10 @@ func TestReadsCheckRedsAnUndeclaredReadAndPassesDeclaredOnes(t *testing.T) {
 
 // Workshop's measure and refresh of a unit's read set (#xryaqdv): a traced run of a unit keyed on its submodule's
 // commit records what it read there, so the next plan keys the unit on that set; a later run that reads beyond the set
-// exits 1 as Loom's void, its finding marked beyondKey, its key listed no-reuse with why, and its set grown, which
-// moves the unit's next key. Mutants that each fail it: the set not recorded; the void's key not listed no-reuse; the
-// set not grown by the void's reads.
+// exits 1 as Loom's void, its finding marked beyondKey, its key listed no-reuse with why and its clean record taken
+// back, and its set grown, which moves the unit's next key. A clean run of a key on a set is recorded clean, which is
+// what lets the planner reuse a verdict under it. Mutants that each fail it: the set not recorded; the void's key not
+// listed no-reuse; the set not grown by the void's reads; a clean run not recorded clean; a void's clean record kept.
 func TestReadsCheckRecordsAReadSetAndVoidsAReadBeyondIt(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
@@ -144,6 +145,9 @@ func TestReadsCheckRecordsAReadSetAndVoidsAReadBeyondIt(t *testing.T) {
 	if _, err := os.Stat(noReuse); err == nil {
 		t.Fatal("a clean run listed a key no-reuse")
 	}
+	if clean, err := planner.TraceClean(readSets, keyed.UnitKey); !clean || err != nil {
+		t.Fatalf("a clean traced run of a key on a read set wasn't recorded clean (%v)", err)
+	}
 	code, output, errors := check(keyedPath, "data.txt", "other.txt")
 	var finding planner.Finding
 	if err := json.Unmarshal([]byte(output), &finding); err != nil || code != 1 {
@@ -159,8 +163,26 @@ func TestReadsCheckRecordsAReadSetAndVoidsAReadBeyondIt(t *testing.T) {
 	if err != nil || !strings.Contains(listed[keyed.UnitKey], "Loom's void") {
 		t.Fatalf("the void's key isn't listed no-reuse: %v (%v)", listed, err)
 	}
+	if clean, _ := planner.TraceClean(readSets, keyed.UnitKey); clean {
+		t.Fatal("the void's key is still recorded clean")
+	}
 	grown, _ := planned()
 	if grown.KeyParts.ReadSet == keyed.KeyParts.ReadSet || grown.UnitKey == keyed.UnitKey {
 		t.Fatal("the void didn't grow the unit's read set and move its next key")
+	}
+}
+
+// The shipped planner keys no unit on a read set until runners trace every set-keyed unit (unit-reads review, finding
+// 2): its unit names no --read-sets. Mutant that fails it: the unit naming ~/.loom/read-sets.
+func TestTheShippedPlannerNamesNoReadSets(t *testing.T) {
+	t.Parallel()
+	content, err := os.ReadFile("../../planner/systemd/loom-plan.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if strings.HasPrefix(line, "ExecStart=") && strings.Contains(line, "--read-sets") {
+			t.Fatalf("the shipped planner keys units on read sets: %s", line)
+		}
 	}
 }

@@ -13,6 +13,11 @@
 # ~/loom-planner/tools, moved to origin's loom/planner-reads before every pull. Calls https://loom.system.inc and GitHub
 # over https. run.py (phase units) needs python3.
 #
+# Read sets are off: it names no --read-sets, so every unit keys each declared submodule's commit (#xryaqdv). They go
+# on, `--read-sets %h/.loom/read-sets` here and the same on build-actions, once the runners trace every unit whose key
+# names a read set and Workshop runs `loom reads-check --key-parts` on each trace: until then no set-keyed verdict would
+# come back clean, so none would be reused.
+#
 # Its environment is loom-build-trees': adamic's toolchain (~/adamic-tools/env.sh) under GOTOOLCHAIN=local. The unit
 # key's tools part is probed from it at start (`go env GOVERSION`, `clang --version`, `node --version`,
 # $WASI_SDK_VERSION), so a different PATH keys every unit differently and nothing in Queue's index is reused; and each
@@ -28,7 +33,7 @@ Type=simple
 WorkingDirectory=%h/loom-planner
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=GOTOOLCHAIN=local
-ExecStart=/bin/bash -c '. %h/adamic-tools/env.sh && exec %h/.loom/bin/loom plan --queue https://loom.system.inc --token-file %h/.loom/planner-token --repository %h/loom-planner/adamic --gate-tools %h/loom-planner/tools --gate-tools-ref loom/planner-reads --runner-sha-file %h/.loom/runner-pin --gate-inputs-file %h/.loom/gate-inputs-manifest --pools %h/.loom/pools.json --no-reuse %h/.loom/no-reuse --read-sets %h/.loom/read-sets --interval 10s'
+ExecStart=/bin/bash -c '. %h/adamic-tools/env.sh && exec %h/.loom/bin/loom plan --queue https://loom.system.inc --token-file %h/.loom/planner-token --repository %h/loom-planner/adamic --gate-tools %h/loom-planner/tools --gate-tools-ref loom/planner-reads --runner-sha-file %h/.loom/runner-pin --gate-inputs-file %h/.loom/gate-inputs-manifest --pools %h/.loom/pools.json --no-reuse %h/.loom/no-reuse --interval 10s'
 Restart=on-failure
 RestartSec=10
 

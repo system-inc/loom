@@ -84,13 +84,73 @@ func (set ReadSet) normal() ReadSet {
 	return normal
 }
 
-// ReadSetsDirectory is where read sets are kept, ~/.loom/read-sets unless a command names another (--read-sets):
-// sets/<id>.json holds a set, units/<codeKey>.json the set its code key is keyed on now. Workshop's planner, builder
-// and read check share it.
-var ReadSetsDirectory = func() string {
+// ReadSetsDirectory is the read sets units are keyed on: sets/<id>.json holds a set, units/<codeKey>.json the set its
+// code key is keyed on now, clean/<unitKey> a key whose traced run came back clean. Empty, the default, keys no unit
+// on a read set: every unit keys each declared submodule's commit, as before read sets. `loom plan --read-sets` and
+// `loom build-actions --read-sets` turn it on, and they must name the same directory, since product keys are both's.
+var ReadSetsDirectory = ""
+
+// DefaultReadSetsDirectory is where Workshop keeps read sets, what `loom reads-check` records into by default.
+var DefaultReadSetsDirectory = func() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".loom", "read-sets")
 }()
+
+// RecordTraceClean records that a traced run of a unit keyed on a read set came back clean: it read nothing beyond its
+// key and nothing undeclared. Only then may a verdict under that key be reused (UncheckedReadSets).
+func RecordTraceClean(directory, unitKey string) error {
+	if !Sha256Hex(unitKey) {
+		return fmt.Errorf("unit key %q isn't a sha256", unitKey)
+	}
+	return writeRenamed(filepath.Join(directory, "clean", unitKey), []byte(unitKey))
+}
+
+// ForgetTraceClean takes a key's clean record back, when a later traced run of it read beyond its key.
+func ForgetTraceClean(directory, unitKey string) error {
+	if !Sha256Hex(unitKey) {
+		return fmt.Errorf("unit key %q isn't a sha256", unitKey)
+	}
+	if err := os.Remove(filepath.Join(directory, "clean", unitKey)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// TraceClean says whether a traced run of the key came back clean.
+func TraceClean(directory, unitKey string) (bool, error) {
+	if directory == "" || !Sha256Hex(unitKey) {
+		return false, nil
+	}
+	_, err := os.Stat(filepath.Join(directory, "clean", unitKey))
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// UncheckedReadSets turns every reuse of a key that's keyed on a read set back into a run until a traced run of that
+// key has come back clean (unit-reads review, finding 2). A set is measured, so a key on it is only as good as a
+// trace that shows a run at that key reading within it: a run whose reads depend on what it read (A says which B)
+// keyed on a set without the B it reads would otherwise pass, and a later change to only that B reuse the stale pass.
+// One clean trace at the key is enough: a run that read only what the key holds reads the same on every tree that
+// agrees on the key, so every verdict under it is that run's.
+func UncheckedReadSets(choices []Choice, parts map[string]KeyParts, directory string) ([]Choice, error) {
+	for index, choice := range choices {
+		set := parts[choice.Name].ReadSet
+		if choice.Action != "reuse" || set == "" {
+			continue
+		}
+		clean, err := TraceClean(directory, choice.UnitKey)
+		if err != nil {
+			return nil, err
+		}
+		if !clean {
+			choices[index].Action, choices[index].Reused = "run", ""
+			choices[index].Reason = fmt.Sprintf("keyed on read set %.12s, and no traced run of this key has come back clean", set)
+		}
+	}
+	return choices, nil
+}
 
 // readSetUnit is units/<codeKey>.json: the set's id, and whose code key it is, for a person reading the directory.
 type readSetUnit struct {
@@ -234,8 +294,8 @@ func CodeKey(parts KeyParts, files [][2]string) (string, error) {
 // and so does a unit whose set is empty and whose declared reads name no submodule, whose key that already is.
 func withReadSet(tree string, parts *KeyParts, pairs readPairs) (string, error) {
 	codeKey, err := CodeKey(*parts, pairs.files)
-	if err != nil {
-		return "", err
+	if err != nil || ReadSetsDirectory == "" {
+		return codeKey, err
 	}
 	set, id, found, err := UnitReadSet(ReadSetsDirectory, codeKey)
 	if err != nil || !found || set.Empty() && pairs.gitlinks == 0 {

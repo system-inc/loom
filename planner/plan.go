@@ -345,7 +345,10 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	if err != nil {
 		return nil, err
 	}
-	for _, choice := range Unreused(choices, noReuse) {
+	if choices, err = UncheckedReadSets(Unreused(choices, noReuse), parts, ReadSetsDirectory); err != nil {
+		return nil, err
+	}
+	for _, choice := range choices {
 		results = append(results, PlannedResult{Name: choice.Name, UnitKey: choice.UnitKey, KeyParts: parts[choice.Name],
 			Decision: choice.Action, Reason: choice.Reason, Reused: choice.Reused, Resources: resources[choice.Name]})
 	}

@@ -30,13 +30,15 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	keepCaches := flags.Int("keep-caches", 2, "tree caches kept under --cache, newest first")
 	jobs := flags.Int("jobs", 4, "actions built at once")
 	list := flags.Bool("list", false, "print each action and its productKey, and build nothing")
+	readSets := flags.String("read-sets", "", "the read sets products are keyed on: loom plan's, or none while the planner names none")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		return 2
 	}
 	if *tree == "" || *gateTools == "" {
-		fmt.Fprintln(stderr, "usage: loom build-actions --tree <dir> --gate-tools <dir> [--r2 <key file>] [--bucket <name>] [--read <url>] [--packages a,b] [--cache <dir>] [--keep-caches N] [--jobs N] [--scratch <dir>] [--list]")
+		fmt.Fprintln(stderr, "usage: loom build-actions --tree <dir> --gate-tools <dir> [--r2 <key file>] [--bucket <name>] [--read <url>] [--packages a,b] [--cache <dir>] [--keep-caches N] [--jobs N] [--scratch <dir>] [--list] [--read-sets <dir>]")
 		return 2
 	}
+	planner.ReadSetsDirectory = *readSets
 	selected := []string{}
 	if *packages != "" {
 		selected = strings.Split(*packages, ",")
