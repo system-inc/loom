@@ -945,7 +945,7 @@ func TestSourcesAreBoundedAndAHeldOneStays(t *testing.T) {
 	held := []*heldSource{}
 	for index := range 3 {
 		archive := makeTar(t, []tarEntry{{name: "file", kind: tar.TypeReg, content: fmt.Sprint(index)}}, true)
-		source, err := cache.hold(hashOf(archive))
+		source, err := cache.hold(context.Background(), hashOf(archive))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -969,7 +969,7 @@ func TestSourcesAreBoundedAndAHeldOneStays(t *testing.T) {
 	if present != "02" {
 		t.Fatalf("sources %q are left, not the held 0 and the newest 2", present)
 	}
-	again, err := cache.hold(held[2].sum)
+	again, err := cache.hold(context.Background(), held[2].sum)
 	if err != nil || !again.ready {
 		t.Errorf("a kept source isn't found again: %v", err)
 	}

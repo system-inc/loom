@@ -101,7 +101,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		return protocol.StatusBroken
 	}
 	sourceSum := builder.SourceSum(index.Source)
-	held, err := sources.hold(sourceSum)
+	held, err := sources.hold(prepareContext, sourceSum)
 	if err != nil {
 		run.fail(protocol.PhaseStart, fmt.Errorf("holding the tree's source: %w (the instance's, never the change's)", err))
 		return protocol.StatusBroken
@@ -142,7 +142,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 	// The tree's module cache, unpacked once like its source: the only place the tests' go queries read a module.
 	var modules *heldSource
 	if index.Modules != "" {
-		if modules, err = sources.hold(index.Modules); err != nil {
+		if modules, err = sources.hold(prepareContext, index.Modules); err != nil {
 			run.fail(protocol.PhaseStart, fmt.Errorf("holding the tree's module cache: %w (the instance's, never the change's)", err))
 			return protocol.StatusBroken
 		}
@@ -187,6 +187,9 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 				time.Since(unpackStarted).Seconds(), done.base, done.kept, done.removed, done.unpacked))
 		} else {
 			run.say(fmt.Sprintf("assembled the tree's source in %.1f s: %d chunks unpacked", time.Since(unpackStarted).Seconds(), done.unpacked))
+		}
+		if done.passed != "" {
+			run.say("the kept tree wasn't made into this one, so it was assembled from nothing: " + done.passed)
 		}
 		if done.stateErr != nil {
 			run.say(fmt.Sprintf("the tree's state wasn't written, so it is never made into another: %v", done.stateErr))

@@ -27,7 +27,9 @@ import (
 //	a kept tree checked by size and modification time alone, or by its files alone, or its top's names unchecked:
 //	TestAChangedKeptTreeIsNeverMadeIntoAnother
 //	a changed tree's state kept: TestAChangedKeptTreeIsNeverMadeIntoAnother
-//	a kept tree a unit holds made into another: TestAHeldKeptTreeIsNeverSpent
+//	a kept tree a unit holds made into another, or a claim that lost the lock taken: TestAHeldKeptTreeIsNeverSpent
+//	a hold waiting on its tree's lock without bound, or nearest holding the kept tree's lock through the fetch:
+//	TestAHoldWaitsNoLongerThanItsTimeAndNearestHoldsNothing
 //	a chunk's range unchecked as it unpacks: TestAChunkHoldingAnotherChunksNameIsRefused
 //	a spent tree renamed before its state is removed, or a tree assembled at its name:
 //	TestAnAssemblyKilledPartwayLeavesNothingTrusted
@@ -127,7 +129,7 @@ var (
 // directory and how it was made.
 func assembleTree(t *testing.T, cache sourceCache, chunks []builder.SourceChunk, open func(context.Context, string) (*os.File, error)) (string, assembly, []string) {
 	t.Helper()
-	held, err := cache.hold(builder.SourceSum(chunks))
+	held, err := cache.hold(context.Background(), builder.SourceSum(chunks))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +138,9 @@ func assembleTree(t *testing.T, cache sourceCache, chunks []builder.SourceChunk,
 	done, err := cache.assemble(context.Background(), held, chunks, base, open)
 	if err != nil || !held.ready || done.stateErr != nil {
 		t.Fatalf("assembling: %v %v", err, done.stateErr)
+	}
+	if done.passed != "" {
+		why = append(why, done.passed)
 	}
 	return held.directory, done, why
 }
@@ -221,7 +226,8 @@ func TestAChangedKeptTreeIsNeverMadeIntoAnother(t *testing.T) {
 	}
 }
 
-// A kept tree a unit holds is never spent: the new tree is assembled from nothing.
+// A kept tree a unit holds is never spent: the new tree is assembled from nothing, whether the unit held it before the
+// kept tree was picked or took it between the pick and the claim, while the chunks were fetched.
 func TestAHeldKeptTreeIsNeverSpent(t *testing.T) {
 	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
 	chunksB, blobsB := makeChunks(t, treeB, treeCuts...)
@@ -231,17 +237,82 @@ func TestAHeldKeptTreeIsNeverSpent(t *testing.T) {
 	open := openFrom(t, blobs, map[string]int{})
 	cache := newSourceCache(t.TempDir())
 	assembleTree(t, cache, chunksA, open)
-	unit, err := cache.hold(builder.SourceSum(chunksA))
+	unit, err := cache.hold(context.Background(), builder.SourceSum(chunksA))
 	if err != nil || !unit.ready {
 		t.Fatal(err)
 	}
 	defer unit.release()
+	if base, why := cache.nearest(chunksB); base != nil || !strings.Contains(strings.Join(why, "\n"), "held by a unit") {
+		t.Fatalf("nearest picked a held tree: %q", why)
+	}
 	_, done, why := assembleTree(t, cache, chunksB, open)
 	if done.base != "" || !strings.Contains(strings.Join(why, "\n"), "held by a unit") {
 		t.Fatalf("B beside a held A: %+v %q", done, why)
 	}
 	if !unit.whole() {
 		t.Fatal("the held tree was spent")
+	}
+	unit.release()
+	// Picked, then held by a unit before the claim.
+	chunksC, blobsC := makeChunks(t, append(treeA[:len(treeA):len(treeA)], tarEntry{name: "m/x/v.txt", kind: tar.TypeReg, content: "v\n"}), treeCuts...)
+	for sum, blob := range blobsC {
+		blobs[sum] = blob
+	}
+	held, _ := cache.hold(context.Background(), builder.SourceSum(chunksC))
+	defer held.release()
+	base, why := cache.nearest(chunksC)
+	if base == nil {
+		t.Fatalf("no kept tree is picked for C: %q", why)
+	}
+	unit, err = cache.hold(context.Background(), base.sum)
+	if err != nil || !unit.ready {
+		t.Fatal(err)
+	}
+	done, err = cache.assemble(context.Background(), held, chunksC, base, open)
+	if err != nil || done.base != "" || !strings.Contains(done.passed, "held by a unit") || !unit.whole() {
+		t.Fatalf("C beside an A held after the pick: %+v %v", done, err)
+	}
+	sameTree(t, held.directory, append(treeA[:len(treeA):len(treeA)], tarEntry{name: "m/x/v.txt", kind: tar.TypeReg, content: "v\n"}))
+}
+
+// A hold waits for its tree's lock no longer than its time: a unit of a tree being spent or removed is held to its
+// deadline. And nearest holds nothing, so a unit of the tree it picked holds it at once. (The review's proof, Oct 10.)
+func TestAHoldWaitsNoLongerThanItsTimeAndNearestHoldsNothing(t *testing.T) {
+	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
+	chunksB, _ := makeChunks(t, treeB, treeCuts...)
+	cache := newSourceCache(t.TempDir())
+	assembleTree(t, cache, chunksA, openFrom(t, blobs, map[string]int{}))
+	sumA := builder.SourceSum(chunksA)
+	base, why := cache.nearest(chunksB)
+	if base == nil {
+		t.Fatalf("A isn't picked for B: %q", why)
+	}
+	quick, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	unit, err := cache.hold(quick, sumA)
+	cancel()
+	if err != nil || !unit.ready {
+		t.Fatalf("a unit of the picked tree: %v", err)
+	}
+	unit.release()
+	// The tree's lock held exclusively, as a claim or a removal holds it.
+	if passed := cache.claim(base); passed != "" {
+		t.Fatal(passed)
+	}
+	defer base.release()
+	short, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		_, err := cache.hold(short, sumA)
+		result <- err
+	}()
+	select {
+	case err = <-result:
+		if err == nil {
+			t.Fatal("a hold on a claimed tree took it")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a hold on a claimed tree waited past its deadline")
 	}
 }
 
@@ -258,7 +329,7 @@ func TestAKeptChunkIsMatchedWholeNotByItsBlob(t *testing.T) {
 	if err := builder.CheckChunks(narrowed); err != nil {
 		t.Fatal(err)
 	}
-	held, _ := cache.hold(builder.SourceSum(narrowed))
+	held, _ := cache.hold(context.Background(), builder.SourceSum(narrowed))
 	defer held.release()
 	base, why := cache.nearest(narrowed)
 	if base == nil {
@@ -281,7 +352,7 @@ func TestAChunkHoldingAnotherChunksNameIsRefused(t *testing.T) {
 	blobs[hashOf(dishonest)] = dishonest
 	chunks[1] = builder.SourceChunk{Blob: hashOf(dishonest), First: chunks[1].First, Last: chunks[1].Last, Files: 3, Bytes: int64(len(dishonest))}
 	cache := newSourceCache(t.TempDir())
-	held, _ := cache.hold(builder.SourceSum(chunks))
+	held, _ := cache.hold(context.Background(), builder.SourceSum(chunks))
 	defer held.release()
 	_, err := cache.assemble(context.Background(), held, chunks, nil, openFrom(t, blobs, map[string]int{}))
 	if err == nil || !strings.Contains(err.Error(), "isn't one this archive may hold") {
@@ -309,7 +380,7 @@ func TestHelperAssembleUntilKilled(t *testing.T) {
 	var chunks []builder.SourceChunk
 	json.Unmarshal(content, &chunks)
 	cache := newSourceCache(root)
-	held, err := cache.hold(builder.SourceSum(chunks))
+	held, err := cache.hold(context.Background(), builder.SourceSum(chunks))
 	if err != nil {
 		t.Fatal(err)
 	}

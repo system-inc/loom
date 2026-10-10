@@ -71,15 +71,16 @@ func newSourceCache(root string) sourceCache {
 var sourceLocks sync.Map
 
 // hold takes a shared hold on source sum, which keeps it from removal until release, and says whether it is already
-// unpacked whole. A used source becomes the most recently used.
-func (cache sourceCache) hold(sum string) (*heldSource, error) {
+// unpacked whole. A used source becomes the most recently used. It waits for a removal or an assembly spending the
+// tree no longer than waitContext.
+func (cache sourceCache) hold(waitContext context.Context, sum string) (*heldSource, error) {
 	if !protocol.Sha256Pattern.MatchString(sum) {
 		return nil, fmt.Errorf("%q isn't a source's sha256", sum)
 	}
 	if err := os.MkdirAll(cache.directory, 0o755); err != nil {
 		return nil, err
 	}
-	lock, err := cache.lockFile(sum)
+	lock, err := cache.lockFile(waitContext, sum)
 	if err != nil {
 		return nil, err
 	}
@@ -99,15 +100,16 @@ func (held *heldSource) whole() bool {
 }
 
 // lockFile holds a shared lock on source sum's lock file, the one at its path once the lock is held: a removal unlinks
-// the file it locked, so a lock taken on a file no longer at the path holds nothing, and is taken again.
-func (cache sourceCache) lockFile(sum string) (*os.File, error) {
+// the file it locked, so a lock taken on a file no longer at the path holds nothing, and is taken again. It waits no
+// longer than waitContext.
+func (cache sourceCache) lockFile(waitContext context.Context, sum string) (*os.File, error) {
 	path := filepath.Join(cache.directory, sum+".lock")
 	for {
 		lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 		if err != nil {
 			return nil, err
 		}
-		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_SH); err != nil {
+		if err = waitForLock(waitContext, lock, syscall.LOCK_SH); err != nil {
 			lock.Close()
 			return nil, err
 		}

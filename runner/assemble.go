@@ -156,7 +156,8 @@ func changed(directory string, state sourceState) string {
 	return ""
 }
 
-// A sourceBase is a kept tree a new one is made from: held exclusively, so no unit holds it.
+// A sourceBase is a kept tree a new one may be made from. nearest picks it unlocked; claim holds it exclusively, only
+// once the chunks it lacks are fetched, so a unit of that tree waits on it for no more than the assembly itself.
 type sourceBase struct {
 	sum       string
 	directory string
@@ -165,7 +166,7 @@ type sourceBase struct {
 	lock      *os.File
 }
 
-// release lets the base go unspent.
+// release lets a claimed base go unspent.
 func (base *sourceBase) release() {
 	if base != nil && base.lock != nil {
 		base.lock.Close()
@@ -173,9 +174,9 @@ func (base *sourceBase) release() {
 	}
 }
 
-// nearest is the kept tree sharing the most bytes of chunks with chunks, at least half of them, that no unit holds
-// and that is unchanged since it was assembled, held exclusively; nil when none is. A changed one's state is removed,
-// so it is never checked again. why says what it passed over.
+// nearest is the kept tree sharing the most bytes of chunks with chunks, at least half of them, whole, and that no unit
+// holds now (its lock tried and let go at once); nil when none is. It holds nothing: assemble claims it, and checks it
+// unchanged, only once the chunks it lacks are fetched. why says what it passed over.
 func (cache sourceCache) nearest(chunks []builder.SourceChunk) (base *sourceBase, why []string) {
 	wanted := map[builder.SourceChunk]bool{}
 	total := int64(0)
@@ -217,28 +218,45 @@ func (cache sourceCache) nearest(chunks []builder.SourceChunk) (base *sourceBase
 			why = append(why, fmt.Sprintf("tree %s is held by a unit", candidate.sum))
 			continue
 		}
-		// A lock file another removal unlinked meanwhile holds nothing: the tree's holders lock the one at the path.
-		locked, lockedErr := lock.Stat()
-		named, namedErr := os.Stat(lockPath)
-		if lockedErr != nil || namedErr != nil || !os.SameFile(locked, named) {
-			lock.Close()
-			continue
-		}
-		candidate.lock = lock
-		held := &heldSource{sum: candidate.sum, directory: candidate.directory}
-		difference := "it isn't whole"
-		if held.whole() {
-			difference = changed(candidate.directory, candidate.state)
-		}
-		if difference != "" {
-			os.Remove(cache.statePath(candidate.sum))
-			candidate.release()
-			why = append(why, fmt.Sprintf("tree %s isn't made into another: %s", candidate.sum, difference))
+		lock.Close()
+		if !(&heldSource{sum: candidate.sum, directory: candidate.directory}).whole() {
 			continue
 		}
 		return candidate, why
 	}
 	return nil, why
+}
+
+// claim holds base exclusively, so no unit holds it, and checks it is still whole and unchanged since it was
+// assembled; it says why when it can't, and a changed one's state is removed, so it is never checked again.
+func (cache sourceCache) claim(base *sourceBase) string {
+	lockPath := filepath.Join(cache.directory, base.sum+".lock")
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err.Error()
+	}
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		lock.Close()
+		return fmt.Sprintf("tree %s is held by a unit", base.sum)
+	}
+	// A lock file another removal unlinked meanwhile holds nothing: the tree's holders lock the one at the path.
+	locked, lockedErr := lock.Stat()
+	named, namedErr := os.Stat(lockPath)
+	if lockedErr != nil || namedErr != nil || !os.SameFile(locked, named) {
+		lock.Close()
+		return fmt.Sprintf("tree %s was removed", base.sum)
+	}
+	base.lock = lock
+	difference := "it isn't whole"
+	if (&heldSource{sum: base.sum, directory: base.directory}).whole() {
+		difference = changed(base.directory, base.state)
+	}
+	if difference != "" {
+		os.Remove(cache.statePath(base.sum))
+		base.release()
+		return fmt.Sprintf("tree %s isn't made into another: %s", base.sum, difference)
+	}
+	return ""
 }
 
 // sourceBytes is chunks' size, gzipped.
@@ -253,14 +271,16 @@ func sourceBytes(chunks []builder.SourceChunk) int64 {
 // An assembly is how a tree was assembled, for the unit's record.
 type assembly struct {
 	base     string
+	passed   string // why the base it was given wasn't claimed
 	kept     int
 	removed  int
 	unpacked int
 	stateErr error
 }
 
-// assemble makes the tree held from chunks: from base when there is one (spending it), each chunk the base lacks
-// opened through open and unpacked in, then marked, synced and renamed to its name, and its state recorded. A tree
+// assemble makes the tree held from chunks: from base when there is one and claim takes it (spending it), each chunk
+// the base lacks opened through open and unpacked in, then marked, synced and renamed to its name, and its state
+// recorded. A base it can't claim is passed over, and the tree assembled from nothing, open fetching what it lacks. A tree
 // another unit assembled meanwhile is taken as it is. assembleContext bounds the wait for another unit's assembly and
 // the assembly itself.
 func (cache sourceCache) assemble(assembleContext context.Context, held *heldSource, chunks []builder.SourceChunk, base *sourceBase,
@@ -299,6 +319,11 @@ func (cache sourceCache) assemble(assembleContext context.Context, held *heldSou
 	defer removeDirectory(scratch)
 	tree := filepath.Join(scratch, "tree")
 	kept := map[builder.SourceChunk]bool{}
+	if base != nil {
+		if done.passed = cache.claim(base); done.passed != "" {
+			base = nil
+		}
+	}
 	if base != nil {
 		if kept, err = cache.spend(base, chunks, tree, &done); err != nil {
 			return done, fmt.Errorf("making it from tree %s: %w", base.sum, err)
