@@ -13,3 +13,17 @@ func inodeAndChange(info fs.FileInfo) (uint64, int64) {
 	}
 	return stat.Ino, stat.Ctim.Nano()
 }
+
+// tmpfsMagic is tmpfs's filesystem type, as statfs says it.
+const tmpfsMagic = 0x01021994
+
+// sharedWritesUnseen reports whether a write through a shared memory map can change a file on path's filesystem and
+// leave its change and modification times as they were: on tmpfs it can, msync or not (a review, Oct 10), so a tree
+// kept there can't be checked unchanged. A filesystem statfs can't read is taken for one.
+func sharedWritesUnseen(path string) bool {
+	var stat syscall.Statfs_t
+	if syscall.Statfs(path, &stat) != nil {
+		return true
+	}
+	return stat.Type == tmpfsMagic
+}

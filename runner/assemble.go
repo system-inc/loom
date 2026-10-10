@@ -37,8 +37,13 @@ import (
 // A tree's state, <sum>.state, is written once it is whole and named: each entry's type, mode, size, inode, change and
 // modification times, and the names at its top. A test that writes, makes, removes, renames or chmods anything in the
 // tree changes the change time of that entry or of its directory, which no process can set back, so a tree whose
-// state no longer matches is never made into another one, and its state is removed. A state is removed before its
+// state no longer matches is never made into another one, and its state is removed. On tmpfs a write through a shared
+// memory map changes no time, so no tree kept there is made into another (keptTreesUnchecked). A state is removed before its
 // tree is spent or removed, and written only after its tree is named, so it never describes another tree.
+
+// keptTreesUnchecked reports whether trees kept under path can't be checked unchanged (sharedWritesUnseen: on tmpfs),
+// so none is made into another there. Tests set it.
+var keptTreesUnchecked = sharedWritesUnseen
 
 // sourceStateSuffix names a tree's state beside it.
 const sourceStateSuffix = ".state"
@@ -178,6 +183,9 @@ func (base *sourceBase) release() {
 // holds now (its lock tried and let go at once); nil when none is. It holds nothing: assemble claims it, and checks it
 // unchanged, only once the chunks it lacks are fetched. why says what it passed over.
 func (cache sourceCache) nearest(chunks []builder.SourceChunk) (base *sourceBase, why []string) {
+	if keptTreesUnchecked(cache.directory) {
+		return nil, []string{"no kept tree is made into another here: on this filesystem (tmpfs) a write through a shared memory map changes a file and no time a check could see"}
+	}
 	wanted := map[builder.SourceChunk]bool{}
 	total := int64(0)
 	for _, chunk := range chunks {

@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -34,6 +36,7 @@ import (
 //	a spent tree renamed before its state is removed, or a tree assembled at its name:
 //	TestAnAssemblyKilledPartwayLeavesNothingTrusted
 //	a fetched chunk's hash unchecked, or a cached one's: TestACorruptChunkIsNeverAssembled
+//	a kept tree on tmpfs made into another: TestAKeptTreeOnTmpfsIsNeverMadeIntoAnother
 //	a kept chunk matched by its blob alone, not its range and count: TestAKeptChunkIsMatchedWholeNotByItsBlob
 
 // describeTree describes every entry under directory but the marker: its type and mode, a link's target, a file's
@@ -149,6 +152,7 @@ func assembleTree(t *testing.T, cache sourceCache, chunks []builder.SourceChunk,
 // archive makes: the kept tree's entries the new one lacks gone, and the directories that left empty, and a new
 // directory made. Going back is the same, one chunk again.
 func TestATreeMadeFromAKeptOneIsTheWholeArchivesTree(t *testing.T) {
+	checkableHere(t)
 	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
 	chunksB, blobsB := makeChunks(t, treeB, treeCuts...)
 	for sum, blob := range blobsB {
@@ -181,6 +185,7 @@ func TestATreeMadeFromAKeptOneIsTheWholeArchivesTree(t *testing.T) {
 // set back, a file made in a directory, one made at the top, a mode changed. The new tree is assembled from nothing,
 // and the changed one's state is removed, so it is never checked again.
 func TestAChangedKeptTreeIsNeverMadeIntoAnother(t *testing.T) {
+	checkableHere(t)
 	for name, change := range map[string]func(t *testing.T, tree string){
 		"a file rewritten, its time set back": func(t *testing.T, tree string) {
 			path := filepath.Join(tree, "a", "b.txt")
@@ -229,6 +234,7 @@ func TestAChangedKeptTreeIsNeverMadeIntoAnother(t *testing.T) {
 // A kept tree a unit holds is never spent: the new tree is assembled from nothing, whether the unit held it before the
 // kept tree was picked or took it between the pick and the claim, while the chunks were fetched.
 func TestAHeldKeptTreeIsNeverSpent(t *testing.T) {
+	checkableHere(t)
 	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
 	chunksB, blobsB := makeChunks(t, treeB, treeCuts...)
 	for sum, blob := range blobsB {
@@ -278,6 +284,7 @@ func TestAHeldKeptTreeIsNeverSpent(t *testing.T) {
 // A hold waits for its tree's lock no longer than its time: a unit of a tree being spent or removed is held to its
 // deadline. And nearest holds nothing, so a unit of the tree it picked holds it at once. (The review's proof, Oct 10.)
 func TestAHoldWaitsNoLongerThanItsTimeAndNearestHoldsNothing(t *testing.T) {
+	checkableHere(t)
 	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
 	chunksB, _ := makeChunks(t, treeB, treeCuts...)
 	cache := newSourceCache(t.TempDir())
@@ -320,6 +327,7 @@ func TestAHoldWaitsNoLongerThanItsTimeAndNearestHoldsNothing(t *testing.T) {
 // index draws narrower around the same blob is unpacked again and refused, as a fresh assembly refuses it, never left
 // in place with a file outside every chunk's range. (The review's proof, Oct 10.)
 func TestAKeptChunkIsMatchedWholeNotByItsBlob(t *testing.T) {
+	checkableHere(t)
 	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
 	open := openFrom(t, blobs, map[string]int{})
 	cache := newSourceCache(t.TempDir())
@@ -373,6 +381,7 @@ func TestHelperAssembleUntilKilled(t *testing.T) {
 	if root == "" {
 		t.Skip("runs only as TestAnAssemblyKilledPartwayLeavesNothingTrusted's child")
 	}
+	checkableHere(t)
 	content, err := os.ReadFile(filepath.Join(root, "chunks.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -398,6 +407,7 @@ func TestHelperAssembleUntilKilled(t *testing.T) {
 // B's unpacking), no state naming a tree that isn't there, and an unpacking whose lock is free, which the next sweep
 // removes. B is then assembled whole.
 func TestAnAssemblyKilledPartwayLeavesNothingTrusted(t *testing.T) {
+	checkableHere(t)
 	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
 	chunksB, blobsB := makeChunks(t, treeB, treeCuts...)
 	for sum, blob := range blobsB {
@@ -493,6 +503,7 @@ func (fixture *prebuiltFixture) evict(t *testing.T) {
 // cache emptied, it still makes a tree from the kept one, whose files the cache's chunks never were, fetching only the
 // chunk it lacks. With neither, every chunk.
 func TestARunnerFetchesOnlyTheChunksItLacks(t *testing.T) {
+	checkableHere(t)
 	fixture := newPrebuiltFixture(t)
 	if result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t)); result.Status != protocol.StatusPassed {
 		t.Fatalf("tree A: %s; errors %q", result.Status, errorPhases(events))
@@ -597,5 +608,143 @@ func TestOverlappingChunksAndAnOldIndexAreLooms(t *testing.T) {
 				t.Fatalf("%s, %d blob GETs; errors %q", result.Status, fixture.store.blobGets(), errors)
 			}
 		})
+	}
+}
+
+// checkableHere has kept trees made into others whatever filesystem the test's temporary directory is on (tmpfs, on
+// some Linux machines, where none is), for a test of what happens when they are.
+func checkableHere(t *testing.T) {
+	original := keptTreesUnchecked
+	keptTreesUnchecked = func(string) bool { return false }
+	t.Cleanup(func() { keptTreesUnchecked = original })
+}
+
+// On tmpfs a write through a shared memory map changes a file and no time, so no tree kept there is made into another:
+// the new one is assembled from nothing. Linux's /dev/shm, when it is a tmpfs mount, is taken for one.
+func TestAKeptTreeOnTmpfsIsNeverMadeIntoAnother(t *testing.T) {
+	original := keptTreesUnchecked
+	keptTreesUnchecked = func(string) bool { return true }
+	t.Cleanup(func() { keptTreesUnchecked = original })
+	chunksA, blobs := makeChunks(t, treeA, treeCuts...)
+	chunksB, blobsB := makeChunks(t, treeB, treeCuts...)
+	for sum, blob := range blobsB {
+		blobs[sum] = blob
+	}
+	open := openFrom(t, blobs, map[string]int{})
+	cache := newSourceCache(t.TempDir())
+	assembleTree(t, cache, chunksA, open)
+	directory, done, why := assembleTree(t, cache, chunksB, open)
+	if done.base != "" || done.unpacked != 3 || !strings.Contains(strings.Join(why, "\n"), "tmpfs") {
+		t.Fatalf("B beside an A on tmpfs: %+v %q", done, why)
+	}
+	sameTree(t, directory, treeB)
+	mounts, err := os.ReadFile("/proc/mounts")
+	if runtime.GOOS != "linux" || err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(mounts), "\n") {
+		if fields := strings.Fields(line); len(fields) > 2 && fields[1] == "/dev/shm" && fields[2] == "tmpfs" && !sharedWritesUnseen("/dev/shm") {
+			t.Error("/dev/shm, a tmpfs mount, isn't taken for tmpfs")
+		}
+	}
+}
+
+// A kept tree changed any of the ways the review tried is never made into another: removed, replaced by a link or a
+// directory, its time alone set, linked out or in, a file made deep, the same bytes written again, an attribute set, a
+// directory's mode, two directories swapped at the top, a write through a shared memory map (a kept tree on tmpfs,
+// where that changes no time, is passed over as nearest picks it). Unchanged, it is. (The review's proof, Oct 10.)
+func TestAKeptTreeChangedAnyOtherWayIsNeverMadeIntoAnother(t *testing.T) {
+	setAttribute := func(t *testing.T, path string) {
+		for _, command := range [][]string{{"xattr", "-w", "user.loom", "1", path}, {"setfattr", "-n", "user.loom", "-v", "1", path}} {
+			if _, err := exec.LookPath(command[0]); err == nil {
+				if output, err := exec.Command(command[0], command[1:]...).CombinedOutput(); err != nil {
+					t.Skipf("%s: %v %s", command[0], err, output)
+				}
+				return
+			}
+		}
+		t.Skip("no xattr or setfattr here")
+	}
+	for name, change := range map[string]func(t *testing.T, tree, outside string){
+		"unchanged":      nil,
+		"a file removed": func(t *testing.T, tree, outside string) { must(t, os.Remove(filepath.Join(tree, "a", "b.txt"))) },
+		"a file made a link": func(t *testing.T, tree, outside string) {
+			must(t, os.Remove(filepath.Join(tree, "a", "b.txt")))
+			must(t, os.Symlink("run.sh", filepath.Join(tree, "a", "b.txt")))
+		},
+		"a file made a directory": func(t *testing.T, tree, outside string) {
+			must(t, os.Remove(filepath.Join(tree, "a", "b.txt")))
+			must(t, os.Mkdir(filepath.Join(tree, "a", "b.txt"), 0o755))
+		},
+		"its time alone": func(t *testing.T, tree, outside string) {
+			must(t, os.Chtimes(filepath.Join(tree, "a", "b.txt"), time.Unix(1, 0), time.Unix(1, 0)))
+		},
+		"linked out": func(t *testing.T, tree, outside string) {
+			must(t, os.Link(filepath.Join(tree, "a", "b.txt"), filepath.Join(outside, "out")))
+		},
+		"linked in": func(t *testing.T, tree, outside string) {
+			must(t, os.WriteFile(filepath.Join(outside, "in"), nil, 0o644))
+			must(t, os.Link(filepath.Join(outside, "in"), filepath.Join(tree, "m", "x", "y", "in")))
+		},
+		"a file made deep": func(t *testing.T, tree, outside string) {
+			must(t, os.WriteFile(filepath.Join(tree, "m", "x", "y", "new"), nil, 0o644))
+		},
+		"the same bytes written": func(t *testing.T, tree, outside string) {
+			must(t, os.WriteFile(filepath.Join(tree, "a", "b.txt"), []byte("b\n"), 0o644))
+		},
+		"an attribute set": func(t *testing.T, tree, outside string) { setAttribute(t, filepath.Join(tree, "top.txt")) },
+		"a directory's mode": func(t *testing.T, tree, outside string) {
+			must(t, os.Chmod(filepath.Join(tree, "m", "x"), 0o700))
+		},
+		"two directories swapped": func(t *testing.T, tree, outside string) {
+			must(t, os.Rename(filepath.Join(tree, "a"), filepath.Join(tree, "swap")))
+			must(t, os.Rename(filepath.Join(tree, "z"), filepath.Join(tree, "a")))
+			must(t, os.Rename(filepath.Join(tree, "swap"), filepath.Join(tree, "z")))
+		},
+		"a shared memory map's write": func(t *testing.T, tree, outside string) {
+			file, err := os.OpenFile(filepath.Join(tree, "top.txt"), os.O_RDWR, 0)
+			must(t, err)
+			defer file.Close()
+			data, err := syscall.Mmap(int(file.Fd()), 0, 4, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+			must(t, err)
+			copy(data, "TOP\n")
+			must(t, syscall.Munmap(data))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// Only the shared memory map's write meets the real filesystem's rule; every other change is checked
+			// wherever the test runs.
+			if name != "a shared memory map's write" {
+				checkableHere(t)
+			}
+			chunksA, blobs := makeChunks(t, treeA, treeCuts...)
+			chunksB, _ := makeChunks(t, treeB, treeCuts...)
+			cache := newSourceCache(t.TempDir())
+			tree, _, _ := assembleTree(t, cache, chunksA, openFrom(t, blobs, map[string]int{}))
+			// A unit's test, a while after the tree was made.
+			time.Sleep(20 * time.Millisecond)
+			if change != nil {
+				change(t, tree, t.TempDir())
+			}
+			base, why := cache.nearest(chunksB)
+			if base == nil {
+				if change == nil || name != "a shared memory map's write" || !strings.Contains(strings.Join(why, "\n"), "tmpfs") {
+					t.Fatalf("no kept tree picked: %q", why)
+				}
+				return
+			}
+			passed := cache.claim(base)
+			base.release()
+			if (passed == "") != (change == nil) {
+				t.Fatalf("claimed: %q", passed)
+			}
+		})
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
