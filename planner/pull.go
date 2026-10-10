@@ -292,6 +292,17 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 				}
 			}
 		}
+		// The phase units the box fast gate runs on this change, listed by run.py at this tree (Loom, 01:41Z).
+		var phases []PlannedResult
+		if err == nil {
+			phaseInputs := ParityInputs{GateInputs: gateInputs, ChangedPaths: paths}
+			if future.Parity || future.Select != nil {
+				phaseInputs, err = client.ParityInputs(future, gateInputs)
+			}
+			if err == nil {
+				phases, err = PhaseUnits(tree, gateTools, future.Base, future.Tree, tools, phaseInputs)
+			}
+		}
 		cleanup()
 		if err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
@@ -312,7 +323,7 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 				continue
 			}
 		}
-		if err := client.PostPlan(future.Future, results); err != nil {
+		if err := client.PostPlan(future.Future, append(results, phases...)); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
 			continue
 		}

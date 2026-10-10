@@ -69,6 +69,7 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 					http.Error(writer, "unitKey is not its keyParts' key", http.StatusUnprocessableEntity)
 					return
 				}
+				unit.PlannedResult.KeyParts.Kind, _ = unit.KeyParts["kind"].(string)
 				results = append(results, unit.PlannedResult)
 			}
 			lock.Lock()
@@ -96,7 +97,17 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 			if !Sha256Hex(unit.UnitKey) {
 				t.Errorf("%s posted a unit without a key: %+v", future, unit)
 			}
+			// Phase units ride every plan, always run; the decisions here are the test units'.
+			if strings.HasPrefix(unit.Name, "phase:") {
+				if unit.Decision != "run" || unit.KeyParts.Kind != "phase" {
+					t.Errorf("%s posted %s as %s, kind %s", future, unit.Name, unit.Decision, unit.KeyParts.Kind)
+				}
+				continue
+			}
 			result[unit.Name] = unit.Decision
+		}
+		if phases := len(posted[future]) - len(result); phases != 3 {
+			t.Errorf("%s posted %d phase units, want build, vet and gofmt", future, phases)
 		}
 		return result
 	}

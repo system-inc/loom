@@ -22,10 +22,16 @@ func planFixture(t *testing.T) (tree, gateTools string) {
 		"compiler/c.go": "package compiler\n",
 		"cloud/fast-gate/compiler-dependencies.json": `{"version": 1, "packages": {"a": ["compiler"]}}`,
 	})
-	writeFiles(t, gateTools, map[string]string{"cloud/fast-gate/executors.txt": "# no reads\n"})
-	for _, arguments := range [][]string{{"init", "-q"}, {"add", "."}} {
-		if output, err := exec.Command("git", append([]string{"-C", tree}, arguments...)...).CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v %s", arguments, err, output)
+	writeFiles(t, gateTools, map[string]string{
+		"cloud/fast-gate/executors.txt": "# no reads\n",
+		// run.py's --list-units as the gate tools hold it: the phase units it lists, one per line.
+		"cloud/fast-gate/run.py": "import sys\nif '--list-units' in sys.argv:\n    print('build')\n    print('vet')\n",
+	})
+	for _, directory := range []string{tree, gateTools} {
+		for _, arguments := range [][]string{{"init", "-q"}, {"add", "."}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixture"}} {
+			if output, err := exec.Command("git", append([]string{"-C", directory}, arguments...)...).CombinedOutput(); err != nil {
+				t.Fatalf("git %v: %v %s", arguments, err, output)
+			}
 		}
 	}
 	return tree, gateTools
@@ -244,5 +250,45 @@ func TestAChangeKeysGateInputsEverywhereAndItsPathsOnlyOnGateSampleReaders(t *te
 	}
 	if _, err := planTree(tree, gateTools, tools, MemoryIndex{}, false, dropped, nil, &inputs); err == nil {
 		t.Error("a gatesample reader keyed without ADAMIC_GATE_CHANGED was planned")
+	}
+}
+
+// A future's phase units are run.py's own list at the gate tools plus gofmt, each kind phase, run, keyed on the
+// tree's object and the tools commit, with gofmt alone carrying the change's paths. Another tree moves every phase key.
+func TestPhaseUnitsAreRunPysListPlusGofmtKeyedOnTheWholeTree(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := planFixture(t)
+	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
+	inputs := ParityInputs{GateInputs: strings.Repeat("4", 64), ChangedPaths: []string{"a/a.go"}}
+	phases, err := PhaseUnits(tree, gateTools, strings.Repeat("b", 40), strings.Repeat("c", 40), tools, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, keys := []string{}, map[string]string{}
+	for _, phase := range phases {
+		names = append(names, phase.Name)
+		keys[phase.Name] = phase.UnitKey
+		gofmt := phase.Name == "phase:gofmt"
+		if phase.KeyParts.Kind != "phase" || phase.Decision != "run" || phase.KeyParts.GateInputs != inputs.GateInputs || (phase.KeyParts.Env["ADAMIC_GATE_CHANGED"] != "") != gofmt {
+			t.Errorf("%s: %+v, decision %s", phase.Name, phase.KeyParts, phase.Decision)
+		}
+	}
+	if strings.Join(names, ",") != "phase:build,phase:vet,phase:gofmt" {
+		t.Fatalf("phase units %v, want run.py's build and vet, then gofmt", names)
+	}
+	writeFiles(t, tree, map[string]string{"z.txt": "another tree\n"})
+	for _, arguments := range [][]string{{"add", "."}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "moved"}} {
+		if output, err := exec.Command("git", append([]string{"-C", tree}, arguments...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", arguments, err, output)
+		}
+	}
+	moved, err := PhaseUnits(tree, gateTools, strings.Repeat("b", 40), strings.Repeat("c", 40), tools, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, phase := range moved {
+		if keys[phase.Name] == phase.UnitKey {
+			t.Errorf("%s kept its key on another tree", phase.Name)
+		}
 	}
 }
