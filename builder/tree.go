@@ -810,7 +810,7 @@ func (index TreeIndex) blobs() []string {
 }
 
 // keep keeps a held index runnable when a worse build declines to replace it, rather than letting what it names
-// expire under its runners near day 7: every blob it names that was uploaded more than FreshFor ago is read, checked
+// expire under its runners near day 30: every blob it names that was uploaded more than FreshFor ago is read, checked
 // and refreshed in the bucket, and so is the index itself, over the ETag read (r2.ErrChanged when another build wrote it
 // meanwhile, for the caller to read it again). Refreshing beats calling an old index replaceable: that would hand
 // runners the worse build, failed packages and all, when the better one only needed its blobs kept. An index naming a

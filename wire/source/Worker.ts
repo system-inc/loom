@@ -4,7 +4,7 @@
 // whether a token may reach a blob is the run object's call, since it holds the plan's inputs and the run's uploads.
 
 import { BoardName, BoardSubprotocol } from './Board';
-import { fresh, getBlob, headBlob, holdBlob, putBlob, Sha256Pattern } from './Blobs';
+import { fresh, FreshForMilliseconds, getBlob, headBlob, holdBlob, putBlob, RunsFreshForMilliseconds, Sha256Pattern } from './Blobs';
 import { getCacheEntry, putCacheEntry } from './Cache';
 import { RunIdPattern } from './Events';
 import { jsonResponse } from './Http';
@@ -239,9 +239,9 @@ async function handleBlob(request: Request, environment: Env, run: string, sha25
     }
     if (request.method === 'HEAD') {
         // Asking proves no bytes, so it records nothing.
-        return headBlob(environment.Store, sha256);
+        return headBlob(environment.Store, RunsFreshForMilliseconds, sha256);
     }
-    const put = await putBlob(environment.Store, sha256, request);
+    const put = await putBlob(environment.Store, RunsFreshForMilliseconds, sha256, request);
     if (put.bytes === null) {
         return put.response;
     }
@@ -401,9 +401,9 @@ async function handlePublicBlob(request: Request, environment: Env, sha256: stri
         return claims;
     }
     if (request.method === 'HEAD') {
-        return headBlob(environment.PublicStore, sha256);
+        return headBlob(environment.PublicStore, FreshForMilliseconds, sha256);
     }
-    return (await putBlob(environment.PublicStore, sha256, request)).response;
+    return (await putBlob(environment.PublicStore, FreshForMilliseconds, sha256, request)).response;
 }
 
 // A named ref in the public store: refs/<namespace>/<name> holds one blob's sha256 (64 hex digits), read direct
@@ -411,8 +411,9 @@ async function handlePublicBlob(request: Request, environment: Env, sha256: stri
 // manifest under its cache key this way (@system_adamic, Oct 9). A ref is written only through here, by a
 // coordinator or publish token, and only to a blob the store already holds, so a ref never dangles. A cache key
 // is honest, so the same key always names the same product: a write that would change a ref is refused (409),
-// which also surfaces a key that isn't honest. refs/ expires 7 days after its upload, as blobs/ does, so a ref written
-// again with what it holds is refreshed when stale, and so is its blob first, so the ref never outlives what it names.
+// which also surfaces a key that isn't honest. refs/ expires 30 days after its upload, as blobs/ does, so a ref written
+// again with what it holds is refreshed when stale (FreshForMilliseconds), and so is its blob first, so the ref never
+// outlives what it names.
 export const RefNamespacePattern = /^[a-z][a-z0-9-]{0,31}$/;
 export const RefNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 
@@ -439,7 +440,7 @@ async function handlePublicRef(request: Request, environment: Env, namespace: st
     if (!Sha256Pattern.test(target)) {
         return jsonResponse(400, { error: 'a ref holds one blob sha256, 64 lowercase hex digits' });
     }
-    if (!(await holdBlob(environment.PublicStore, target))) {
+    if (!(await holdBlob(environment.PublicStore, FreshForMilliseconds, target))) {
         return jsonResponse(409, { error: `blob ${target} isn't in the store; put it before its ref` });
     }
     const key = `refs/${namespace}/${name}`;
@@ -449,7 +450,7 @@ async function handlePublicRef(request: Request, environment: Env, namespace: st
         if (held !== target) {
             return jsonResponse(409, { error: `${key} already names ${held}; a ref never changes`, held });
         }
-        if (fresh(existing)) {
+        if (fresh(existing, FreshForMilliseconds)) {
             return jsonResponse(200, { ref: key, sha256: target, created: false, refreshed: false });
         }
         // Only over the very object read: a ref never changes, so one another writer replaced meanwhile is fresh too.

@@ -57,7 +57,7 @@ type Server struct {
 
 	mutex sync.Mutex
 	// flights are the fetches in progress by path, never by sha256 alone: blobs/X and releases/blobs/X are two objects
-	// of the store, and one may be gone (the action store's 7 days) while the other stays.
+	// of the store, and one may be gone (the action store's 30 days) while the other stays.
 	flights map[string]*flight
 	// room is held while room is made; reserved, under it, is the length each fetch in flight said its blob has, by
 	// its partial's name, so two fetches at once never count on the same free bytes.

@@ -523,7 +523,7 @@ func TestOpenLocksTheDirectoryAndClearsDeadPartials(t *testing.T) {
 	second.Close()
 }
 
-// blobs/X and releases/blobs/X are two objects of the store, and the action store's may be gone after its 7 days while
+// blobs/X and releases/blobs/X are two objects of the store, and the action store's may be gone after its 30 days while
 // the release store's stays: a miss of one never waits on the other's fetch, so the release isn't refused for the
 // expired blob's 404.
 func TestAMissOfOnePathNeverWaitsOnAnothers(t *testing.T) {

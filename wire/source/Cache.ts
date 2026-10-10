@@ -1,8 +1,9 @@
 // The unit cache in R2 under cache/<key>: protocol.CacheEntry, written once by the coordinator after a unit
 // passes and read before placing one. The Worker checks the entry's shape the way protocol.CheckCacheEntry
-// does, and that every blob it names is in the store, refreshed when stale, since a hit hands those hashes to the next run.
+// does, and that every blob it names is in the store, refreshed when stale (RunsFreshForMilliseconds: the cache lives
+// in loom-runs), since a hit hands those hashes to the next run.
 
-import { holdBlob, Sha256Pattern } from './Blobs';
+import { holdBlob, RunsFreshForMilliseconds, Sha256Pattern } from './Blobs';
 import { MaximumUnitIdLength, RunIdPattern } from './Events';
 import { jsonResponse, readBodyText } from './Http';
 
@@ -147,7 +148,7 @@ export async function putCacheEntry(store: R2Bucket, key: string, request: Reque
     ];
     const held = await Promise.all(
         named.map(function (sha256) {
-            return holdBlob(store, sha256);
+            return holdBlob(store, RunsFreshForMilliseconds, sha256);
         }),
     );
     const missing = named.filter(function (_, index) {

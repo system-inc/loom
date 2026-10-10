@@ -37,7 +37,7 @@ import (
 // binary in its directory of that source as go test -json would: the
 // binary's output, through the same test2json conversion go test applies (runner/test2json, vendored), is the event
 // stream the Judge reads. Whatever the store can't give whole (an index, a binary, the source, a product: never built,
-// past the 7-day lifecycle, or poisoned) is named and the unit is broken, Loom's to place again, never red.
+// past the 30-day lifecycle, or poisoned) is named and the unit is broken, Loom's to place again, never red.
 //
 // The runner never builds. The tests find a stand-in go first on PATH (standInGo): a read-only query (go version, go
 // env, go list without a flag that builds), which adamic's buildcache asks to key a product, goes to the runner's own
@@ -301,7 +301,7 @@ func (run *unitRun) treeIndex(runContext context.Context, treeKey string) (build
 	defer response.Body.Close()
 	switch {
 	case response.StatusCode == http.StatusNotFound:
-		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s isn't in the store (never built, or past its 7 days)", name)
+		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s isn't in the store (never built, or past its 30 days)", name)
 	case response.StatusCode != http.StatusOK:
 		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s: the store answered %s", name, response.Status)
 	}
@@ -379,7 +379,7 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 				blob := needed[position]
 				file, fetch, err := cache.open(fetchContext, blob.sum)
 				if errors.Is(err, builder.ErrNotStored) {
-					err = fmt.Errorf("%s, blob %s, isn't in the store (never uploaded, or past its 7 days)", blob.what, blob.sum)
+					err = fmt.Errorf("%s, blob %s, isn't in the store (never uploaded, or past its 30 days)", blob.what, blob.sum)
 				} else if err != nil {
 					err = fmt.Errorf("%s: %w", blob.what, err)
 				}
