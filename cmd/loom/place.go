@@ -191,17 +191,10 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		UnfitEvery: *settings.unfitEvery,
 		Keep:       *settings.keep,
 		Trees:      *settings.trees,
-		TreeState: func(tree string) (placer.TreeState, error) {
-			indexed, err := store.TreeIndexed(tree)
-			if err != nil {
-				return placer.TreeState{}, err
-			}
-			newest, found, err := treebuilder.Newest(*settings.treesLedger, tree)
-			return placer.TreeState{Indexed: indexed, Newest: newest, Found: found}, err
-		},
-		TreeWait: *settings.treeWait,
-		Now:      time.Now,
-		Log:      stdout,
+		TreeState:  treeStateReader(store, *settings.treesLedger),
+		TreeWait:   *settings.treeWait,
+		Now:        time.Now,
+		Log:        stdout,
 	}
 	var prunedAt time.Time
 	for runContext.Err() == nil {
@@ -232,6 +225,19 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// treeStateReader reads a tree's build as the placer sees it: whether the bucket holds its index, and the tree
+// builder's newest record of it from its ledger at ledgerPath, read without the builder's lock.
+func treeStateReader(store builder.Store, ledgerPath string) func(tree string) (placer.TreeState, error) {
+	return func(tree string) (placer.TreeState, error) {
+		indexed, err := store.TreeIndexed(tree)
+		if err != nil {
+			return placer.TreeState{}, err
+		}
+		newest, found, err := treebuilder.Newest(ledgerPath, tree)
+		return placer.TreeState{Indexed: indexed, Newest: newest, Found: found}, err
+	}
 }
 
 // poolReader reads the pool table joined with --pool-has. At start a --pool-has naming a pool the table doesn't hold

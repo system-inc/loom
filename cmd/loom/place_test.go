@@ -9,8 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/placer"
+	"github.com/system-inc/loom/r2"
+	"github.com/system-inc/loom/r2/r2test"
+	"github.com/system-inc/loom/treebuilder"
 )
 
 // A placement's `loom run` is the future's run id, uncached, on its pools alone, each strict with the toolchains,
@@ -189,4 +193,33 @@ func placeUnitCommand(unit []byte, home string) ([]string, error) {
 		return nil, fmt.Errorf("ExecStart %q isn't loom place", command)
 	}
 	return words[2:], nil
+}
+
+// The placer reads a tree's build where the builder leaves it: the bucket's index, and the builder's newest record of
+// the tree from the ledger it holds, read without its lock. Mutants: the index not read; the ledger not read.
+func TestThePlacerReadsATreesBuildFromTheBucketAndTheBuildersLedger(t *testing.T) {
+	fake := r2test.New(t)
+	bucket := fake.Bucket()
+	store := builder.Store{Read: fake.Public(), Bucket: &bucket}
+	path := filepath.Join(t.TempDir(), "trees.jsonl")
+	key, other := strings.Repeat("b", 64), strings.Repeat("c", 64)
+	ledger, err := treebuilder.OpenLedger(path, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	ledger.Append(treebuilder.Record{Tree: key, Event: treebuilder.Started, At: "2026-10-10T13:00:00Z"})
+	ledger.Append(treebuilder.Record{Tree: key, Event: treebuilder.Refused, At: "2026-10-10T13:01:00Z", Cause: "under its floor"})
+	read := treeStateReader(store, path)
+	state, err := read(key)
+	if err != nil || state.Indexed || !state.Found || state.Newest.Event != treebuilder.Refused {
+		t.Fatalf("a tree refused, not up: %+v %v", state, err)
+	}
+	if state, err = read(other); err != nil || state.Found || state.Indexed {
+		t.Fatalf("a tree the builder never saw: %+v %v", state, err)
+	}
+	bucket.Put("trees/"+key+".json", []byte("{}\n"), r2.PutOptions{ContentType: "application/json"})
+	if state, err = read(key); err != nil || !state.Indexed {
+		t.Fatalf("a tree whose index is up: %+v %v", state, err)
+	}
 }
