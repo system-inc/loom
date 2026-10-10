@@ -2,6 +2,7 @@ package release
 
 import (
 	"fmt"
+	"net"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -12,24 +13,25 @@ import (
 // A Config is ~/.loom/release.conf on Workshop: key = value lines, # comments, as update.conf and serve.conf are. Its
 // presence is what makes a machine release: `loom release install` does nothing where there is none.
 type Config struct {
-	Repository     string        // the Loom clone the watcher fetches main into and runs publish.sh and upload.sh from
-	Remote         string        // its remote
-	Branch         string        // the branch whose head is released
-	Out            string        // publish.sh's out directory
-	Destination    string        // upload.sh's destination
-	Base           string        // where the boxes read current.txt, for status
-	State          string        // the watcher's state: release.json, reports/, marks/
-	Listen         string        // the address the reports are received on
-	Canary         string        // the host that takes each release first
-	Boxes          []string      // every box that runs the updater, the canary among them
-	CanaryServices []string      // the services the canary must report active
-	Pools          []string      // the pools the boxes serve, read for when each box's serve last asked
-	Units          []string      // this machine's own services, which its health probe reports
-	CanaryWithin   time.Duration // how long the canary has to report the release installed and healthy
-	Soak           time.Duration // how long it then has to stay healthy before the release is promoted
-	FleetWithin    time.Duration // how long every other box has to report the release once promoted
-	Restarts       int           // how many times a canary service may restart during the soak
-	Interval       time.Duration // the watcher's pass
+	Repository     string              // the Loom clone the watcher fetches main into and runs publish.sh and upload.sh from
+	Remote         string              // its remote
+	Branch         string              // the branch whose head is released
+	Out            string              // publish.sh's out directory
+	Destination    string              // upload.sh's destination
+	Base           string              // where the boxes read current.txt, for status
+	State          string              // the watcher's state: release.json, reports/, marks/
+	Listen         string              // Workshop's LAN address and port the reports are received on, never every interface
+	Addresses      map[string][]string // each box's addresses, by lowercase host; a box not named is resolved by its name
+	Canary         string              // the host that takes each release first
+	Boxes          []string            // every box that runs the updater, the canary among them
+	CanaryServices []string            // the services the canary must report active
+	Pools          []string            // the pools the boxes serve, read for when each box's serve last asked
+	Units          []string            // this machine's own services, which its health probe reports
+	CanaryWithin   time.Duration       // how long the canary has to report the release installed and healthy
+	Soak           time.Duration       // how long it then has to stay healthy before the release is promoted
+	FleetWithin    time.Duration       // how long every other box has to report the release once promoted
+	Restarts       int                 // how many times a canary service may restart during the soak
+	Interval       time.Duration       // the watcher's pass
 }
 
 // DefaultConfig is Workshop's, under home.
@@ -42,7 +44,7 @@ func DefaultConfig(home string) Config {
 		Destination:    "r2:loom-artifacts/releases",
 		Base:           "https://artifacts.loom.system.inc/releases",
 		State:          filepath.Join(home, ".loom", "releases"),
-		Listen:         ":7381",
+		Addresses:      map[string][]string{},
 		Canary:         "Cloud",
 		Boxes:          []string{"Workshop", "Cloud", "Server", "Home", "Chonchon"},
 		CanaryServices: []string{"loom-serve.service"},
@@ -56,6 +58,22 @@ func DefaultConfig(home string) Config {
 		Restarts: 2,
 		Interval: 30 * time.Second,
 	}
+}
+
+// CheckListen refuses a listen address that isn't one IP address and a port: never a name, and never every
+// interface (":7381", "0.0.0.0:7381", "[::]:7381"), since the receiver is for the house's LAN alone.
+func CheckListen(listen string) error {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("listen %q isn't <address>:<port>", listen)
+	}
+	if number, err := strconv.Atoi(port); err != nil || number < 1 || number > 65535 {
+		return fmt.Errorf("listen %q names no port", listen)
+	}
+	if ip := net.ParseIP(host); ip == nil || ip.IsUnspecified() {
+		return fmt.Errorf("listen %q isn't one IP address: the receiver binds Workshop's LAN address alone, never every interface", listen)
+	}
+	return nil
 }
 
 var unitPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@-]*\.(service|timer)$`)
@@ -111,7 +129,29 @@ func ReadConfig(content string, defaults Config) (Config, error) {
 		case "state":
 			config.State = value
 		case "listen":
+			if err = CheckListen(value); err != nil {
+				err = fmt.Errorf("release.conf line %d: %w", number+1, err)
+			}
 			config.Listen = value
+		case "addresses":
+			config.Addresses = map[string][]string{}
+			for _, entry := range strings.Fields(value) {
+				host, list, found := strings.Cut(entry, "=")
+				if !found || !hostPattern.MatchString(host) {
+					err = fmt.Errorf("release.conf line %d: %q isn't <host>=<address>[,<address>]", number+1, entry)
+					break
+				}
+				for _, address := range strings.Split(list, ",") {
+					if net.ParseIP(address) == nil {
+						err = fmt.Errorf("release.conf line %d: %q isn't an IP address", number+1, address)
+						break
+					}
+					config.Addresses[strings.ToLower(host)] = append(config.Addresses[strings.ToLower(host)], address)
+				}
+				if err != nil {
+					break
+				}
+			}
 		case "canary":
 			if !hostPattern.MatchString(value) {
 				err = fmt.Errorf("release.conf line %d: canary %q isn't a host name", number+1, value)

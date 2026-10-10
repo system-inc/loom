@@ -3,6 +3,7 @@ package release
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -44,20 +45,20 @@ func TestTheManifestReadsAsTheUpdaterReadsIt(t *testing.T) {
 	}
 }
 
-// The receiver keeps each known box's latest report, stamped with when it arrived, and refuses an unknown host, a
-// bad name and anything that isn't a report.
+// The receiver keeps each known box's latest report, stamped with when it arrived and where from, and refuses an
+// unknown host, a bad name and anything that isn't a report.
 func TestTheReceiverKeepsEachBoxsLatestReport(t *testing.T) {
 	directory := t.TempDir()
 	now := time.Date(2026, 10, 10, 16, 0, 0, 0, time.UTC)
-	receiver := Receiver{Directory: directory, Hosts: []string{"Workshop", "Cloud"}, Now: func() time.Time { return now }}
+	receiver := &Receiver{Directory: directory, Hosts: []string{"Workshop", "Cloud"}, Secret: testSecret, Addresses: map[string][]string{"cloud": {"10.10.102.20"}},
+		Now: func() time.Time { return now }}
 	post := func(method, path, body string) int {
 		recorder := httptest.NewRecorder()
-		request := httptest.NewRequest(method, path, strings.NewReader(body))
-		request.RemoteAddr = "10.10.102.20:41234"
+		request := signed(reportToken(t, "Cloud"), []byte(body), "10.10.102.20")
+		request.Method, request.URL.Path = method, path
 		receiver.ServeHTTP(recorder, request)
 		return recorder.Code
 	}
-	// An updater from before this release posts only these four fields; it is read all the same.
 	if code := post(http.MethodPost, "/report", `{"host":"cloud","version":"`+commit("a")+`","previous":"","at":"2026-10-10T15:59:59Z"}`); code != http.StatusNoContent {
 		t.Fatalf("answered %d", code)
 	}
@@ -80,6 +81,80 @@ func TestTheReceiverKeepsEachBoxsLatestReport(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(directory); len(entries) != 1 {
 		t.Fatalf("files kept: %v", entries)
+	}
+}
+
+// Anything on the house's network reaches the receiver, so a report counts only when its own box signed it, with
+// the report token minted for it from the token secret, and sent it from its own address, timed now and newer than
+// its last. Each other report is refused and leaves the box's kept report as it was.
+func TestTheReceiverTakesOnlyWhatABoxSignedFromItsAddress(t *testing.T) {
+	directory := t.TempDir()
+	now := time.Date(2026, 10, 10, 16, 0, 0, 0, time.UTC)
+	var log bytes.Buffer
+	receiver := &Receiver{Directory: directory, Hosts: []string{"Workshop", "Cloud"}, Secret: testSecret, Addresses: map[string][]string{"cloud": {"10.10.102.20", "fd00::20"}},
+		Resolve: func(_ context.Context, host string) ([]string, error) {
+			if host == "Workshop" {
+				return []string{"10.10.102.10"}, nil
+			}
+			return nil, errors.New("no such host")
+		},
+		Now: func() time.Time { return now }, Log: &log}
+	body := func(host, version string, at time.Time) []byte {
+		content, _ := json.Marshal(Report{Host: host, Version: version, Hooked: version, Services: []string{serveUp}, At: at.Format(time.RFC3339)})
+		return content
+	}
+	send := func(request *http.Request) int {
+		recorder := httptest.NewRecorder()
+		receiver.ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+	cloud, workshop := reportToken(t, "Cloud"), reportToken(t, "Workshop")
+	accepted := signed(cloud, body("Cloud", commit("a"), now), "10.10.102.20")
+	replay := signed(cloud, body("Cloud", commit("a"), now), "10.10.102.20")
+	if code := send(accepted); code != http.StatusNoContent {
+		t.Fatalf("Cloud's own report: %d", code)
+	}
+	if code := send(signed(workshop, body("Workshop", commit("a"), now), "10.10.102.10")); code != http.StatusNoContent {
+		t.Fatalf("Workshop's own report, from the address its name resolves to: %d", code)
+	}
+	otherSecret, _ := MintReportToken([]byte("another house's secret"), "Cloud", now.Add(time.Hour))
+	expired, _ := MintReportToken(testSecret, "Cloud", now.Add(-time.Second))
+	unsigned := httptest.NewRequest(http.MethodPost, "/report", bytes.NewReader(body("Cloud", commit("b"), now.Add(time.Second))))
+	unsigned.RemoteAddr = "10.10.102.20:41234"
+	tampered := signed(cloud, body("Cloud", commit("a"), now.Add(time.Second)), "10.10.102.20")
+	tampered.Body = io.NopCloser(bytes.NewReader(body("Cloud", commit("b"), now.Add(time.Second))))
+	wrongClaims := signed(cloud, body("Cloud", commit("b"), now.Add(time.Second)), "10.10.102.20")
+	claims, _, _ := strings.Cut(workshop, ".")
+	wrongClaims.Header.Set(ClaimsHeader, claims)
+	for name, test := range map[string]struct {
+		request *http.Request
+		code    int
+	}{
+		"unsigned":                              {unsigned, http.StatusUnauthorized},
+		"signed by another box's token":         {signed(workshop, body("Cloud", commit("b"), now.Add(time.Second)), "10.10.102.20"), http.StatusUnauthorized},
+		"signed by another secret's token":      {signed(otherSecret, body("Cloud", commit("b"), now.Add(time.Second)), "10.10.102.20"), http.StatusUnauthorized},
+		"signed by an expired token":            {signed(expired, body("Cloud", commit("b"), now.Add(time.Second)), "10.10.102.20"), http.StatusUnauthorized},
+		"changed after it was signed":           {tampered, http.StatusUnauthorized},
+		"claims another box's token":            {wrongClaims, http.StatusUnauthorized},
+		"sent from another address":             {signed(cloud, body("Cloud", commit("b"), now.Add(time.Second)), "10.66.66.66"), http.StatusForbidden},
+		"from a box whose name doesn't resolve": {signed(workshop, body("Workshop", commit("b"), now.Add(time.Second)), "10.10.102.20"), http.StatusForbidden},
+		"replayed":                              {replay, http.StatusConflict},
+		"timed long ago":                        {signed(cloud, body("Cloud", commit("b"), now.Add(-time.Hour)), "10.10.102.20"), http.StatusForbidden},
+		"timed in the future":                   {signed(cloud, body("Cloud", commit("b"), now.Add(time.Hour)), "10.10.102.20"), http.StatusForbidden},
+	} {
+		if code := send(test.request); code != test.code {
+			t.Errorf("%s: answered %d, want %d", name, code, test.code)
+		}
+	}
+	if report, err := ReadReport(directory, "Cloud"); err != nil || report.Version != commit("a") {
+		t.Fatalf("a refused report was kept: %+v, %v", report, err)
+	}
+	if !strings.Contains(log.String(), "refused a report from 10.66.66.66:41234: a report for Cloud came from 10.66.66.66") {
+		t.Fatalf("a refusal isn't named:\n%s", log.String())
+	}
+	// A newer report of its own, from its other address, is taken.
+	if code := send(signed(cloud, body("Cloud", commit("b"), now.Add(time.Second)), "fd00::20")); code != http.StatusNoContent {
+		t.Fatalf("Cloud's next report: %d", code)
 	}
 }
 
@@ -170,9 +245,11 @@ func TestStatusFlagsALaggingBox(t *testing.T) {
 
 func TestReleaseConfReadsAndRefuses(t *testing.T) {
 	defaults := DefaultConfig("/home/ahra")
-	config, err := ReadConfig("# Workshop\ncanary = Server\nboxes = Workshop, Server Home\nsoak = 20m\nrestarts = 0\nunits = loom-plan.service loom-pusher.timer\n", defaults)
+	config, err := ReadConfig("# Workshop\ncanary = Server\nboxes = Workshop, Server Home\nsoak = 20m\nrestarts = 0\nunits = loom-plan.service loom-pusher.timer\n"+
+		"listen = 10.10.102.10:7381\naddresses = Server=10.10.102.30,fd00::30 Home=10.10.102.40\n", defaults)
 	if err != nil || config.Canary != "Server" || !reflect.DeepEqual(config.Boxes, []string{"Workshop", "Server", "Home"}) || config.Soak != 20*time.Minute || config.Restarts != 0 ||
-		config.Out != "/home/ahra/loom-releases/out" || len(config.Units) != 2 {
+		config.Out != "/home/ahra/loom-releases/out" || len(config.Units) != 2 || config.Listen != "10.10.102.10:7381" ||
+		!reflect.DeepEqual(config.Addresses, map[string][]string{"server": {"10.10.102.30", "fd00::30"}, "home": {"10.10.102.40"}}) {
 		t.Fatalf("%+v, %v", config, err)
 	}
 	for name, text := range map[string]string{
@@ -187,6 +264,13 @@ func TestReleaseConfReadsAndRefuses(t *testing.T) {
 		"a line with no equals":  "canary Cloud\n",
 		"a box with a slash":     "boxes = Cloud a/b\n",
 		"a canary with a space?": "canary = Cl oud\n",
+		"listen on every port":   "listen = :7381\n",
+		"listen on every IPv4":   "listen = 0.0.0.0:7381\n",
+		"listen on every IPv6":   "listen = [::]:7381\n",
+		"listen on a name":       "listen = workshop:7381\n",
+		"listen with no port":    "listen = 10.10.102.10\n",
+		"an address not an IP":   "addresses = Cloud=cloud.lan\n",
+		"an address with no box": "addresses = 10.10.102.20\n",
 	} {
 		if config, err := ReadConfig(text, defaults); err == nil {
 			t.Errorf("%s: read %+v", name, config)

@@ -9,7 +9,8 @@
 #	base    LOOM_UPDATE_BASE     where current.txt and blobs/<sha256> are served (required)
 #	host    LOOM_UPDATE_HOST     this machine's name for the manifest's canary hosts (default: hostname -s)
 #	report  LOOM_UPDATE_REPORT   a URL this machine's state is POSTed to (optional), whenever it changes and every 5
-#	                             minutes besides: {host, version, previous, updated, hooked, held, refused, services, at}
+#	                             minutes besides: {host, version, previous, updated, hooked, held, refused, services, at},
+#	                             signed with ~/.loom/report-token (`loom release report-token <host>` on Workshop)
 #	house-cache  LOOM_UPDATE_HOUSE_CACHE  the house cache, http://<host>:<port>, asked first for every blob (optional;
 #	                                      docs/house-cache.md): current.txt is always the base's
 #	hold    LOOM_UPDATE_HOLD     "current" keeps the version installed; a version keeps (or brings) this machine on
@@ -85,6 +86,30 @@ hash() {
 		shasum -a 256 "$1" 2> /dev/null | cut -c1-64
 	fi
 }
+digest() { hash /dev/stdin; } # digest: the sha256 of stdin, in hex
+bytes() { printf "$(printf '%s' "$1" | sed 's/../\\x&/g')"; } # bytes <hex>: the bytes the hex spells
+# keyed <hex key> <byte>: each byte of a 64-byte key XORed with the byte, in hex.
+keyed() {
+	local hex=$1 out= byte
+	while [ -n "${hex}" ]; do
+		printf -v byte '%02x' $((0x${hex:0:2} ^ $2))
+		out=${out}${byte}
+		hex=${hex:2}
+	done
+	printf '%s' "${out}"
+}
+# sign <token> <file>: HMAC-SHA256 of the file keyed by the token, in hex, as Workshop's receiver checks it
+# (release.SignReport), made from the sha256 this script already needs rather than openssl: a key over 64 bytes is its
+# hash, padded with zeros to 64, and each pass hashes the key XORed with 0x36, then 0x5c, before what it signs. The
+# token never reaches a command's arguments.
+sign() {
+	local key inner
+	key=$(printf '%s' "$1" | od -An -v -tx1 | tr -d ' \n')
+	[ ${#key} -gt 128 ] && key=$(printf '%s' "$1" | digest)
+	while [ ${#key} -lt 128 ]; do key=${key}00; done
+	inner=$({ bytes "$(keyed "${key}" 0x36)"; cat "$2"; } | digest)
+	{ bytes "$(keyed "${key}" 0x5c)"; bytes "${inner}"; } | digest
+}
 # place <path> <symlink target | -> [text]: replaces <path> by renaming a new symlink, or with "-" a new file holding
 # the text, over it. mv renames a file or a symlink to a file atomically on Linux and macOS alike, so <path> is
 # never missing; only a directory there would take the new one inside it, so one is refused.
@@ -114,7 +139,7 @@ alive() {
 	kill -0 "$1" 2> /dev/null && ps -p "$1" -o command= 2> /dev/null | grep -qF "${self}"
 }
 release() {
-	rm -f "${manifest:-}" "${manifest:-}.wanted"
+	rm -f "${manifest:-}" "${manifest:-}.wanted" "${root}/report.$$" "${root}/report.$$.answer" "${root}/report.$$.answer.err"
 	[ "$(cat "${lock}/pid" 2> /dev/null)" = "$$" ] || return 0
 	rm -f "${lock}/pid" "${lock}"/pid.*
 	for directory in "${lock}"/takeover-*; do [ -d "${directory}" ] && rmdir "${directory}"; done
@@ -158,19 +183,27 @@ services() {
 # post [refusal]: reports this machine's state: the version it runs, the one before, when it last switched, the version
 # whose hooks all passed, its hold, this run's refusal if any, and its services. Sent when that differs from what the
 # report URL last accepted (kept in reported) and every 5 minutes besides, so a machine gone quiet reads as quiet; a
-# failed report is logged and sent again by the next run, and never fails the update.
+# failed or refused report is logged with the receiver's answer and sent again by the next run, and never fails the
+# update. Each is signed with report-token, whose claims go beside the signature and the token itself never: anything
+# on the house's network can reach the receiver, which takes only what this machine's own token signed.
 post() {
 	[ -n "${report}" ] || return 0
-	local state
+	local state body token code
 	state=$(printf '{"host":"%s","version":"%s","previous":"%s","updated":"%s","hooked":"%s","held":"%s","refused":"%s","services":[%s]' \
 		"${host}" "$(current version)" "$(current previous)" "$(current updated)" "$(current hooked)" "${hold}" \
 		"$(printf '%s' "${1:-}" | cut -c1-400 | quoted)" "$(services)")
 	[ "$(cat "${root}/reported" 2> /dev/null)" = "${state}" ] && [ -z "$(find "${root}/reported" -mmin +4 2> /dev/null)" ] && return 0
-	if curl -fsS -m 20 -X POST -H 'content-type: application/json' --data "${state},\"at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" "${report}" > /dev/null 2>&1; then
-		printf '%s\n' "${state}" > "${root}/reported.$$" && mv -f "${root}/reported.$$" "${root}/reported"
-	else
-		say "report of $(current version) to ${report} failed; the next run tries again"
-	fi
+	token=$(LC_ALL=C tr -d ' \t\r\n' < "${root}/report-token" 2> /dev/null)
+	case "${token}" in *[!A-Za-z0-9_.-]* | "" | *.*.* | .* | *.) say "report of $(current version) to ${report} not sent: no report token in ${root}/report-token (on Workshop: loom release report-token ${host})"; return 0 ;; esac
+	body=${root}/report.$$
+	printf '%s,"at":"%s"}' "${state}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${body}"
+	code=$(curl -sS -m 20 -o "${body}.answer" -w '%{http_code}' -X POST -H 'content-type: application/json' -H "X-Loom-Report-Claims: ${token%%.*}" \
+		-H "X-Loom-Report-Signature: $(sign "${token}" "${body}")" --data-binary @"${body}" "${report}" 2> "${body}.answer.err")
+	case "${code}" in
+	2??) printf '%s\n' "${state}" > "${root}/reported.$$" && mv -f "${root}/reported.$$" "${root}/reported" ;;
+	*) say "report of $(current version) to ${report} failed (${code:-no answer}: $(cat "${body}.answer" "${body}.answer.err" 2> /dev/null | LC_ALL=C tr -cd ' -~' | cut -c1-300)); the next run tries again" ;;
+	esac
+	rm -f "${body}" "${body}.answer" "${body}.answer.err"
 }
 reporting=1
 # A hold is logged once when it is set, changed or removed, and kept in held while it stands.

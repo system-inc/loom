@@ -31,6 +31,10 @@ const (
 	// ScopeSubmit submits a change to main and reads changes, and nothing else. Its run claim is the owner's
 	// username: the wire takes a change only when the body's owner matches it (docs/contracts.md, the API).
 	ScopeSubmit = "submit"
+	// ScopeReport signs a house box's update reports to Workshop's release watcher (docs/releases.md), its run claim
+	// report-<host>. It is the house's own: the wire knows no such scope and refuses it everywhere, and the box never
+	// sends it whole, only its claims beside an HMAC of each report keyed by the whole token.
+	ScopeReport = "report"
 )
 
 // BoardRun is the run a board token names.
@@ -65,7 +69,7 @@ func MintToken(secret []byte, claims TokenClaims) (string, error) {
 }
 
 func knownScope(scope string) bool {
-	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool || scope == ScopePublish || scope == ScopePublishCandidate || scope == ScopeSubmit
+	return scope == ScopeRunner || scope == ScopeViewer || scope == ScopeCoordinator || scope == ScopeBoard || scope == ScopePool || scope == ScopePublish || scope == ScopePublishCandidate || scope == ScopeSubmit || scope == ScopeReport
 }
 
 // ReadTokenSecret reads the HMAC key from a file such as ~/.loom/token-secret. The key is the file's text
