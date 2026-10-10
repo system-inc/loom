@@ -100,12 +100,13 @@ func (run *unitRun) runTest(runContext context.Context) string {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
 	}
-	// Only a strict runner's instance runs one unit at a time, so only there are earlier units' leavings no one's.
+	// Only a strict runner runs one unit at a time on its root, so only there are earlier units' leavings no one's; only
+	// an exclusive one's machine is its alone, HOME included.
 	trim := "keep"
 	if run.options.Strict {
 		trim = "trim"
 	}
-	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim, root}, run.environment(), run.workspace, time.Until(deadline))
+	prepared, _, _, err := run.stream(runContext, []string{"bash", script, tree, job.Sha, job.Base, job.GateInputs, environmentFile, trim, root, owner(run.options)}, run.environment(), run.workspace, time.Until(deadline))
 	switch {
 	case err != nil:
 		run.fail(protocol.PhaseStart, err)
@@ -152,11 +153,19 @@ func (run *unitRun) runTest(runContext context.Context) string {
 
 // testRoot is where a test job keeps what outlives a unit: Root, or /tmp for a strict runner, whose instance is its
 // alone, or loom-test-root under the workspace parent.
+// owner is prepare.sh's word for whose machine this is: exclusive when it is the runner's alone, shared otherwise.
+func owner(options Options) string {
+	if options.Exclusive {
+		return "exclusive"
+	}
+	return "shared"
+}
+
 func (options Options) testRoot() string {
 	switch {
 	case options.Root != "":
 		return options.Root
-	case options.Strict:
+	case options.Exclusive:
 		return "/tmp"
 	default:
 		return filepath.Join(options.WorkspaceParent, "loom-test-root")

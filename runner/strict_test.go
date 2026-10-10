@@ -62,6 +62,7 @@ printf '{"Action":"pass","Package":"%s","Test":"TestA"}\n' "${!#}"
 touch "` + fixture.directory + `/prepared"
 echo "$6" > "` + fixture.directory + `/trim"
 echo "$7" > "` + fixture.directory + `/root"
+echo "$8" > "` + fixture.directory + `/owner"
 env > "` + fixture.directory + `/prepare-environment"
 [ ` + strconv.Itoa(prepareExit) + ` = 0 ] || exit ` + strconv.Itoa(prepareExit) + `
 mkdir -p "$1"
@@ -305,8 +306,8 @@ func TestPrepareNamesNoHostPath(t *testing.T) {
 	}
 }
 
-// prepare.sh with trim clears its root and its HOME, and nothing else: a canary in the host's /tmp named like each
-// thing it trims survives. The run ends at the refusal (a commit GitHub doesn't hold, or GitHub unreachable), after
+// prepare.sh with trim on an exclusive machine clears its root and its HOME, and nothing else: a canary in the host's
+// /tmp named like each thing it trims survives. The run ends at the refusal (a commit GitHub doesn't hold, or GitHub unreachable), after
 // the trims.
 func TestPrepareTouchesNothingOutsideItsRoot(t *testing.T) {
 	directory := t.TempDir()
@@ -330,7 +331,7 @@ func TestPrepareTouchesNothingOutsideItsRoot(t *testing.T) {
 	exec.Command("git", "init", "-q", tree).Run()
 	script := filepath.Join(directory, "prepare.sh")
 	os.WriteFile(script, prepareScript, 0o700)
-	command := exec.Command("bash", script, tree, strings.Repeat("e", 40), "", "", filepath.Join(directory, "environment"), "trim", root)
+	command := exec.Command("bash", script, tree, strings.Repeat("e", 40), "", "", filepath.Join(directory, "environment"), "trim", root, "exclusive")
 	command.Env = append(os.Environ(), "LOOM_PREPARE_ATTEMPTS=1", "HOME="+home)
 	output, _ := command.CombinedOutput()
 	if command.ProcessState.ExitCode() != 3 {
@@ -348,13 +349,29 @@ func TestPrepareTouchesNothingOutsideItsRoot(t *testing.T) {
 	}
 }
 
-func TestAStrictRunnersRootIsTmpAndOthersKeepTheirOwn(t *testing.T) {
+// Only an exclusive runner's machine is its alone, so only its root defaults to /tmp and only its preparation is told
+// so; a strict runner that shares its machine keeps a root of its own and prepares as shared.
+func TestAnExclusiveRunnersRootIsTmpAndOthersKeepTheirOwn(t *testing.T) {
 	fixture := newStrictFixture(t, 0)
 	options := fixture.options(t)
-	options.Root = ""
+	options.Root, options.Exclusive = "", true
 	runUnit(t, testJobUnit(goodTestJob()), options)
 	if root, _ := os.ReadFile(filepath.Join(fixture.directory, "root")); string(root) != "/tmp\n" {
-		t.Errorf("a strict runner's root is %q", root)
+		t.Errorf("an exclusive runner's root is %q", root)
+	}
+	if owner, _ := os.ReadFile(filepath.Join(fixture.directory, "owner")); string(owner) != "exclusive\n" {
+		t.Errorf("an exclusive runner prepared as %q", owner)
+	}
+	options.Exclusive = false
+	runUnit(t, testJobUnit(goodTestJob()), options)
+	if root, _ := os.ReadFile(filepath.Join(fixture.directory, "root")); string(root) != filepath.Join(options.WorkspaceParent, "loom-test-root")+"\n" {
+		t.Errorf("a shared strict runner's root is %q", root)
+	}
+	if owner, _ := os.ReadFile(filepath.Join(fixture.directory, "owner")); string(owner) != "shared\n" {
+		t.Errorf("a shared strict runner prepared as %q", owner)
+	}
+	if trim, _ := os.ReadFile(filepath.Join(fixture.directory, "trim")); string(trim) != "trim\n" {
+		t.Errorf("a shared strict runner prepared with %q, not trim: its root is still its own", trim)
 	}
 	options.Strict = false
 	runUnit(t, testJobUnit(goodTestJob()), options)

@@ -314,7 +314,7 @@ func TestAStrictServeTrimsItsFullRootOnceAndAsksAgain(t *testing.T) {
 			}
 			return 50000, nil
 		}
-		options.trim = func(_ context.Context, root string, _ io.Writer) error {
+		options.trim = func(_ context.Context, root string, _ bool, _ io.Writer) error {
 			mutex.Lock()
 			defer mutex.Unlock()
 			trims++
@@ -334,29 +334,41 @@ func TestAStrictServeTrimsItsFullRootOnceAndAsksAgain(t *testing.T) {
 	}
 }
 
-// The real trim, on a root and a HOME of the test's own: what earlier units left goes, and the rest stays.
+// The real trim, on a root and a HOME of the test's own: what earlier units left goes, and the rest stays. Only an
+// exclusive runner's trim reaches HOME: a shared machine's adamic runtime builds are other work's, in flight.
 func TestTheTrimClearsEarlierUnitsLeavingsOnItsRoot(t *testing.T) {
+	for _, exclusive := range []bool{true, false} {
+		testTheTrim(t, exclusive)
+	}
+}
+
+func testTheTrim(t *testing.T, exclusive bool) {
 	root, home := t.TempDir(), t.TempDir()
 	t.Setenv("HOME", home)
-	left := []string{filepath.Join(root, "go-build123", "x"), filepath.Join(root, "adamic-stage3-lane-1", "x"), filepath.Join(root, "adamic-gate", "old", "x"),
-		filepath.Join(home, ".cache", "adamic", "runtime", ".build-1", "x")}
+	left := []string{filepath.Join(root, "go-build123", "x"), filepath.Join(root, "adamic-stage3-lane-1", "x"), filepath.Join(root, "adamic-gate", "old", "x")}
 	kept := []string{filepath.Join(root, "adamic", "x"), filepath.Join(root, "adamic-gate", "markdown-width-1", "x"), filepath.Join(root, "adamic-tools", "x")}
+	inflight := filepath.Join(home, ".cache", "adamic", "runtime", ".build-otherjob", "inflight.o")
+	if exclusive {
+		left = append(left, inflight)
+	} else {
+		kept = append(kept, inflight)
+	}
 	for _, path := range append(append([]string{}, left...), kept...) {
 		os.MkdirAll(filepath.Dir(path), 0o755)
 		os.WriteFile(path, []byte("x"), 0o644)
 	}
 	var report bytes.Buffer
-	if err := trimRoot(context.Background(), root, &report); err != nil || !strings.Contains(report.String(), "trimmed "+root) {
-		t.Fatalf("%v: %s", err, report.String())
+	if err := trimRoot(context.Background(), root, exclusive, &report); err != nil || !strings.Contains(report.String(), "trimmed "+root) {
+		t.Fatalf("exclusive %v: %v: %s", exclusive, err, report.String())
 	}
 	for _, path := range left {
 		if _, err := os.Stat(path); err == nil {
-			t.Errorf("left %s", path)
+			t.Errorf("exclusive %v: left %s", exclusive, path)
 		}
 	}
 	for _, path := range kept {
 		if _, err := os.Stat(path); err != nil {
-			t.Errorf("trimmed %s, which isn't a leaving", path)
+			t.Errorf("exclusive %v: trimmed %s, which isn't a leaving", exclusive, path)
 		}
 	}
 }

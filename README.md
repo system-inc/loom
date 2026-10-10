@@ -12,9 +12,11 @@ Tests, from a clean clone: `go test ./...`, then in `wire/` `pnpm install --froz
 
 ## What a strict worker does
 
-A Codex instance serves its pool with `loom-runner serve --strict`. This is everything it does, in order, as
-`runner/strict.go` and `runner/prepare.sh` do it. A box worker (no `--strict`) runs a unit's argv as `docs/protocol.md`
-says, and a test job the same way as below except the disk trims.
+A Codex instance serves its pool with `loom-runner serve --strict --exclusive`. This is everything it does, in order, as
+`runner/strict.go` and `runner/prepare.sh` do it. A house box serves `--strict` without `--exclusive`
+(docs/serving.md): its machine is shared with other work, so it clears only its own root and runs no setup in HOME. A
+runner without `--strict` runs a unit's argv as `docs/protocol.md` says, and a test job the same way as below except the
+disk trims.
 
 **What it holds.** The pool token, which asks its pool for the next unit and reaches nothing else, and for each unit
 that unit's run token, which posts that unit's events and log and reads and writes blobs through that run's own
@@ -37,11 +39,11 @@ job's values reach it only as positional arguments, quoted at every use, and not
 text. It:
 1. runs git with no system or global configuration, no prompt, no password helper, no credential helper and no hooks,
    and fetches submodules recorded over ssh from `https://github.com/` instead;
-2. keeps what outlives a unit under its root, `/tmp` for a strict runner (`--root`), and touches nothing outside that
-   root, the checkout and HOME; it first removes what earlier units left there and in HOME's caches (go's and the
-   tests' temporary directories, stage 3 lane trees, half-made npm trees, the runtime's build directories, and go's
-   build cache when under 3 GB is free), since an instance runs one unit at a time; under 1.5 GB free it stops, the
-   instance's fault;
+2. keeps what outlives a unit under its root, `/tmp` for an exclusive runner (`--root`), and touches nothing outside
+   that root, the checkout and HOME; it first removes what earlier units left there (go's and the tests' temporary
+   directories, stage 3 lane trees, half-made npm trees), since it runs one unit at a time, and, only with
+   `--exclusive`, HOME's caches (the runtime's build directories, and go's build cache when under 3 GB is free); under
+   1.5 GB free it stops, the instance's fault;
 3. keeps the checkout at `<root>/adamic` (`--tree`) across units, but makes it again from the public repository when its
    own configuration names a URL rewrite, a credential or HTTP setting, an askpass, an ssh command, a hook path or an
    include;
@@ -50,8 +52,9 @@ text. It:
    anything it can't fetch is refused, and nothing further runs;
 5. checks out the sha, and refuses a sha that doesn't descend from its base;
 6. refuses a submodule whose URL isn't on GitHub, then updates the submodules over HTTPS with no credentials;
-7. runs adamic's own `cloud/setup.sh --wasi-sdk` at that commit, once per instance, which installs adamic's toolchain
-   from the sources that script names, and loads its `env.sh`;
+7. with `--exclusive`, runs adamic's own `cloud/setup.sh --wasi-sdk` at that commit, once per instance, which installs
+   adamic's toolchain into HOME from the sources that script names; without it, uses the machine's own toolchain, and
+   a machine with none is unfit for the unit; then loads its `env.sh`;
 8. runs `npm ci --ignore-scripts` for `stage3/api` from https://registry.npmjs.org, once per lockfile;
 9. fetches the gate inputs named by the job's hash from Loom's public store (https://artifacts.loom.system.inc),
    checking every chunk and the total by sha256;

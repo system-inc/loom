@@ -65,8 +65,8 @@ type neededBlob struct {
 // store couldn't give what the unit reads whole, or a test that failed had tried to run go.
 func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJob, root string, started, deadline time.Time) string {
 	if run.options.Strict {
-		// The instance is the runner's alone, so what earlier units left on its root is no one's.
-		if err := trimRoot(runContext, root, io.Discard); err != nil {
+		// A strict runner runs one unit at a time on its root, so what earlier units left there is no one's.
+		if err := trimRoot(runContext, root, run.options.Exclusive, io.Discard); err != nil {
 			run.say(fmt.Sprintf("trimming %s: %v", root, err))
 		}
 	}

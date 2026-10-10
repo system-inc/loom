@@ -48,15 +48,20 @@ type Options struct {
 	// WireDrainTimeout bounds how long the end of a unit waits for the wire to take its events. Zero means 30 s.
 	WireDrainTimeout time.Duration
 	// Strict runs only structured test jobs (strict.go): a unit with argv, or anything a test job doesn't take, is
-	// refused before anything runs. The Codex pool's runners serve this way.
+	// refused before anything runs, and a test job's root is cleared of earlier units' leavings, one unit at a time.
+	// The Codex pool's runners and the house boxes' serve this way.
 	Strict bool
+	// Exclusive says the machine is the runner's alone (a Codex instance): only then does a test job's preparation clear
+	// HOME's adamic runtime builds and Go's build cache, and run adamic's cloud/setup.sh, which installs into HOME. A
+	// house box shares its machine with other work (the tree builder, Kirk's), so its serve never passes it.
+	Exclusive bool
 	// PhaseJobs lets the runner take a phase job (a box fast gate phase through run.py). Only our box services pass
 	// --phase-jobs: a Codex instance consented to a runner that runs only a go test of public adamic and refuses
 	// everything else, and its prompt never passes the flag, so that promise stays true (Loom, Oct 10 02:09Z).
 	PhaseJobs bool
 	// Root is where a test job keeps what outlives a unit (its npm trees, gate inputs and setup marker) and where its
-	// preparation clears earlier units' leavings. Empty means /tmp for a strict runner, whose instance is the runner's
-	// alone, and loom-test-root under WorkspaceParent otherwise.
+	// preparation clears earlier units' leavings. Empty means /tmp for an exclusive runner, whose instance is the
+	// runner's alone, and loom-test-root under WorkspaceParent otherwise.
 	Root string
 	// Tree is where a test job's checkout is kept across units. Empty means adamic under Root.
 	Tree string

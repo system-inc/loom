@@ -4,18 +4,20 @@
 # environment the tests run in. Every value it takes is a positional argument the runner checked first (CheckTestJob),
 # quoted at every use; nothing of the job is ever part of this text.
 #
-#	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep> <root>
+#	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep> <root> <exclusive | shared>
 #	prepare.sh environment <tree> <gate inputs sha256 or ""> <environment file> <root>
-#	prepare.sh trim-only <root>
+#	prepare.sh trim-only <root> <exclusive | shared>
 #
 # environment readies only what a prebuilt test job's binaries run with (prebuilt.go), over <tree>, the tree's source
 # the runner already unpacked from the action store: the instance's adamic toolchain (env.sh, which must exist: exit 2
 # without it), stage3/api's npm packages and the gate inputs. No checkout, no setup, and nothing of Go.
 #
 # <root> holds everything it keeps between units beside the tree (the npm trees, the gate inputs, the setup marker) and
-# is where it looks for what earlier units left: /tmp only for a strict runner, whose instance is the runner's alone.
-# It touches nothing outside <root>, <tree> and HOME, which adamic's setup and Go's caches use. trim (a strict runner's:
-# one unit at a time) first removes what earlier units left there; keep removes nothing.
+# is where it looks for what earlier units left. trim (a strict runner's: one unit at a time) first removes what
+# earlier units left there; keep removes nothing. exclusive says the machine is the runner's alone (a Codex instance,
+# --exclusive): only then does it clear HOME's adamic runtime builds and Go's build cache too, and run adamic's own
+# cloud/setup.sh, which installs into HOME. shared (a house box, which other work shares) touches nothing of HOME but
+# what go test itself writes, and a checkout on a machine without adamic's toolchain is unfit there, exit 2, named.
 #
 # Exit 0: the tree is at <sha> and <environment file> holds the environment, NUL separated. Exit 3: the job is refused
 # (the sha or base can't be fetched from the public repository, a submodule isn't public on GitHub); nothing ran. Exit 2:
@@ -25,16 +27,20 @@
 # (serve.go, #zzmz489), then looks again.
 set -uo pipefail
 say() { echo "loom-runner prepare: $*"; }
-# Disk: on an instance that runs one unit at a time, what earlier units left in /tmp and the caches is no one's.
+# Disk: on an instance that runs one unit at a time, what earlier units left on its root is no one's, and on a machine
+# that is the runner's alone (exclusive), what they left in HOME's caches too. A shared machine's HOME is other work's.
 freeMegabytes() { df -Pm "${HOME}" "${root}" | awk 'NR > 1 {print $4}' | sort -n | head -1; }
 trimLeftovers() {
-	rm -rf "${HOME}/.cache/adamic/runtime"/.build-* "${root}"/go-build* "${root}"/Test* "${root}"/adamic-npm/replaced-* "${root}"/adamic-npm/*.staging-* 2> /dev/null
+	rm -rf "${root}"/go-build* "${root}"/Test* "${root}"/adamic-npm/replaced-* "${root}"/adamic-npm/*.staging-* 2> /dev/null
 	find "${root}/adamic-gate" -mindepth 1 -maxdepth 1 ! -name 'markdown-width-*' -exec rm -rf {} + 2> /dev/null
 	rm -rf "${root}"/adamic-stage3-lane-* 2> /dev/null
-	[ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
+	if [ "${owner}" = exclusive ]; then
+		rm -rf "${HOME}/.cache/adamic/runtime"/.build-* 2> /dev/null
+		[ "$(freeMegabytes)" -ge 3000 ] || rm -rf "${HOME}/.cache/go-build"
+	fi
 }
 if [ "${1:-}" = trim-only ]; then
-	root=${2:-}
+	root=${2:-} owner=${3:-shared}
 	case ${root} in /*) ;; *) say "the root must be an absolute path"; exit 2 ;; esac
 	[ -d "${root}" ] || exit 0
 	trimLeftovers
@@ -43,9 +49,9 @@ if [ "${1:-}" = trim-only ]; then
 fi
 mode=checkout
 if [ "${1:-}" = environment ]; then
-	mode=environment tree=${2:-} sha= base= gateInputs=${3:-} environmentFile=${4:-} trim=keep root=${5:-}
+	mode=environment tree=${2:-} sha= base= gateInputs=${3:-} environmentFile=${4:-} trim=keep root=${5:-} owner=shared
 else
-	tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6 root=$7
+	tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6 root=$7 owner=${8:-shared}
 fi
 case ${root} in /*) ;; *) echo "loom-runner prepare: the root must be an absolute path"; exit 2 ;; esac
 mkdir -p "${root}"
@@ -119,8 +125,14 @@ if [ "${mode}" = checkout ]; then
 		retry git -C "${tree}" submodule update -q --init --recursive || { say "the submodules of ${sha} can't be fetched"; exit 2; }
 	fi
 
-	# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance.
-	if [ ! -f "${root}/adamic-setup-done" ]; then
+	# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance, and only on a machine that is the
+	# runner's alone, since it installs into HOME. A shared machine's own toolchain serves, or the unit is unfit there.
+	if [ "${owner}" != exclusive ]; then
+		[ -f "${HOME}/adamic-tools/env.sh" ] || [ -f "${HOME}/.adamic-tools/env.sh" ] || {
+			say "unfit: this machine isn't the runner's alone, so it runs no cloud/setup.sh in its shared HOME, and it has no adamic toolchain (adamic-tools/env.sh)"
+			exit 2
+		}
+	elif [ ! -f "${root}/adamic-setup-done" ]; then
 		(cd "${tree}" && bash cloud/setup.sh --wasi-sdk > "${root}/adamic-setup.log" 2>&1) && touch "${root}/adamic-setup-done" || { say "cloud/setup.sh failed"; tail -20 "${root}/adamic-setup.log"; exit 2; }
 	fi
 fi

@@ -121,7 +121,7 @@ func TestTheServePromptRunsARelease(t *testing.T) {
 
 func TestAStrictServePromptServesStrictAndRunsNoBeforeScript(t *testing.T) {
 	prompt := servePrompt("https://wire", "codex-strict", "secret.token", strings.Repeat("a", 64), "55m", "", true)
-	if !strings.Contains(prompt, "serve --strict --pool https://wire/pools/codex-strict --token-file /tmp/loom-pool-token") {
+	if !strings.Contains(prompt, "serve --strict --exclusive --pool https://wire/pools/codex-strict --token-file /tmp/loom-pool-token") {
 		t.Fatalf("the strict prompt doesn't serve with --strict:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "loom-before") {

@@ -372,7 +372,8 @@ const releaseBlobs = "https://artifacts.loom.system.inc/releases/blobs/"
 func servePrompt(wire string, pool string, token string, runnerHash string, until string, before string, strict bool) string {
 	strictFlag := ""
 	if strict {
-		strictFlag = " --strict"
+		// A Codex instance is the runner's alone, so its preparation may clear HOME's caches and run adamic's setup there.
+		strictFlag = " --strict --exclusive"
 	}
 	readying, explained := "", ""
 	if before != "" {

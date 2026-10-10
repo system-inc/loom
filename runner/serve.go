@@ -52,8 +52,9 @@ type ServeOptions struct {
 	Drain <-chan struct{}
 	// freeMegabytes reads a path's free room; nil means the file system's. Tests plant a full disk through it.
 	freeMegabytes func(path string) (int64, error)
-	// trim clears what earlier units left on a strict runner's root (prepare.sh trim-only); nil means that script.
-	trim func(trimContext context.Context, root string, report io.Writer) error
+	// trim clears what earlier units left on a strict runner's root, and an exclusive one's HOME (prepare.sh trim-only);
+	// nil means that script.
+	trim func(trimContext context.Context, root string, exclusive bool, report io.Writer) error
 }
 
 // A ServeSummary is how a serving runner ended: how many units it ran and how each finished, how long it
@@ -115,7 +116,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	disks := []string{unitOptions.WorkspaceParent}
 	root := unitOptions.Root
 	if root == "" && unitOptions.Strict {
-		root = "/tmp"
+		root = unitOptions.testRoot()
 	}
 	if root != "" {
 		disks = append(disks, root)
@@ -155,13 +156,13 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			fmt.Fprintf(options.Report, "loom-runner serve: readying the blob cache: %v\n", err)
 		}
 		unfit := unfitDisk(options, disks)
-		// A strict runner's instance is its alone, so what earlier units left on its root is no one's: the first time
-		// it finds no room it clears that once, as every unit's preparation does, and looks again. A box worker shares
-		// its machine, so it only stands down.
+		// A strict runner runs one unit at a time on its root, so what earlier units left there is no one's (and an
+		// exclusive one's HOME caches too): the first time it finds no room it clears that once, as every unit's
+		// preparation does, and looks again. A runner that isn't strict only stands down.
 		if unfit != "" && summary.Unfit == "" && unitOptions.Strict {
 			fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; trimming earlier units' leavings on %s\n", unfit, root)
 			trimContext, cancel := context.WithTimeout(serveContext, 5*time.Minute)
-			if err := options.trim(trimContext, root, options.Report); err != nil {
+			if err := options.trim(trimContext, root, unitOptions.Exclusive, options.Report); err != nil {
 				fmt.Fprintf(options.Report, "loom-runner serve: trimming %s: %v\n", root, err)
 			}
 			cancel()
@@ -255,9 +256,10 @@ func ReadTokenFile(path string) (string, error) {
 	return token, nil
 }
 
-// trimRoot runs prepare.sh trim-only on the root, the script read from stdin, so a full disk needn't hold a copy.
-func trimRoot(trimContext context.Context, root string, report io.Writer) error {
-	command := exec.CommandContext(trimContext, "bash", "-s", "--", "trim-only", root)
+// trimRoot runs prepare.sh trim-only on the root, the script read from stdin, so a full disk needn't hold a copy. Only
+// an exclusive runner's trim reaches HOME's caches.
+func trimRoot(trimContext context.Context, root string, exclusive bool, report io.Writer) error {
+	command := exec.CommandContext(trimContext, "bash", "-s", "--", "trim-only", root, owner(Options{Exclusive: exclusive}))
 	command.Stdin = bytes.NewReader(prepareScript)
 	command.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
 	command.Stdout, command.Stderr = report, report
