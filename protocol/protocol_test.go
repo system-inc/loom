@@ -472,6 +472,9 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 	add("tests[shard=0]", Event{Type: "finished", Status: StatusFailed})
 	add("cached", Event{Type: "cached", Key: strings.Repeat("c", 64), FromRun: "r-earlier", EventLog: strings.Repeat("d", 64)})
 	add("cached", Event{Type: "finished", Status: StatusPassed})
+	add("unfit", Event{Type: "started", Machine: "box", RunnerVersion: "v0-dev"})
+	add("unfit", Event{Type: "error", Phase: PhaseStart, Message: "the unit requires wasiSdk, which this machine lacks"})
+	add("unfit", Event{Type: "finished", Status: StatusBroken, MissingTools: []string{"wasiSdk"}})
 
 	var written strings.Builder
 	for _, event := range fixture {
@@ -495,7 +498,15 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 	if string(held) != written.String() {
 		t.Fatalf("%s no longer matches what Go writes; rerun with LOOM_WRITE_FIXTURES=1 if the change is meant:\n%s", path, written.String())
 	}
-	if verdict := Decide("r-fixture", []string{"a", "tests[shard=0]", "cached"}, fixture); verdict.Status != "red" || verdict.Failed[0] != "tests[shard=0]" || verdict.Cached[0] != "cached" {
+	// unfit is in the file for the wire's schema (a finished with missingTools); a broken unit voids a run, so the
+	// verdict is read without it.
+	decided := []Event{}
+	for _, event := range fixture {
+		if event.Unit != "unfit" {
+			decided = append(decided, event)
+		}
+	}
+	if verdict := Decide("r-fixture", []string{"a", "tests[shard=0]", "cached"}, decided); verdict.Status != "red" || verdict.Failed[0] != "tests[shard=0]" || verdict.Cached[0] != "cached" {
 		t.Fatalf("the fixture decides %+v", verdict)
 	}
 }
