@@ -266,7 +266,8 @@ func ownerBridge(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("owner-bridge", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	once := flags.Bool("once", false, "send what is owed once, then exit")
-	interval := flags.Duration("interval", 5*time.Second, "how often to read the feed")
+	// Each pass reads the log after the last owner event sent, so it is read at the pace an owner would notice.
+	interval := flags.Duration("interval", 30*time.Second, "how often to read the feed")
 	pipeline := flags.String("pipeline", "https://loom-pipeline.kirk-ouimet.workers.dev", "loom-pipeline's origin")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
 		fmt.Fprint(stderr, usage)
