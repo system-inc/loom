@@ -103,7 +103,7 @@ describe('the board of changes', function () {
         // The page puts it at the end of the track, green, named for what it is, and never in the line on its way.
         const html = await (await call('/board')).text();
         expect(html).toContain('landed: 6, witnessed: 6 }[line.state]');
-        expect(html).toContain("line.state === 'witnessed') { name = 'Witnessed';");
+        expect(html).toContain("line.state === 'witnessed') { name = 'Verified';");
         expect(html).toContain("line.state === 'witnessed') { verdict = ['Green', 'green',");
         expect(html).toContain("var onTheWay = ['queued', 'building', 'testing', 'parked'];");
     });

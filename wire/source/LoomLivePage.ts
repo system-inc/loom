@@ -183,7 +183,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 <main>
 <header>
     <div class="brand">${loomMark(24)}Loom</div>
-    <span class="mono headline" id="headline">change <b>&ndash;</b></span>
+    <span class="mono headline" id="headline">branch <b>&ndash;</b></span>
     <span class="connection" id="connection" data-state="connecting">connecting</span>
     <div class="controls">
         <span class="label">sound</span>
@@ -195,19 +195,19 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     <article class="panel">
         <span class="label">Builds tested, last hour</span>
         <div class="figure"><b class="mono big" id="tested">&ndash;</b><div class="spark" id="spark" role="img" aria-label="Builds tested in each five minutes of the last hour"></div></div>
-        <span class="source" id="tested-source">a future's whole verdict, green or red; a void tested nothing and isn't counted</span>
+        <span class="source" id="tested-source">a candidate's whole verdict, green or red; a void tested nothing and isn't counted</span>
     </article>
     <article class="panel">
         <span class="label">Main's reds</span>
         <div class="figure"><b class="mono big" id="main-red">&ndash;</b><span class="mono trend" id="main-trend"></span></div>
-        <span class="source" id="main-source">units red on the last witness of main's tip</span>
+        <span class="source" id="main-source">units red on the last verify of main's tip</span>
     </article>
 </section>
-<section class="track" id="track" aria-label="Where the change is"></section>
+<section class="track" id="track" aria-label="Where the branch is"></section>
 <section class="cols">
     <article class="panel" id="panel-posted">
         <span class="label">The line</span>
-        <span class="note">each change on its way, in submit order, then the last day's finished</span>
+        <span class="note">each branch on its way, in submit order, then the last day's finished</span>
         <div class="list" id="posted"></div>
     </article>
     <div class="middle">
@@ -222,8 +222,8 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
                     </svg>
                     <div class="words">
                         <b class="title">No block forming</b>
-                        <span class="closes">closes on the first of: a free slot, a full budget, the oldest change waiting 2 min</span>
-                        <span class="mono reason">each change is its own future until Queue logs block.opened</span>
+                        <span class="closes">closes on the first of: a free slot, a full budget, the oldest branch waiting 2 min</span>
+                        <span class="mono reason">each branch is its own candidate until Queue logs block.opened</span>
                     </div>
                 </div>
             </article>
@@ -260,7 +260,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         <div class="foot">
             <span class="label">Submit to main</span>
             <span class="mono clock" id="clock">&ndash;</span>
-            <span class="note" id="clock-note">the change in view, from its arrival to its landing</span>
+            <span class="note" id="clock-note">the branch in view, from its arrival to its landing</span>
         </div>
     </article>
 </section>
@@ -367,7 +367,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             var name = stage[0];
             var sub = stage[1];
             if (index === 5 && line && line.state === 'red') { name = 'Red'; sub = 'to its owner, with a repro'; }
-            if (index === 5 && line && line.state === 'witnessed') { name = 'Witnessed'; sub = 'main itself, green; a witness never lands'; }
+            if (index === 5 && line && line.state === 'witnessed') { name = 'Verified'; sub = 'main itself, green; a verify never lands'; }
             if (index === 0 && line && line.state === 'parked') { sub = 'parked, waits to restack'; }
             if (index === 0 && line && line.state === 'refused') { sub = 'refused at the door'; }
             head.appendChild(icon(index === 5 && line && line.state === 'red' ? 'XCircle' : index === 5 && line && line.state === 'witnessed' ? 'CheckCircle' : stepIcons[index]));
@@ -393,15 +393,15 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     function renderHeadline(line) {
         var headline = document.getElementById('headline');
         headline.replaceChildren();
-        headline.appendChild(document.createTextNode('change '));
+        headline.appendChild(document.createTextNode('branch '));
         headline.appendChild(element('b', null, line ? line.sha.slice(0, 12) : '\\u2013'));
         if (line) { headline.appendChild(document.createTextNode(' \\u00B7 ' + line.owner)); }
     }
 
-    // What a change is doing, in the log's own terms: waiting for its future, waiting for its plan, judged unit by unit,
-    // a void attempt running again, or how it finished.
+    // What a branch is doing, in the log's own terms: waiting for its candidate (its future), waiting for its plan, judged
+    // unit by unit, a void run going again, or how it finished.
     function lineWord(change) {
-        if (change.state === 'queued') { return change.future ? 'waiting for its plan' : 'in line for its future'; }
+        if (change.state === 'queued') { return change.future ? 'waiting for its plan' : 'in line for its candidate'; }
         if (change.state === 'building') { return 'building its tree'; }
         if (change.state === 'testing') {
             if (voided(change)) { return 'void, running again'; }
@@ -409,7 +409,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             return 'judged ' + finishedUnits(change.units) + ' of ' + change.units.planned;
         }
         if (change.state === 'red') { return 'red, ' + change.units.failed + ' of ' + change.units.planned + ' failed'; }
-        return { parked: 'parked', landed: 'landed', witnessed: 'witnessed, main green', refused: 'refused' }[change.state] || change.state;
+        return { parked: 'parked', landed: 'landed', witnessed: 'verified, main green', refused: 'refused' }[change.state] || change.state;
     }
 
     function lineCard(change, place) {
@@ -478,7 +478,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             counts.appendChild(document.createTextNode(' ' + part[2] + ' \\u00B7 '));
         });
         counts.appendChild(document.createTextNode(waiting + ' waiting'));
-        document.getElementById('planned').textContent = line ? units.planned + ' units, the plan for ' + line.sha.slice(0, 12) : 'no change in view';
+        document.getElementById('planned').textContent = line ? units.planned + ' units, the plan for ' + line.sha.slice(0, 12) : 'no branch in view';
         var tiles = document.getElementById('tiles');
         tiles.replaceChildren();
         var shown = Math.min(units.planned, 1024);
@@ -490,7 +490,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             if (state) { tile.dataset.state = state; }
             tiles.appendChild(tile);
         }
-        if (shown === 0) { tiles.appendChild(element('span', 'empty', line ? 'No units planned yet.' : 'Waiting for the first change.')); }
+        if (shown === 0) { tiles.appendChild(element('span', 'empty', line ? 'No units planned yet.' : 'Waiting for the first branch.')); }
     }
 
     function renderVerdict(line) {
@@ -498,10 +498,10 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         var why = document.getElementById('verdict-why');
         var verdict = ['deciding', '', 'waits for every planned unit; a missing one is void, never green'];
         if (line && line.state === 'landed') { verdict = ['Green', 'green', 'every planned unit passed, and the units equal the plan']; }
-        else if (line && line.state === 'witnessed') { verdict = ['Green', 'green', 'a witness of main: every planned unit passed on main itself, uncached, and nothing lands']; }
+        else if (line && line.state === 'witnessed') { verdict = ['Green', 'green', 'a verify of main: every planned unit passed on main itself, uncached, and nothing lands']; }
         else if (line && line.state === 'red') { verdict = ['Red', 'red', line.units.failed + ' of ' + line.units.planned + ' units failed; its owner has the failing test and a repro']; }
-        else if (line && line.state === 'parked') { verdict = ['Parked', 'held', 'held behind a change it stacks on; it restacks by itself']; }
-        else if (line && voided(line)) { verdict = ['Void', 'held', line.units.void + ' of ' + line.units.planned + ' units never finished, so nothing is decided; the next attempt runs them again']; }
+        else if (line && line.state === 'parked') { verdict = ['Parked', 'held', 'held behind a branch it stacks on; it restacks by itself']; }
+        else if (line && voided(line)) { verdict = ['Void', 'held', line.units.void + ' of ' + line.units.planned + ' units never finished, so nothing is decided; the next run tests them again']; }
         else if (line && line.state === 'refused') { verdict = ['Refused', 'red', 'the queue refused it at the door']; }
         word.textContent = verdict[0];
         if (verdict[1]) { word.dataset.state = verdict[1]; } else { delete word.dataset.state; }
@@ -593,7 +593,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         mark.innerHTML = ${JSON.stringify(loomMark(64, celebrationGold, celebrationGold))};
         card.appendChild(mark);
         card.appendChild(element('b', 'word', 'Landed'));
-        card.appendChild(element('span', 'who', test ? 'A test landing: this is what main moving looks like' : line.owner + '\\u2019s change is on main'));
+        card.appendChild(element('span', 'who', test ? 'A test landing: this is what main moving looks like' : line.owner + '\\u2019s branch is on main'));
         if (!test) {
             var what = element('span', 'mono what');
             what.appendChild(element('b', null, line.sha.slice(0, 12)));
@@ -769,7 +769,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         if (reading.mainRed === null) {
             red.textContent = '\\u2013';
             delete red.dataset.state;
-            sourceLine('main-source', 'no witness of main\\u2019s tip decided yet', reading.readAt);
+            sourceLine('main-source', 'no verify of main\\u2019s tip decided yet', reading.readAt);
             return;
         }
         red.textContent = String(reading.mainRed.red);
@@ -780,7 +780,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             trend.textContent = (change < 0 ? '\\u25BC ' : '\\u25B2 ') + Math.abs(change) + ' since ' + clockTime(first.at);
             trend.dataset.state = change < 0 ? 'down' : 'up';
         }
-        sourceLine('main-source', 'units red on main ' + reading.mainRed.main.slice(0, 8) + '\\u2019s witness, ' + clockTime(reading.mainRed.at), reading.readAt);
+        sourceLine('main-source', 'units red on main ' + reading.mainRed.main.slice(0, 8) + '\\u2019s verify, ' + clockTime(reading.mainRed.at), reading.readAt);
     }
 
     function readPulse() {
