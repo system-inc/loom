@@ -44,6 +44,10 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	if err != nil {
 		return nil, err
 	}
+	productKeys, err := TestProductKeys(tree, gateTools, tools)
+	if err != nil {
+		return nil, err
+	}
 	results := []PlannedResult{}
 	planned := []PlannedUnit{}
 	parts := map[string]KeyParts{}
@@ -53,7 +57,8 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 		for _, input := range declared[directory] {
 			compilers = append(compilers, module+"/"+input)
 		}
-		unit := Unit{Kind: "test", Package: listed.ImportPath, Directory: directory, Environment: GateEnvironment}
+		unit := Unit{Kind: "test", Package: listed.ImportPath, Directory: directory, Environment: GateEnvironment,
+			Products: UnitProducts(productKeys, listed.ImportPath, compilers)}
 		keyParts, err := keyFor(tree, gateTools, unit, tools, compilers)
 		if err != nil {
 			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)

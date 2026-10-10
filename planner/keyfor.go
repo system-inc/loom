@@ -48,6 +48,9 @@ type Unit struct {
 	Run, Skip   string
 	Environment map[string]string
 	GateInputs  string
+	// Products are a test unit's product keys (UnitProducts over TestProductKeys), computed once per tree. Nil for a
+	// test unit is refused, so a caller can't key one without its products by forgetting them.
+	Products []string
 }
 
 // ProductStub stands in for Builder's productKeys while the planner stubs the builder as "build locally" (contract,
@@ -67,7 +70,13 @@ func ProductStub(tree string, compilerPackages []string) ([]string, error) {
 }
 
 // KeyFor assembles a unit's key parts on a tree: its closure from go list, its reads (the declared stub), its
-// products (the build-locally stub), the box's tools and its closed env. The key is UnitKey(parts).
+// products, the box's tools and its closed env. The key is UnitKey(parts).
+//
+// A test unit's products are Builder's product keys (unit.Products), what a runner fetches before the unit starts.
+// The compiler packages its tests build at run time are reads outside its closure, so their closures' files join its
+// reads: adamic's declared compilers (internal/native, lower, ir and the rest) have no product tests of their own, so
+// product keys alone would leave them out. A product's products part stays its compilers' closures (ProductStub), so a
+// product key never keys itself.
 func KeyFor(tree, gateTools string, unit Unit, tools Tools, compilerPackages []string) (KeyParts, error) {
 	closure, err := Closure(tree, unit.Package)
 	if err != nil {
@@ -77,11 +86,37 @@ func KeyFor(tree, gateTools string, unit Unit, tools Tools, compilerPackages []s
 	if err != nil {
 		return KeyParts{}, err
 	}
-	readsHash, err := ReadsHash(tree, reads)
-	if err != nil {
-		return KeyParts{}, err
+	var products []string
+	if unit.Kind == "product" {
+		if products, err = ProductStub(tree, compilerPackages); err != nil {
+			return KeyParts{}, err
+		}
+	} else {
+		if unit.Products == nil {
+			return KeyParts{}, fmt.Errorf("unit %s: a %s unit's products weren't computed (UnitProducts)", unit.Package, unit.Kind)
+		}
+		products = append([]string{}, unit.Products...)
+		sort.Strings(products)
+		read := map[string]bool{}
+		for _, file := range reads {
+			read[file] = true
+		}
+		for _, importPath := range compilerPackages {
+			files, err := ClosureFiles(tree, importPath)
+			if err != nil {
+				return KeyParts{}, fmt.Errorf("compiler %s: %w", importPath, err)
+			}
+			for _, file := range files {
+				read[file] = true
+			}
+		}
+		reads = reads[:0]
+		for file := range read {
+			reads = append(reads, file)
+		}
+		sort.Strings(reads)
 	}
-	products, err := ProductStub(tree, compilerPackages)
+	readsHash, err := ReadsHash(tree, reads)
 	if err != nil {
 		return KeyParts{}, err
 	}

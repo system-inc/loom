@@ -35,7 +35,8 @@ func TestKeyForMovesForEveryInputAndNothingElse(t *testing.T) {
 	t.Parallel()
 	tree, gateTools := keyForFixture(t)
 	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0", Clang: "20.1.0", Node: "v24.1.0", WasiSdk: "27"}
-	unit := Unit{Kind: "test", Package: "example.com/key/a", Directory: "a", Run: "^TestA$", Environment: map[string]string{"ADAMIC_GATE_UNCACHED": "1"}}
+	unit := Unit{Kind: "test", Package: "example.com/key/a", Directory: "a", Run: "^TestA$", Environment: map[string]string{"ADAMIC_GATE_UNCACHED": "1"},
+		Products: []string{}}
 	key := func(unit Unit) string {
 		parts, err := KeyFor(tree, gateTools, unit, tools, []string{"example.com/key/compiler"})
 		if err != nil {
@@ -85,5 +86,15 @@ func TestKeyEnvIsClosedAndReadsTheChangedFile(t *testing.T) {
 	os.WriteFile(second, []byte("b/b.go\n"), 0o644)
 	if moved, _ := KeyEnv(map[string]string{"ADAMIC_GATE_CHANGED": second}); moved["ADAMIC_GATE_CHANGED"] == left["ADAMIC_GATE_CHANGED"] {
 		t.Fatal("a changed-paths file with other contents keyed the same")
+	}
+}
+
+// A test unit keyed without its products is refused, never keyed as if it had none.
+func TestKeyForRefusesATestUnitWithoutItsProducts(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := keyForFixture(t)
+	unit := Unit{Kind: "test", Package: "example.com/key/a", Directory: "a"}
+	if _, err := KeyFor(tree, gateTools, unit, Tools{}, nil); err == nil {
+		t.Fatal("a test unit with nil products was keyed")
 	}
 }

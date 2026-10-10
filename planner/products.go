@@ -142,3 +142,39 @@ func ProductKeys(tree, gateTools string, tools Tools, tests []ProductTest, decla
 	}
 	return keys, nil
 }
+
+// TestProductKeys is every package's product keys on a tree, once per tree: each package's import path to the sorted
+// keys of its product tests, what UnitProducts reads for each test unit.
+func TestProductKeys(tree, gateTools string, tools Tools) (map[string][]string, error) {
+	tests, err := ListProductTests(tree, nil)
+	if err != nil {
+		return nil, err
+	}
+	declared, err := compilerDeclarations(tree)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := ProductKeys(tree, gateTools, tools, tests, declared)
+	if err != nil {
+		return nil, err
+	}
+	byPackage := map[string][]string{}
+	for test, key := range keys {
+		byPackage[test.Package] = append(byPackage[test.Package], key)
+	}
+	for _, packageKeys := range byPackage {
+		sort.Strings(packageKeys)
+	}
+	return byPackage, nil
+}
+
+// UnitProducts is a test unit's products part: the product keys of its own package's product tests and of each
+// compiler package its declaration names, sorted, never nil.
+func UnitProducts(productKeys map[string][]string, importPath string, compilerPackages []string) []string {
+	products := []string{}
+	for _, owner := range append([]string{importPath}, compilerPackages...) {
+		products = append(products, productKeys[owner]...)
+	}
+	sort.Strings(products)
+	return products
+}

@@ -70,8 +70,12 @@ func KeyAt(tree, gateTools string, parts KeyParts) (KeyParts, string, error) {
 	for _, input := range declared[directory] {
 		compilers = append(compilers, module+"/"+input)
 	}
+	productKeys, err := TestProductKeys(tree, gateTools, parts.Tools)
+	if err != nil {
+		return KeyParts{}, "", err
+	}
 	unit := Unit{Kind: parts.Kind, Package: parts.Package, Directory: directory, Run: parts.Select.Run, Skip: parts.Select.Skip,
-		GateInputs: parts.GateInputs}
+		GateInputs: parts.GateInputs, Products: UnitProducts(productKeys, parts.Package, compilers)}
 	keyed, err := KeyFor(tree, gateTools, unit, parts.Tools, compilers)
 	if err != nil {
 		return KeyParts{}, "", err
