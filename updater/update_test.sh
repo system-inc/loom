@@ -17,6 +17,7 @@
 #	sed 's/-mmin +4/-mmin +99999/' loom-update.sh > m.sh && updater/update_test.sh m.sh                                   # fails 1: a quiet machine never reports again
 #	sed 's/\[ -n "${reporting:-}" \] \&\& post "$\*"/true/' loom-update.sh > m.sh && updater/update_test.sh m.sh            # fails 2: a refusal goes unreported
 #	sed 's/^services() {$/services() { return 0/' loom-update.sh > m.sh && updater/update_test.sh m.sh                       # fails 4: no service is reported
+#	sed 's/^\t\tbounded 10 "${probe}"/\t\t"${probe}"/' loom-update.sh > m.sh && updater/update_test.sh m.sh                   # fails 4: a hung probe holds the run
 # (chmod +x m.sh first.)
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
@@ -249,6 +250,24 @@ check same-state-not-sent-within-5-minutes 'code 0 && [ "$(reports)" = "$((sent 
 aged "${T}/probed/.loom/reported" 330
 update probed Probed /report
 check state-sent-every-5-minutes 'code 0 && [ "$(reports)" = "$((sent + 2))" ]'
+
+# A probe that hangs, and the process it started, are ended after 10 s and named, so the run that holds update.lock
+# finishes and reports; the lines it printed before hanging stay, and a probe beside it still reports. Run twice: with
+# the PATH the tests have, and with only /usr/bin and /bin, which on a stock macOS holds no timeout(1), so perl ends it.
+hung() { # hung <home> <host> <PATH>
+	mkdir -p "${T}/$1/.loom/health.d"
+	printf '#!/bin/sh\necho "hung.service active running"\nsleep 600 &\necho $$ $! > %s\nsleep 600\n' "${T}/$1.pids" > "${T}/$1/.loom/health.d/50-hung"
+	printf '#!/bin/sh\necho "beside.service active running"\n' > "${T}/$1/.loom/health.d/60-beside"
+	chmod +x "${T}/$1/.loom/health.d/50-hung" "${T}/$1/.loom/health.d/60-beside"
+	(PATH=$3 update "$1" "$2" /report; touch "${T}/$1.done") &
+	for i in $(seq 1 400); do [ -e "${T}/$1.done" ] && break; sleep 0.1; done
+	check "$1-probe-ended" 'code 0 && [ -e ${T}/'"$1"'.done ] && [ "$(reported '"$2"' services)" = "[\"hung.service active running\", \"50-hung probe-timed-out\", \"beside.service active running\"]" ] && [ ! -e ${T}/'"$1"'/.loom/update.lock ] && [ -z "$(ls -A ${T}/'"$1"'/.loom | grep "^probe\.")" ]'
+	sleep 3
+	check "$1-probe-processes-ended" '! kill -0 $(cat ${T}/'"$1"'.pids) 2> /dev/null'
+	kill $(cat "${T}/$1.pids") 2> /dev/null
+}
+hung hung Hung "${PATH}"
+hung hung-bare HungBare /usr/bin:/bin
 
 # A hold: "current" keeps the version installed and reads no current.txt; a version keeps (or brings) the machine on
 # that one, from its own manifest; either way the log says so once and every report carries it. A version with no
