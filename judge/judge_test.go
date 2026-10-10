@@ -226,3 +226,85 @@ func TestARunIsGreenOnlyWhenEveryPlannedUnitPassedOnce(t *testing.T) {
 		})
 	}
 }
+
+// The build law (Kirk, Oct 10 21:5xZ, #ccewvra): a test unit that passes past the 60 s budget is green with a warning,
+// and red only when its alone reruns show the branch made it slow, past the budget and past 1.5x main's base.
+func TestASlowPassIsGreenWithAWarningUnlessTheBranchMadeItSlow(t *testing.T) {
+	slow := func(wall float64) Evidence {
+		return Evidence{First: Attempt{Status: Passed, WallSeconds: wall}, Budgeted: true}
+	}
+	alone := func(status string, wall float64) *Rerun { return &Rerun{Status: status, WallSeconds: wall} }
+	cases := []struct {
+		name     string
+		evidence Evidence
+		decided  bool
+		status   string
+		cause    string
+		next     string
+		warned   bool
+		baseWall float64
+	}{
+		{"a pass within the budget has no warning", slow(59.9), true, Passed, "", "", false, 0},
+		{"exactly the budget is within it", slow(60), true, Passed, "", "", false, 0},
+		{"a phase isn't held to the budget", func() Evidence { e := slow(300); e.Budgeted = false; return e }(), true, Passed, "", "", false, 0},
+		{"a slow pass on a branch reruns alone on both before it decides", slow(74), false, "", "", "rerunAlone", false, 0},
+		{"a slow pass on a verify is green with a warning, nothing rerun", func() Evidence { e := slow(74); e.SameTree = true; return e }(), true, Passed, "", "", true, 0},
+		{"slow alone on the candidate, fast on the base: the branch's red", func() Evidence {
+			e := slow(74)
+			e.Candidate, e.Main = alone(Passed, 80), alone(Passed, 30)
+			return e
+		}(), true, Failed, CauseChange, "", true, 30},
+		{"slow on the base too: green with a warning", func() Evidence {
+			e := slow(74)
+			e.Candidate, e.Main = alone(Passed, 80), alone(Passed, 70)
+			return e
+		}(), true, Passed, "", "", true, 70},
+		{"far past a base that was itself over the budget: green with a warning, the branch didn't push it over", func() Evidence {
+			e := slow(74)
+			e.Candidate, e.Main = alone(Passed, 200), alone(Passed, 70)
+			return e
+		}(), true, Passed, "", "", true, 70},
+		{"over the budget but within 1.5x a base inside it: noise, green with a warning", func() Evidence {
+			e := slow(74)
+			e.Candidate, e.Main = alone(Passed, 80), alone(Passed, 60)
+			return e
+		}(), true, Passed, "", "", true, 60},
+		{"within the budget alone on the candidate: green with a warning", func() Evidence {
+			e := slow(74)
+			e.Candidate, e.Main = alone(Passed, 50), alone(Passed, 20)
+			return e
+		}(), true, Passed, "", "", true, 20},
+		{"a candidate rerun that failed can't be compared: green with a warning, never void", func() Evidence {
+			e := slow(74)
+			e.Candidate, e.Main = alone(Failed, 90), alone(Passed, 20)
+			return e
+		}(), true, Passed, "", "", true, 0},
+		{"a base rerun that broke can't be compared: green with a warning", func() Evidence {
+			e := slow(74)
+			e.Candidate, e.Main = alone(Passed, 90), &Rerun{Status: Broken, Infra: InfraNeverPlaced}
+			return e
+		}(), true, Passed, "", "", true, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			decision, err := Decide(c.evidence)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := [4]string{map[bool]string{true: "decided", false: "open"}[decision.Decided], decision.Status, decision.Cause, decision.Next}
+			want := [4]string{map[bool]string{true: "decided", false: "open"}[c.decided], c.status, c.cause, c.next}
+			if got != want {
+				t.Fatalf("got %v, want %v (%s)", got, want, decision.Why)
+			}
+			if warned := len(decision.Warnings) == 1 && decision.Warnings[0].Kind == WarningOverBudget && decision.Warnings[0].WallSeconds == c.evidence.First.WallSeconds; warned != c.warned {
+				t.Fatalf("warnings %+v, want warned %v", decision.Warnings, c.warned)
+			}
+			if c.warned && decision.Warnings[0].BaseWallSeconds != c.baseWall {
+				t.Fatalf("base wall %v, want %v", decision.Warnings[0].BaseWallSeconds, c.baseWall)
+			}
+			if decision.Why == "" {
+				t.Fatal("every decision names its row")
+			}
+		})
+	}
+}

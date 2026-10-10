@@ -20,7 +20,8 @@ import (
 
 // units is `loom units` (#g1jvdbq): the unit rows the judge keeps (judge/rows.go), read for a span of days through
 // R2's S3 interface with the store's key, filtered, and grouped by name, box or day, each group with its count, its
-// statuses, and the p50 and p90 of its wall, queue wait, phases and peak memory. --json prints every row as kept.
+// statuses, how many passed past the run budget, and the p50 and p90 of its wall, queue wait, phases and peak memory.
+// --json prints every row as kept.
 func units(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("units", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -30,11 +31,12 @@ func units(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	box := flags.String("box", "", "only units whose worker's name holds this")
 	kind := flags.String("kind", "", "only units of this kind: test, product or phase")
 	status := flags.String("status", "", "only units that finished so: passed, failed or broken")
+	overBudget := flags.Bool("over-budget", false, "only test units that passed past the 60 s run budget, green with a warning")
 	by := flags.String("by", "name", "group by name, box or day")
 	asJSON := flags.Bool("json", false, "print every row as kept, one JSON line each, in place of the groups")
 	storeFlags := addStoreFlags(flags)
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || *days < 1 || !slices.Contains([]string{"name", "box", "day"}, *by) {
-		fmt.Fprintln(stderr, "usage: loom units [--days N | --day YYYY-MM-DD] [--name <text>] [--box <text>] [--kind <kind>] [--status <status>] [--by name|box|day] [--json] [--r2 <key file>]")
+		fmt.Fprintln(stderr, "usage: loom units [--days N | --day YYYY-MM-DD] [--name <text>] [--box <text>] [--kind <kind>] [--status <status>] [--over-budget] [--by name|box|day] [--json] [--r2 <key file>]")
 		return 2
 	}
 	spanned, err := unitDays(*day, *days, time.Now())
@@ -54,7 +56,7 @@ func units(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	rows = slices.DeleteFunc(rows, func(row judge.UnitRow) bool {
 		return !strings.Contains(row.Name, *name) || !strings.Contains(row.Machine, *box) || (*kind != "" && row.Kind != *kind) ||
-			(*status != "" && row.Status != *status)
+			(*status != "" && row.Status != *status) || (*overBudget && !row.OverBudget)
 	})
 	if *asJSON {
 		content, err := judge.EncodeRows(rows)
@@ -126,6 +128,7 @@ type unitGroup struct {
 	key                    string
 	rows                   []judge.UnitRow
 	passed, failed, broken int
+	overBudget             int // passed past the run budget
 }
 
 // groupUnitRows groups the rows by name, box (the worker) or day (started's date), the groups with the most rows first.
@@ -145,6 +148,9 @@ func groupUnitRows(rows []judge.UnitRow, by string) []unitGroup {
 			index[key] = group
 		}
 		group.rows = append(group.rows, row)
+		if row.OverBudget {
+			group.overBudget++
+		}
 		switch row.Status {
 		case "passed":
 			group.passed++
@@ -200,13 +206,13 @@ var unitColumns = []struct {
 // writeUnitGroups prints one line per group: its key, rows, statuses, and each column's p50/p90 ("-" where no row says).
 func writeUnitGroups(stdout io.Writer, groups []unitGroup) {
 	table := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	header := "group\tunits\tpassed\tfailed\tbroken"
+	header := "group\tunits\tpassed\tfailed\tbroken\tover budget"
 	for _, column := range unitColumns {
 		header += "\t" + column.name + " p50/p90"
 	}
 	fmt.Fprintln(table, header)
 	for _, group := range groups {
-		line := fmt.Sprintf("%s\t%d\t%d\t%d\t%d", strings.TrimPrefix(group.key, "github.com/system-inc/adamic/"), len(group.rows), group.passed, group.failed, group.broken)
+		line := fmt.Sprintf("%s\t%d\t%d\t%d\t%d\t%d", strings.TrimPrefix(group.key, "github.com/system-inc/adamic/"), len(group.rows), group.passed, group.failed, group.broken, group.overBudget)
 		for _, column := range unitColumns {
 			p50, found := percentile(group.rows, column.value, 50)
 			p90, _ := percentile(group.rows, column.value, 90)

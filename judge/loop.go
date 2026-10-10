@@ -344,7 +344,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		// A unit that never reported is placed again like any infra.
 		first = Finished{Attempt: Attempt{Status: Broken}, Infra: InfraSilent}
 	}
-	evidence := loop.evidenceOf(first, unit)
+	evidence := loop.evidenceOf(job, first, unit)
 	if found && loop.Warm != nil {
 		run := job.Run
 		if carried != "" {
@@ -384,7 +384,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 				verdict.Attempts = append(verdict.Attempts, again.Attempt)
 				verdict.Tests, verdict.Outputs = nonNil(again.Tests), nonNilStrings(again.Outputs)
 				source = again
-				evidence = loop.evidenceOf(again, unit)
+				evidence = loop.evidenceOf(job, again, unit)
 			} else {
 				// An alone rerun broke: run both again.
 				evidence.Candidate, evidence.Main = nil, nil
@@ -411,6 +411,11 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		}
 	}
 	verdict.Status, verdict.Cause, verdict.Infra = decision.Status, decision.Cause, decision.Infra
+	verdict.Warnings = decision.Warnings
+	if decision.Status == Failed && len(decision.Warnings) > 0 {
+		// The branch made it slow: the kick says so, with both walls, since no test failed.
+		verdict.slowdown = decision.Why
+	}
 	if unit.Kind == KindPhase {
 		// A phase has no tests: zerorun and the census are the test units' rules.
 		if verdict.RuleId == Rule {
@@ -471,9 +476,10 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 		return err
 	}
 	verdict.Attempts = append(verdict.Attempts, candidate.Attempt, main.Attempt)
-	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256, OverBudget: candidate.OverBudget}
-	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256, OverBudget: main.OverBudget}
-	evidence.SameTree = job.Future == job.Base
+	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256,
+		OverBudget: candidate.OverBudget, WallSeconds: candidate.Attempt.WallSeconds}
+	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256,
+		OverBudget: main.OverBudget, WallSeconds: main.Attempt.WallSeconds}
 	evidence.MainRecorded = nil
 	if found {
 		evidence.MainRecorded = recorded
@@ -481,13 +487,16 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 	return nil
 }
 
-func (loop Loop) evidenceOf(finished Finished, unit PlanUnit) Evidence {
+func (loop Loop) evidenceOf(job Job, finished Finished, unit PlanUnit) Evidence {
 	return Evidence{First: finished.Attempt, FirstInfra: finished.Infra, FirstTests: finished.Tests, MissingTools: finished.MissingTools, FirstOverBudget: finished.OverBudget,
-		Phase: unit.Kind == KindPhase, KeyRunner: unit.Runner, RequireRunner: loop.RequireRunner}
+		Phase: unit.Kind == KindPhase, Budgeted: unit.Kind == KindTest, SameTree: job.Future == job.Base, KeyRunner: unit.Runner, RequireRunner: loop.RequireRunner}
 }
 
 // KindPhase is a unit key's kind for one of the box fast gate's non-test stages.
 const KindPhase = "phase"
+
+// KindTest is a unit key's kind for a package's tests, the kind the run budget holds.
+const KindTest = "test"
 
 func nonNil(outcomes []TestOutcome) []TestOutcome {
 	if outcomes == nil {
