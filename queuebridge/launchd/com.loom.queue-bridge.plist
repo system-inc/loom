@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The queue's bridge to git on a macOS machine (#vwsgnxm): one pass of the release's `loom queue-bridge` every 60 s.
+     `loom queue-bridge install` writes it to ~/Library/LaunchAgents with HOME_DIRECTORY replaced by the user's home,
+     since launchd doesn't expand ~, and never loads it: launchctl bootstrap gui/$(id -u) <this file>. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.loom.queue-bridge</string>
+  <key>ProgramArguments</key><array><string>HOME_DIRECTORY/.loom/bin/loom</string><string>queue-bridge</string></array>
+  <key>WorkingDirectory</key><string>HOME_DIRECTORY/.loom</string>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string><key>HOME</key><string>HOME_DIRECTORY</string></dict>
+  <key>StartInterval</key><integer>60</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>HOME_DIRECTORY/.loom/queue-bridge.log</string>
+  <key>StandardErrorPath</key><string>HOME_DIRECTORY/.loom/queue-bridge.log</string>
+</dict>
+</plist>
