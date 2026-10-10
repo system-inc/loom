@@ -147,6 +147,9 @@ func (machine *PoolMachine) Toolchains() []string { return machine.Has }
 // TakesKinds is the unit kinds the pool takes, nil when it takes test and product units.
 func (machine *PoolMachine) TakesKinds() []string { return machine.Kinds }
 
+// CpuCapacity is each worker's cpus as declared (--pool-cpus), 0 when unknown.
+func (machine *PoolMachine) CpuCapacity() int { return machine.CoreCount }
+
 // MemoryCapacity is each worker's memory in megabytes, 0 when unknown.
 func (machine *PoolMachine) MemoryCapacity() int { return machine.MemoryMegabytes }
 

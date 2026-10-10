@@ -535,6 +535,15 @@ func (coordinator *coordinator) unfit(state *unitState) string {
 			return "a pool that takes kind " + kind
 		}
 	}
+	if need := state.planned.Unit.Resources.Cpus; need > 0 {
+		found := false
+		for _, machine := range coordinator.config.Slots {
+			found = found || seats(machine, need)
+		}
+		if !found {
+			return fmt.Sprintf("%d cpus", need)
+		}
+	}
 	if need := state.planned.Unit.Resources.MemoryMegabytes; need > 0 {
 		found := false
 		for _, machine := range coordinator.config.Slots {
@@ -565,7 +574,16 @@ func (coordinator *coordinator) fitsUnit(machine Machine, unit protocol.JobUnit)
 	if record := coordinator.config.RecordPlatform; record != "" && !unit.Portable && machine.Platform() != record {
 		return false
 	}
-	return takes(machine, unit.Kind) && holds(machine, unit.Resources.MemoryMegabytes) && fits(machine, unit.Requires)
+	return takes(machine, unit.Kind) && holds(machine, unit.Resources.MemoryMegabytes) && seats(machine, unit.Resources.Cpus) &&
+		fits(machine, unit.Requires)
+}
+
+// seats says whether the machine has the cpus a unit declares. A machine that doesn't say (a box) seats any. Oct 10:
+// ec123b7f, declared at 16 cpus, fit Codex's memory and was placed on a 4-cpu instance, where its tests' 90 s
+// commands overrun.
+func seats(machine Machine, need int) bool {
+	sized, ok := machine.(interface{ CpuCapacity() int })
+	return need <= 0 || !ok || sized.CpuCapacity() <= 0 || sized.CpuCapacity() >= need
 }
 
 // takes says whether the machine takes a unit of the kind: a machine that names its kinds takes only those, and one

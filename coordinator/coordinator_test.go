@@ -1081,3 +1081,39 @@ func TestAPhaseUnitGoesOnlyToAPoolThatTakesPhasesAndATestUnitNeverDoes(t *testin
 		t.Fatalf("a phase unit with no phase pool: %q", why)
 	}
 }
+
+// A cpuMachine says how many cpus its workers have, the way a pool given --pool-cpus does, and notes each unit it ran.
+type cpuMachine struct {
+	LocalMachine
+	cpus  int
+	mutex sync.Mutex
+	ran   []string
+}
+
+func (machine *cpuMachine) CpuCapacity() int { return machine.cpus }
+
+func (machine *cpuMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {
+	machine.mutex.Lock()
+	machine.ran = append(machine.ran, unit.Unit)
+	machine.mutex.Unlock()
+	return machine.LocalMachine.Run(runContext, unit, events)
+}
+
+// A unit declaring more cpus than a pool's workers have never goes there, though its memory fits (Oct 10: ec123b7f at
+// 16 cpus placed on a 4-cpu Codex instance). Mutant: seats always true, and the 16-cpu unit lands on a 4-cpu slot.
+func TestAUnitDeclaringMoreCpusThanAPoolHasGoesWhereItFits(t *testing.T) {
+	wire := newFakeWire(t)
+	small := &cpuMachine{LocalMachine: LocalMachine{Label: "codex-strict"}, cpus: 4}
+	wide := &cpuMachine{LocalMachine: LocalMachine{Label: "box-strict-8a70-cold"}, cpus: 16}
+	big := shell("big", "echo big")
+	big.Resources.Cpus, big.Resources.MemoryMegabytes = 16, 9710
+	result := run(t, config(wire, small, small, wide), big, shell("a", "echo a"))
+	if result.Verdict.Status != "green" || slices.Contains(small.ran, "big") || !slices.Contains(wide.ran, "big") {
+		t.Fatalf("verdict %+v; the 16-cpu unit ran on %v (4 cpus) and %v (16)", result.Verdict, small.ran, wide.ran)
+	}
+	alone := newFakeWire(t)
+	result = run(t, config(alone, &cpuMachine{LocalMachine: LocalMachine{Label: "codex-strict"}, cpus: 4}), big)
+	if why := closedBroken(alone.events(result.Run), result.Run, "big"); why != "not placed: no machine of the run has 16 cpus" {
+		t.Fatalf("a 16-cpu unit with only 4-cpu pools: %q", why)
+	}
+}
