@@ -76,6 +76,12 @@ const usage = `usage:
   loom push install
   loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--tailnet] [--public]
   loom house-cache install
+  loom release watch [--config <file>] [--wire <url>]
+  loom release status [--config <file>] [--wire <url>]
+  loom release install [--config <file>]
+  loom release mark <commit> <step> [--config <file>]
+  loom release rollback [--config <file>]
+  loom release resume [--retry] [--config <file>]
 `
 
 func main() {
@@ -145,6 +151,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "house-cache" {
 		return houseCache(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "release" {
+		return releaseCommand(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "publish-token" {
 		return publishToken(arguments[1:], stdout, stderr)

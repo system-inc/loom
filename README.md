@@ -7,6 +7,7 @@ Commands in, artifacts out. A runner holds no credential but its tokens (below);
 `updater/` is how the house machines get Loom's binaries: Workshop builds and publishes them once per commit, and each machine's updater installs them (`docs/updater.md`).
 `serving/` keeps each Linux house machine serving its pool on the release's runner, a systemd user unit the updater's hook installs and reloads (`docs/serving.md`), and runs the house cache on the box that hosts it.
 `cutover/cutover.sh` is the one switch between the old path to adamic main and the lander, and its rehearsal on a scratch branch (`docs/cutover.md`).
+`release/` releases each new commit on loom main by itself: Workshop's watcher publishes it as a canary for Cloud, promotes it once Cloud reports it healthy, and `loom release status` shows every box's version, last update, hold and health (`docs/releases.md`).
 
 `housecache/` is the house cache: one box per house keeps the store's blobs, by sha256, and serves them to the house's other boxes, so each blob crosses the house's internet link once (`docs/house-cache.md`).
 The work and its laws live in the task tree at #system_adamic_developer_tools_loom.
