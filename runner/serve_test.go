@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -35,7 +36,9 @@ type testPool struct {
 	// before the live route does.
 	lives      []postedLive
 	refuseLive bool
-	server     *httptest.Server
+	// askDelay holds every ask this long before the pool reads it, a slow pool.
+	askDelay time.Duration
+	server   *httptest.Server
 }
 
 // A postedLive is one live status a serve posted to its pool.
@@ -51,8 +54,9 @@ func newTestPool(t *testing.T, units ...protocol.Unit) *testPool {
 		switch {
 		case request.URL.Path == "/pools/codex/next":
 			pool.mutex.Lock()
-			refuse := pool.refuse
+			refuse, delay := pool.refuse, pool.askDelay
 			pool.mutex.Unlock()
+			time.Sleep(delay)
 			if refuse || request.Header.Get("Authorization") != "Bearer "+testPoolToken {
 				http.Error(writer, "not this pool's token", http.StatusUnauthorized)
 				return
@@ -87,6 +91,15 @@ func newTestPool(t *testing.T, units ...protocol.Unit) *testPool {
 			}
 			if request.Header.Get("Authorization") != "Bearer "+testPoolToken {
 				http.Error(writer, "not this pool's token", http.StatusForbidden)
+				return
+			}
+			// As the wire: a status is kept only for a worker that has asked.
+			var posted struct {
+				Worker string `json:"worker"`
+			}
+			json.Unmarshal(body, &posted)
+			if !slices.ContainsFunc(pool.askers, func(asker string) bool { return strings.HasPrefix(asker, posted.Worker+" ") }) {
+				http.Error(writer, "this worker hasn't asked", http.StatusForbidden)
 				return
 			}
 			pool.lives = append(pool.lives, postedLive{at: time.Now(), body: body})

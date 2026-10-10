@@ -458,6 +458,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			continue
 		}
 		failures = 0
+		poster.asked.Store(true)
 		live.Update(func(status *livestatus.Status) { status.AskedAt = time.Now() })
 		if !found {
 			// The pool waits up to 20 s before it says none; one that answers at once mustn't be asked in a spin.

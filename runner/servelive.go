@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/system-inc/loom/protocol"
@@ -86,6 +87,9 @@ type livePoster struct {
 	limit int64
 	// failing is whether the last post failed, so a wire that refuses is said once, not every 10 s.
 	failing bool
+	// asked is set once serve's first ask has reached the pool: the pool keeps a status only for a worker it has seen
+	// ask (wire/source/Pool.ts), so nothing is posted before.
+	asked atomic.Bool
 }
 
 // update changes the status under the poster's lock.
@@ -111,8 +115,11 @@ func (poster *livePoster) loop(loopContext context.Context, every time.Duration)
 	}
 }
 
-// post sends the status as it stands, with the disk and the blob cache read now.
+// post sends the status as it stands, with the disk and the blob cache read now; nothing before serve's first ask.
 func (poster *livePoster) post() {
+	if !poster.asked.Load() {
+		return
+	}
 	poster.mutex.Lock()
 	status := poster.status
 	status.Units = append([]liveStatusUnit{}, poster.status.Units...)

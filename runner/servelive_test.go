@@ -12,7 +12,7 @@ import (
 
 // A box serve's live status reaches its pool (#yk0q0kj). Mutants: no post at all; a post every loop pass instead of
 // every liveEvery; a field the wire doesn't take; the units in hand or the totals not kept current; a refused post
-// stopping serve.
+// stopping serve; a post before serve's first ask, which the pool refuses.
 
 // The wire's fields exactly (wire/source/Pool.ts, checkPoolLive): a post that decodes strictly into these is one the wire
 // takes.
@@ -60,9 +60,17 @@ func TestServePostsItsLiveStatusToItsPool(t *testing.T) {
 	pool.queue = []protocol.Unit{pool.unit("a", "sleep 1"), pool.unit("b", "sleep 1")}
 	options := pool.slotsOptions(t, 16, 1<<20, 2, 4, 1024)
 	options.liveEvery = 100 * time.Millisecond
+	// The pool answers each ask after 300 ms, so several of serve's ticks come before its first ask lands.
+	pool.askDelay = 300 * time.Millisecond
+	var report lockedBuffer
+	options.Report = &report
 	started := time.Now()
 	if summary, err := Serve(context.Background(), options); err != nil || summary.Passed != 2 {
 		t.Fatalf("summary %+v, %v", summary, err)
+	}
+	// Nothing is posted before serve's first ask, which the pool would refuse.
+	if strings.Contains(string(report.Bytes()), "posting the live status failed") {
+		t.Fatalf("a post the pool refused:\n%s", report.Bytes())
 	}
 	served := time.Since(started)
 	pool.mutex.Lock()
