@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -290,7 +291,8 @@ func (builder Builder) buildAndUpload(action Action, key string, result *Result,
 	}
 	defer os.RemoveAll(logs)
 	log := filepath.Join(logs, "builds.log")
-	environment := append(planner.GateEnvironmentList(), "ADAMIC_BUILD_CACHE_DIR="+builder.Cache, "ADAMIC_BUILD_LOG="+log, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on")
+	// The product test runs here, so it is built for here: on Workshop, the runners' platform.
+	environment := append(planner.UnitEnvironment(runtime.GOOS, runtime.GOARCH), "ADAMIC_BUILD_CACHE_DIR="+builder.Cache, "ADAMIC_BUILD_LOG="+log, "ADAMIC_BUILD_STORE=off", "ADAMIC_BUILD_CACHE=on")
 	if output, err := builder.Run(action, environment); err != nil {
 		tail := output
 		if len(tail) > 4000 {

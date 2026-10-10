@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/livestatus"
+	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -563,7 +564,10 @@ func (run *unitRun) testEnvironment(environmentFile string, job *protocol.TestJo
 			environment[name] = value
 		}
 	}
-	for name, value := range map[string]string{"ADAMIC_GATE_UNCACHED": "1", "ADAMIC_TEST_WASI": "1", "ADAMIC_ORACLE_WASI": "1", "ADAMIC_GATE_COHERE": "1"} {
+	// The gate's switches, and the toolchain and flags Workshop ran the tree's product tests under, so a test asks for
+	// each product by the key Workshop built it under (planner.UnitEnvironment, #nm31pcn).
+	for _, variable := range planner.UnitEnvironment(runtime.GOOS, runtime.GOARCH) {
+		name, value, _ := strings.Cut(variable, "=")
 		environment[name] = value
 	}
 	if job.Sample != "" {
