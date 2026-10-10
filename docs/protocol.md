@@ -103,7 +103,7 @@ The coordinator decides a run from the plan and the events, never from a runner'
 
 ## Store
 
-Blobs are addressed by sha256 and live in R2 (`loom-runs`) at `blobs/<sha256>`. A blob is reached only through a run: `GET <wire>/runs/<run>/blobs/<sha256>` returns the bytes and `PUT` stores them, the Worker recomputing the hash and refusing a mismatch. A `PUT` of a blob that already exists succeeds without rewriting it. The unit's `store.url` is that run's endpoint, so a runner never sees a key, a bucket or another run.
+Blobs are addressed by sha256 and live in R2 (`loom-runs`) at `blobs/<sha256>`. A blob is reached only through a run: `GET <wire>/runs/<run>/blobs/<sha256>` returns the bytes and `PUT` stores them, the Worker recomputing the hash and refusing a mismatch. A `PUT` of a blob that already exists succeeds without taking its bytes again. The unit's `store.url` is that run's endpoint, so a runner never sees a key, a bucket or another run.
 
 What each token may do there (its run must be the run in the path):
 
@@ -118,10 +118,11 @@ This is the run-scoped access the store promised, and it is better than an S3 pr
 - A `PUT` needs `Content-Length` (411 without it), and the body must be exactly that long.
 - Up to 100 MiB (104,857,600 bytes) per blob; more is 413. A bigger input is split into several, one per file.
 - The coordinator's machines upload inputs through the same endpoint with a coordinator token; nothing holds an R2 key but the Worker.
+- Both buckets delete every object 7 days after its upload (`loom-runs` everything, `loom-artifacts` its `blobs/`, `refs/` and `trees/`), so whatever is used is kept fresh rather than exempted, which would grow the buckets forever. A held blob that a `PUT` or a `HEAD` reaches, or that a ref or cache entry being written names, and that was uploaded more than 5 days ago (`FreshForMilliseconds`, builder/store.go's `FreshFor`), is written again onto itself in R2: its own bytes, streamed from R2 back into R2 and checked against its sha256 again, never sent by the writer. That starts its 7 days over and leaves two for whoever reads it. A held object that doesn't hash to its name is replaced by the writer's verified body.
 
 ### The public store
 
-Open-source projects (Adamic, cohere) keep their build products and test inputs in a public bucket instead, by Kirk's call (Oct 8): `loom-artifacts`, read by anyone direct at `https://artifacts.loom.system.inc/blobs/<sha256>`, so a hundred instances fetch from Cloudflare's edge and never through the Worker. Every reader verifies the sha256 it asked for, so a public read can't be poisoned. Writes stay authenticated: `PUT /public/blobs/<sha256>` on the Worker, a coordinator token of any run, the same hash check, and `HEAD` to skip a blob already held; there is no public write. Uploads come from a machine with a fast uplink (Workshop's fiber, or a Codex instance while the star owns Workshop), never from Kirk's home connection. `loom-runs` and its run-scoped access are unchanged for every other project.
+Open-source projects (Adamic, cohere) keep their build products and test inputs in a public bucket instead, by Kirk's call (Oct 8): `loom-artifacts`, read by anyone direct at `https://artifacts.loom.system.inc/blobs/<sha256>`, so a hundred instances fetch from Cloudflare's edge and never through the Worker. Every reader verifies the sha256 it asked for, so a public read can't be poisoned. Writes stay authenticated: `PUT /public/blobs/<sha256>` on the Worker, a coordinator token of any run, the same hash check, and `HEAD` to skip a blob already held (refreshed when stale, as Store says); there is no public write. Uploads come from a machine with a fast uplink (Workshop's fiber, or a Codex instance while the star owns Workshop), never from Kirk's home connection. `loom-runs` and its run-scoped access are unchanged for every other project.
 
 The edge keeps what never changes. A Cache Rule on the system.inc zone (ruleset `f38094946f90495f9213f085a9f95c67`, the zone's `http_request_cache_settings` entrypoint; rule `0487c4418dae403baa83bc48ddb9b12f`, ref `loom_artifacts_immutable_blobs`, Oct 10) matches
 
@@ -137,7 +138,7 @@ Caching is opt-in per job unit: `"cache": true` says the unit is hermetic, its r
 
 A job unit may also say `"expectedSeconds"`: the planner's estimate of its wall. The coordinator places ready units longest first by it, and only for a unit without one by the wall that unit id recorded last run (`~/.loom/durations.tsv`), since a planner that re-cuts its units every run reuses ids for different work. It never reaches the runner and is no part of a cache key.
 
-The coordinator keeps the cache. After a unit passes it writes a `protocol.CacheEntry` (`key`, `run`, `unit`, `machine`, `runnerVersion`, `wallSeconds`, `outputs` with path, sha256 and bytes, `events`, the sha256 of the unit's event log as a blob) to `PUT /cache/<key>`. Before placing a unit it reads `GET /cache/<key>`; on a hit it posts the unit's stream itself, `cached` then `finished passed`, and the verdict lists the unit under `cached`. Only passed units are cached, an entry is written once and never replaced, and the Worker refuses an entry whose outputs or event log aren't in the store.
+The coordinator keeps the cache. After a unit passes it writes a `protocol.CacheEntry` (`key`, `run`, `unit`, `machine`, `runnerVersion`, `wallSeconds`, `outputs` with path, sha256 and bytes, `events`, the sha256 of the unit's event log as a blob) to `PUT /cache/<key>`. Before placing a unit it reads `GET /cache/<key>`; on a hit it posts the unit's stream itself, `cached` then `finished passed`, and the verdict lists the unit under `cached`. Only passed units are cached, an entry is written once and never replaced, and the Worker refuses an entry whose outputs or event log aren't in the store, and refreshes each that is stale (Store), so an entry never names a blob about to expire.
 
 `--uncached` bypasses the cache entirely: no reads, every unit runs. An uncached run is what lands main, and its verdict's `cached` is empty.
 
@@ -212,8 +213,8 @@ All on the Worker (`wire/`). A token goes in `Authorization: Bearer <token>`, or
 | `GET /runs/<run>/stream` | any for the run | WebSocket: the tail so far, then every event as it is accepted, then the verdict. |
 | `GET /runs/<run>` | any for the run | The live page: one row per planned unit, filling as it runs, red with its last lines the moment it fails. |
 | `GET /runs/<run>/blobs/<sha256>` | as Store says | The blob's bytes from R2. A hash the token may not read is 403; one not in the store is 404. A viewer token may come as `?token=`. |
-| `HEAD /runs/<run>/blobs/<sha256>` | as `GET` | 200 with `Content-Length` when the blob is in the store, 404 when not. The coordinator asks before uploading an input, so a blob already held costs no bytes. It records nothing: only a `PUT`, which proves the bytes, counts as the run's upload. |
-| `PUT /runs/<run>/blobs/<sha256>` | runner or coordinator | Stores the body if its sha256 matches (201); an existing blob is left as is (200). Either way the hash is recorded as uploaded by the run. Needs `Content-Length`; up to 100 MiB. |
+| `HEAD /runs/<run>/blobs/<sha256>` | as `GET` | 200 with `Content-Length` when the blob is in the store, 404 when not. The coordinator asks before uploading an input, so a blob already held costs no bytes, and one held but stale is refreshed first (Store). It records nothing: only a `PUT`, which proves the bytes, counts as the run's upload. |
+| `PUT /runs/<run>/blobs/<sha256>` | runner or coordinator | Stores the body if its sha256 matches (201); an existing blob isn't taken again, only refreshed when stale (200, `refreshed` says which). Either way the hash is recorded as uploaded by the run. Needs `Content-Length`; up to 100 MiB. |
 | `GET /board/stream` | board | WebSocket: the board's snapshot, then every change (see The board). The token comes as the subprotocol `token.<token>`. |
 | `GET /board/snapshot` | board | The same snapshot as JSON. |
 | `POST /board/gate` | coordinator (any run) | The gate's lines, posted whole (see The gate's lines). |
