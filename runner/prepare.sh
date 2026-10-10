@@ -7,6 +7,7 @@
 #	prepare.sh <tree> <sha> <base or ""> <gate inputs sha256 or ""> <environment file> <trim | keep> <root> <exclusive | shared>
 #	prepare.sh environment <tree> <gate inputs sha256 or ""> <environment file> <root>
 #	prepare.sh trim-only <root> <exclusive | shared>
+#	prepare.sh submodules <tree> <root>
 #
 # environment readies only what a prebuilt test job's binaries run with (prebuilt.go), over <tree>, the tree's source
 # the runner already unpacked from the action store, its npm packages among it: the instance's adamic toolchain
@@ -27,6 +28,9 @@
 #
 # trim-only runs the trim alone and exits 0: a strict serve that finds its disk too full to take a unit runs it once
 # (serve.go, #zzmz489), then looks again.
+#
+# submodules readies <tree>'s submodules alone, as a checkout does after its commit, and exits with the update's status:
+# it is for the runner's tests, which run it against local repositories, and the runner never passes it.
 set -uo pipefail
 say() { echo "loom-runner prepare: $*"; }
 # Disk: on an instance that runs one unit at a time, what earlier units left on its root is no one's, and on a machine
@@ -52,6 +56,8 @@ fi
 mode=checkout
 if [ "${1:-}" = environment ]; then
 	mode=environment tree=${2:-} sha= base= gateInputs=${3:-} environmentFile=${4:-} trim=keep root=${5:-} owner=shared
+elif [ "${1:-}" = submodules ]; then
+	mode=submodules tree=${2:-} sha= base= gateInputs= environmentFile= trim=keep root=${3:-} owner=shared
 else
 	tree=$1 sha=$2 base=$3 gateInputs=$4 environmentFile=$5 trim=$6 root=$7 owner=${8:-shared}
 fi
@@ -67,6 +73,51 @@ export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 G
 export GIT_CONFIG_COUNT=3 GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf GIT_CONFIG_VALUE_0=git@github.com:
 export GIT_CONFIG_KEY_1=credential.helper GIT_CONFIG_VALUE_1= GIT_CONFIG_KEY_2=core.hooksPath GIT_CONFIG_VALUE_2=/dev/null
 
+# GitHub turns away anonymous fetches when many instances check out at once, so each step retries with backoff.
+# LOOM_PREPARE_ATTEMPTS is for the runner's tests; the runner never passes it, so a unit always gets four.
+retry() {
+	local attempt attempts=${LOOM_PREPARE_ATTEMPTS:-4}
+	for attempt in $(seq 1 "${attempts}"); do
+		"$@" && return 0
+		[ "${attempt}" -lt "${attempts}" ] && sleep $((attempt * 10 + RANDOM % 10))
+	done
+	return 1
+}
+# A submodule clone killed midway (a unit's deadline, a stop) leaves its .git file naming a gitdir that isn't a
+# repository: Home, Oct 10, held only objects/pack/tmp_pack_* under .git/modules/cohere/modules/TypeScript. Every update
+# after it fails on that submodule ("could not get a repository handle"), so each such .git file goes, and its gitdir
+# with it when that lies inside the checkout's own .git, and the update clones that submodule again. Whole ones are kept.
+clearSubmoduleStubs() {
+	local pointer gitdir inside
+	inside=$(cd "${tree}/.git" && pwd -P)
+	while IFS= read -r -d '' pointer; do
+		gitdir=$(sed -n 's/^gitdir: //p' "${pointer}")
+		case ${gitdir} in /*) ;; *) gitdir=$(dirname "${pointer}")/${gitdir} ;; esac
+		git --git-dir="${gitdir}" rev-parse -q --verify HEAD > /dev/null 2>&1 && continue
+		case $(cd "${gitdir}" 2> /dev/null && pwd -P)/ in "${inside}"/*) rm -rf "${gitdir}" ;; esac
+		rm -f "${pointer}"
+		say "cleared ${pointer#"${tree}/"}: the gitdir it names isn't a repository"
+	done < <(find "${tree}" \( -name .git -type d -prune \) -o \( -name node_modules -prune \) -o \( -name .git -type f -print0 \))
+}
+# The submodules, at the commits the checkout records. A failed update first clears what a killed clone left and tries
+# again, keeping every submodule that is whole; only when that fails too are they all made again, and a kill during
+# that leaves stubs the next unit clears the same way.
+makeSubmodules() {
+	git -C "${tree}" submodule update -q --init --recursive && return 0
+	say "the submodule update failed; clearing what a killed clone left and updating again"
+	clearSubmoduleStubs
+	retry git -C "${tree}" submodule update -q --init --recursive && return 0
+	say "the submodule update failed again; making the submodules again"
+	git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
+	rm -rf "${tree}/.git/modules"
+	clearSubmoduleStubs
+	retry git -C "${tree}" submodule update -q --init --recursive
+}
+if [ "${mode}" = submodules ]; then
+	makeSubmodules
+	exit
+fi
+
 [ "${trim}" = trim ] && trimLeftovers
 free=$(freeMegabytes)
 [ "${free:-0}" -ge 1500 ] || { say "only ${free} MB free after trimming"; exit 2; }
@@ -78,16 +129,6 @@ if [ "${mode}" = checkout ]; then
 		say "the kept checkout's configuration names a helper or rewrite; making it again"
 		rm -rf "${tree}"
 	fi
-	# GitHub turns away anonymous fetches when many instances check out at once, so each step retries with backoff.
-	# LOOM_PREPARE_ATTEMPTS is for the runner's tests; the runner never passes it, so a unit always gets four.
-	retry() {
-		local attempt attempts=${LOOM_PREPARE_ATTEMPTS:-4}
-		for attempt in $(seq 1 "${attempts}"); do
-			"$@" && return 0
-			[ "${attempt}" -lt "${attempts}" ] && sleep $((attempt * 10 + RANDOM % 10))
-		done
-		return 1
-	}
 	if [ ! -d "${tree}/.git" ]; then
 		[ "${free:-0}" -ge 4500 ] || { say "only ${free} MB free, too little to clone"; exit 2; }
 		retry git clone -q --filter=blob:none "${repository}" "${tree}" || { say "cloning ${repository} failed"; exit 2; }
@@ -120,12 +161,7 @@ if [ "${mode}" = checkout ]; then
 			*) say "refused: submodule ${url} isn't on GitHub"; exit 3 ;;
 		esac
 	done < <(git -C "${tree}" config -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
-	if ! git -C "${tree}" submodule update -q --init --recursive; then
-		say "the submodule update failed; making the submodules again"
-		git -C "${tree}" submodule deinit -q -f --all 2> /dev/null
-		rm -rf "${tree}/.git/modules"
-		retry git -C "${tree}" submodule update -q --init --recursive || { say "the submodules of ${sha} can't be fetched"; exit 2; }
-	fi
+	makeSubmodules || { say "the submodules of ${sha} can't be fetched"; exit 2; }
 
 	# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance, and only on a machine that is the
 	# runner's alone, since it installs into HOME. A shared machine's own toolchain serves, or the unit is unfit there.
