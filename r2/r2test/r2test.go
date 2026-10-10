@@ -1,5 +1,6 @@
 // Package r2test is R2 in memory for tests, never the real one: its S3 interface at /<bucket>/<key> honors HEAD,
-// GET (each with an ETag, the body's MD5 quoted), PUT with If-None-Match: * or If-Match: <ETag>, ListObjectsV2
+// GET (each with an ETag, the body's MD5 quoted), PUT with If-None-Match: * or If-Match: <ETag>, CopyObject of a key
+// onto itself with x-amz-copy-source-if-match (logged, and handed to Before and Answer, as method COPY), ListObjectsV2
 // and GetBucketLifecycleConfiguration, stamps every write's Last-Modified from its own clock, and refuses
 // (and fails the test on) any request whose Signature Version 4 Authorization isn't well formed, for the right key
 // id, over the body it carries. The bucket's public domain is /public/<key>, read (GET or HEAD) with no signature.
@@ -189,7 +190,7 @@ func (fake *Fake) check(request *http.Request, body []byte) string {
 	for _, name := range strings.Split(match[3], ";") {
 		signed[name] = true
 	}
-	for _, name := range []string{"host", "x-amz-date", "x-amz-content-sha256", "if-none-match", "content-type", "cache-control"} {
+	for _, name := range []string{"host", "x-amz-date", "x-amz-content-sha256", "if-none-match", "content-type", "cache-control", "x-amz-copy-source", "x-amz-copy-source-if-match"} {
 		if (name == "host" || request.Header.Get(name) != "") && !signed[name] {
 			return fmt.Sprintf("%s isn't signed (SignedHeaders=%s)", name, match[3])
 		}
@@ -258,13 +259,17 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		fail(writer, http.StatusNotFound, "NoSuchBucket", path)
 		return
 	}
+	method := request.Method
+	if method == http.MethodPut && request.Header.Get("X-Amz-Copy-Source") != "" {
+		method = "COPY"
+	}
 	if fake.Before != nil {
-		fake.Before(request.Method, key)
+		fake.Before(method, key)
 	}
 	if fake.Answer != nil {
-		if status := fake.Answer(request.Method, key); status != 0 {
+		if status := fake.Answer(method, key); status != 0 {
 			fake.mutex.Lock()
-			fake.requests = append(fake.requests, request.Method+" "+key)
+			fake.requests = append(fake.requests, method+" "+key)
 			fake.mutex.Unlock()
 			fail(writer, status, "Answered", key)
 			return
@@ -272,9 +277,9 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	}
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
-	fake.requests = append(fake.requests, request.Method+" "+key)
+	fake.requests = append(fake.requests, method+" "+key)
 	held, found := fake.objects[key]
-	switch request.Method {
+	switch method {
 	case http.MethodHead, http.MethodGet:
 		if !found {
 			fail(writer, http.StatusNotFound, "NoSuchKey", key)
@@ -310,6 +315,23 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		}
 		fake.objects[key] = object{body: body, modified: fake.now(), cacheControl: request.Header.Get("Cache-Control")}
 		writer.WriteHeader(http.StatusOK)
+	case "COPY":
+		if request.Header.Get("X-Amz-Copy-Source") != "/"+fake.Name+"/"+key {
+			fail(writer, http.StatusNotImplemented, "NotImplemented", "a copy from another key")
+			return
+		}
+		if !found {
+			fail(writer, http.StatusNotFound, "NoSuchKey", key)
+			return
+		}
+		if match := request.Header.Get("X-Amz-Copy-Source-If-Match"); match != "" && match != etag(held.body) {
+			fail(writer, http.StatusPreconditionFailed, "PreconditionFailed", key)
+			return
+		}
+		held.modified = fake.now()
+		fake.objects[key] = held
+		writer.Header().Set("Content-Type", "application/xml")
+		fmt.Fprintf(writer, "<CopyObjectResult><ETag>%s</ETag><LastModified>%s</LastModified></CopyObjectResult>", etag(held.body), held.modified.UTC().Format("2006-01-02T15:04:05.000Z"))
 	default:
 		fail(writer, http.StatusMethodNotAllowed, "MethodNotAllowed", request.Method)
 	}

@@ -20,7 +20,8 @@ func clocked(t *testing.T, now *time.Time) (*r2test.Fake, Store) {
 	return fake, store
 }
 
-// A blob the bucket holds from within FreshFor isn't sent again; one older is, which starts its 7 days over.
+// A blob the bucket holds from within FreshFor isn't sent again; one older is copied onto itself in the bucket, which
+// starts its 7 days over and sends no byte; one whose ETag isn't these bytes' MD5, or one gone, is sent.
 func TestABlobIsSkippedOnlyWhileItIsFresh(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	fake, store := clocked(t, &now)
@@ -34,17 +35,35 @@ func TestABlobIsSkippedOnlyWhileItIsFresh(t *testing.T) {
 		t.Fatalf("a blob 4 days old was sent again: %v %v", err, fake.Requests())
 	}
 	now = now.Add(26 * time.Hour)
-	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 2 || !fake.Modified("blobs/"+sum).Equal(now) {
-		t.Fatalf("a blob 5 days and 2 hours old wasn't sent again: %v %v", err, fake.Requests())
+	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 1 || fake.Count("COPY", "blobs/") != 1 || !fake.Modified("blobs/"+sum).Equal(now) {
+		t.Fatalf("a blob 5 days and 2 hours old wasn't refreshed in the bucket: %v %v", err, fake.Requests())
+	}
+	// Held under its name but not these bytes, as a multipart upload's ETag would be: sent, never trusted.
+	fake.Set("blobs/"+sum, []byte("other bytes"), now.Add(-6*24*time.Hour))
+	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 2 || fake.Count("COPY", "blobs/") != 1 {
+		t.Fatalf("a held blob of other bytes wasn't sent: %v %v", err, fake.Requests())
+	}
+	if held, _ := fake.Object("blobs/" + sum); string(held) != string(content) {
+		t.Fatalf("the blob holds %q", held)
 	}
 	fake.Delete("blobs/" + sum)
 	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 3 {
 		t.Fatalf("a blob the lifecycle took wasn't sent again: %v %v", err, fake.Requests())
 	}
+	// A blob the lifecycle takes between the look and the refresh is sent.
+	fake.Set("blobs/"+sum, content, now.Add(-6*24*time.Hour))
+	fake.Before = func(method, key string) {
+		if method == "COPY" {
+			fake.Delete(key)
+		}
+	}
+	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 4 || !fake.Modified("blobs/"+sum).Equal(now) {
+		t.Fatalf("a blob gone under its refresh wasn't sent again: %v %v", err, fake.Requests())
+	}
 }
 
 // A ref is only ever written after its blob is fresh: a product whose archive went up six days ago (an earlier
-// build's, the same bytes) gets its blob sent again before the ref that names it.
+// build's, the same bytes) gets its blob refreshed before the ref that names it is written.
 func TestAFreshRefNeverNamesABlobAboutToExpire(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	fake, store := clocked(t, &now)
@@ -55,42 +74,42 @@ func TestAFreshRefNeverNamesABlobAboutToExpire(t *testing.T) {
 		t.Fatalf("%s %v", sum, err)
 	}
 	requests := fake.Requests()
-	blob, ref := slices.Index(requests, "PUT blobs/"+digest(archive)), slices.Index(requests, "PUT refs/action/"+key)
+	blob, ref := slices.Index(requests, "COPY blobs/"+digest(archive)), slices.Index(requests, "PUT refs/action/"+key)
 	if blob < 0 || ref < 0 || blob > ref {
-		t.Fatalf("the blob went up after its ref, or not at all: %v", requests)
+		t.Fatalf("the blob was refreshed after its ref was written, or not at all: %v", requests)
 	}
 	if !fake.Modified("blobs/" + digest(archive)).Equal(now) {
 		t.Fatalf("the blob's clock wasn't reset: %v", fake.Modified("blobs/"+digest(archive)))
 	}
-	// A ref already held for the same archive is found, and it and its blob, both now past FreshFor, are written
-	// again with their own bytes, the ref only over the object read (If-Match), blob first.
+	// A ref already held for the same archive is found, and it and its blob, both now past FreshFor, are refreshed in
+	// the bucket, the ref only over the object read (its ETag), blob first.
 	now = now.Add(5*24*time.Hour + time.Minute)
 	fake.ResetRequests()
 	if _, err := store.Publish(key, archive); err != nil {
 		t.Fatal(err)
 	}
 	requests = fake.Requests()
-	blob, ref = slices.Index(requests, "PUT blobs/"+digest(archive)), slices.Index(requests, "PUT refs/action/"+key)
-	if blob < 0 || ref < 0 || blob > ref || !fake.Modified("refs/action/"+key).Equal(now) {
+	blob, ref = slices.Index(requests, "COPY blobs/"+digest(archive)), slices.Index(requests, "COPY refs/action/"+key)
+	if blob < 0 || ref < 0 || blob > ref || fake.Count("PUT", "") != 0 || !fake.Modified("refs/action/"+key).Equal(now) {
 		t.Fatalf("an unchanged product past FreshFor: %v", requests)
 	}
 	if held, _ := fake.Object("refs/action/" + key); string(held) != digest(archive) {
 		t.Fatalf("the ref was rewritten as %q", held)
 	}
-	// A builder holding the action, its blob and ref gone stale, calls it stored and refreshes both, the blob from its
-	// own bytes: a held product is refreshed, never rebuilt.
+	// A builder holding the action, its blob and ref gone stale, calls it stored and refreshes both, the blob once its
+	// bytes are read and checked: a held product is refreshed, never rebuilt.
 	now = now.Add(5*24*time.Hour + time.Minute)
 	fake.ResetRequests()
 	if sum, stored, err := store.Stored(key); err != nil || !stored || sum != digest(archive) {
 		t.Fatalf("a held product 5 days old: %s %v %v", sum, stored, err)
 	}
-	if fake.Count("PUT", "blobs/") != 1 || fake.Count("PUT", "refs/") != 1 || !fake.Modified("blobs/"+digest(archive)).Equal(now) || !fake.Modified("refs/action/"+key).Equal(now) {
+	if fake.Count("PUT", "") != 0 || fake.Count("COPY", "blobs/") != 1 || fake.Count("COPY", "refs/") != 1 || !fake.Modified("blobs/"+digest(archive)).Equal(now) || !fake.Modified("refs/action/"+key).Equal(now) {
 		t.Fatalf("a stale held product wasn't refreshed: %v", fake.Requests())
 	}
 	// A day later nothing is written.
 	now = now.Add(24 * time.Hour)
 	fake.ResetRequests()
-	if _, stored, err := store.Stored(key); err != nil || !stored || fake.Count("PUT", "") != 0 {
+	if _, stored, err := store.Stored(key); err != nil || !stored || fake.Count("PUT", "") != 0 || fake.Count("COPY", "") != 0 {
 		t.Fatalf("a fresh held product: %v %v", err, fake.Requests())
 	}
 	// Only a ref whose blob is gone isn't stored, so its product is built again; the builder says why.
@@ -118,7 +137,7 @@ func TestARefRefreshIsWrittenOnlyOverTheRefRead(t *testing.T) {
 			fake.Set("blobs/"+digest(archive), archive, now)
 			fake.Set("refs/action/"+key, []byte(digest(archive)), now.Add(-6*24*time.Hour))
 			fake.Before = func(method, path string) {
-				if method == "PUT" && path == "refs/action/"+key {
+				if method == "COPY" && path == "refs/action/"+key {
 					fake.Set(path, []byte(theirs+"\n"), now)
 				}
 			}
@@ -287,7 +306,7 @@ func TestARefWhoseBlobIsGoneIsPointedAtTheRebuild(t *testing.T) {
 }
 
 // A worse build that keeps a better build's index keeps it runnable: every blob it names that is past FreshFor is
-// put again with its own bytes, and so is the index, over its ETag. An index naming a blob that is gone can't be kept,
+// read, checked and refreshed in the bucket, and so is the index, over its ETag, none of them sent again. An index naming a blob that is gone can't be kept,
 // and the worse but whole one takes its place.
 func TestAKeptIndexAndEverythingItNamesAreKeptFresh(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
@@ -316,13 +335,13 @@ func TestAKeptIndexAndEverythingItNamesAreKeptFresh(t *testing.T) {
 			t.Errorf("%s wasn't kept fresh: %v", key, fake.Modified(key))
 		}
 	}
-	if content, _ := fake.Object("trees/k.json"); !strings.Contains(string(content), digest(product)) {
-		t.Fatalf("the kept index changed: %s", content)
+	if content, _ := fake.Object("trees/k.json"); !strings.Contains(string(content), digest(product)) || fake.Count("PUT", "") != 0 {
+		t.Fatalf("the kept index changed, or something was sent: %s %v", content, fake.Requests())
 	}
 	// A day later nothing needs writing.
 	now = now.Add(24 * time.Hour)
 	fake.ResetRequests()
-	if written, err := store.writeIndex("k", &worse); err != nil || written || fake.Count("PUT", "") != 0 {
+	if written, err := store.writeIndex("k", &worse); err != nil || written || fake.Count("PUT", "") != 0 || fake.Count("COPY", "") != 0 {
 		t.Fatalf("a fresh kept index: %v %v %v", written, err, fake.Requests())
 	}
 	// With the product's blob gone, the better index can't be kept.

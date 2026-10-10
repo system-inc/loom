@@ -155,7 +155,7 @@ func heldBuild(t *testing.T, store Store, version string) (TreeIndex, string) {
 
 // Two trees that share a product build it once: the second tree's buildcache fetches it from the store, its log
 // says so, and the store sees one put of that product's blob and one of its ref, though a rebuild would have made
-// other bytes. A held blob uploaded more than FreshFor ago is fetched, used, and sent again, the same bytes.
+// other bytes. A held blob uploaded more than FreshFor ago is fetched, used, and refreshed in the bucket, not sent.
 func TestTwoTreesSharingAProductBuildItOnce(t *testing.T) {
 	fake, store := serve(t)
 	first, log := heldBuild(t, store, "1")
@@ -177,15 +177,15 @@ func TestTwoTreesSharingAProductBuildItOnce(t *testing.T) {
 		t.Fatalf("the product went up %d times and its ref %d: %v", blobs, refs, fake.Requests())
 	}
 
-	// Six days on, the blob and its ref are about to expire: the third tree fetches the blob, uses it, and sends both
-	// again, their own bytes.
+	// Six days on, the blob and its ref are about to expire: the third tree fetches the blob, uses it, and refreshes
+	// both in the bucket.
 	fake.Set("blobs/"+archive, mustObject(t, fake, "blobs/"+archive), time.Now().Add(-6*24*time.Hour))
 	fake.Set("refs/action/"+sharedProduct, mustObject(t, fake, "refs/action/"+sharedProduct), time.Now().Add(-6*24*time.Hour))
 	third, log := heldBuild(t, store, "3")
 	if !strings.Contains(log, " fetched ") || third.Products[sharedProduct] != archive {
 		t.Fatalf("the third tree: %q, %s", log, third.Products[sharedProduct])
 	}
-	if fake.Count("PUT", "blobs/"+archive) != 2 || fake.Count("PUT", "refs/action/"+sharedProduct) != 2 || time.Since(fake.Modified("blobs/"+archive)) > time.Minute || time.Since(fake.Modified("refs/action/"+sharedProduct)) > time.Minute {
+	if fake.Count("PUT", "blobs/"+archive) != 1 || fake.Count("PUT", "refs/action/"+sharedProduct) != 1 || fake.Count("COPY", "blobs/"+archive) != 1 || fake.Count("COPY", "refs/action/"+sharedProduct) != 1 || time.Since(fake.Modified("blobs/"+archive)) > time.Minute || time.Since(fake.Modified("refs/action/"+sharedProduct)) > time.Minute {
 		t.Fatalf("a stale held blob: %v, modified %v", fake.Requests(), fake.Modified("blobs/"+archive))
 	}
 }
@@ -258,7 +258,7 @@ func TestHeldProductsAsksAgainAfterAFailure(t *testing.T) {
 	var refuse atomic.Bool
 	refuse.Store(true)
 	fake.Answer = func(method, key string) int {
-		if refuse.Load() && method == "PUT" && key == "refs/action/"+sharedProduct {
+		if refuse.Load() && method == "COPY" && key == "refs/action/"+sharedProduct {
 			return 403
 		}
 		return 0
