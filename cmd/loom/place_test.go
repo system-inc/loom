@@ -91,6 +91,18 @@ func TestTheShippedUnitKeepsItsRunsAcrossARestart(t *testing.T) {
 	if len(settings.poolHas["box-phase"]) == 0 || *settings.ledgerPath != "/home/loom/loom-placer/placed.jsonl" || *settings.once || *settings.dryRun {
 		t.Fatalf("the unit's placer is %v", arguments)
 	}
+	// Workshop's builds stay off until the fleet decodes a test job's tree; the tree builder's ledger is the one its
+	// unit writes. Mutant: --trees shipped on.
+	if *settings.trees || *settings.treesLedger != "/home/loom/loom-trees/trees.jsonl" || *settings.treeWait != placer.TreeWaitBound {
+		t.Fatalf("the unit's placer names trees %v from %s, waiting %v", *settings.trees, *settings.treesLedger, *settings.treeWait)
+	}
+	builderUnit, err := os.ReadFile("../../treebuilder/systemd/loom-build-trees.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(builderUnit, []byte("--ledger %h/loom-trees/trees.jsonl")) {
+		t.Fatal("the placer reads a ledger the tree builder's unit doesn't write")
+	}
 }
 
 // A run's job and log are this user's alone (its log prints the run's viewer token), its ending reaches the placer

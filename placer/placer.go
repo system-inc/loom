@@ -9,6 +9,9 @@
 // run, coordinator.FutureRun(tree, attempt), the run the judge reads. The ledger records each attempt before anything
 // starts, so a restart never places one twice. An attempt with a unit it can't place starts nothing and is posted void
 // as Loom's (neverPlaced), naming each unit and why: a future is never left silent, and never runs without a unit.
+//
+// With Trees set (#w7agfa9), every test and product unit's job names Workshop's build of its tree (the key its plan
+// carries), and an attempt is held, neither started nor voided, until the tree builder has put that tree's index up.
 package placer
 
 import (
@@ -28,6 +31,7 @@ import (
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/treebuilder"
 )
 
 // A Pool is one pool of the pool table (judge.PoolEntry, workshop's ~/.loom/pools.json) with the toolchains every
@@ -85,11 +89,28 @@ type Record struct {
 	// the run's first event, so nothing ran and the judge would wait out its backstop.
 	Exit      string `json:"exit,omitempty"`
 	EarlyExit string `json:"earlyExit,omitempty"`
+	// Held is what the attempt waits on, its tree's build, since At: written once when it starts waiting, so a restart
+	// waits out the same bound. The attempt is still the placer's.
+	Held string `json:"held,omitempty"`
 }
 
 // placed says the attempt is the placer's no more: started, voided, or with nothing to run.
 func (record Record) placed() bool {
-	return record.StartFailed == "" || record.Void != ""
+	return record.Void != "" || (record.StartFailed == "" && record.Held == "")
+}
+
+// TreeWaitBound is how long an attempt waits on its tree's index before it's voided as Loom's, named: a cold tree is
+// about 15 minutes on Workshop (900 s for 2016af55), and the tree builder builds one at a time, so a tree with one
+// other ahead of it in line is up in about 30. It's under the judge's 45-minute backstop (judge.StaleAfter), so the
+// placer's void, naming the tree, lands before the judge's silent one.
+const TreeWaitBound = 30 * time.Minute
+
+// A TreeState is what the placer reads of a tree's build: whether the store holds its index, and the tree builder's
+// newest record of it (Found false: none).
+type TreeState struct {
+	Indexed bool
+	Newest  treebuilder.Record
+	Found   bool
 }
 
 // An Exit is a placed run's loom run ending, as the process that started it saw it.
@@ -146,8 +167,17 @@ type Placer struct {
 	UnfitEvery time.Duration
 	// Keep is how long the ledger keeps an attempt of a future Queue no longer lists; zero keeps every one.
 	Keep time.Duration
-	Now  func() time.Time
-	Log  io.Writer
+	// Trees is the rollout gate for Workshop's builds (#w7agfa9): set only once every runner of the fleet runs a
+	// release that decodes `TestJob.Tree` (an older runner decodes a job strictly and refuses one carrying it). Set,
+	// every test and product unit's job names its plan's tree key, and an attempt waits, held, until the store holds
+	// that tree's index (TreeState), voided as Loom's, named, when the tree builder's build failed or past TreeWait.
+	// Unset, no job names a tree and nothing waits, as before.
+	Trees     bool
+	TreeState func(tree string) (TreeState, error)
+	// TreeWait is how long an attempt waits on its tree's index; zero means TreeWaitBound.
+	TreeWait time.Duration
+	Now      func() time.Time
+	Log      io.Writer
 	// noted are the attempts already logged as waiting (empty or held), so each is said once.
 	noted map[string]bool
 	// failing are the futures whose reads are failing, backed off between tries.
@@ -394,6 +424,7 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 	record := Record{Future: future.Future, Attempt: attempt, Run: run, PlanHash: PlanHash(future.Units)}
 	candidates := []candidate{}
 	var changed []string
+	trees := map[string]bool{}
 	for _, unit := range future.Units {
 		switch {
 		case unit.Decision == "reuse":
@@ -429,7 +460,18 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 			record.Unplaced = append(record.Unplaced, fmt.Sprintf("%s: %s", unitName(unit, parts.Kind), why))
 			continue
 		}
+		if placer.Trees && planner.RunsTreeBuild(parts.Kind) {
+			if unit.Tree == "" {
+				// A plan from before the planner keyed trees: no build is named for it, so it never runs one.
+				record.Unplaced = append(record.Unplaced, fmt.Sprintf("%s: its plan carries no tree key", unitName(unit, parts.Kind)))
+				continue
+			}
+			trees[unit.Tree] = true
+		}
 		candidates = append(candidates, candidate{unit: unit, job: job, fit: fit})
+	}
+	if len(trees) > 1 {
+		record.Unplaced = append(record.Unplaced, fmt.Sprintf("its units carry %d tree keys, and a future is one tree", len(trees)))
 	}
 	record.Unplaced = append(record.Unplaced, pass.pin(candidates)...)
 	record.At = placer.Now().UTC().Format(time.RFC3339)
@@ -440,6 +482,16 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 		// Every unit reused or carried: the judge decides the attempt from the earlier runs, with nothing to run.
 		fmt.Fprintf(placer.Log, "%s: nothing to place, %d reused and %d carried\n", run, record.Reused, record.Carried)
 		return false, placer.Ledger.Append(record)
+	}
+	for tree := range trees {
+		if ready, err := pass.treeReady(future, attempt, record, tree); !ready || err != nil {
+			return false, err
+		}
+		for index := range candidates {
+			if planner.RunsTreeBuild(candidates[index].job.Kind) {
+				candidates[index].job.Test.Tree = tree
+			}
+		}
 	}
 	placement := Placement{Future: future.Future, Attempt: attempt, Run: run, Job: protocol.Job{Name: "future-" + future.Future[:12]}}
 	slots := map[string]int{}
@@ -482,6 +534,52 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 	}
 	fmt.Fprintf(placer.Log, "placed %s: %d units on %s (%d reused, %d carried)\n", run, len(placement.Units), poolNames(placement.Pools), record.Reused, record.Carried)
 	return true, nil
+}
+
+// treeReady says whether the store holds the index of the attempt's tree, Workshop's build its units run. Until it
+// does the attempt is held, neither started nor voided, its wait written once to the ledger so a restart waits out the
+// same bound. It's voided as Loom's, naming the tree and why, when the tree builder's build of it failed (while that
+// failure stands; the builder tries again after it), or once it has waited TreeWait.
+func (pass *pass) treeReady(future judge.PlannedFuture, attempt int, record Record, tree string) (bool, error) {
+	placer := pass.placer
+	state, err := placer.TreeState(tree)
+	if err != nil {
+		return false, readError{fmt.Errorf("tree %s's build: %w", tree, err)}
+	}
+	if state.Indexed {
+		return true, nil
+	}
+	now := placer.Now()
+	if state.Found && state.Newest.Standing(now) {
+		record.Unplaced = []string{fmt.Sprintf("its tree %s wasn't built on Workshop (%s): Loom's, never the change's", tree, state.Newest)}
+		return false, pass.void(future, attempt, record, "tree failed: "+tree)
+	}
+	since := now
+	if held, found := placer.Ledger.Find(future.Future, attempt); found && held.Held != "" {
+		if at, err := time.Parse(time.RFC3339, held.At); err == nil {
+			since = at
+		}
+	} else {
+		held := record
+		held.Held = "its tree " + tree + "'s index"
+		if err := placer.Ledger.Append(held); err != nil {
+			return false, err
+		}
+		fmt.Fprintf(placer.Log, "%s: held, waiting for its tree %s's index\n", record.Run, tree)
+	}
+	wait := placer.TreeWait
+	if wait <= 0 {
+		wait = TreeWaitBound
+	}
+	if now.Sub(since) < wait {
+		return false, nil
+	}
+	builder := "the tree builder has no record of it"
+	if state.Found {
+		builder = "the tree builder's newest record: " + state.Newest.String()
+	}
+	record.Unplaced = []string{fmt.Sprintf("its tree %s's index wasn't in the store within %v (%s): Loom's, never the change's", tree, wait, builder)}
+	return false, pass.void(future, attempt, record, "")
 }
 
 // void posts the attempt void as Loom's, naming every unit it couldn't place, and records it. A void with a hold key

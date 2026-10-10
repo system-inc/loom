@@ -16,6 +16,12 @@
 # through its own clone ~/loom-placer/adamic.git (not the judge's: two fetches into one clone would race on its locks).
 # The ledger ~/loom-placer/placed.jsonl is held by one placer at a time; a second refuses to start.
 #
+# Workshop's builds (#w7agfa9): with --trees, every test and product unit's job names its plan's tree key, and an
+# attempt is held until the tree builder (loom-build-trees, whose ledger ~/loom-trees/trees.jsonl it reads) has put
+# that tree's index up, voided, named, when the build failed or after --tree-wait (30 min). It's off here until every
+# runner of the fleet runs a release that decodes a test job's tree (an older one refuses the job), loom-build-trees
+# runs, and loom-plan carries tree keys. Then add --trees to ExecStart.
+#
 # PLACE_POOL_HAS must match pools.json's names and the judge's JUDGE_POOL_HAS: a pool without one has no toolchain.
 [Unit]
 Description=Loom placer: places every planned future's attempt on the pools that take its units
@@ -27,7 +33,7 @@ Type=simple
 WorkingDirectory=%h/loom-placer
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment="PLACE_POOL_HAS=--pool-has codex-strict=go,clang,node,wasiSdk --pool-has box-strict=go,clang,node,wasiSdk --pool-has box-phase=go,clang,node"
-ExecStart=%h/.loom/bin/loom place --queue https://loom.system.inc --token-file %h/.loom/placer-token --wire https://runs.loom.system.inc --source %h/Projects/system/loom --pools %h/.loom/pools.json $PLACE_POOL_HAS --needs-git %h/loom-placer/adamic.git --r2 %h/.loom/r2-releases.conf --ledger %h/loom-placer/placed.jsonl --runs %h/loom-placer/runs --interval 10s
+ExecStart=%h/.loom/bin/loom place --queue https://loom.system.inc --token-file %h/.loom/placer-token --wire https://runs.loom.system.inc --source %h/Projects/system/loom --pools %h/.loom/pools.json $PLACE_POOL_HAS --needs-git %h/loom-placer/adamic.git --r2 %h/.loom/r2-releases.conf --ledger %h/loom-placer/placed.jsonl --runs %h/loom-placer/runs --trees-ledger %h/loom-trees/trees.jsonl --interval 10s
 KillMode=process
 Restart=on-failure
 RestartSec=10

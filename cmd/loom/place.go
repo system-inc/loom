@@ -19,11 +19,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/coordinator"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/placer"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/treebuilder"
 )
 
 // placeSettings are `loom place`'s flags, parsed in one place so the shipped unit's command line is checked against
@@ -31,10 +33,11 @@ import (
 type placeSettings struct {
 	queue, tokenFile, wire, source, poolsPath, needsGit *string
 	warmRunnersFile, warmAttempts, ledgerPath, runs     *string
+	treesLedger                                         *string
 	poolHas                                             poolHasFlag
 	priority, poolSlots                                 *int
-	unfitEvery, keep, interval                          *time.Duration
-	once, dryRun                                        *bool
+	unfitEvery, keep, interval, treeWait                *time.Duration
+	once, dryRun, trees                                 *bool
 	store                                               storeFlags
 }
 
@@ -61,6 +64,9 @@ func parsePlaceFlags(arguments []string, stderr io.Writer) (placeSettings, error
 	settings.interval = flags.Duration("interval", 10*time.Second, "time between pulls")
 	settings.once = flags.Bool("once", false, "pull once and exit")
 	settings.dryRun = flags.Bool("dry-run", false, "print each placement and void, start and post nothing, and write no ledger")
+	settings.trees = flags.Bool("trees", false, "every runner of the fleet runs a release that decodes a test job's tree: name Workshop's build on every test unit, holding an attempt until its tree's index is up (off: none named, none held)")
+	settings.treesLedger = flags.String("trees-ledger", filepath.Join(home, "loom-trees", "trees.jsonl"), "the tree builder's ledger (`loom build-trees`), read without its lock: why a tree an attempt waits on isn't up")
+	settings.treeWait = flags.Duration("tree-wait", placer.TreeWaitBound, "how long an attempt waits on its tree's index before it's voided, named, under the judge's 45-minute backstop")
 	settings.store = addStoreFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return settings, err
@@ -122,6 +128,15 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	exits := make(chan placer.Exit, 64)
 	start := func(placement placer.Placement) error { return startRun(placement, options, exits) }
 	var ledger placer.Ledger
+	// The action store: a void's records go there as the judge's do, straight to R2 with this machine's key, and a
+	// tree's index is read there.
+	var store builder.Store
+	if !*settings.dryRun || *settings.trees {
+		if store, err = settings.store.open(nil); err != nil {
+			fmt.Fprintln(stderr, "place:", err)
+			return 1
+		}
+	}
 	if *settings.dryRun {
 		voider.Queue, voider.Loop.Blobs = printedQueue{out: stdout}, &judge.StubBlobs{}
 		ledger = &placer.MemoryLedger{}
@@ -130,12 +145,6 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return nil
 		}
 	} else {
-		// A void's records go to the action store as the judge's do, straight to R2 with this machine's key.
-		store, err := settings.store.open(nil)
-		if err != nil {
-			fmt.Fprintln(stderr, "place:", err)
-			return 1
-		}
 		voider.Loop.Blobs = judge.StoreBlobs{Store: store}
 		// A run's log holds its live page's viewer token: the directory is this user's alone.
 		if err := os.MkdirAll(*settings.runs, 0o700); err == nil {
@@ -177,8 +186,18 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		PoolSlots:  *settings.poolSlots,
 		UnfitEvery: *settings.unfitEvery,
 		Keep:       *settings.keep,
-		Now:        time.Now,
-		Log:        stdout,
+		Trees:      *settings.trees,
+		TreeState: func(tree string) (placer.TreeState, error) {
+			indexed, err := store.TreeIndexed(tree)
+			if err != nil {
+				return placer.TreeState{}, err
+			}
+			newest, found, err := treebuilder.Newest(*settings.treesLedger, tree)
+			return placer.TreeState{Indexed: indexed, Newest: newest, Found: found}, err
+		},
+		TreeWait: *settings.treeWait,
+		Now:      time.Now,
+		Log:      stdout,
 	}
 	var prunedAt time.Time
 	for runContext.Err() == nil {

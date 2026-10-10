@@ -75,8 +75,8 @@ func goBuildArguments(testPackage protocol.TestPackage) []string {
 
 // runTest runs a test job. One naming its tree's build (job.Tree) runs Workshop's prebuilt test binaries and builds
 // nothing (prebuilt.go). Otherwise prepare.sh fetches the commit from the public repository and readies the checkout,
-// then each package's go test runs in it (runPackages): the path every unit takes until the placer names a tree, and a
-// phase job's always. Failed: a package's go test failed or the unit ran out of time. Broken: the job was refused, the
+// then each package's go test runs in it (runPackages): the path of every test job the placer places with its --trees
+// gate off, and of every judge's rerun, until reruns name a built tree too (#6ygdzat), and a phase job's always. Failed: a package's go test failed or the unit ran out of time. Broken: the job was refused, the
 // instance couldn't be readied, or its disk filled.
 func (run *unitRun) runTest(runContext context.Context) string {
 	job := run.unit.Test
