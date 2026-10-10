@@ -73,6 +73,24 @@ type ServeOptions struct {
 	trim func(trimContext context.Context, root string, exclusive bool, report io.Writer) error
 	// checkToolchains probes the claims; nil means toolchains.Check with HOME's adamic toolchain. Tests plant one.
 	checkToolchains func(checkContext context.Context, claims []string) []toolchains.Failure
+	// Units is the most units serve runs at once (#ef2rgaq): a box's 64 threads and 125 GB hold several, and one at a
+	// time left most of each idle. Zero or one runs one at a time. Only a prebuilt test job on serve's own runner runs
+	// beside others (slots.go); any other unit waits for the units in hand to finish and runs alone.
+	Units int
+	// UnitCpus and UnitMemoryMegabytes are a unit's share when it declares none (protocol.Resources). Zero means 8 and
+	// 16384, the strict tier's memory, so any unit that ran on a Codex instance fits its share.
+	UnitCpus            int
+	UnitMemoryMegabytes int
+	// Busy is the fraction of the machine's CPU time serve lets the machine reach before it asks for another unit while
+	// any is in hand. Zero means 0.8, Workshop's admission target.
+	Busy float64
+	// busy reads how busy the machine's CPUs were since its last call; nil means /proc/stat's (busyMeter). Tests plant a
+	// load through it.
+	busy func() (float64, bool)
+	// machine is the machine whose threads and memory the shares in hand are held to; nil means this one. Tests plant one.
+	machine *machine
+	// alongside says whether a unit may run beside others; nil means slots.go's alongside. Tests let a command unit.
+	alongside func(unit protocol.Unit) bool
 }
 
 // A ServeSummary is how a serving runner ended: how many units it ran and how each finished, how long it
@@ -102,9 +120,12 @@ func (summary ServeSummary) String() string {
 // it doesn't have, a request it can't read.
 var errPoolRefused = errors.New("the pool refused")
 
-// Serve asks the pool for units and runs them one at a time until the deadline or a drain, either of which lets the
-// unit in hand finish, or until serveContext is cancelled, which stops the unit in hand (it finishes broken, as with
-// any stopped runner). The error is the pool refusing this runner; the summary is always filled in.
+// Serve asks the pool for units and runs them until the deadline or a drain, either of which lets the units in hand
+// finish, or until serveContext is cancelled, which stops them (each finishes broken, as with any stopped runner). With
+// Units over one it runs several at once (slots.go): it asks for another only while the shares in hand leave room for
+// a unit of the default share and the machine is under its busy target, and a unit that can't run beside others waits
+// for the units in hand to finish and runs alone. The error is the pool refusing this runner; the summary is always
+// filled in.
 func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, error) {
 	started := time.Now()
 	unitOptions := options.Unit.withDefaults()
@@ -143,6 +164,23 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			return toolchains.Check(checkContext, claims, toolchains.Environment(home))
 		}
 	}
+	options.Units = max(1, options.Units)
+	if options.UnitCpus == 0 {
+		options.UnitCpus = 8
+	}
+	if options.UnitMemoryMegabytes == 0 {
+		options.UnitMemoryMegabytes = 16384
+	}
+	if options.Busy == 0 {
+		options.Busy = 0.8
+	}
+	if options.alongside == nil {
+		options.alongside = alongside
+	}
+	if options.busy == nil {
+		meter := &busyMeter{}
+		options.busy = meter.busy
+	}
 	// The disks a unit writes: its workspace's, and a strict runner's root, where its test job keeps the checkout.
 	disks := []string{unitOptions.WorkspaceParent}
 	root := unitOptions.Root
@@ -152,9 +190,22 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	if root != "" {
 		disks = append(disks, root)
 	}
-	cpus := describeMachine().cpus
+	machine := describeMachine()
+	if options.machine != nil {
+		machine = *options.machine
+	}
+	// What the units in hand may hold between them: every thread, and nine tenths of the memory, since a share's memory
+	// is a ceiling its cgroup kills at, never an average.
+	capacity := share{cpus: machine.cpus, memoryMegabytes: machine.memoryMegabytes * 9 / 10}
+	var cgroups *unitCgroups
+	if options.Units > 1 {
+		var err error
+		if cgroups, err = delegatedCgroups(); err != nil {
+			fmt.Fprintf(options.Report, "loom-runner serve: units run without a cgroup of their own: %v\n", err)
+		}
+	}
 	// A drain ends every wait at once, but never an ask in flight, whose unit the pool has already taken off its queue,
-	// and never the unit in hand.
+	// and never a unit in hand.
 	drainContext, drained := context.WithCancel(serveContext)
 	defer drained()
 	go func() {
@@ -182,6 +233,98 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	// unhad counts the units in a row whose runner couldn't be had: past two, serve waits a little before it asks again,
 	// so a store that is down doesn't void a whole queue in seconds. Any unit whose runner was had starts it over.
 	unhad := 0
+	// askAfter is when serve may ask again after that wait.
+	askAfter := time.Time{}
+	// The units in hand, each running in its own goroutine, which says it finished on finished. Only this loop reads
+	// or changes them.
+	type inHand struct {
+		unit    protocol.Unit
+		share   *share
+		live    *livestatus.Unit
+		started time.Time
+	}
+	type finish struct {
+		hand   *inHand
+		result Result
+		had    bool
+	}
+	hands := map[*inHand]bool{}
+	// holding is the shares of the units in hand, alone whether one runs alone.
+	holding := share{}
+	alone := false
+	finished := make(chan finish, options.Units)
+	settle := func(done finish) {
+		delete(hands, done.hand)
+		if done.hand.share != nil {
+			holding.cpus -= done.hand.share.cpus
+			holding.memoryMegabytes -= done.hand.share.memoryMegabytes
+		}
+		alone = false
+		var next *livestatus.Unit
+		for other := range hands {
+			if next == nil || other.live.StartedAt.Before(next.StartedAt) {
+				next = other.live
+			}
+		}
+		finishLive(live, done.hand.unit, done.result.Status, done.hand.started, next, done.hand.share == nil, unitOptions.LiveStatus)
+		summary.Units++
+		switch done.result.Status {
+		case protocol.StatusPassed:
+			summary.Passed++
+		case protocol.StatusFailed:
+			summary.Failed++
+		default:
+			summary.Broken++
+		}
+		if done.had {
+			unhad = 0
+			return
+		}
+		unhad++
+		fmt.Fprintf(options.Report, "loom-runner serve: unit %s's runner couldn't be had (%d in a row)\n", done.hand.unit.Unit, unhad)
+		if unhad > 2 {
+			askAfter = time.Now().Add(serveBackoff(unhad - 2))
+		}
+	}
+	// rest waits for delay, settling every unit that finishes meanwhile, and ends early at the first one, or at a drain,
+	// never past until.
+	rest := func(until time.Time, delay time.Duration) {
+		delay = max(0, min(delay, time.Until(until)))
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case done := <-finished:
+			settle(done)
+		case <-drainContext.Done():
+		case <-timer.C:
+		}
+	}
+	// start runs a unit in its own goroutine on its share (nil: alone, on the whole machine).
+	start := func(unit protocol.Unit, unitShare *share) {
+		hand := &inHand{unit: unit, share: unitShare, live: liveUnit(unit, livestatus.PhaseStarting, time.Now()), started: time.Now()}
+		hands[hand] = true
+		ownOptions, ownRunners := unitOptions, runners
+		if unitShare != nil {
+			holding.cpus += unitShare.cpus
+			holding.memoryMegabytes += unitShare.memoryMegabytes
+			ownOptions.share = unitShare
+			// Several units at once can't share one live status file, nor serve's phase for the unit in hand.
+			ownOptions.LiveStatus, ownRunners.live = "", nil
+		} else {
+			alone = true
+		}
+		live.Update(func(status *livestatus.Status) { status.Unit = hand.live })
+		go func() {
+			result, had := ownRunners.run(serveContext, unit, ownOptions)
+			if unitShare != nil && unitShare.cgroup != nil {
+				fmt.Fprintf(options.Report, "loom-runner serve: unit %s %s on %d cpus, peak %d MB of its %d MB\n", unit.Unit, result.Status,
+					unitShare.cpus, unitShare.cgroup.peakMegabytes(), unitShare.memoryMegabytes)
+				unitShare.cgroup.remove()
+			}
+			finished <- finish{hand: hand, result: result, had: had}
+		}()
+	}
+	cgroupsMade := 0
 	for {
 		if serveContext.Err() != nil {
 			summary.Stopped = "by a signal"
@@ -195,21 +338,38 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			summary.Stopped = "at the deadline"
 			break
 		}
+		askUntil := options.Deadline.Add(-options.Margin)
+		// Room for one more: no unit running alone, fewer than Units in hand, shares left for a default one, and, with any
+		// in hand, the machine under its busy target.
+		if alone || len(hands) >= options.Units || holding.cpus+options.UnitCpus > capacity.cpus && len(hands) > 0 ||
+			holding.memoryMegabytes+options.UnitMemoryMegabytes > capacity.memoryMegabytes && len(hands) > 0 {
+			rest(askUntil, time.Hour)
+			continue
+		}
+		if len(hands) > 0 {
+			busy, ok := options.busy()
+			if !ok || busy >= options.Busy {
+				rest(askUntil, 5*time.Second)
+				continue
+			}
+		}
 		// The blob cache gives up what it must before the disks are read, so a full cache never stands an instance down;
 		// a disk under the floor with the cache empty is unfit just below.
 		if err := readyRoot(unitOptions, unitOptions.testRoot()); err != nil && !errors.Is(err, errUnfit) {
 			fmt.Fprintf(options.Report, "loom-runner serve: readying the blob cache: %v\n", err)
 		}
 		unfit := unfitDisk(options, disks)
-		// A strict runner runs one unit at a time on its root, so what earlier units left there is no one's (and an
-		// exclusive one's HOME caches too): the first time it finds no room it clears that once, as every unit's
+		// What earlier units left on a strict runner's root is no one's once no unit holds it (and an exclusive one's HOME
+		// caches too): the first time serve finds no room with no unit in hand, it clears that once, as every unit's
 		// preparation does, and looks again. A runner that isn't strict only stands down.
-		if unfit != "" && summary.Unfit == "" && unitOptions.Strict {
+		if unfit != "" && summary.Unfit == "" && unitOptions.Strict && len(hands) == 0 {
 			fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; trimming earlier units' leavings on %s\n", unfit, root)
 			trimContext, cancel := context.WithTimeout(serveContext, 5*time.Minute)
-			if err := options.trim(trimContext, root, unitOptions.Exclusive, options.Report); err != nil {
-				fmt.Fprintf(options.Report, "loom-runner serve: trimming %s: %v\n", root, err)
-			}
+			trimAlone(root, func() {
+				if err := options.trim(trimContext, root, unitOptions.Exclusive, options.Report); err != nil {
+					fmt.Fprintf(options.Report, "loom-runner serve: trimming %s: %v\n", root, err)
+				}
+			})
 			cancel()
 			unfit = unfitDisk(options, disks)
 		}
@@ -244,17 +404,25 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			live.Update(func(status *livestatus.Status) { status.Unfit = unfit })
 		}
 		if summary.Unfit != "" {
-			pause(drainContext, options.Deadline.Add(-options.Margin), options.UnfitPause)
+			rest(askUntil, options.UnfitPause)
+			continue
+		}
+		if wait := time.Until(askAfter); wait > 0 {
+			// The last few units' runners weren't had: a store that is down.
+			rest(askUntil, wait)
 			continue
 		}
 		asked := time.Now()
-		unit, found, err := askForUnit(serveContext, options, unitOptions.Client, cpus)
+		unit, found, err := askForUnit(serveContext, options, unitOptions.Client, machine.cpus)
 		var unreadable *unreadableUnit
 		switch {
 		case serveContext.Err() != nil:
 			continue
 		case errors.Is(err, errPoolRefused):
 			fmt.Fprintf(options.Report, "loom-runner serve: %v\n", err)
+			for len(hands) > 0 {
+				settle(<-finished)
+			}
 			summary.Stopped = "because " + err.Error()
 			summary.Seconds = time.Since(started).Seconds()
 			return summary, err
@@ -272,37 +440,55 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			if failures == 1 {
 				fmt.Fprintf(options.Report, "loom-runner serve: asking the pool failed, retrying: %v\n", err)
 			}
-			pause(drainContext, options.Deadline.Add(-options.Margin), serveBackoff(failures))
+			rest(askUntil, serveBackoff(failures))
 			continue
 		}
 		failures = 0
 		live.Update(func(status *livestatus.Status) { status.AskedAt = time.Now() })
 		if !found {
 			// The pool waits up to 20 s before it says none; one that answers at once mustn't be asked in a spin.
-			pause(drainContext, options.Deadline.Add(-options.Margin), time.Second-time.Since(asked))
+			rest(askUntil, time.Second-time.Since(asked))
 			continue
 		}
-		live.Update(func(status *livestatus.Status) { status.Unit = liveUnit(unit, livestatus.PhaseStarting, time.Now()) })
-		result, had := runners.run(serveContext, unit, unitOptions)
-		finishLive(live, unit, result.Status, unitOptions.LiveStatus)
-		summary.Units++
-		switch result.Status {
-		case protocol.StatusPassed:
-			summary.Passed++
-		case protocol.StatusFailed:
-			summary.Failed++
-		default:
-			summary.Broken++
-		}
-		if had {
-			unhad = 0
+		// The unit is this serve's now, whatever the wait: the pool took it off its queue.
+		if options.Units == 1 || !options.alongside(unit) {
+			waited := time.Now()
+			for len(hands) > 0 {
+				settle(<-finished)
+			}
+			if since := time.Since(waited); since > time.Second {
+				fmt.Fprintf(options.Report, "loom-runner serve: unit %s runs alone; it waited %.0f s for the units in hand\n", unit.Unit, since.Seconds())
+			}
+			start(unit, nil)
 			continue
 		}
-		unhad++
-		fmt.Fprintf(options.Report, "loom-runner serve: unit %s's runner couldn't be had (%d in a row)\n", unit.Unit, unhad)
-		if unhad > 2 {
-			pause(drainContext, options.Deadline.Add(-options.Margin), serveBackoff(unhad-2))
+		unitShare := &share{cpus: options.UnitCpus, memoryMegabytes: options.UnitMemoryMegabytes}
+		if unit.Resources.Cpus > 0 {
+			unitShare.cpus = unit.Resources.Cpus
 		}
+		if unit.Resources.MemoryMegabytes > 0 {
+			unitShare.memoryMegabytes = unit.Resources.MemoryMegabytes
+		}
+		// A unit that declares more than the machine has gets all of it, alone among the shares.
+		unitShare.cpus, unitShare.memoryMegabytes = min(unitShare.cpus, capacity.cpus), min(unitShare.memoryMegabytes, capacity.memoryMegabytes)
+		waited := time.Now()
+		for holding.cpus+unitShare.cpus > capacity.cpus || holding.memoryMegabytes+unitShare.memoryMegabytes > capacity.memoryMegabytes {
+			settle(<-finished)
+		}
+		if since := time.Since(waited); since > time.Second {
+			fmt.Fprintf(options.Report, "loom-runner serve: unit %s waited %.0f s for room for its %d cpus and %d MB\n", unit.Unit, since.Seconds(), unitShare.cpus, unitShare.memoryMegabytes)
+		}
+		cgroupsMade++
+		group, err := cgroups.make(fmt.Sprintf("%d-%d", os.Getpid(), cgroupsMade), unitShare.cpus, unitShare.memoryMegabytes)
+		if err != nil {
+			fmt.Fprintf(options.Report, "loom-runner serve: unit %s runs without a cgroup of its own: %v\n", unit.Unit, err)
+		}
+		unitShare.cgroup = group
+		start(unit, unitShare)
+	}
+	// Serving has stopped: every unit in hand runs to its finish (or stops with serveContext).
+	for len(hands) > 0 {
+		settle(<-finished)
 	}
 	summary.Seconds = time.Since(started).Seconds()
 	return summary, nil

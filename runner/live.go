@@ -156,10 +156,10 @@ func startLive(options ServeOptions, started time.Time) *livestatus.Writer {
 	return livestatus.NewWriter(options.LiveStatus, status)
 }
 
-// finishLive puts the unit serve just ran among its recent ones and counts it: its verdict, its time, and the bytes it
-// fetched from the store, which the runner that ran it said on its own status (unitPath) when that status is this
-// unit's.
-func finishLive(live *livestatus.Writer, unit protocol.Unit, verdict string, unitPath string) {
+// finishLive puts a unit serve ran among its recent ones and counts it: its verdict, its time from started, and the bytes
+// it fetched from the store, which the runner that ran it said on its own status (unitPath) when it ran alone and that
+// status is this unit's. next is the unit in hand serve shows now, nil when none.
+func finishLive(live *livestatus.Writer, unit protocol.Unit, verdict string, started time.Time, next *livestatus.Unit, alone bool, unitPath string) {
 	if live == nil {
 		return
 	}
@@ -167,18 +167,14 @@ func finishLive(live *livestatus.Writer, unit protocol.Unit, verdict string, uni
 		verdict = protocol.StatusBroken
 	}
 	var fetched int64
-	if unitPath != "" {
+	if unitPath != "" && alone {
 		if ran, err := livestatus.Read(unitPath); err == nil && ran.Unit != nil && ran.Unit.Run == unit.Run && ran.Unit.Unit == unit.Unit {
 			fetched = ran.Unit.Fetched()
 		}
 	}
 	now := time.Now()
 	live.Update(func(status *livestatus.Status) {
-		started := now
-		if status.Unit != nil {
-			started = status.Unit.StartedAt
-		}
-		status.Unit = nil
+		status.Unit = next
 		status.AddRecent(livestatus.Recent{Run: unit.Run, Unit: unit.Unit, Verdict: verdict, FinishedAt: now, Seconds: now.Sub(started).Seconds(), Fetched: fetched})
 		status.Totals.Units++
 		status.Totals.Fetched += fetched

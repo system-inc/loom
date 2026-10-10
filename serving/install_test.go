@@ -13,11 +13,14 @@ import (
 
 func TestServeConfReadsAPoolAndRefusesAnythingElse(t *testing.T) {
 	config, err := ReadConfig("# Cloud\npool = box-strict\n\n  phase-jobs=yes  \nhas = go, clang,node,wasiSdk\n")
-	if err != nil || !reflect.DeepEqual(config, Config{Pool: "box-strict", PhaseJobs: true, Has: []string{"go", "clang", "node", "wasiSdk"}}) {
+	if err != nil || !reflect.DeepEqual(config, Config{Pool: "box-strict", PhaseJobs: true, Has: []string{"go", "clang", "node", "wasiSdk"}, Units: 1}) {
 		t.Fatalf("read %+v, %v", config, err)
 	}
 	if config, err := ReadConfig("pool=box-phase\nphase-jobs = no\n"); err != nil || config.PhaseJobs {
 		t.Fatalf("phase-jobs = no read %+v, %v", config, err)
+	}
+	if config, err := ReadConfig("pool = box-strict\nunits = 8\n"); err != nil || config.Units != 8 {
+		t.Fatalf("units = 8 read %+v, %v", config, err)
 	}
 	for name, content := range map[string]string{
 		"no pool":                     "phase-jobs = yes\n",
@@ -31,6 +34,10 @@ func TestServeConfReadsAPoolAndRefusesAnythingElse(t *testing.T) {
 		"a line with no equals":       "pool = box-strict\nbox-phase\n",
 		"a toolchain no probe checks": "pool = box-strict\nhas = go,rust\n",
 		"a toolchain claimed twice":   "pool = box-strict\nhas = go,go\n",
+		"no units":                    "pool = box-strict\nunits = 0\n",
+		"too many units":              "pool = box-strict\nunits = 65\n",
+		"units as a word":             "pool = box-strict\nunits = eight\n",
+		"units with a sign":           "pool = box-strict\nunits = +8\n",
 	} {
 		if config, err := ReadConfig(content); err == nil {
 			t.Errorf("%s: read %+v", name, config)
@@ -79,11 +86,19 @@ func TestTheUnitServesTheConfiguredPoolStrictAndDrainsOnReload(t *testing.T) {
 	if claims := Unit(Config{Pool: "box-strict", Has: []string{"go", "wasiSdk"}}, "cloud-4f1d2c", ""); !strings.Contains(claims, "serve --strict --has go,wasiSdk --pool https://runs.loom.system.inc/pools/box-strict ") {
 		t.Fatalf("a box claiming toolchains:\n%s", claims)
 	}
+	if several := Unit(Config{Pool: "box-strict", Units: 8}, "cloud-4f1d2c", ""); !strings.Contains(several, "serve --strict --units 8 --pool ") {
+		t.Fatalf("a box running eight units at once:\n%s", several)
+	}
+	if strings.Contains(Unit(Config{Pool: "box-strict", Units: 1}, "cloud-4f1d2c", ""), "--units") {
+		t.Fatal("a box running one unit at a time passes --units")
+	}
 	for _, line := range []string{
 		"ExecStartPre=/usr/bin/install -m 600 %h/.loom/serve-token %t/loom-serve/pool-token",
 		"RuntimeDirectoryMode=0700",
 		"ExecReload=/bin/kill -HUP $MAINPID",
 		"KillMode=mixed",
+		"Delegate=yes",
+		"DelegateSubgroup=serve",
 		"Restart=always",
 		"WantedBy=default.target",
 	} {

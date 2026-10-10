@@ -75,12 +75,22 @@ type neededBlob struct {
 // Broken: the instance was unfit (under the free floor with its blob cache empty, or without adamic's toolchain), the
 // store couldn't give what the unit reads whole, or a test that failed had tried to run go.
 func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJob, root string, started, deadline time.Time) string {
+	// What earlier units left on a strict runner's root is no one's once no unit holds it, so the first unit to find it
+	// free trims it; every prebuilt unit then holds it shared, beside the others a box serve runs at once.
+	var trim func()
 	if run.options.Strict {
-		// A strict runner runs one unit at a time on its root, so what earlier units left there is no one's.
-		if err := trimRoot(runContext, root, run.options.Exclusive, io.Discard); err != nil {
-			run.say(fmt.Sprintf("trimming %s: %v", root, err))
+		trim = func() {
+			if err := trimRoot(runContext, root, run.options.Exclusive, io.Discard); err != nil {
+				run.say(fmt.Sprintf("trimming %s: %v", root, err))
+			}
 		}
 	}
+	releaseRoot, err := holdRoot(runContext, root, false, trim)
+	if err != nil {
+		run.fail(protocol.PhaseStart, fmt.Errorf("holding %s: %w (the instance's, never the change's)", root, err))
+		return protocol.StatusBroken
+	}
+	defer releaseRoot()
 	prepareContext, cancelPrepare := context.WithDeadline(runContext, deadline)
 	defer cancelPrepare()
 	if err := readyRoot(run.options, root); err != nil {

@@ -267,15 +267,23 @@ fi
 # manifest by that name lists the chunks of a tar.gz of it, then "total <sha256> <bytes>" of the tar.gz and "tar <name>
 # <bytes>". Every chunk, the total and the tar itself are checked by sha256, the last against the job's name, so the
 # manifest needn't be trusted. Nothing is fetched until the root has room for the tar.gz and the unpacked inputs above
-# the 1500 MB floor. The marker naming what is unpacked goes first and comes back last, and the inputs are unpacked in
-# staging and moved into place whole, so a unit that fails anywhere between (a full disk, its deadline) leaves no marker
-# naming inputs that aren't there, and the next unit fetches them again. Staging goes when this ends, however it ends,
-# short of a kill, whose leavings the next trim takes. With LOOM_HOUSE_CACHE set (docs/house-cache.md), each chunk is
+# the 1500 MB floor. They are unpacked in staging and moved whole into adamic-tools/gate-inputs-<name>, which is never
+# changed after, so a unit that fails anywhere before the move (a full disk, its deadline) leaves nothing by that name,
+# and the next unit fetches them again. Staging goes when this ends, however it ends, short of a kill, whose leavings
+# the next trim takes. Units a box serve runs at once share the root (#ef2rgaq): one preparation fetches at a time,
+# under adamic-tools/gate-inputs.lock, and the rest wait and find what it unpacked. The runner holds its unit's
+# gate-inputs-<name>.lock shared while the unit runs (strict.go), and gate inputs of another name are removed only when
+# their lock can be taken exclusive at once, so no unit's inputs are removed or replaced under its tests. A machine
+# without flock runs one unit at a time and needs no lock. With LOOM_HOUSE_CACHE set (docs/house-cache.md), each chunk is
 # asked of the house cache first, within 2 s to connect and never under 64 KB a second for 10 s, the Go clients' floor
 # (a chunk is up to 90 MiB, so no total limit); the first chunk it doesn't give whole and hashing to its name is read
 # from the store, and so is every chunk after it. The manifest, whose name isn't its own hash, always comes from the store.
-tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs
-if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/null)" != "${gateInputs}" ]; then
+tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs-${gateInputs}
+if [ -n "${gateInputs}" ]; then
+	mkdir -p "${tools}" && exec 9> "${tools}/gate-inputs.lock" || { say "the gate inputs' lock can't be opened"; exit 2; }
+	if command -v flock > /dev/null; then flock -x 9 || { say "the gate inputs' lock can't be held"; exit 2; }; fi
+fi
+if [ -n "${gateInputs}" ] && [ ! -d "${inputs}" ]; then
 	fetch() { curl -fsS --retry 3 -o "$2" "https://artifacts.loom.system.inc/gate-inputs/$1"; }
 	house=${LOOM_HOUSE_CACHE:-}
 	chunk() { # chunk <sha256> <path>: from the house cache while it gives each chunk whole, else from the store
@@ -289,7 +297,6 @@ if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/nu
 	}
 	staging=${tools}/staging-$$ archive=${tools}/staging-$$/gate-inputs.tar.gz
 	trap 'rm -rf "${staging}"' EXIT
-	rm -f "${tools}/gate-inputs.manifest"
 	mkdir -p "${staging}/unpacked" && fetch "${gateInputs}" "${staging}/manifest" || { say "gate inputs manifest ${gateInputs} unreadable"; exit 2; }
 	read -r _ total compressed < <(grep '^total ' "${staging}/manifest")
 	read -r _ name size < <(grep '^tar ' "${staging}/manifest")
@@ -306,10 +313,18 @@ if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/nu
 	echo "${total}  ${archive}" | sha256sum -c --quiet || { say "gate inputs total hash differs"; exit 2; }
 	[ "$(gzip -dc "${archive}" | sha256sum | cut -c1-64)" = "${gateInputs}" ] || { say "gate inputs tar isn't ${gateInputs}"; exit 2; }
 	tar -C "${staging}/unpacked" -xzf "${archive}" && [ -d "${staging}/unpacked/gate-inputs" ] || { say "gate inputs unpack failed"; exit 2; }
-	{ [ ! -e "${inputs}" ] || mv "${inputs}" "${staging}/replaced"; } && mv "${staging}/unpacked/gate-inputs" "${inputs}" &&
-		echo "${gateInputs}" > "${tools}/gate-inputs.manifest" || { say "the gate inputs couldn't be moved into place"; exit 2; }
+	mv "${staging}/unpacked/gate-inputs" "${inputs}" || { say "the gate inputs couldn't be moved into place"; exit 2; }
 	rm -rf "${staging}"
 	trap - EXIT
+fi
+if [ -n "${gateInputs}" ]; then
+	# Gate inputs of another name go once no unit holds them. Their lock files stay: a unit waiting on one holds that
+	# file, so a lock file made again in its place would be one no one else is waiting on.
+	for old in "${tools}"/gate-inputs-*; do
+		[ -d "${old}" ] && [ "${old}" != "${inputs}" ] || continue
+		if command -v flock > /dev/null; then flock -n -x "${old}.lock" rm -rf "${old}" || true; else rm -rf "${old}"; fi
+	done
+	exec 9>&-
 fi
 if [ -n "${gateInputs}" ]; then
 	export ADAMIC_TYPESCRIPT_SOURCE=${inputs}/typescript ADAMIC_CYCLE_LEDGER_ROOT=${inputs}/cycle-ledger

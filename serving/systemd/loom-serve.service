@@ -1,18 +1,23 @@
 # Loom's serve on a Linux box (docs/serving.md): `loom-runner serve` asks this box's pool on the wire for units and
-# runs them one at a time, each on the runner its key names, beside loom-update. Nobody copies this file: `loom-runner
+# runs them, as many at once as serve.conf's units, each on the runner its key names, beside loom-update. Nobody copies this file: `loom-runner
 # install-serve`, which the updater's hook ~/.loom/updated.d/50-serve runs after every release, renders it from
 # ~/.loom/serve.conf (POOL and FLAGS below) and the host (WORKER: its name and a short machine id) into
 # ~/.config/systemd/user/loom-serve.service, enables it, and starts it or reloads it when it runs an older release.
 #
-# Reload is a drain (SIGHUP): serve asks for nothing more, lets the unit in hand finish, and exits 0, and Restart=always
+# Reload is a drain (SIGHUP): serve asks for nothing more, lets the units in hand finish, and exits 0, and Restart=always
 # starts it again on the runner the release just linked, so a release breaks no unit. --until ends every serve the same
 # way each hour, so it starts fresh and reads its token again. Stop is SIGTERM to serve alone (KillMode=mixed): it
-# breaks only the unit in hand, which it posts broken to the wire, and the unit's leftovers are killed once serve exits.
+# breaks only the units in hand, which it posts broken to the wire, and the unit's leftovers are killed once serve exits.
 #
 # Token: ~/.loom/serve-token, mode 600, a pool token for POOL. Each start copies it into this unit's own runtime
 # directory, and serve reads that copy and removes it, so the token is never on a command line.
 # Root: ~/loom-serve/root holds the blob cache and the unpacked sources under the runner's own bounds (4 GiB of blobs,
 # 3 GiB free before a prebuilt unit starts); ~/loom-serve/units holds each unit's workspace while it runs.
+#
+# Cgroups: the unit's cgroup is delegated to serve (Delegate=yes), which lives in its serve/ subgroup
+# (DelegateSubgroup=), so with serve.conf's units above 1 each unit it runs at once gets a cgroup of its own beside it,
+# held to its share of CPUs and memory: a unit past its memory is killed alone and finishes broken (runner/slots.go).
+# Stop still reaches every unit's processes, since their cgroups are this unit's.
 [Unit]
 Description=Loom serve: this box takes units from its pool on the wire and runs them
 
@@ -25,6 +30,8 @@ ExecStartPre=/usr/bin/install -m 600 %h/.loom/serve-token %t/loom-serve/pool-tok
 ExecStart=%h/.loom/bin/loom-runner serve FLAGS --pool https://runs.loom.system.inc/pools/POOL --token-file %t/loom-serve/pool-token --worker WORKER --until 1h --root %h/loom-serve/root --workspace %h/loom-serve/units
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=mixed
+Delegate=yes
+DelegateSubgroup=serve
 TimeoutStopSec=90
 Restart=always
 RestartSec=30
