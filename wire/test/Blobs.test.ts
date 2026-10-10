@@ -319,4 +319,17 @@ describe('public refs', function () {
         expect((await call('/public/refs/Build/x', { method: 'PUT', bearer: coordinator, body: sha256 })).status).toBe(400);
         expect((await call('/public/refs/build/.hidden', { method: 'PUT', bearer: coordinator, body: sha256 })).status).toBe(400);
     });
+
+    it('lets no token claim a refs/action key, the action store builders write straight to R2', async function () {
+        const body = randomBytes(256);
+        const sha256 = await sha256Hex(body);
+        const name = await sha256Hex(randomBytes(32));
+        const coordinator = await token(freshRun(), 'coordinator');
+        expect((await call(`/public/blobs/${sha256}`, { method: 'PUT', bearer: coordinator, body: body })).status).toBe(201);
+        for (const scope of ['coordinator', 'publish', 'publish-candidate'] as const) {
+            const writer = await token(scope === 'coordinator' ? freshRun() : 'workshop', scope);
+            expect((await call(`/public/refs/action/${name}`, { method: 'PUT', bearer: writer, body: sha256 })).status, scope).toBe(403);
+        }
+        expect(await env.PublicStore.head(`refs/action/${name}`)).toBeNull();
+    });
 });

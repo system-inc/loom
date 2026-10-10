@@ -415,9 +415,17 @@ async function handlePublicBlob(request: Request, environment: Env, sha256: stri
 export const RefNamespacePattern = /^[a-z][a-z0-9-]{0,31}$/;
 export const RefNamePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 
+// refs/action is the action store's (loom's builder/store.go): a builder writes it straight to R2 with its own key,
+// and a runner trusts what it names, so no token of this Worker's may claim one.
+export const ActionRefNamespace = 'action';
+
 async function handlePublicRef(request: Request, environment: Env, namespace: string, name: string): Promise<Response> {
     if (request.method !== 'PUT') {
         return methodNotAllowed('PUT');
+    }
+    if (namespace === ActionRefNamespace) {
+        await request.body?.cancel();
+        return jsonResponse(403, { error: 'refs/action is written only by a builder, straight to R2, never through the wire' });
     }
     const claims = await authorize(request, environment, null, { scopes: publicWriterScopes, queryScopes: [] });
     if (claims instanceof Response) {
