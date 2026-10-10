@@ -67,18 +67,14 @@ var ErrNotStored = errors.New("not in the action store")
 
 // ConflictError is a ref that already names an archive of other files than the one this build made: one key, two
 // products. The key isn't honest, or the build isn't reproducible, and since a ref never changes it always fails the
-// build. Gone is a ref whose archive the store no longer holds, so the two can't be compared.
+// build.
 type ConflictError struct {
 	Key   string
 	Held  string
 	Built string
-	Gone  bool
 }
 
 func (conflict ConflictError) Error() string {
-	if conflict.Gone {
-		return fmt.Sprintf("refs/action/%s names %s, which the store no longer holds, and this build made %s: a ref never changes, so this key can't be built again until the ref expires", conflict.Key, conflict.Held, conflict.Built)
-	}
 	return fmt.Sprintf("refs/action/%s holds %s and this build made %s, other files: a ref never changes, so this key isn't honest or its build isn't reproducible", conflict.Key, conflict.Held, conflict.Built)
 }
 
@@ -301,9 +297,10 @@ func sameContent(left, right []byte) (bool, error) {
 // Publish stores a product's archive under its key and returns the sha256 of the archive the store now names for
 // it. A ref naming the same archive is found, and it and its blob are kept fresh. A ref naming another archive holding
 // the same tar (gzip's bytes changed, the files didn't) is that archive, kept fresh; one holding other files is a
-// ConflictError, and nothing goes up. Otherwise the blob goes up first, fresh, then the ref, written only if nothing
-// is there (If-None-Match: *): of two builders racing, one writes and the other is held to what it wrote. A ref is
-// never overwritten with anything but its own bytes.
+// ConflictError, and nothing goes up. A ref whose archive the lifecycle already took names nothing, and is pointed at
+// this build's (replaceGone). Otherwise the blob goes up first, fresh, then the ref, written only if nothing is there
+// (If-None-Match: *): of two builders racing, one writes and the other is held to what it wrote. A ref naming an
+// archive the store holds is never overwritten with anything but its own bytes.
 func (store Store) Publish(key string, archive []byte) (string, error) {
 	sum := digest(archive)
 	held, err := store.heldRef(key)
@@ -337,7 +334,7 @@ func (store Store) agree(key string, held heldRef, archive []byte) (string, erro
 	}
 	theirs, err := store.heldBlob(held.Sum)
 	if errors.Is(err, ErrNotStored) {
-		return "", ConflictError{Key: key, Held: held.Sum, Built: sum, Gone: true}
+		return store.replaceGone(key, held, archive)
 	}
 	if err != nil {
 		return "", err
@@ -350,6 +347,30 @@ func (store Store) agree(key string, held heldRef, archive []byte) (string, erro
 		return "", ConflictError{Key: key, Held: held.Sum, Built: sum}
 	}
 	return held.Sum, store.refreshRef(key, held)
+}
+
+// replaceGone points a ref whose archive the lifecycle already took at this build's: the old archive names nothing a
+// runner can read, so there is nothing to compare or to keep. The new blob goes up first, then the ref is rewritten
+// only over the very object read (If-Match on its ETag); a ref another builder wrote meanwhile is read again and must
+// name this archive, or this build is refused.
+func (store Store) replaceGone(key string, held heldRef, archive []byte) (string, error) {
+	sum, err := store.PutBlob(archive)
+	if err != nil {
+		return "", err
+	}
+	store.wrote()
+	err = store.Bucket.Put("refs/action/"+key, []byte(sum), r2.PutOptions{ContentType: "text/plain", CacheControl: "no-cache", IfMatch: held.Object.ETag})
+	if !errors.Is(err, r2.ErrChanged) {
+		return sum, err
+	}
+	again, err := store.heldRef(key)
+	if err != nil {
+		return "", err
+	}
+	if again.Sum != sum {
+		return "", ConflictError{Key: key, Held: again.Sum, Built: sum}
+	}
+	return sum, nil
 }
 
 // Stored reports whether the bucket holds key's product, the sha256 of the archive its ref names, and whether that

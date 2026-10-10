@@ -161,6 +161,8 @@ func TestARefNamingAnotherArchiveIsRefusedAndNeverOverwritten(t *testing.T) {
 			fake, store := serve(t)
 			fake.Before = func(method, path string) {
 				if method == "PUT" && path == "refs/action/"+key {
+					// Another builder puts its blob, then its ref.
+					fake.Set("blobs/"+digest(theirs), theirs, time.Now())
 					fake.Set(path, []byte(digest(theirs)), time.Now())
 				}
 			}
@@ -241,5 +243,45 @@ func TestAnArchiveOfTheSameFilesGzippedOtherwiseIsTheHeldOne(t *testing.T) {
 	different := tarGzip(t, entry{name: key + "/tool", body: "another tool"})
 	if _, err = store.Publish(key, different); !errors.As(err, &ConflictError{}) {
 		t.Fatalf("other files: %v", err)
+	}
+}
+
+// A ref whose archive the lifecycle already took names nothing, so a rebuild with other bytes (a product that isn't
+// reproducible yet) takes its place: the blob first, then the ref, only over the ref read. A ref another builder
+// rewrote meanwhile holds this build to it.
+func TestARefWhoseBlobIsGoneIsPointedAtTheRebuild(t *testing.T) {
+	key := keyOf("p")
+	gone := keyOf("an archive the lifecycle took")
+	rebuilt := tarGzip(t, entry{name: key + "/tool", body: "built again, other bytes"})
+	fake, store := serve(t)
+	fake.Set("refs/action/"+key, []byte(gone), time.Now().Add(-6*24*time.Hour))
+	if sum, err := store.Publish(key, rebuilt); err != nil || sum != digest(rebuilt) {
+		t.Fatalf("a rebuild over a ref whose blob is gone: %s %v", sum, err)
+	}
+	requests := fake.Requests()
+	blob, ref := slices.Index(requests, "PUT blobs/"+digest(rebuilt)), slices.Index(requests, "PUT refs/action/"+key)
+	if blob < 0 || ref < 0 || blob > ref {
+		t.Fatalf("the blob went up after its ref, or not at all: %v", requests)
+	}
+	if held, _ := fake.Object("refs/action/" + key); string(held) != digest(rebuilt) {
+		t.Fatalf("the ref holds %q", held)
+	}
+	for name, theirs := range map[string]string{"another archive": keyOf("a third build"), "this archive": digest(rebuilt)} {
+		t.Run(name, func(t *testing.T) {
+			fake, store := serve(t)
+			fake.Set("refs/action/"+key, []byte(gone), time.Now())
+			fake.Before = func(method, path string) {
+				if method == "PUT" && path == "refs/action/"+key {
+					fake.Set(path, []byte(theirs), time.Now())
+				}
+			}
+			_, err := store.Publish(key, rebuilt)
+			if held, _ := fake.Object("refs/action/" + key); string(held) != theirs {
+				t.Fatalf("the other builder's ref was overwritten with %q", held)
+			}
+			if same := theirs == digest(rebuilt); same != (err == nil) || (!same && !errors.As(err, &ConflictError{})) {
+				t.Fatalf("racing %s: %v", name, err)
+			}
+		})
 	}
 }

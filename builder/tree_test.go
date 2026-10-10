@@ -145,7 +145,9 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	}
 
 	// A product whose ref names another archive fails each package that reads it, naming both, and the rest go up.
-	fake.Set("refs/action/"+product, []byte(strings.Repeat("e", 64)), time.Now())
+	other := tarGzip(t, entry{name: product + "/tool", body: "another build's tool"})
+	fake.Set("blobs/"+digest(other), other, time.Now())
+	fake.Set("refs/action/"+product, []byte(digest(other)), time.Now())
 	conflicted := TreeIndex{Tree: index.Tree, Future: "f", Go: index.Go, Packages: map[string]TreePackage{}}
 	for name, result := range index.Packages {
 		result.Binary = ""
@@ -154,13 +156,13 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	if _, written, err = PublishTree(store, &conflicted, build.Out, build.Cache, source, nil); err != nil || written {
 		t.Fatal(err)
 	}
-	if broke := conflicted.Packages["example.com/tree/a"].Error; !strings.Contains(broke, strings.Repeat("e", 64)) || !strings.Contains(broke, stored.Products[product]) {
+	if broke := conflicted.Packages["example.com/tree/a"].Error; !strings.Contains(broke, digest(other)) || !strings.Contains(broke, stored.Products[product]) {
 		t.Fatalf("package a: %q", broke)
 	}
 	if conflicted.Packages["example.com/tree/b"].Error != "" || conflicted.Packages["example.com/tree/b"].Binary == "" {
 		t.Fatalf("package b: %+v", conflicted.Packages["example.com/tree/b"])
 	}
-	if ref, _ := fake.Object("refs/action/" + product); string(ref) != strings.Repeat("e", 64) {
+	if ref, _ := fake.Object("refs/action/" + product); string(ref) != digest(other) {
 		t.Fatalf("the conflicting ref was overwritten with %q", ref)
 	}
 	// The index a better build wrote stays: package a, which built there, is still what a runner fetches.
