@@ -135,6 +135,7 @@ type Paths struct {
 	Token        string
 	Units        string
 	Hook         string
+	ClockHook    string
 	Probe        string
 	Binary       string
 	Host         string
@@ -149,8 +150,9 @@ func HomePaths(home string) Paths {
 	host, _ := os.Hostname()
 	return Paths{Config: filepath.Join(home, ".loom", "serve.conf"), UpdateConfig: filepath.Join(home, ".loom", "update.conf"), Token: filepath.Join(home, ".loom", "serve-token"),
 		Units: filepath.Join(home, ".config", "systemd", "user"), Hook: filepath.Join(home, ".loom", "updated.d", HookName),
-		Probe:  filepath.Join(home, ".loom", "health.d", HookName),
-		Binary: filepath.Join(home, ".loom", "bin", "loom-runner"), Host: host, MachineId: "/etc/machine-id", User: os.Getuid(), Proc: "/proc"}
+		ClockHook: filepath.Join(home, ".loom", "updated.d", ClockHookName),
+		Probe:     filepath.Join(home, ".loom", "health.d", HookName),
+		Binary:    filepath.Join(home, ".loom", "bin", "loom-runner"), Host: host, MachineId: "/etc/machine-id", User: os.Getuid(), Proc: "/proc"}
 }
 
 //go:embed updated.d/50-serve
@@ -158,6 +160,12 @@ var hookText string
 
 // HookName is the updater's hook that runs install-serve after every release (docs/updater.md).
 const HookName = "50-serve"
+
+//go:embed updated.d/10-clock
+var clockHookText string
+
+// ClockHookName is the updater's hook that keeps a WSL box's clock to Hyper-V's time sync alone (updated.d/10-clock, #nmx30ay).
+const ClockHookName = "10-clock"
 
 // A Systemctl runs `systemctl --user <arguments>` and gives back what it printed.
 type Systemctl func(arguments ...string) (string, error)
@@ -217,6 +225,9 @@ func Install(paths Paths, systemctl Systemctl, report io.Writer) error {
 	}
 	if _, err := WriteChanged(paths.Hook, hookText, 0o755); err != nil {
 		return fmt.Errorf("the updater's hook: %w", err)
+	}
+	if _, err := WriteChanged(paths.ClockHook, clockHookText, 0o755); err != nil {
+		return fmt.Errorf("the updater's clock hook: %w", err)
 	}
 	// The probe puts serve's state in every report the updater posts: the canary's health, and `loom release status`.
 	probe, err := updater.Probe(UnitName)

@@ -305,3 +305,65 @@ func TestTheHookRunsInstallServeOrPassesOnARollback(t *testing.T) {
 		t.Fatalf("on a rollback: exit %d, %s", code, output)
 	}
 }
+
+// The clock hook (#nmx30ay), run against stubs that record every call: a WSL box with Hyper-V's clock, timesyncd
+// enabled and its tick turned down, gets timesyncd stopped and masked and the tick put back; one already fixed (noise
+// in the frequency) is left alone; anywhere but WSL with Hyper-V's clock nothing is touched, since there timesyncd may
+// be the only time sync; a refused sudo fails the hook, named. Each mutant below fails a case here: the WSL guard
+// dropped (the plain Linux box), the Hyper-V guard dropped, the mask dropped, the tick reset dropped, the 1 ppm
+// tolerance dropped (the fixed box).
+func TestTheClockHookKeepsHyperVsTimeSyncAlone(t *testing.T) {
+	served := newBox(t, "pool = box-strict\n", 0o600)
+	if err := served.install(); err != nil {
+		t.Fatal(err)
+	}
+	if hook, err := os.Stat(served.paths.ClockHook); err != nil || hook.Mode().Perm() != 0o755 {
+		t.Fatalf("the clock hook: %v, %v", hook, err)
+	}
+	for _, test := range []struct {
+		name, release, timesyncd, adjtimex, sudo string
+		hyperv                                   bool
+		code                                     int
+		calls                                    string
+		says                                     string
+	}{
+		{"a plain Linux box", "6.8.0-45-generic", "enabled", "9000 0", "ok", true, 0, "", "not WSL"},
+		{"WSL without Hyper-V's clock", "6.18.40.1-microsoft-standard-WSL2", "enabled", "9000 0", "ok", false, 0, "", "no Hyper-V clock"},
+		{"the boxes on Oct 10", "6.18.40.1-microsoft-standard-WSL2", "enabled", "9162 -2832001", "ok", true, 0,
+			"sudo systemctl stop systemd-timesyncd|sudo systemctl mask systemd-timesyncd|sudo python3 set 10000|", "put back to 10000 and 0"},
+		{"a box already fixed", "6.18.40.1-microsoft-standard-WSL2", "masked", "10000 41", "ok", true, 0, "", "alone keeps the clock"},
+		{"sudo refused", "6.18.40.1-microsoft-standard-WSL2", "enabled", "9000 0", "refused", true, 1, "", "couldn't stop and mask"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			bin := filepath.Join(directory, "bin")
+			os.MkdirAll(bin, 0o755)
+			calls := filepath.Join(directory, "calls")
+			release := filepath.Join(directory, "osrelease")
+			os.WriteFile(release, []byte(test.release+"\n"), 0o644)
+			hyperv := filepath.Join(directory, "ptp_hyperv")
+			if test.hyperv {
+				os.WriteFile(hyperv, nil, 0o644)
+			}
+			stubs := map[string]string{
+				"systemctl": `[ "$1" = is-enabled ] && { echo ` + test.timesyncd + `; exit 0; }; echo "systemctl $*" >> ` + calls + `; exit 0`,
+				"sudo":      `[ "` + test.sudo + `" = ok ] || exit 1; [ "$1" = -n ] && shift; printf 'sudo ' >> ` + calls + `; exec "$@"`,
+				"python3":   `if [ $# -gt 2 ]; then echo "python3 set $3" >> ` + calls + `; echo 10000 0; else echo ` + test.adjtimex + `; fi`,
+			}
+			for name, script := range stubs {
+				os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+script+"\n"), 0o755)
+			}
+			command := exec.Command(served.paths.ClockHook)
+			command.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "LOOM_CLOCK_RELEASE=" + release, "LOOM_CLOCK_HYPERV=" + hyperv}
+			output, _ := command.CombinedOutput()
+			recorded, _ := os.ReadFile(calls)
+			got := strings.ReplaceAll(strings.TrimSpace(string(recorded)), "\n", "|")
+			if got != "" {
+				got += "|"
+			}
+			if command.ProcessState.ExitCode() != test.code || got != test.calls || !strings.Contains(string(output), test.says) {
+				t.Fatalf("exit %d, calls %q, said %q; want exit %d, calls %q, saying %q", command.ProcessState.ExitCode(), got, output, test.code, test.calls, test.says)
+			}
+		})
+	}
+}
