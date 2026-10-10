@@ -300,11 +300,11 @@ type runOptions struct {
 
 // runArguments is the `loom run` that runs a placement: uncached, on its pools alone, under the future's run id, every
 // pool strict (each unit is a test job) with its toolchains, kinds, cpus and memory, so the coordinator's own fit
-// holds the pool choice the placer made. A strict unit may go quiet for the unit ceiling's 1800 s, as the judge's
-// reruns allow.
+// holds the pool choice the placer made. A unit whose runner goes silent two heartbeats is placed again
+// (coordinator.silentBeats, #ravqt9s), as the judge's reruns are.
 func runArguments(placement placer.Placement, options runOptions) []string {
 	arguments := []string{"run", "--uncached", "--slots", "none", "--run-id", placement.Run, "--wire", options.wire, "--source", options.source,
-		"--priority", strconv.Itoa(options.priority), "--silence-drop", strconv.Itoa(int(strictSilence.Seconds())),
+		"--priority", strconv.Itoa(options.priority),
 		"--record", filepath.Join(options.runs, placement.Run+".record")}
 	for _, pool := range placement.Pools {
 		arguments = append(arguments, "--strict-pool", fmt.Sprintf("%s=%d", pool.Name, pool.Slots),
