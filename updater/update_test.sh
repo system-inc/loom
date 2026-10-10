@@ -440,6 +440,14 @@ wait "${holder}"
 ) > "${T}/run.log" 2>&1
 echo $? > "${T}/code"
 check upload-runs-under-a-handed-down-lock 'code 0 && cmp -s ${T}/www2/current.txt ${T}/out/current.txt'
+# --current sends the manifest given as current.txt, with the blobs it names, and leaves the out directory's as it is:
+# how the release watcher promotes a canary before the out directory says so.
+"${T}/source/updater/upload.sh" --current "${T}/out/manifests/${g}.txt" "${T}/out" "${T}/www3" > "${T}/run.log" 2>&1
+echo $? > "${T}/code"
+check upload-current-sends-the-manifest-given 'code 0 && cmp -s ${T}/www3/current.txt ${T}/out/manifests/${g}.txt && [ -f ${T}/www3/blobs/$(runnerOf ${g}) ] && [ ! -e ${T}/www3/blobs/$(runnerOf ${h}) ] && cmp -s ${T}/out/current.txt ${T}/current-before.txt'
+"${T}/source/updater/upload.sh" --current "${T}/out/manifests/missing.txt" "${T}/out" "${T}/www3" > "${T}/run.log" 2>&1
+echo $? > "${T}/code"
+check upload-current-needs-a-manifest 'code 2 && grep -q "isn.t a manifest file" ${T}/run.log && cmp -s ${T}/www3/current.txt ${T}/out/manifests/${g}.txt'
 LOOM_RELEASE_LOCK_FD=8 "${T}/source/updater/upload.sh" "${T}/out" "${T}/www2" 8>> "${T}/elsewhere" > "${T}/run.log" 2>&1
 echo $? > "${T}/code"
 check upload-refuses-a-descriptor-on-another-file 'code 1 && grep -q "descriptor 8 (LOOM_RELEASE_LOCK_FD) isn.t open on" ${T}/run.log'

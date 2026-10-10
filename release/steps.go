@@ -72,7 +72,10 @@ func Commands(config Config, log io.Writer) Steps {
 			return script(callContext, "publish.sh", commit, config.Out)
 		},
 		Promote: func(commit string) error { return Promote(config.Out, commit) },
-		Upload: func(callContext context.Context) error {
+		Upload: func(callContext context.Context, current string) error {
+			if current != "" {
+				return script(callContext, "upload.sh", "--current", current, config.Out, config.Destination)
+			}
 			return script(callContext, "upload.sh", config.Out, config.Destination)
 		},
 		Published: func(callContext context.Context) (Manifest, error) {
@@ -111,15 +114,30 @@ func FetchManifest(callContext context.Context, base string, fresh bool) (Manife
 	return manifest, nil
 }
 
+// ManifestPath is where publish.sh keeps a commit's own manifest: <out>/manifests/<commit>.txt.
+func ManifestPath(out, commit string) string {
+	return filepath.Join(out, "manifests", commit+".txt")
+}
+
+// OwnManifest is the commit's own manifest, refused unless it names that commit alone.
+func OwnManifest(out, commit string) ([]byte, error) {
+	content, err := os.ReadFile(ManifestPath(out, commit))
+	if err != nil {
+		return nil, err
+	}
+	if manifest, err := ParseManifest(string(content)); err != nil || !Alone(manifest, commit) {
+		return nil, fmt.Errorf("manifests/%s.txt isn't that commit's manifest alone (%v)", commit, err)
+	}
+	return content, nil
+}
+
 // Promote makes the commit's own manifest, which publish.sh kept at manifests/<commit>.txt, the out directory's
-// current.txt: every box follows it, the canary line gone. It is how a canary is promoted and how one is ended.
+// current.txt: every box follows it, the canary line gone. It is how a canary is promoted and how one is ended, once
+// the boxes read it.
 func Promote(out, commit string) error {
-	content, err := os.ReadFile(filepath.Join(out, "manifests", commit+".txt"))
+	content, err := OwnManifest(out, commit)
 	if err != nil {
 		return err
-	}
-	if manifest, err := ParseManifest(string(content)); err != nil || manifest.Top() != commit || manifest.CanaryVersion() != "" {
-		return fmt.Errorf("manifests/%s.txt isn't that commit's manifest alone (%v)", commit, err)
 	}
 	partial := filepath.Join(out, ".current.txt.promote")
 	if err := os.WriteFile(partial, content, 0o644); err != nil {
