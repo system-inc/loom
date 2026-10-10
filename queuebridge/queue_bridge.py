@@ -115,6 +115,48 @@ def testOnly(paths):
     return bool(paths) and all(testOnlyPattern.search(path) for path in paths)
 
 
+# push-main's Python test names: a test a non-test file names is gate logic (l.787-795).
+pythonTestPattern = re.compile(r"(_test\.py$|-test\.py$|(^|/)test_[^/]*\.py$)")
+
+
+def historyOf(base, sha):
+    """Every path a non-merge commit in base..sha touches: the queue refuses a change whose history reaches past its diff."""
+    return sorted(set(path for path in git("log", "--no-merges", "--format=", "--name-only", "%s..%s" % (base, sha)).splitlines() if path))
+
+
+def gateNamedOf(sha, diffPaths):
+    """Each Python test in the diff that a file other than a test, a .md or a .txt names in sha's tree, with those files."""
+    named = []
+    for path in diffPaths:
+        if not pythonTestPattern.search(path):
+            continue
+        found = [line.split(":", 1)[1] for line in git("grep", "-l", "-F", "-e", path.rsplit("/", 1)[-1], sha, "--", ".").splitlines() if ":" in line]
+        users = sorted(user for user in found if user != path and not testOnlyPattern.search(user) and not user.endswith((".md", ".txt")))
+        if users:
+            named.append({"path": path, "users": users})
+    return named
+
+
+def patchId(older, newer):
+    diff = subprocess.run(["git", "-C", repository, "diff", older, newer], capture_output=True).stdout
+    if not diff:
+        return None
+    out = subprocess.run(["git", "-C", repository, "patch-id", "--stable"], input=diff, capture_output=True).stdout.split()
+    return out[0].decode() if out else None
+
+
+def revertOf(base, sha, depth=30):
+    """The commit among main's newest first-parent commits whose inverse is exactly base..sha, or None."""
+    change = patchId(base, sha)
+    if change is None:
+        return None
+    for commit in git("rev-list", "--first-parent", "-n", str(depth), "origin/main").splitlines():
+        parent = git("rev-parse", "--verify", "-q", commit + "^1")
+        if parent and patchId(commit, parent) == change:
+            return commit
+    return None
+
+
 def log(text):
     print("%s queue-bridge: %s" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), text), flush=True)
 
@@ -164,8 +206,10 @@ class Gate:
         if not exists:
             return {"shaExists": False, "baseIsAncestor": False, "baseOnMain": False, "diffPaths": []}
         ancestor = lambda older, newer: subprocess.run(["git", "-C", repository, "merge-base", "--is-ancestor", older, newer], capture_output=True).returncode == 0
+        diffPaths = sorted(path for path in git("diff", "--no-renames", "--name-only", base, sha).splitlines() if path)
         return {"shaExists": True, "baseIsAncestor": ancestor(base, sha), "baseOnMain": ancestor(base, "origin/main"),
-                "diffPaths": sorted(path for path in git("diff", "--no-renames", "--name-only", base, sha).splitlines() if path)}
+                "diffPaths": diffPaths, "historyPaths": historyOf(base, sha), "gateNamed": gateNamedOf(sha, diffPaths),
+                "revertOf": revertOf(base, sha)}
 
     def record(self, tree):
         """The newest finished fast record for tree: {ref, status, gated}, or None while none has finished."""

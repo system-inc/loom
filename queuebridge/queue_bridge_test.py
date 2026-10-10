@@ -308,5 +308,60 @@ class Tick(unittest.TestCase):
         self.assertEqual(pipeline.posts(), [("/landings/" + change, {"refused": "refused: the record gated another sha", "main": new})])
 
 
+class Facts(unittest.TestCase):
+    """The new facts from real git: history beyond the diff, gate-named Python tests, and a revert of main."""
+
+    def setUp(self):
+        import subprocess, tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        environment = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        self.run = lambda *arguments: subprocess.run(["git", "-C", self.work, *arguments], check=True, capture_output=True, text=True, env=environment).stdout.strip()
+        origin = os.path.join(self.tmp.name, "origin.git")
+        subprocess.run(["git", "init", "-q", "--bare", origin], check=True)
+        self.work = os.path.join(self.tmp.name, "work")
+        subprocess.run(["git", "init", "-q", self.work], check=True)
+        self.run("remote", "add", "origin", origin)
+        self.base = self.commit({"cloud/run.sh": "python3 cloud/a_test.py\n", "a.go": "package a\n"})
+        self.run("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.run("fetch", "-q", "origin")
+        self.saved = queue_bridge.repository
+        queue_bridge.repository = self.work
+
+    def tearDown(self):
+        queue_bridge.repository = self.saved
+
+    def commit(self, files, remove=()):
+        for name, text in files.items():
+            path = os.path.join(self.work, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            open(path, "w").write(text)
+        for name in remove:
+            os.remove(os.path.join(self.work, name))
+        self.run("add", "-A")
+        self.run("commit", "-q", "-m", "c")
+        return self.run("rev-parse", "HEAD")
+
+    def test_history_names_a_path_a_later_commit_took_back_out_of_the_diff(self):
+        self.commit({"x_test.go": "package a\n", "cloud/gate.sh": "echo\n"})
+        sha = self.commit({}, remove=["cloud/gate.sh"])
+        self.assertEqual(queue_bridge.historyOf(self.base, sha), ["cloud/gate.sh", "x_test.go"])
+        self.assertEqual(self.run("diff", "--name-only", self.base, sha), "x_test.go")
+
+    def test_a_python_test_a_script_names_is_gate_logic_and_one_only_docs_name_is_not(self):
+        sha = self.commit({"cloud/a_test.py": "x\n", "cloud/b_test.py": "y\n", "docs/b.md": "cloud/b_test.py\n"})
+        self.assertEqual(queue_bridge.gateNamedOf(sha, ["cloud/a_test.py", "cloud/b_test.py", "docs/b.md"]),
+                         [{"path": "cloud/a_test.py", "users": ["cloud/run.sh"]}])
+
+    def test_a_revert_of_a_main_commit_is_named_and_anything_else_is_none(self):
+        landed = self.commit({"a.go": "package a\n\nvar x = 1\n"})
+        self.run("push", "-q", "origin", "HEAD:refs/heads/main")
+        self.run("fetch", "-q", "origin")
+        reverted = self.commit({"a.go": "package a\n"})
+        self.assertEqual(queue_bridge.revertOf(landed, reverted), landed)
+        other = self.commit({"b.go": "package a\n"})
+        self.assertIsNone(queue_bridge.revertOf(reverted, other))
+
+
 if __name__ == "__main__":
     unittest.main()
