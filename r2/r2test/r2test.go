@@ -1,10 +1,12 @@
 // Package r2test is R2 in memory for tests, never the real one: its S3 interface at /<bucket>/<key> honors HEAD,
-// GET, PUT with If-None-Match: * and ListObjectsV2, stamps every write's Last-Modified from its own clock, and refuses
+// GET (each with an ETag, the body's MD5 quoted), PUT with If-None-Match: * or If-Match: <ETag>, and ListObjectsV2,
+// stamps every write's Last-Modified from its own clock, and refuses
 // (and fails the test on) any request whose Signature Version 4 Authorization isn't well formed, for the right key
 // id, over the body it carries. The bucket's public domain is /public/<key>, read with no signature.
 package r2test
 
 import (
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
@@ -25,7 +27,8 @@ import (
 
 // A Fake is one bucket. Now is its clock (nil means time.Now), PageSize how many keys a listing page holds,
 // Refused hears each badly signed request (nil means the test fails), and Before, when set, runs before each signed
-// request on a key is answered, so a test can race another writer in.
+// request on a key is answered, so a test can race another writer in. Answer, when set and it returns a status, is
+// what the fake answers instead, for a test that needs the service to fail or slow it down.
 type Fake struct {
 	Server      *httptest.Server
 	Credentials r2.Credentials
@@ -34,6 +37,7 @@ type Fake struct {
 	PageSize    int
 	Refused     func(problem string)
 	Before      func(method, key string)
+	Answer      func(method, key string) int
 
 	t        testing.TB
 	mutex    sync.Mutex
@@ -50,7 +54,7 @@ type object struct {
 // New starts a fake bucket, loom-artifacts, closed when the test ends.
 func New(t testing.TB) *Fake {
 	fake := &Fake{
-		Credentials: r2.Credentials{AccountId: "acct0123", AccessKeyId: "fake-key-id", SecretAccessKey: "fake-secret"},
+		Credentials: r2.Credentials{AccountId: "0123456789abcdef0123456789abcdef", AccessKeyId: "fake-key-id", SecretAccessKey: "fake-secret"},
 		Name:        "loom-artifacts",
 		PageSize:    1000,
 		t:           t,
@@ -233,6 +237,15 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if fake.Before != nil {
 		fake.Before(request.Method, key)
 	}
+	if fake.Answer != nil {
+		if status := fake.Answer(request.Method, key); status != 0 {
+			fake.mutex.Lock()
+			fake.requests = append(fake.requests, request.Method+" "+key)
+			fake.mutex.Unlock()
+			fail(writer, status, "Answered", key)
+			return
+		}
+	}
 	fake.mutex.Lock()
 	defer fake.mutex.Unlock()
 	fake.requests = append(fake.requests, request.Method+" "+key)
@@ -245,6 +258,7 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		}
 		writer.Header().Set("Last-Modified", held.modified.UTC().Format(http.TimeFormat))
 		writer.Header().Set("Content-Length", strconv.Itoa(len(held.body)))
+		writer.Header().Set("ETag", etag(held.body))
 		if request.Method == http.MethodGet {
 			writer.Write(held.body)
 		}
@@ -257,11 +271,21 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			fail(writer, http.StatusNotImplemented, "NotImplemented", "If-None-Match "+match)
 			return
 		}
+		if match := request.Header.Get("If-Match"); match != "" && (!found || (match != "*" && match != etag(held.body))) {
+			fail(writer, http.StatusPreconditionFailed, "PreconditionFailed", key)
+			return
+		}
 		fake.objects[key] = object{body: body, modified: fake.now(), cacheControl: request.Header.Get("Cache-Control")}
 		writer.WriteHeader(http.StatusOK)
 	default:
 		fail(writer, http.StatusMethodNotAllowed, "MethodNotAllowed", request.Method)
 	}
+}
+
+// etag is an object's ETag as R2 gives one for a single put: its MD5, quoted.
+func etag(body []byte) string {
+	sum := md5.Sum(body)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
 
 // list answers one ListObjectsV2 page, keys in order, PageSize at most, its continuation token the last key given.

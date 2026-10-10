@@ -4,7 +4,8 @@
 // Reads by anyone go direct to the bucket's public domain instead, artifacts.loom.system.inc, never through here.
 //
 // The key pair comes from a key = value file, ~/.loom/r2-releases.conf by default, the same file updater/upload.sh
-// reads: account_id, access_key_id and secret_access_key. That key writes loom-artifacts and nothing else.
+// reads: account_id, access_key_id and secret_access_key. That key can write anywhere in loom-artifacts, releases/
+// included, so Put writes only the action store's prefixes (Writable).
 package r2
 
 import (
@@ -21,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -79,30 +81,48 @@ type Bucket struct {
 	Now         func() time.Time
 }
 
-// Open is the bucket named name on credentials' account.
-func Open(credentials Credentials, name string) Bucket {
-	return Bucket{Endpoint: "https://" + credentials.AccountId + ".r2.cloudflarestorage.com", Name: name, Credentials: credentials}
+// accountIdPattern is a Cloudflare account id, the first label of the S3 endpoint's host.
+var accountIdPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// Open is the bucket named name on credentials' account, refusing an account id that isn't one, so nothing from the
+// credentials file can steer the host a request is signed for.
+func Open(credentials Credentials, name string) (Bucket, error) {
+	if !accountIdPattern.MatchString(credentials.AccountId) {
+		return Bucket{}, fmt.Errorf("account_id %q isn't a Cloudflare account id, 32 lowercase hex digits", credentials.AccountId)
+	}
+	return Bucket{Endpoint: "https://" + credentials.AccountId + ".r2.cloudflarestorage.com", Name: name, Credentials: credentials}, nil
 }
 
 // ErrNotFound is a key the bucket doesn't hold.
 var ErrNotFound = errors.New("not in the bucket")
 
-// ErrExists is a conditional put refused because the key is already written.
+// ErrExists is a put with IfNoneMatch refused because the key is already written.
 var ErrExists = errors.New("already written")
 
-// An Object is one key the bucket holds: its size and when it was last written, which is when R2's lifecycle starts
-// counting its days.
+// ErrChanged is a put with IfMatch refused because the key no longer holds that ETag.
+var ErrChanged = errors.New("changed since it was read")
+
+// Writable are the only key prefixes Put writes: the action store's (builder/store.go). The key pair can write the
+// whole bucket, releases/ included, whose current.txt every machine installs from, so a writer of the action store
+// never touches anything else even through a bug.
+var Writable = []string{"blobs/", "refs/action/", "trees/"}
+
+// An Object is one key the bucket holds: its size, its ETag, and when it was last written, which is when R2's
+// lifecycle starts counting its days.
 type Object struct {
 	Key      string
 	Size     int64
+	ETag     string
 	Modified time.Time
 }
 
-// PutOptions are a put's headers: IfNoneMatch writes only when the key holds nothing (If-None-Match: *).
+// PutOptions are a put's headers: IfNoneMatch writes only when the key holds nothing (If-None-Match: *), and
+// IfMatch only when the key still holds that ETag (If-Match), which R2's PutObject honors.
 type PutOptions struct {
 	ContentType  string
 	CacheControl string
 	IfNoneMatch  bool
+	IfMatch      string
 }
 
 // emptySha256 is the payload hash of a request with no body.
@@ -137,8 +157,13 @@ func (bucket Bucket) address(key string, query url.Values) (*url.URL, error) {
 	return address, nil
 }
 
-// do sends one signed request, again after a network error or a 5xx, three tries in all, and returns the answer
-// with its body read. Each try is signed afresh, so a retry never carries a stale date.
+// transient is an answer worth asking again: the service's own failure, or its asking us to slow down.
+func transient(status int) bool {
+	return status >= 500 || status == http.StatusTooManyRequests
+}
+
+// do sends one signed request, again after a network error, a 5xx or a 429, three tries in all, and returns the
+// answer with its body read. Each try is signed afresh, so a retry never carries a stale date.
 func (bucket Bucket) do(method, key string, query url.Values, body []byte, headers map[string]string) (*http.Response, []byte, error) {
 	address, err := bucket.address(key, query)
 	if err != nil {
@@ -177,7 +202,7 @@ func (bucket Bucket) do(method, key string, query url.Values, body []byte, heade
 			lastError = err
 			continue
 		}
-		if response.StatusCode >= 500 {
+		if transient(response.StatusCode) {
 			lastError = fmt.Errorf("%s %s: %s: %s", method, key, response.Status, snippet(answer))
 			continue
 		}
@@ -188,6 +213,15 @@ func (bucket Bucket) do(method, key string, query url.Values, body []byte, heade
 
 func snippet(answer []byte) string {
 	return strings.TrimSpace(string(answer[:min(len(answer), 512)]))
+}
+
+// object is what an answer's headers say about key.
+func object(key string, response *http.Response) (Object, error) {
+	modified, err := http.ParseTime(response.Header.Get("Last-Modified"))
+	if err != nil {
+		return Object{}, fmt.Errorf("%s: Last-Modified %q: %w", key, response.Header.Get("Last-Modified"), err)
+	}
+	return Object{Key: key, Size: response.ContentLength, ETag: response.Header.Get("ETag"), Modified: modified}, nil
 }
 
 // Head is what the bucket holds at key, or ErrNotFound.
@@ -203,30 +237,42 @@ func (bucket Bucket) Head(key string) (Object, error) {
 	default:
 		return Object{}, fmt.Errorf("HEAD %s: %s: %s", key, response.Status, snippet(answer))
 	}
-	modified, err := http.ParseTime(response.Header.Get("Last-Modified"))
-	if err != nil {
-		return Object{}, fmt.Errorf("HEAD %s: Last-Modified %q: %w", key, response.Header.Get("Last-Modified"), err)
-	}
-	return Object{Key: key, Size: response.ContentLength, Modified: modified}, nil
+	return object(key, response)
 }
 
 // Get reads key's bytes, or ErrNotFound.
 func (bucket Bucket) Get(key string) ([]byte, error) {
+	content, _, err := bucket.GetObject(key)
+	return content, err
+}
+
+// GetObject reads key's bytes and what the bucket says about them, or ErrNotFound.
+func (bucket Bucket) GetObject(key string) ([]byte, Object, error) {
 	response, answer, err := bucket.do(http.MethodGet, key, nil, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, Object{}, err
 	}
 	switch response.StatusCode {
 	case http.StatusOK:
-		return answer, nil
+		held, err := object(key, response)
+		held.Size = int64(len(answer))
+		return answer, held, err
 	case http.StatusNotFound:
-		return nil, ErrNotFound
+		return nil, Object{}, ErrNotFound
 	}
-	return nil, fmt.Errorf("GET %s: %s: %s", key, response.Status, snippet(answer))
+	return nil, Object{}, fmt.Errorf("GET %s: %s: %s", key, response.Status, snippet(answer))
 }
 
-// Put writes body at key. With IfNoneMatch, a key that already holds anything is ErrExists and is left as it is.
+// Put writes body at key, which must be under one of Writable. With IfNoneMatch, a key that already holds anything
+// is ErrExists; with IfMatch, a key that no longer holds that ETag is ErrChanged; either way it is left as it is.
 func (bucket Bucket) Put(key string, body []byte, options PutOptions) error {
+	writable := false
+	for _, prefix := range Writable {
+		writable = writable || (strings.HasPrefix(key, prefix) && len(key) > len(prefix))
+	}
+	if !writable || strings.Contains(key, "..") {
+		return fmt.Errorf("PUT %s: the action store writes only under %s", key, strings.Join(Writable, ", "))
+	}
 	headers := map[string]string{}
 	if options.ContentType != "" {
 		headers["Content-Type"] = options.ContentType
@@ -236,6 +282,9 @@ func (bucket Bucket) Put(key string, body []byte, options PutOptions) error {
 	}
 	if options.IfNoneMatch {
 		headers["If-None-Match"] = "*"
+	}
+	if options.IfMatch != "" {
+		headers["If-Match"] = options.IfMatch
 	}
 	if body == nil {
 		body = []byte{}
@@ -249,6 +298,8 @@ func (bucket Bucket) Put(key string, body []byte, options PutOptions) error {
 		return nil
 	case response.StatusCode == http.StatusPreconditionFailed && options.IfNoneMatch:
 		return ErrExists
+	case response.StatusCode == http.StatusPreconditionFailed && options.IfMatch != "":
+		return ErrChanged
 	}
 	return fmt.Errorf("PUT %s: %s: %s", key, response.Status, snippet(answer))
 }

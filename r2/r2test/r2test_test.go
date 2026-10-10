@@ -47,6 +47,21 @@ func TestABucketWritesReadsAndListsThroughTheS3Interface(t *testing.T) {
 	if content, _ := fake.Object("refs/action/k"); string(content) != "one" {
 		t.Fatalf("a conditional put replaced %q", content)
 	}
+	// If-Match writes only over the ETag it read.
+	_, read, err := bucket.GetObject("refs/action/k")
+	if err != nil || read.ETag == "" {
+		t.Fatalf("%+v %v", read, err)
+	}
+	if err = bucket.Put("refs/action/k", []byte("one"), r2.PutOptions{IfMatch: read.ETag}); err != nil {
+		t.Fatalf("a put over the ETag read: %v", err)
+	}
+	fake.Set("refs/action/k", []byte("someone else's"), written)
+	if err = bucket.Put("refs/action/k", []byte("one"), r2.PutOptions{IfMatch: read.ETag}); !errors.Is(err, r2.ErrChanged) {
+		t.Fatalf("a put over another ETag: %v", err)
+	}
+	if err = bucket.Put("refs/action/gone", []byte("one"), r2.PutOptions{IfMatch: read.ETag}); !errors.Is(err, r2.ErrChanged) {
+		t.Fatalf("a put over nothing: %v", err)
+	}
 	for index := range 5 {
 		bucket.Put(fmt.Sprintf("blobs/%c", 'b'+index), []byte("x"), r2.PutOptions{})
 	}

@@ -31,6 +31,9 @@ func (store storeFlags) open(requests *builder.Requests) (builder.Store, error) 
 	if err != nil {
 		return builder.Store{}, fmt.Errorf("the store's key: %w", err)
 	}
-	bucket := r2.Open(credentials, *store.bucket)
+	bucket, err := r2.Open(credentials, *store.bucket)
+	if err != nil {
+		return builder.Store{}, fmt.Errorf("the store's key: %w", err)
+	}
 	return builder.Store{Read: strings.TrimSuffix(*store.read, "/"), Bucket: &bucket, Requests: requests}, nil
 }
