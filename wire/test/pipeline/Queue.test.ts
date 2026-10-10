@@ -721,6 +721,45 @@ describe('a decided block', function () {
     });
 });
 
+describe('outside verdicts, behind their switch', function () {
+    it("are refused only after Judge decided a real change that landed, logged, and refusing one writes nothing", async function () {
+        const queue = await freshQueue();
+        const rules = function (body: unknown): Promise<Response> {
+            return queue.fetch('https://queue/rules', { method: 'POST', body: JSON.stringify(body) });
+        };
+        const refuse = { rule: 'outsideVerdicts', value: { refused: true }, commit: sha(99) };
+        expect((await rules({ rule: 'outsideVerdicts', value: { refused: true } })).status).toBe(400);
+        // A landing today's gate decided with a whole verdict isn't Judge's: still not.
+        const whole = ((await (await submit(queue, change(201))).json()) as { change: string }).change;
+        expect((await postWhole(queue, whole, sha(201), 'passed', null)).status).toBe(200);
+        expect((await report(queue, whole, { main: sha(201), from: main, landed: sha(201) })).status).toBe(200);
+        expect((await rules(refuse)).status).toBe(422);
+        // Judge decides one by its units, and it lands: now the switch may flip.
+        const judged = ((await (await submit(queue, change(202))).json()) as { change: string }).change;
+        const units = await planOf(['outside']);
+        expect((await postPlan(queue, sha(202), units)).status).toBe(200);
+        const key = units[0]?.unitKey ?? '';
+        expect((await postBatch(queue, sha(202), batch(judged, sha(202), 'run-1', [record(judged, key, 'run-1', 'passed', null)], 'green'))).status).toBe(200);
+        expect((await report(queue, judged, { main: sha(202), from: sha(201), landed: sha(202) })).status).toBe(200);
+        expect((await rules(refuse)).status).toBe(200);
+        // A whole verdict from outside is refused and logs nothing; the change waits for Judge.
+        const waiting = ((await (await submit(queue, change(203))).json()) as { change: string }).change;
+        const before = (await logOf(queue)).length;
+        const refused = await postWhole(queue, waiting, sha(203), 'passed', null);
+        expect(refused.status).toBe(409);
+        expect(await refused.text()).toContain('outsideVerdicts');
+        expect((await logOf(queue)).length).toBe(before);
+        expect(await landings(queue)).toEqual([]);
+        const log = await logOf(queue);
+        expect(log.filter((event) => event.type === 'rule.changed').map((event) => event.data)).toEqual([{ rule: 'outsideVerdicts', value: { refused: true }, commit: sha(99) }]);
+        expect((await replay(log)).rules.outsideVerdicts).toEqual({ refused: true });
+        // The rollback: off again, today's gate decides as before.
+        expect((await rules({ ...refuse, value: { refused: false } })).status).toBe(200);
+        expect((await postWhole(queue, waiting, sha(203), 'passed', null)).status).toBe(200);
+        expect(await landings(queue)).toEqual([expect.objectContaining({ change: waiting, future: sha(203) })]);
+    });
+});
+
 describe('a resubmit', function () {
     it('moves a red or parked change to a new sha under the same id, rechecked by git, and never back to a tested sha', async function () {
         const queue = await freshQueue();

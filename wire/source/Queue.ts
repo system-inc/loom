@@ -239,6 +239,9 @@ export interface Rules {
     // Blocks (#j3t4qbg), off until after cutover: with them on, a cleared change waits, and the instant no block is in
     // flight the queue opens one with every waiting change in line order, up to the budget. No clock.
     blocks: { on: boolean; budget: number };
+    // Outside verdicts (#srsq44p): while refused, today's gate can't decide a future with a whole verdict, and only
+    // Judge's batches decide. It turns on only after Judge decided a real change that landed (Loom, 01:25Z).
+    outsideVerdicts: { refused: boolean };
 }
 
 export interface BlockEntry {
@@ -551,7 +554,7 @@ export function parityOf(state: QueueState, future: FutureEntry): boolean {
 }
 
 export function emptyState(): QueueState {
-    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 } }, blocks: new Map() };
+    return { changes: new Map(), futures: new Map(), verdicts: new Map(), line: [], refused: 0, head: GenesisHash, seq: 0, landedMain: null, rules: { blocks: { on: false, budget: 8 }, outsideVerdicts: { refused: false } }, blocks: new Map() };
 }
 
 // A whole verdict's decision, by the judge's rule: a failure that is main's red (excused, as Green excuses it) doesn't
@@ -587,6 +590,9 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'rule.changed') {
         if (event.data.rule === 'blocks') {
             state.rules.blocks = event.data.value as Rules['blocks'];
+        }
+        else if (event.data.rule === 'outsideVerdicts') {
+            state.rules.outsideVerdicts = event.data.value as Rules['outsideVerdicts'];
         }
     }
     else if (event.type === 'block.opened') {
@@ -735,6 +741,18 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     }
     state.head = hash;
     state.seq = event.seq;
+}
+
+// The first real change that landed on a future Judge decided by its units, not a whole verdict, or null: the proof
+// outside verdicts wait on before they can be refused.
+export function judgeLanded(state: QueueState): string | null {
+    for (const entry of state.changes.values()) {
+        const future = state.futures.get(entry.future ?? '');
+        if (entry.state === 'landed' && entry.record.parity !== true && future !== undefined && future.whole === null && future.units !== null) {
+            return entry.record.change;
+        }
+    }
+    return null;
 }
 
 // Replays a log from genesis, checking every link of the chain; a broken link is an error, never a state.
@@ -1359,9 +1377,12 @@ export class Queue extends DurableObject<Env> {
         await this.openBlock();
     }
 
-    // A rule moves only by a rule.changed naming the landed commit that changed it. Blocks is the one rule tonight.
+    // A rule moves only by a rule.changed naming the landed commit that changed it: blocks, or outside verdicts.
     private async changeRule(request: Request): Promise<Response> {
         const parsed = parseJson((await readBodyText(request, MaximumChangeBodyBytes)) ?? '');
+        if (isPlainObject(parsed) && parsed.rule === 'outsideVerdicts') {
+            return this.changeOutsideVerdicts(parsed);
+        }
         if (
             !isPlainObject(parsed) ||
             parsed.rule !== 'blocks' ||
@@ -1382,6 +1403,22 @@ export class Queue extends DurableObject<Env> {
         return this.ctx.blockConcurrencyWhile(async () => {
             await this.append('rule.changed', {}, { rule: 'blocks', value: value, commit: commit });
             await this.openBlock();
+            return jsonResponse(200, { rules: (await this.current()).rules });
+        });
+    }
+
+    private async changeOutsideVerdicts(parsed: Record<string, unknown>): Promise<Response> {
+        if (!isPlainObject(parsed.value) || typeof parsed.value.refused !== 'boolean' || typeof parsed.commit !== 'string' || !shaPattern.test(parsed.commit)) {
+            return jsonResponse(400, { error: 'the body is {rule: outsideVerdicts, value: {refused}, commit: the landed commit that changed it}' });
+        }
+        const value = { refused: parsed.value.refused };
+        const commit = parsed.commit;
+        return this.ctx.blockConcurrencyWhile(async () => {
+            const state = await this.current();
+            if (value.refused && judgeLanded(state) === null) {
+                return jsonResponse(422, { error: "outside verdicts can't be refused until Judge has decided a real change that landed (Loom, 01:25Z)" });
+            }
+            await this.append('rule.changed', {}, { rule: 'outsideVerdicts', value: value, commit: commit });
             return jsonResponse(200, { rules: (await this.current()).rules });
         });
     }
@@ -1551,6 +1588,9 @@ export class Queue extends DurableObject<Env> {
         }
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
+            if (state.rules.outsideVerdicts.refused) {
+                return jsonResponse(409, { error: 'whole verdicts are refused by rule outsideVerdicts: Judge decides every future' });
+            }
             const entry = state.changes.get(checked.change);
             if (entry === undefined) {
                 return jsonResponse(404, { error: `no change ${checked.change}` });
