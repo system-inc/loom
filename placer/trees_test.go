@@ -178,3 +178,36 @@ func TestAFailedTreeOrAPlanNamingNoOneTreeIsVoidedNamed(t *testing.T) {
 		}
 	}
 }
+
+// After a tree's failure voids attempt 1, attempt 2's void for the same failure is held by cause, and the builder
+// retries; attempt 2's wait is still counted from its first pass, so its named void lands under the judge's backstop,
+// never after the judge's silent one (review of tree-wiring, finding 2). Mutant: a held failure's void ending the pass
+// before the bound is read.
+func TestAnAttemptAfterATreeFailureIsVoidedNamedBeforeTheJudgesBackstop(t *testing.T) {
+	ledger := &MemoryLedger{}
+	source := &listedFutures{{Future: tree, Base: base, Attempt: 1, Units: withTree(t, everyKind(t), treeKey)}}
+	h := newHarness(t, source, ledger)
+	state := newTrees(h)
+	start := h.now
+	state.newest[treeKey] = treebuilder.Record{Tree: treeKey, Event: treebuilder.Failed, At: start.Format(time.RFC3339), Cause: "boom"}
+	h.placeOnce(t, 0)
+	if len(h.voids) != 1 {
+		t.Fatalf("attempt 1: voids %v", h.voids)
+	}
+	(*source)[0].Attempt = 2
+	var named time.Time
+	for minute := 0; minute <= 90 && named.IsZero(); minute++ {
+		h.now = start.Add(time.Duration(minute)*time.Minute + 10*time.Second)
+		if minute == 30 { // the builder retries
+			state.newest[treeKey] = treebuilder.Record{Tree: treeKey, Event: treebuilder.Started, At: h.now.Format(time.RFC3339)}
+		}
+		before := len(h.voids)
+		h.placeOnce(t, 0)
+		if len(h.voids) > before {
+			named = h.now
+		}
+	}
+	if named.IsZero() || named.Sub(start) >= judge.StaleAfter {
+		t.Fatalf("attempt 2's first named void at %v, want under the judge's %v backstop", named.Sub(start), judge.StaleAfter)
+	}
+}

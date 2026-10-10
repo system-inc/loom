@@ -96,6 +96,13 @@ func TestTheShippedUnitKeepsItsRunsAcrossARestart(t *testing.T) {
 	if *settings.trees || *settings.treesLedger != "/home/loom/loom-trees/trees.jsonl" || *settings.treeWait != placer.TreeWaitBound {
 		t.Fatalf("the unit's placer names trees %v from %s, waiting %v", *settings.trees, *settings.treesLedger, *settings.treeWait)
 	}
+	// The wait stays under the judge's backstop, so a tree that never comes is voided named. Mutant: no check.
+	if _, err := parsePlaceFlags(append(arguments, "--tree-wait", judge.StaleAfter.String()), &bytes.Buffer{}); err == nil {
+		t.Fatal("a tree wait at the judge's backstop was taken")
+	}
+	if placer.TreeWaitBound >= judge.StaleAfter {
+		t.Fatalf("the default tree wait %v isn't under the judge's %v backstop", placer.TreeWaitBound, judge.StaleAfter)
+	}
 	builderUnit, err := os.ReadFile("../../treebuilder/systemd/loom-build-trees.service")
 	if err != nil {
 		t.Fatal(err)

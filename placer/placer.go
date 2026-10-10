@@ -99,7 +99,8 @@ func (record Record) placed() bool {
 	return record.Void != "" || (record.StartFailed == "" && record.Held == "")
 }
 
-// TreeWaitBound is how long an attempt waits on its tree's index before it's voided as Loom's, named: a cold tree is
+// TreeWaitBound is how long an attempt waits on its tree's index before it's voided as Loom's, named, counted from the
+// first pass that found it not up: a cold tree is
 // about 15 minutes on Workshop (900 s for 2016af55), and the tree builder builds one at a time, so a tree with one
 // other ahead of it in line is up in about 30. It's under the judge's 45-minute backstop (judge.StaleAfter), so the
 // placer's void, naming the tree, lands before the judge's silent one.
@@ -549,12 +550,10 @@ func (pass *pass) treeReady(future judge.PlannedFuture, attempt int, record Reco
 	if state.Indexed {
 		return true, nil
 	}
-	now := placer.Now()
-	if state.Found && state.Newest.Standing(now) {
-		record.Unplaced = []string{fmt.Sprintf("its tree %s wasn't built on Workshop (%s): Loom's, never the change's", tree, state.Newest)}
-		return false, pass.void(future, attempt, record, "tree failed: "+tree)
-	}
-	since := now
+	// The wait starts at the first pass that finds the tree not up, whatever the reason, so the bound below is counted
+	// from there even while a failure's void is held by cause: the attempt's named void always lands under the judge's
+	// backstop.
+	now, since := placer.Now(), placer.Now()
 	if held, found := placer.Ledger.Find(future.Future, attempt); found && held.Held != "" {
 		if at, err := time.Parse(time.RFC3339, held.At); err == nil {
 			since = at
@@ -566,6 +565,12 @@ func (pass *pass) treeReady(future judge.PlannedFuture, attempt int, record Reco
 			return false, err
 		}
 		fmt.Fprintf(placer.Log, "%s: held, waiting for its tree %s's index\n", record.Run, tree)
+	}
+	if state.Found && state.Newest.Standing(now) {
+		record.Unplaced = []string{fmt.Sprintf("its tree %s wasn't built on Workshop (%s): Loom's, never the change's", tree, state.Newest)}
+		if err := pass.void(future, attempt, record, "tree failed: "+tree); pass.voided || err != nil {
+			return false, err
+		}
 	}
 	wait := placer.TreeWait
 	if wait <= 0 {

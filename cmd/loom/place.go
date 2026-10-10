@@ -74,6 +74,10 @@ func parsePlaceFlags(arguments []string, stderr io.Writer) (placeSettings, error
 	if *settings.queue == "" || *settings.tokenFile == "" || *settings.priority < 0 || *settings.priority > 1000 || *settings.poolSlots < 1 || flags.NArg() != 0 {
 		return settings, errors.New("usage: loom place --queue <url> --token-file <path> --pool-has <name>=<toolchains>... [--pools <file>] [--needs-git <clone>] [--wire <url>] [--r2 <key file>] [--ledger <file>] [--runs <dir>] [--priority 40] [--pool-slots 32] [--keep 168h] [--interval 10s] [--once] [--dry-run]")
 	}
+	// The placer's named void must land before the judge's silent one.
+	if *settings.treeWait <= 0 || *settings.treeWait >= judge.StaleAfter {
+		return settings, fmt.Errorf("--tree-wait %v: an attempt waits on its tree under the judge's %v backstop, so its void is named", *settings.treeWait, judge.StaleAfter)
+	}
 	return settings, nil
 }
 
