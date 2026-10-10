@@ -8,6 +8,7 @@ package judge
 import (
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // A Future is one prefix future of a block: the changes in it, in order (Changes[len-1] is the one this future adds),
@@ -134,7 +135,19 @@ func KickFor(blame Blame, record ChangeRecord, verdict Verdict) (Kick, error) {
 	if outputs == nil {
 		outputs = []string{}
 	}
+	tests, why := failing(verdict.Tests), blame.Why
+	if verdict.RuleId == RuleCensus {
+		// A census red's tests passed: the kick names the skips the census refused, each as its skip outcome.
+		tests = []TestOutcome{}
+		for _, refused := range verdict.censusFailing {
+			fields := strings.Fields(refused)
+			if len(fields) == 3 {
+				tests = append(tests, TestOutcome{Package: fields[1], Test: fields[2], Outcome: "skip"})
+			}
+		}
+		why += "; census: " + strings.Join(verdict.censusFailing, ", ") + " (classify each skip in the census, or make it run)"
+	}
 	return Kick{Change: record.Change, Owner: record.Owner, UnitKey: blame.UnitKey, Future: verdict.Future,
-		Tests: failing(verdict.Tests), Outputs: outputs, Diff: record.Base + ".." + record.Sha,
-		Repro: "loom repro " + blame.UnitKey, Why: blame.Why}, nil
+		Tests: tests, Outputs: outputs, Diff: record.Base + ".." + record.Sha,
+		Repro: "loom repro " + blame.UnitKey, Why: why}, nil
 }

@@ -250,3 +250,109 @@ func TestAVoidNamesItsCause(t *testing.T) {
 		t.Fatal("a void with no cause was posted")
 	}
 }
+
+// skippedUnit is a unit whose tests passed with one skip of test in internal/native, saying why.
+func skippedUnit(test, why string) Finished {
+	return Finished{Attempt: Attempt{Status: Passed}, Tests: []TestOutcome{outcome("TestA", "pass"), {Package: nativePackage, Test: test, Outcome: "skip"}},
+		Events: append([]TestEvent{{Action: "pass", Package: nativePackage, Test: "TestA"}}, skipOf(test, why)...)}
+}
+
+func censusLoop(h harness) Loop {
+	rows := []CensusRow{{File: "internal/native/a_test.go", ID: "m", Callers: []string{"TestMeasured"}, Message: `"a measurement"`, Class: "measurement", Provides: "timing"}}
+	return Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: time.Now, Census: &CensusConfig{Rows: rows, Platform: "linux"}}
+}
+
+func censusJob(plan ...PlanUnit) Job {
+	return Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: baseTree, Owner: "system_adamic_library"}, Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1", Plan: plan}
+}
+
+func TestAnUnclassifiedSkipRedsItsUnitAtTheCensusWithoutReruns(t *testing.T) {
+	h := newHarness()
+	h.runs["u"], h.runs["v"] = skippedUnit("TestWASIUnit07", "no sysroot"), skippedUnit("TestMeasured", "a measurement")
+	post, err := censusLoop(h).JudgeFuture(censusJob(PlanUnit{UnitKey: "u"}, PlanUnit{UnitKey: "v"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if post.Decision.Status != "red" || strings.Join(post.Decision.Red, ",") != "u" || len(h.fabric.Asked) != 0 {
+		t.Fatalf("decision %+v, placements %v: want u red at the census and nothing rerun", post.Decision.RunVerdict, h.fabric.Asked)
+	}
+	if record := recordOf(t, post, "u"); record.Status != Failed || record.Cause != CauseChange {
+		t.Fatalf("u %+v", record)
+	}
+	if !strings.Contains(string(post.Verdicts[0]), `"rule":"judge-v1 census"`) || !strings.Contains(string(post.Verdicts[1]), `"rule":"judge-v1"`) {
+		t.Fatalf("records %s %s: want u's rule census and v's plain", post.Verdicts[0], post.Verdicts[1])
+	}
+	kick := post.Decision.Kicks["u"]
+	if len(kick.Tests) != 1 || kick.Tests[0].Test != "TestWASIUnit07" || kick.Tests[0].Outcome != "skip" || !strings.Contains(kick.Why, "census: unknown "+nativePackage+" TestWASIUnit07") {
+		t.Fatalf("kick %+v", kick)
+	}
+}
+
+func TestATestRedStaysATestRedAndAVoidIsNeverCensused(t *testing.T) {
+	h := newHarness()
+	failing := failedWith("TestB")
+	failing.Events = skipOf("TestWASIUnit07", "no sysroot")
+	h.runs["u"], h.runs["v"] = failing, broken(InfraDisk)
+	h.script("u", futureTree, failedWith("TestB"))
+	h.script("u", baseTree, passed())
+	h.script("v", futureTree, broken(InfraDisk), broken(InfraDisk))
+	post, err := censusLoop(h).JudgeFuture(censusJob(PlanUnit{UnitKey: "u"}, PlanUnit{UnitKey: "v"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(post.Verdicts[0]), "census") || recordOf(t, post, "v").Status != Void {
+		t.Fatalf("records %s %s", post.Verdicts[0], post.Verdicts[1])
+	}
+	reading, err := ReadingOf(futureTree, post)
+	if err != nil || reading.FirstStep != "tests" {
+		t.Fatalf("reading %+v (%v), want a red at tests", reading, err)
+	}
+}
+
+// 0096078f, deferred-red-reaches-census, through the new path: its TestWASIUnit shards skip at an undeclared site, the
+// unit's tests pass, and the batch must read red at the census, which is what the suite declares.
+func TestTheCensusMutantReadsAsDeclared(t *testing.T) {
+	h := newHarness()
+	h.runs["native"] = skippedUnit("TestWASIUnit00", "gate mutant 3: a deferred red that must reach the census")
+	post, err := censusLoop(h).JudgeFuture(censusJob(PlanUnit{UnitKey: "native"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reading, err := ReadingOf(futureTree, post)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutant := Mutant{Name: "deferred-red-reaches-census", Sha: futureTree, Step: "census"}
+	if said := JudgeMutant(mutant, reading); said != "ok" {
+		t.Fatalf("%s: reading %+v", said, reading)
+	}
+	// Without the census step the same batch reads green, which the suite must call wrong.
+	h2 := newHarness()
+	h2.runs["native"] = h.runs["native"]
+	bare := censusLoop(h2)
+	bare.Census = nil
+	post, err = bare.JudgeFuture(censusJob(PlanUnit{UnitKey: "native"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reading, _ = ReadingOf(futureTree, post)
+	if said := JudgeMutant(mutant, reading); !strings.HasPrefix(said, "wrong green") {
+		t.Fatalf("a census-less judge read the census mutant %q", said)
+	}
+}
+
+// The box runs its census after its tests, so a batch with a test red and a census red reads red at tests.
+func TestATestRedComesBeforeACensusRed(t *testing.T) {
+	h := newHarness()
+	h.runs["tests"], h.runs["census"] = failedWith("TestB"), skippedUnit("TestWASIUnit07", "no sysroot")
+	h.script("tests", futureTree, failedWith("TestB"))
+	h.script("tests", baseTree, passed())
+	post, err := censusLoop(h).JudgeFuture(censusJob(PlanUnit{UnitKey: "tests"}, PlanUnit{UnitKey: "census"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reading, err := ReadingOf(futureTree, post)
+	if err != nil || len(post.Decision.Red) != 2 || reading.FirstStep != "tests" || reading.FirstFailure != testPackage+" TestB" {
+		t.Fatalf("red %v, reading %+v (%v): want both red and the step tests", post.Decision.Red, reading, err)
+	}
+}

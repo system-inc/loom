@@ -69,3 +69,13 @@ func TestPostParityPostsOnlyParityFutures(t *testing.T) {
 		t.Fatalf("printed %q, want the real change's future kept dry", out.String())
 	}
 }
+
+func TestTheCensusConfigLoadsTheLiveRowsForThePoolsPlatform(t *testing.T) {
+	config, err := censusConfig([]string{"../../judge/testdata/census/skips.json", "../../judge/testdata/census/census-extra.json"}, "")
+	if err != nil || len(config.Rows) != 141 || config.Platform != "linux" || config.Landed != nil {
+		t.Fatalf("config %d rows on %q (%v)", len(config.Rows), config.Platform, err)
+	}
+	if _, err := censusConfig([]string{"../../judge/testdata/census/plain-skips.jsonl"}, ""); err == nil {
+		t.Fatal("a log was loaded as census rows")
+	}
+}

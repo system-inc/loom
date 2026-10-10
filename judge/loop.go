@@ -87,7 +87,20 @@ type Loop struct {
 	Main   MainRecords
 	Queue  Queue
 	Now    func() time.Time
+	// Census, when set, holds every unit whose tests passed to the skip census (#esdkm67); nil skips the step.
+	Census *CensusConfig
 }
+
+// CensusConfig is what the census step reads: the tools tree's rows, whether an awaited branch is on main, and the
+// platform the units ran on.
+type CensusConfig struct {
+	Rows     []CensusRow
+	Landed   Landed
+	Platform string
+}
+
+// RuleCensus is the rule a unit's red names when its tests passed and its skips failed the census.
+const RuleCensus = Rule + " census"
 
 // JudgeFuture decides every planned unit of one future, posts the result to Queue, and returns what it posted.
 func (loop Loop) JudgeFuture(job Job) (FuturePost, error) {
@@ -189,6 +202,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 	evidence := evidenceOf(first)
 	verdict.Attempts = append(verdict.Attempts, first.Attempt)
 	verdict.Tests, verdict.Outputs = nonNil(first.Tests), nonNilStrings(first.Outputs)
+	events := first.Events
 	budget := InfraRetries
 	var decision Decision
 	for {
@@ -213,6 +227,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 				}
 				verdict.Attempts = append(verdict.Attempts, again.Attempt)
 				verdict.Tests, verdict.Outputs = nonNil(again.Tests), nonNilStrings(again.Outputs)
+				events = again.Events
 				evidence = evidenceOf(again)
 			} else {
 				// An alone rerun broke: run both again.
@@ -226,6 +241,15 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		}
 	}
 	verdict.Status, verdict.Cause, verdict.Infra = decision.Status, decision.Cause, decision.Infra
+	if loop.Census != nil && verdict.Status == Passed {
+		// A unit is a whole package, so a skip, the pass that covers it and its siblings all run in it: the unit's census
+		// is the batch's for its package. Its red is structural, the box's census step, so nothing is rerun for it.
+		census := Census(events, loop.Census.Rows, loop.Census.Landed, loop.Census.Platform)
+		if census.Failed() {
+			verdict.Status, verdict.Cause, verdict.RuleId = Failed, CauseChange, RuleCensus
+			verdict.censusFailing = census.Failing
+		}
+	}
 	verdict.DecidedAt = loop.Now().UTC().Format(time.RFC3339)
 	return verdict, nonNil(decision.Flaky), nil
 }

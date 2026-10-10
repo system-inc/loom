@@ -82,6 +82,9 @@ type Verdict struct {
 	Outputs   []string      `json:"outputs"`
 	RuleId    string        `json:"rule"`
 	DecidedAt string        `json:"decidedAt"`
+	// censusFailing names the skips that failed the census when RuleId is RuleCensus ("<class> <package> <test>"),
+	// for the kick; the record carries them as its tests' skip outcomes.
+	censusFailing []string
 }
 
 // Canonical writes the verdict as contract v1 asks of every record: sorted keys, no insignificant whitespace,

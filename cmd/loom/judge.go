@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -43,6 +45,8 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	postParity := flags.Bool("post-parity", false, "with --dry-run, post the batches of parity futures (which never land) and print the rest: the steady judge before cutover")
 	void := flags.String("void", "", "post one listed future's run as void and exit, <tree>:<attempt> (the attempt Queue lists); needs --cause")
 	cause := flags.String("cause", "", "with --void, why the run is void, which leads the decision's problems")
+	censusRows := flags.String("census-rows", "", "the skip census's rows, comma-separated files (the tools tree's skips.json and census-extra.json); every unit whose tests pass is held to it")
+	censusGit := flags.String("census-git", "", "with --census-rows, a clone of Adamic whose origin answers whether a pending skip's awaited branch is on main")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -104,6 +108,14 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Main:  judge.NoMainRecords{},
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
 		Loop:  judge.Loop{Now: time.Now},
+	}
+	if *censusRows != "" {
+		census, err := censusConfig(strings.Split(*censusRows, ","), *censusGit)
+		if err != nil {
+			fmt.Fprintln(stderr, "judge:", err)
+			return 1
+		}
+		puller.Loop.Census = census
 	}
 	if *void != "" {
 		// A void moves nothing toward main: it is posted live even beside --dry-run, and Queue lists the next attempt.
@@ -195,4 +207,73 @@ func (futures parityFutures) Planned() ([]judge.PlannedFuture, error) {
 		futures.trees[future.Future] = future.Parity
 	}
 	return listed, err
+}
+
+// censusConfig loads the census's rows and binds its pending check to a clone of Adamic. The units run on the pool's
+// platform, so rows with platforms are held to its GOOS.
+func censusConfig(paths []string, repository string) (*judge.CensusConfig, error) {
+	config := &judge.CensusConfig{Platform: strings.Split(poolPlatform, "/")[0]}
+	for _, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := judge.LoadCensusRows(file)
+		file.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		config.Rows = append(config.Rows, rows...)
+	}
+	if repository != "" {
+		config.Landed = landedOnMain(repository)
+	}
+	return config, nil
+}
+
+// landedOnMain is skipcensus's (cmd/main.go): it asks origin for main's tip and the branch's, fetches both, and says
+// whether main contains the branch's tip. A branch origin no longer has is an error, which fails the census closed.
+// Answers are kept for the process's life, so a branch read on main is never asked again.
+func landedOnMain(repository string) judge.Landed {
+	answers := map[string]bool{}
+	return func(branch string) (bool, error) {
+		if answer, ok := answers[branch]; ok {
+			return answer, nil
+		}
+		main, err := remoteTip(repository, "main")
+		if err != nil {
+			return false, err
+		}
+		tip, err := remoteTip(repository, branch)
+		if err != nil {
+			return false, err
+		}
+		if output, err := exec.Command("git", "-C", repository, "fetch", "-q", "origin", main, tip).CombinedOutput(); err != nil {
+			return false, fmt.Errorf("fetching main and %s: %v: %s", branch, err, strings.TrimSpace(string(output)))
+		}
+		err = exec.Command("git", "-C", repository, "merge-base", "--is-ancestor", tip, main).Run()
+		var exit *exec.ExitError
+		switch {
+		case err == nil:
+			answers[branch] = true
+		case errors.As(err, &exit) && exit.ExitCode() == 1:
+			// Off main today; asked again next time, since it may land.
+			return false, nil
+		default:
+			return false, fmt.Errorf("is %s on main: %v", branch, err)
+		}
+		return true, nil
+	}
+}
+
+func remoteTip(repository, branch string) (string, error) {
+	output, err := exec.Command("git", "-C", repository, "ls-remote", "origin", "refs/heads/"+branch).Output()
+	if err != nil {
+		return "", fmt.Errorf("asking origin for %s: %v", branch, err)
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) < 2 || fields[1] != "refs/heads/"+branch {
+		return "", fmt.Errorf("origin has no branch %s", branch)
+	}
+	return fields[0], nil
 }
