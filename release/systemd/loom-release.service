@@ -1,0 +1,28 @@
+# Loom's release watcher on Workshop: `loom release watch` (docs/releases.md). Every 30 s it fetches loom main into
+# the clone release.conf names; a new head is published as a canary for Cloud (that clone's updater/publish.sh
+# --canary, then updater/upload.sh), promoted to every box once Cloud reports it installed and stays healthy through the
+# soak, and any failure stops it, loudly, with Cloud left on the canary for inspection. It also receives every box's
+# update report on release.conf's listen address, which `loom release status` reads.
+#
+# Nobody copies this file: `loom release install` renders nothing into it and installs it as it is, with the updater's
+# hook (60-release) that installs it again after every release, and only where ~/.loom/release.conf exists. A restart
+# mid-release is safe: the release in hand is in ~/.loom/releases/release.json, and the next pass carries it on.
+#
+# publish.sh runs with the Go Workshop builds with (the go.mod toolchain pin) and Workshop's 100 GB floor. The R2 key
+# upload.sh signs with is ~/.loom/r2-releases.conf (LOOM_UPLOAD_CREDENTIALS).
+[Unit]
+Description=Loom release watcher: each new commit on loom main, canary first, promoted once it proves healthy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=LOOM_PUBLISH_GO=%h/adamic-tools/go/bin/go
+Environment=LOOM_PUBLISH_FLOOR_GB=100
+ExecStart=%h/.loom/bin/loom release watch
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -73,6 +73,12 @@ const usage = `usage:
   loom gate-inputs check [--manifest-file <path>] [<name>]
   loom push [--config <push.conf>]
   loom push install
+  loom release watch [--config <file>] [--wire <url>]
+  loom release status [--config <file>] [--wire <url>]
+  loom release install [--config <file>]
+  loom release mark <commit> <step> [--config <file>]
+  loom release rollback [--config <file>]
+  loom release resume [--retry] [--config <file>]
 `
 
 func main() {
@@ -139,6 +145,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "push" {
 		return push(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "release" {
+		return releaseCommand(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "publish-token" {
 		return publishToken(arguments[1:], stdout, stderr)

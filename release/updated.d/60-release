@@ -1,0 +1,11 @@
+#!/bin/sh
+# The updater's hook for the release watcher (docs/releases.md), written by `loom release install` on the machine that
+# releases (Workshop): after every release it installs the watcher's unit and restarts the watcher on the release just
+# installed, and does nothing where ~/.loom/release.conf doesn't exist. A release from before `loom release` (a
+# rollback past it) has nothing to install, so the watcher is left as it runs and the hook passes, saying so.
+loom=${LOOM_UPDATE_BIN:-${HOME}/.loom/bin}/loom
+if ! "${loom}" release 2>&1 | grep -q '^  loom release install'; then
+	echo "60-release: ${loom} has no release install (a release from before it?); the watcher is left as it runs"
+	exit 0
+fi
+exec "${loom}" release install
