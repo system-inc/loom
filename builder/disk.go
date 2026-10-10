@@ -3,6 +3,7 @@ package builder
 import (
 	"fmt"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,24 +30,39 @@ func Free(path string) (uint64, error) {
 	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
 }
 
-// CheckFloor refuses when any of paths, by name (a cache base, Go's build cache, the temporary directory), sits on a
-// filesystem with under floor bytes free, naming which and how much it has. free nil means Free.
-func CheckFloor(paths map[string]string, floor uint64, free func(path string) (uint64, error)) error {
+// A Watch is a filesystem a build writes, by a path on it, and the free bytes it keeps.
+type Watch struct {
+	Path  string
+	Floor uint64
+}
+
+// Gigabytes is n GB in bytes, refused when it doesn't fit.
+func Gigabytes(n uint64) (uint64, error) {
+	if n > math.MaxUint64/GB {
+		return 0, fmt.Errorf("%d GB is more bytes than there are", n)
+	}
+	return n * GB, nil
+}
+
+// CheckFloor refuses when any watched filesystem, by name (the cache base, Go's build cache, the temporary
+// directory), has under its floor free, naming which and how much it has. free nil means Free.
+func CheckFloor(watched map[string]Watch, free func(path string) (uint64, error)) error {
 	if free == nil {
 		free = Free
 	}
-	names := make([]string, 0, len(paths))
-	for name := range paths {
+	names := make([]string, 0, len(watched))
+	for name := range watched {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		available, err := free(paths[name])
+		watch := watched[name]
+		available, err := free(watch.Path)
 		if err != nil {
-			return fmt.Errorf("%s (%s): %w", name, paths[name], err)
+			return fmt.Errorf("%s (%s): %w", name, watch.Path, err)
 		}
-		if available < floor {
-			return fmt.Errorf("%s (%s) has %.1f GB free, under the %d GB floor", name, paths[name], float64(available)/float64(GB), floor/GB)
+		if available < watch.Floor {
+			return fmt.Errorf("%s (%s) has %.1f GB free, under its %d GB floor", name, watch.Path, float64(available)/float64(GB), watch.Floor/GB)
 		}
 	}
 	return nil

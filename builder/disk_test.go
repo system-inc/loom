@@ -25,20 +25,35 @@ func freeing(free map[string]uint64) func(string) (uint64, error) {
 	}
 }
 
-// The floor names the filesystem under it and how much it has.
+// The floor names the filesystem under it and how much it has, and the temporary directory, which may be memory,
+// keeps a smaller floor of its own.
 func TestTheFloorNamesTheFilesystemUnderIt(t *testing.T) {
-	paths := map[string]string{"the cache base": "/trees", "Go's build cache": "/gocache", "the temporary directory": "/tmp"}
-	free := map[string]uint64{"/trees": 500 * GB, "/gocache": 150 * GB, "/tmp": 300 * GB}
-	err := CheckFloor(paths, 200*GB, freeing(free))
-	if err == nil || !strings.Contains(err.Error(), "Go's build cache (/gocache) has 150.0 GB free, under the 200 GB floor") {
+	watched := map[string]Watch{"the cache base": {"/trees", 200 * GB}, "Go's build cache": {"/gocache", 200 * GB}, "the temporary directory": {"/tmp", 20 * GB}}
+	free := map[string]uint64{"/trees": 500 * GB, "/gocache": 150 * GB, "/tmp": 30 * GB}
+	err := CheckFloor(watched, freeing(free))
+	if err == nil || !strings.Contains(err.Error(), "Go's build cache (/gocache) has 150.0 GB free, under its 200 GB floor") {
 		t.Fatalf("a short filesystem: %v", err)
 	}
 	free["/gocache"] = 201 * GB
-	if err = CheckFloor(paths, 200*GB, freeing(free)); err != nil {
-		t.Fatalf("every filesystem over the floor: %v", err)
+	if err = CheckFloor(watched, freeing(free)); err != nil {
+		t.Fatalf("every filesystem over its floor, the temporary directory at 30 GB over its 20: %v", err)
+	}
+	free["/tmp"] = 19 * GB
+	if err = CheckFloor(watched, freeing(free)); err == nil || !strings.Contains(err.Error(), "the temporary directory (/tmp) has 19.0 GB free, under its 20 GB floor") {
+		t.Fatalf("a short temporary directory: %v", err)
 	}
 	if free, err := Free(t.TempDir()); err != nil || free == 0 {
 		t.Fatalf("this machine's temporary directory: %d %v", free, err)
+	}
+}
+
+// A floor or a cap in GB that doesn't fit in bytes is refused, never wrapped around to a small number.
+func TestGigabytesRefusesWhatDoesntFit(t *testing.T) {
+	if bytes, err := Gigabytes(200); err != nil || bytes != 200*GB {
+		t.Fatalf("200 GB: %d %v", bytes, err)
+	}
+	if bytes, err := Gigabytes(1 << 34); err == nil {
+		t.Fatalf("2^34 GB came out as %d bytes", bytes)
 	}
 }
 
@@ -47,7 +62,7 @@ func TestTheFloorNamesTheFilesystemUnderIt(t *testing.T) {
 func TestNoJobStartsWhileTheDiskIsUnderTheFloor(t *testing.T) {
 	admissionPoll = time.Millisecond
 	t.Cleanup(func() { admissionPoll = time.Second })
-	short := errors.New("Go's build cache has 12.0 GB free, under the 200 GB floor")
+	short := errors.New("Go's build cache has 12.0 GB free, under its 200 GB floor")
 	ran, refused := atomic.Int64{}, atomic.Int64{}
 	admitted(5, 2, nil, 0.8, func() error { return short }, func(int) { ran.Add(1) }, func(index int, err error) {
 		if errors.Is(err, short) {
@@ -83,7 +98,7 @@ func TestNoJobStartsWhileTheDiskIsUnderTheFloor(t *testing.T) {
 		t.Fatalf("a disk short while the first job runs: %d ran, the second started before the first ended", ran.Load())
 	}
 	// A tree's binaries refused for the disk name it in their error, and no go process runs.
-	build := TreeBuild{Out: t.TempDir(), Jobs: 2, Floor: 200 * GB, Watched: map[string]string{"Go's build cache": "/gocache"}, Free: freeing(map[string]uint64{"/gocache": 12 * GB})}
+	build := TreeBuild{Out: t.TempDir(), Jobs: 2, Watched: map[string]Watch{"Go's build cache": {"/gocache", 200 * GB}}, Free: freeing(map[string]uint64{"/gocache": 12 * GB})}
 	for _, result := range build.Binaries([]planner.ProductTest{{Package: "example.com/a", Directory: "a"}}) {
 		if !strings.Contains(result.Error, "not started: Go's build cache (/gocache) has 12.0 GB free") {
 			t.Fatalf("a refused binary: %+v", result)

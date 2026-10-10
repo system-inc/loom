@@ -103,11 +103,10 @@ type TreeBuild struct {
 	Gauge Gauge
 	// Held is a HeldProducts server's address: the store's products, offered to buildcache before it builds one.
 	Held string
-	// Floor is the free bytes every Watched filesystem (by name: the cache base, Go's build cache, the temporary
-	// directory) keeps: no job starts while one is under it (#ckv0pmg). Zero watches nothing. Free reads a
-	// filesystem (nil means Free).
-	Floor   uint64
-	Watched map[string]string
+	// Watched are the filesystems the build writes, by name (the cache base, Go's build cache, the temporary
+	// directory), each with the free bytes it keeps: no job starts while one is under its floor (#ckv0pmg). None
+	// watches nothing. Free reads a filesystem (nil means Free).
+	Watched map[string]Watch
 	Free    func(path string) (uint64, error)
 }
 
@@ -419,13 +418,13 @@ func admitted(count, jobs int, gauge Gauge, target float64, disk func() error, w
 	group.Wait()
 }
 
-// disk is the build's disk reading for admitted: an error naming a watched filesystem under Floor, or nil.
+// disk is the build's disk reading for admitted: an error naming a watched filesystem under its floor, or nil.
 func (build TreeBuild) disk() func() error {
-	if build.Floor == 0 || len(build.Watched) == 0 {
+	if len(build.Watched) == 0 {
 		return nil
 	}
 	return func() error {
-		return CheckFloor(build.Watched, build.Floor, build.Free)
+		return CheckFloor(build.Watched, build.Free)
 	}
 }
 
