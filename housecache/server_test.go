@@ -469,34 +469,83 @@ func TestABlobCorruptedOnDiskIsRemovedOnceServed(t *testing.T) {
 	}
 }
 
-// A store that stops sending mid-blob is abandoned once it has been quiet for Stall: its clients hear so, nothing is
-// kept, and the next ask fetches again.
-func TestAStalledFetchIsAbandoned(t *testing.T) {
-	content := bytes.Repeat([]byte("s"), 1<<16)
-	sum := hashOf(content)
-	stalled := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		writer.Header().Set("Content-Length", "65536")
-		writer.Write(content[:100])
-		writer.(http.Flusher).Flush()
-		<-stalled
-	}))
-	defer upstream.Close()
-	defer close(stalled)
-	cache := &Server{Directory: t.TempDir(), Upstream: upstream.URL, Limit: 1 << 30, Free: disk{1 << 40}.free, Stall: 200 * time.Millisecond}
-	if err := cache.Open(); err != nil {
-		t.Fatal(err)
-	}
-	defer cache.Close()
-	served := httptest.NewServer(cache)
-	defer served.Close()
-	started := time.Now()
-	if got, err := try(served.URL + "/blobs/" + sum); err == nil || time.Since(started) > 5*time.Second {
-		t.Fatalf("a stalled store answered %d whole after %v", got.status, time.Since(started))
-	}
-	settled(t, cache)
-	if got := held(cache); got != "" {
-		t.Fatalf("a stalled fetch left %q", got)
+// A store whose body stops mid-blob, or trickles under IdleBytes a window (a cellular line that dropped, Oct 10), is
+// abandoned within a window or two, as a client abandons a stalled cache: its clients' answers are cut short, nothing
+// is kept, and the next ask fetches the blob again, whole, on a new connection. Without the watch, a stall held the
+// flight for a minute and a trickle for FetchBound.
+func TestAStalledOrTricklingFetchIsAbandoned(t *testing.T) {
+	const window = 200 * time.Millisecond
+	for _, kind := range []string{"stalled", "trickling"} {
+		t.Run(kind, func(t *testing.T) {
+			content := bytes.Repeat([]byte("s"), 1<<16)
+			sum := hashOf(content)
+			stopped := make(chan struct{})
+			var mutex sync.Mutex
+			connections := []string{}
+			upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				mutex.Lock()
+				connections = append(connections, request.RemoteAddr)
+				first := len(connections) == 1
+				mutex.Unlock()
+				writer.Header().Set("Content-Length", fmt.Sprint(len(content)))
+				if !first {
+					writer.Write(content)
+					return
+				}
+				writer.Write(content[:100])
+				writer.(http.Flusher).Flush()
+				for sent := 100; kind == "trickling" && sent < len(content); sent += 16 {
+					select {
+					case <-request.Context().Done():
+						return
+					case <-stopped:
+						return
+					case <-time.After(20 * time.Millisecond):
+					}
+					writer.Write(content[sent : sent+16])
+					writer.(http.Flusher).Flush()
+				}
+				select {
+				case <-request.Context().Done():
+				case <-stopped:
+				}
+			}))
+			defer upstream.Close()
+			defer close(stopped)
+			cache := &Server{Directory: t.TempDir(), Upstream: upstream.URL, Limit: 1 << 30, Free: disk{1 << 40}.free,
+				IdleWindow: window, IdleBytes: 4 << 10}
+			if err := cache.Open(); err != nil {
+				t.Fatal(err)
+			}
+			defer cache.Close()
+			served := httptest.NewServer(cache)
+			defer served.Close()
+			client := &http.Client{Timeout: 5 * time.Second}
+
+			started := time.Now()
+			response, err := client.Get(served.URL + "/blobs/" + sum)
+			if err == nil {
+				_, err = io.ReadAll(response.Body)
+				response.Body.Close()
+			}
+			if took := time.Since(started); err == nil || took > 5*window {
+				t.Fatalf("a %s store's blob was answered (error %v) after %v, not cut within %v", kind, err, took, 5*window)
+			}
+			settled(t, cache)
+			if got := held(cache); got != "" {
+				t.Fatalf("a %s fetch left %q", kind, got)
+			}
+
+			again := get(t, served.URL+"/blobs/"+sum)
+			if again.how != "miss" || !bytes.Equal(again.body, content) {
+				t.Fatalf("the next ask answered %q with %d bytes, not the whole blob fetched again", again.how, len(again.body))
+			}
+			mutex.Lock()
+			defer mutex.Unlock()
+			if len(connections) != 2 || connections[0] == connections[1] {
+				t.Fatalf("the store saw %v: not one abandoned fetch and one new one on a fresh connection", connections)
+			}
+		})
 	}
 }
 
@@ -523,7 +572,7 @@ func TestOpenLocksTheDirectoryAndClearsDeadPartials(t *testing.T) {
 	second.Close()
 }
 
-// blobs/X and releases/blobs/X are two objects of the store, and the action store's may be gone after its 7 days while
+// blobs/X and releases/blobs/X are two objects of the store, and the action store's may be gone after its 30 days while
 // the release store's stays: a miss of one never waits on the other's fetch, so the release isn't refused for the
 // expired blob's 404.
 func TestAMissOfOnePathNeverWaitsOnAnothers(t *testing.T) {

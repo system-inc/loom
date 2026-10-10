@@ -12,7 +12,7 @@
 // checks every chunk, the total, and the tar's own sha256 against the name it was given, so the manifest needn't be
 // trusted, and makes room for both sizes before it fetches anything. Chunks live beside it at gate-inputs/<sha256>,
 // a prefix no lifecycle rule names, so nothing expires out from under the units keyed on it (the first manifest, made
-// by hand on Oct 8, lived in blobs/, which expires after 7 days, and was gone by the first witness).
+// by hand on Oct 8, lived in blobs/, which then expired after 7 days, and was gone by the first witness).
 //
 // The name is the tar's, not the tar.gz's, so a gzip that compresses differently (a new Go) moves no key. The tar is
 // deterministic, so the name is a function of what the tests read and nothing else: entries in byte order, every time

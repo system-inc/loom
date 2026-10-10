@@ -37,7 +37,7 @@ import (
 // binary in its directory of that source as go test -json would: the
 // binary's output, through the same test2json conversion go test applies (runner/test2json, vendored), is the event
 // stream the Judge reads. Whatever the store can't give whole (an index, a binary, the source, a product: never built,
-// past the 7-day lifecycle, or poisoned) is named and the unit is broken, Loom's to place again, never red.
+// past the 30-day lifecycle, or poisoned) is named and the unit is broken, Loom's to place again, never red.
 //
 // The runner never builds. The tests find a stand-in go first on PATH (standInGo): a read-only query (go version, go
 // env, go list without a flag that builds), which adamic's buildcache asks to key a product, goes to the runner's own
@@ -264,7 +264,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 			break
 		}
 	}
-	standIn, err := run.standInGo(prepareContext, environment, index, sources, source)
+	standIn, err := run.standInGo(prepareContext, environment, index, sources, source, job.Build)
 	if err != nil {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
@@ -301,7 +301,7 @@ func (run *unitRun) treeIndex(runContext context.Context, treeKey string) (build
 	defer response.Body.Close()
 	switch {
 	case response.StatusCode == http.StatusNotFound:
-		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s isn't in the store (never built, or past its 7 days)", name)
+		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s isn't in the store (never built, or past its 30 days)", name)
 	case response.StatusCode != http.StatusOK:
 		return builder.TreeIndex{}, fmt.Errorf("the tree's index %s: the store answered %s", name, response.Status)
 	}
@@ -379,7 +379,7 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 				blob := needed[position]
 				file, fetch, err := cache.open(fetchContext, blob.sum)
 				if errors.Is(err, builder.ErrNotStored) {
-					err = fmt.Errorf("%s, blob %s, isn't in the store (never uploaded, or past its 7 days)", blob.what, blob.sum)
+					err = fmt.Errorf("%s, blob %s, isn't in the store (never uploaded, or past its 30 days)", blob.what, blob.sum)
 				} else if err != nil {
 					err = fmt.Errorf("%s: %w", blob.what, err)
 				}
@@ -611,6 +611,8 @@ func workspaceCopy(copyContext context.Context, real string, environment []strin
 // each build it refused, each read-only query the runner's go answered (with its exit), each one no go here could.
 type goStandIn struct {
 	refused, answered, unanswered string
+	// build is a build job's: every go command its tests run goes through, and a failed one is theirs (protocol.TestJob.Build).
+	build bool
 }
 
 // standInScript is the stand-in go. A read-only query (version, env, list, each with only the flags on its allow list:
@@ -630,6 +632,12 @@ env)
 list)
 	allowed=yes
 	for argument in "$@"; do case "$argument" in -deps | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=* | -buildmode=*) ;; -*) allowed=no ;; esac; done ;;
+work)
+	# go work edit -json prints a go.work as go reads it and writes nothing: adamic keys a workspace by it.
+	if [ "$2" = edit ] && [ "$3" = -json ] && [ $# -le 4 ]; then
+		allowed=yes
+		case "$4" in -*) allowed=no ;; esac
+	fi ;;
 esac
 # The test's own GOFLAGS and GOTOOLCHAIN pass through, each flag one that neither compiles, nor runs or reads anything
 # of the test's choosing, and the toolchain the tree's or the runner's own.
@@ -641,6 +649,8 @@ for flag in $GOFLAGS; do
 	esac
 done
 set +f
+# A build job's tests build (Kirk's build law): every command goes to the runner's go, still of the tree's release.
+[ BUILD = true ] && allowed=yes
 case "${GOTOOLCHAIN:-auto}" in auto | local | RELEASE) ;; *) allowed=no ;; esac
 if [ "$allowed" = no ]; then
 	printf 'go %s (GOFLAGS=%s GOTOOLCHAIN=%s)\n' "$*" "$GOFLAGS" "$GOTOOLCHAIN" >> REFUSED
@@ -654,9 +664,34 @@ if [ -z "$real" ]; then
 	exit 1
 fi
 unset GONOSUMDB GONOSUMCHECK GOPRIVATE GONOPROXY GOINSECURE
+# The workspace a test sees is the tree's own go.work, never this unit's copy of it: adamic's product keys read go env
+# GOWORK, and Workshop's says the tree's (#nm31pcn). The tree's, handed back, is read as the copy.
+copy=WORKCOPY
+if [ -n "$copy" ] && [ "$GOWORK" = WORKTREE ]; then
+	GOWORK=$copy
+	export GOWORK
+fi
 ENVIRONMENT
-"$real" "$@"
-status=$?
+if [ -n "$copy" ] && { [ "$1" = env ] || [ "$1" = work ]; }; then
+	# Builtins only, a test's PATH holding no more than its own: the output, its trailing newlines kept by the dot after
+	# it, and the status after that, then every copy of the copy's path as the tree's, each quoted, so matched literally.
+	output=$("$real" "$@"; printf '.%s' "$?")
+	status=${output##*.}
+	output=${output%.*}
+	answer=
+	while :; do
+		case "$output" in
+		*"$copy"*)
+			answer=$answer${output%%"$copy"*}WORKTREE
+			output=${output#*"$copy"} ;;
+		*) break ;;
+		esac
+	done
+	printf '%s' "$answer$output"
+else
+	"$real" "$@"
+	status=$?
+fi
 printf '%s go %s\n' "$status" "$*" >> ANSWERED
 exit "$status"
 `
@@ -667,7 +702,7 @@ exit "$status"
 // GOTOOLCHAIN=local, or the unit is unfit, both named, and every module the tree needs is put in the tree's own
 // GOMODCACHE before the tests run, so none of them sees go fetch one, and a module the cache lacks breaks the unit,
 // named. With no go, the record says so.
-func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, index builder.TreeIndex, sources sourceCache, directory string) (goStandIn, error) {
+func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, index builder.TreeIndex, sources sourceCache, directory string, build bool) (goStandIn, error) {
 	release := strings.Fields(index.Go)
 	if len(release) == 0 {
 		return goStandIn{}, fmt.Errorf("the tree's index names no Go release: the store is poisoned")
@@ -717,7 +752,7 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 		return goStandIn{}, err
 	}
 	standIn := goStandIn{refused: filepath.Join(run.directory, "go-refused"), answered: filepath.Join(run.directory, "go-answered"),
-		unanswered: filepath.Join(run.directory, "go-unanswered")}
+		unanswered: filepath.Join(run.directory, "go-unanswered"), build: build}
 	exports := ""
 	for _, variable := range delegated {
 		name, value, _ := strings.Cut(variable, "=")
@@ -734,8 +769,16 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 		}
 		exports += name + "=" + shellQuote(value) + "\nexport " + name + "\n"
 	}
-	script := strings.NewReplacer("REFUSED", shellQuote(standIn.refused), "UNANSWERED", shellQuote(standIn.unanswered),
-		"ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release[0]), "ENVIRONMENT\n", exports).Replace(standInScript)
+	// The copy of the tree's go.work, and the tree's own as a test there finds it, for the stand-in to answer with.
+	workCopy, workTree := "", filepath.Join(directory, "go.work")
+	for _, variable := range delegated {
+		if name, value, _ := strings.Cut(variable, "="); name == "GOWORK" {
+			workCopy = value
+		}
+	}
+	script := strings.NewReplacer("WORKCOPY", shellQuote(workCopy), "WORKTREE", shellQuote(workTree), "REFUSED", shellQuote(standIn.refused),
+		"UNANSWERED", shellQuote(standIn.unanswered), "ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release[0]),
+		"BUILD", strconv.FormatBool(build), "ENVIRONMENT\n", exports).Replace(standInScript)
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
 		return goStandIn{}, err
 	}
@@ -785,7 +828,8 @@ func (run *unitRun) settleGo(standIn goStandIn, status string) string {
 			unanswered[0], len(unanswered)))
 		return protocol.StatusBroken
 	}
-	if status != protocol.StatusFailed {
+	if status != protocol.StatusFailed || standIn.build {
+		// A build job's failed build is what its tests assert on: the change's red, as any test's failure.
 		return status
 	}
 	if len(refused) > 0 {

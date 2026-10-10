@@ -45,6 +45,9 @@ func TestATestJobIsChecked(t *testing.T) {
 		"a tree that isn't a key":     func(job *TestJob) { job.Tree = "../trees/x" },
 		"an uppercase tree key":       func(job *TestJob) { job.Tree = strings.Repeat("A", 64) },
 		"a runner that isn't a hash":  func(job *TestJob) { job.Runner = "git-1c6a7d5" },
+		"a build phase job": func(job *TestJob) {
+			job.Build, job.Packages, job.Phase, job.Base, job.Tools = true, nil, "vet", job.Sha, job.Sha
+		},
 	}
 	for name, change := range refused {
 		job := testJob()
@@ -64,6 +67,11 @@ func TestATestJobIsChecked(t *testing.T) {
 	job.Tree = strings.Repeat("f", 64)
 	if err := CheckTestJob(job); err != nil {
 		t.Errorf("a go test job naming its tree's build refused: %v", err)
+	}
+	// A build job is a prebuilt go test job (#8j1qygw).
+	job.Build = true
+	if err := CheckTestJob(job); err != nil {
+		t.Errorf("a prebuilt build job refused: %v", err)
 	}
 	job = testJob()
 	job.Runner = strings.Repeat("e", 64)

@@ -161,3 +161,27 @@ func TestRowsGoIntoTheBucket(t *testing.T) {
 		t.Fatalf("the bucket holds %q", held)
 	}
 }
+
+// A test unit that passed past the 60 s run budget is flagged over budget on its row (#ccewvra); a pass within it, a
+// failure past it and a phase past it aren't. Mutants: every slow row flagged whatever its status; the kind unchecked.
+func TestARowFlagsOnlyATestUnitThatPassedPastTheBudget(t *testing.T) {
+	future := PlannedFuture{Future: strings.Repeat("f", 40)}
+	events := []protocol.Event{}
+	for index, unit := range []struct {
+		kind, status string
+		wall         float64
+	}{{"test", protocol.StatusPassed, 74}, {"test", protocol.StatusPassed, 60}, {"test", protocol.StatusFailed, 74}, {"phase", protocol.StatusPassed, 300}} {
+		key := strings.Repeat(string(rune('1'+index)), 64)
+		future.Units = append(future.Units, PlannedUnitWire{UnitKey: key, KeyParts: json.RawMessage(`{"kind":"` + unit.kind + `"}`), Decision: "run"})
+		events = append(events, protocol.Event{Unit: key, Type: "started", Time: "2026-10-10T22:00:00Z"}, protocol.Event{Unit: key, Type: "exit", Code: code(0), WallSeconds: unit.wall},
+			protocol.Event{Unit: key, Type: "finished", Status: unit.status})
+	}
+	rows := GatherRows(future, 1, "future-f-1", events, nil)
+	flagged := []bool{}
+	for _, row := range rows {
+		flagged = append(flagged, row.OverBudget)
+	}
+	if len(flagged) != 4 || !flagged[0] || flagged[1] || flagged[2] || flagged[3] {
+		t.Fatalf("over budget %v, want only the test that passed in 74 s", flagged)
+	}
+}

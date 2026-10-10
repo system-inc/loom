@@ -27,6 +27,9 @@ type emitter struct {
 	now        func() time.Time
 	writeError error
 	lastEmit   time.Time // when the last event left, so a silent unit can be told from a lost runner
+	// finished is set once the unit's finished event has left: nothing follows it (protocol.Decide reads an event
+	// after finished as a problem, and the run is void), so a beat or a late line from a goroutine is dropped.
+	finished bool
 }
 
 // next is the sequence the next event takes.
@@ -36,19 +39,28 @@ func (emitter *emitter) next() int {
 	return emitter.sequence
 }
 
-// silentFor is how long since the last event left.
-func (emitter *emitter) silentFor() time.Duration {
-	emitter.mutex.Lock()
-	defer emitter.mutex.Unlock()
-	if emitter.lastEmit.IsZero() {
-		return 0
-	}
-	return emitter.now().Sub(emitter.lastEmit)
-}
-
 func (emitter *emitter) emit(event protocol.Event) {
 	emitter.mutex.Lock()
 	defer emitter.mutex.Unlock()
+	emitter.emitLocked(event)
+}
+
+// beat says the unit is still running, text, when it has been silent at least heartbeat, the check and the line under
+// one lock, so no event slips between them and none follows finished (Loom's review of feb1728, before release 7).
+func (emitter *emitter) beat(heartbeat time.Duration, text string) {
+	emitter.mutex.Lock()
+	defer emitter.mutex.Unlock()
+	if emitter.lastEmit.IsZero() || emitter.now().Sub(emitter.lastEmit) < heartbeat {
+		return
+	}
+	emitter.emitLocked(protocol.Event{Type: "output", Stream: "runner", Text: text})
+}
+
+func (emitter *emitter) emitLocked(event protocol.Event) {
+	if emitter.finished {
+		return
+	}
+	emitter.finished = event.Type == "finished"
 	event.Run = emitter.run
 	event.Unit = emitter.unit
 	event.Sequence = emitter.sequence

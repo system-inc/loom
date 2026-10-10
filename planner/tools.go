@@ -11,12 +11,13 @@ import (
 )
 
 // ProbeTools reads the box's tools part: the pinned runner's sha256 and the toolchains' versions. A toolchain the box
-// lacks reads as empty, which is part of the key: a box without clang keys apart from one with it. The runner is the
-// pinned runner of the pool the unit is placed on, read from one file (Loom, Oct 10 00:18Z), so a key never holds a
+// lacks reads as empty, which is part of the key: a box without clang keys apart from one with it. The WASI SDK isn't
+// the box's: a test unit that runs WASI is keyed on the tree's (unitTools), and every other unit on none. The runner is
+// the pinned runner of the pool the unit is placed on, read from one file (Loom, Oct 10 00:18Z), so a key never holds a
 // runner no pool runs; runnerShaFile empty leaves it empty, as a product's key wants (a product is the same whichever
 // runner asked).
 func ProbeTools(runnerShaFile string) (Tools, error) {
-	tools := Tools{WasiSdk: os.Getenv("WASI_SDK_VERSION")}
+	tools := Tools{}
 	if runnerShaFile != "" {
 		var err error
 		if tools.Runner, err = ReadRunnerPin(runnerShaFile); err != nil {

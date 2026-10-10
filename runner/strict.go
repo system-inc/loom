@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/livestatus"
+	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
 )
 
@@ -90,6 +91,11 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	root, tree := run.options.testRoot(), run.options.Tree
 	if job.Tree != "" && job.Phase == "" {
 		return run.runPrebuilt(runContext, job, root, started, deadline)
+	}
+	if job.Build {
+		// A build job's builds run on its tree's build, never on a checkout, where every test may build.
+		run.fail(protocol.PhaseStart, fmt.Errorf("refused: a build job names no tree build to run on: Loom's, never the change's"))
+		return protocol.StatusBroken
 	}
 	if tree == "" {
 		// /tmp/adamic for a strict runner: the checkout the instance's opening clones, kept across units.
@@ -206,9 +212,7 @@ func (run *unitRun) runPackages(runContext context.Context, job *protocol.TestJo
 			case <-quiet:
 				return
 			case <-ticker.C:
-				if run.emitter.silentFor() >= run.options.Heartbeat {
-					run.say(fmt.Sprintf("still running after %.0f s", time.Since(started).Seconds()))
-				}
+				run.emitter.beat(run.options.Heartbeat, fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds()))
 			}
 		}
 	}()
@@ -563,7 +567,10 @@ func (run *unitRun) testEnvironment(environmentFile string, job *protocol.TestJo
 			environment[name] = value
 		}
 	}
-	for name, value := range map[string]string{"ADAMIC_GATE_UNCACHED": "1", "ADAMIC_TEST_WASI": "1", "ADAMIC_ORACLE_WASI": "1", "ADAMIC_GATE_COHERE": "1"} {
+	// The gate's switches, and the toolchain and flags Workshop ran the tree's product tests under, so a test asks for
+	// each product by the key Workshop built it under (planner.UnitEnvironment, #nm31pcn).
+	for _, variable := range planner.UnitEnvironment(runtime.GOOS, runtime.GOARCH) {
+		name, value, _ := strings.Cut(variable, "=")
 		environment[name] = value
 	}
 	if job.Sample != "" {

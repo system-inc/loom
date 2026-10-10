@@ -81,7 +81,7 @@ func TestTestsComeFromTest2jsonLinesAndAnUnfinishedTestStaysUnfinished(t *testin
 		t.Fatalf("attempt %+v", attempt)
 	}
 	// Decide reads the unfinished TestB as red, through the failure path.
-	decision, err := Decide(Loop{}.evidenceOf(finished, PlanUnit{}))
+	decision, err := Decide(Loop{}.evidenceOf(Job{}, finished, PlanUnit{}))
 	if err != nil || decision.Next != "rerunAlone" {
 		t.Fatalf("decision %+v %v", decision, err)
 	}

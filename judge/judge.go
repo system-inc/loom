@@ -74,9 +74,21 @@ const (
 
 	OverBudgetReady = "overBudgetReady"
 	OverBudgetRun   = "overBudgetRun"
+
+	// WarningOverBudget is a warning's kind for a test unit that passed past RunBudgetSeconds.
+	WarningOverBudget = "overBudget"
 	// OverBudgetDeadline is the runner's own deadline on the unit's exit event (timedOut), its budget's hard ceiling.
 	OverBudgetDeadline = "deadline"
 )
+
+// RunBudgetSeconds is the build law's run budget (Kirk, Oct 10 21:5xZ): a test unit that passes past it is green with a
+// warning, named and its owner tasked, never killed for being slow. Only the ceiling, 15 minutes, ends a hang.
+const RunBudgetSeconds = 60.0
+
+// SlowdownRatio is the margin of the law's second rule, so noise isn't a red: a branch made a unit slow when its alone
+// rerun on the candidate passes past RunBudgetSeconds and past this many times its alone rerun on main's base, which
+// passed within the budget.
+const SlowdownRatio = 1.5
 
 var infraKinds = map[string]bool{InfraDisk: true, InfraKill: true, InfraNeverPlaced: true, InfraRefused: true, InfraSilent: true}
 
@@ -115,11 +127,26 @@ type Verdict struct {
 	Outputs   []string      `json:"outputs"`
 	RuleId    string        `json:"rule"`
 	DecidedAt string        `json:"decidedAt"`
+	// Warnings are what a verdict's status doesn't say: a test unit that passed past its budget. Written only when
+	// there is one, so a record without a warning reads as it did before the build law.
+	Warnings []Warning `json:"warnings,omitempty"`
 	// censusFailing names the skips that failed the census when RuleId is RuleCensus ("<class> <package> <test>"),
 	// for the kick; the record carries them as its tests' skip outcomes.
 	censusFailing []string
 	// reusedTests is the tests object of the verdict a reused unit reuses, written as the record's tests in its place.
 	reusedTests json.RawMessage
+	// slowdown is why a unit is red for the branch making it slow, for the kick; empty otherwise.
+	slowdown string
+}
+
+// A Warning is one thing a verdict carries beside its status: a pass past the run budget, with the wall that went
+// over and, when the alone reruns ran, main's base's wall for the same unit.
+type Warning struct {
+	Kind          string  `json:"kind"`
+	WallSeconds   float64 `json:"wallSeconds"`
+	BudgetSeconds float64 `json:"budgetSeconds"`
+	// BaseWallSeconds is the unit's alone rerun on main's base, when it ran; zero when there's none to compare.
+	BaseWallSeconds float64 `json:"baseWallSeconds,omitempty"`
 }
 
 // TestsRef is a record's tests field, by reference (Loom's ruling, Oct 10 01:16Z): a Durable Object's SQLite value caps
@@ -220,6 +247,7 @@ type Rerun struct {
 	Tests        []TestOutcome // its test outcomes
 	RunnerSha256 string        // the runner binary it ran on, as its attempt reported it
 	OverBudget   string        // the runner's budget cause when it stopped the rerun over budget
+	WallSeconds  float64       // its exit event's wall
 }
 
 // RunnerUnreported is an attempt's RunnerSha256 when its runner didn't send one.
@@ -281,6 +309,8 @@ type Evidence struct {
 	// SameTree marks a future whose base is its own tree, a witness of main (base = sha): its two alone reruns run one
 	// tree twice, so there is no change between them to blame.
 	SameTree bool
+	// Budgeted marks a test unit, held to RunBudgetSeconds; phases and products aren't.
+	Budgeted bool
 	// MainRecorded is main's latest recorded verdict for this unit at the future's base, its test outcomes; nil when
 	// main has none.
 	MainRecorded []TestOutcome
@@ -295,6 +325,8 @@ type Decision struct {
 	Next    string        // when not decided: "rerunAlone" (both reruns), or "retry" for infra
 	Flaky   []TestOutcome // the tests to quarantine when the cause is flake
 	Why     string        // the table row that decided it, for the record and the log
+	// Warnings go on the record beside its status: a pass past the run budget.
+	Warnings []Warning
 }
 
 // Decide applies the rule table to one unit's evidence.
@@ -347,6 +379,9 @@ func Decide(evidence Evidence) (Decision, error) {
 	}
 	switch evidence.First.Status {
 	case Passed:
+		if evidence.Budgeted && evidence.First.WallSeconds > RunBudgetSeconds {
+			return slowPass(evidence), nil
+		}
 		return Decision{Decided: true, Status: Passed, Why: "first attempt passed"}, nil
 	case Broken:
 		if !infraKinds[evidence.FirstInfra] {
@@ -408,8 +443,52 @@ func Decide(evidence Evidence) (Decision, error) {
 		Why: "main fails alone too, but main's record doesn't fail exactly this unit's one failing test, so it's the change's"}, nil
 }
 
+// slowPass decides a test unit whose first attempt passed past the run budget (the build law, Kirk Oct 10 21:5xZ): green
+// with a warning, unless its alone reruns show the branch made it slow, its candidate rerun passing past the budget and
+// past SlowdownRatio times main's base, which passed within it. That is the branch's red, with both walls. A verify has
+// no base apart from its tree, so it's green with the warning and nothing reruns. Reruns that can't be compared (one
+// failed, broke, ran on another runner or over budget) leave the pass a pass: slowness never voids a green.
+func slowPass(evidence Evidence) Decision {
+	warning := Warning{Kind: WarningOverBudget, WallSeconds: evidence.First.WallSeconds, BudgetSeconds: RunBudgetSeconds}
+	green := Decision{Decided: true, Status: Passed, Warnings: []Warning{warning}}
+	if evidence.SameTree {
+		green.Why = fmt.Sprintf("passed in %.1f s, past its %.0f s budget: green with a warning; a verify has no base to compare", warning.WallSeconds, RunBudgetSeconds)
+		return green
+	}
+	if evidence.Candidate == nil || evidence.Main == nil {
+		return Decision{Next: "rerunAlone", Why: "passed past its budget: rerun alone on the candidate and on main's base to see whether the branch made it slow"}
+	}
+	candidate, base := evidence.Candidate, evidence.Main
+	comparable := true
+	for _, rerun := range []*Rerun{candidate, base} {
+		if rerun.Status != Passed || rerun.OverBudget != "" || runnerMismatch(evidence.KeyRunner, rerun.RunnerSha256, evidence.RequireRunner) != "" {
+			comparable = false
+		}
+	}
+	green.Warnings[0].BaseWallSeconds = base.WallSeconds
+	switch {
+	case !comparable:
+		green.Why = fmt.Sprintf("passed in %.1f s, past its %.0f s budget: green with a warning; its alone reruns can't be compared (candidate %s, base %s)",
+			warning.WallSeconds, RunBudgetSeconds, candidate.Status, base.Status)
+		green.Warnings[0].BaseWallSeconds = 0
+	case candidate.WallSeconds > RunBudgetSeconds && base.WallSeconds <= RunBudgetSeconds && candidate.WallSeconds > SlowdownRatio*base.WallSeconds:
+		return Decision{Decided: true, Status: Failed, Cause: CauseChange, Warnings: green.Warnings,
+			Why: fmt.Sprintf("the branch made it slow: alone it passes in %.1f s on the candidate and %.1f s on main's base, past the %.0f s budget and past %.1fx the base",
+				candidate.WallSeconds, base.WallSeconds, RunBudgetSeconds, SlowdownRatio)}
+	default:
+		green.Why = fmt.Sprintf("passed in %.1f s, past its %.0f s budget: green with a warning; alone %.1f s on the candidate and %.1f s on main's base, so the branch didn't make it slow",
+			warning.WallSeconds, RunBudgetSeconds, candidate.WallSeconds, base.WallSeconds)
+	}
+	return green
+}
+
 // overBudget is the row for a unit the runner stopped over its budget: void, Loom's, decided with no retry.
 func overBudget(which, cause string) Decision {
+	if cause == OverBudgetDeadline {
+		// The ceiling, 15 minutes under the build law, ends only a hang: a slow unit passes with a warning before it.
+		return Decision{Decided: true, Status: Void, Cause: CauseInfra, Infra: InfraOverBudget,
+			Why: which + " hung to the runner's ceiling: void, never red; nothing reruns, since a hang hangs again"}
+	}
 	return Decision{Decided: true, Status: Void, Cause: CauseInfra, Infra: InfraOverBudget,
 		Why: which + " ran over its budget (" + cause + "): Loom's, never the change's; its test is split and the future reruns"}
 }

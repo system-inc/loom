@@ -31,3 +31,24 @@ func TestEveryJobNamesItsKeysRunner(t *testing.T) {
 		t.Fatalf("a product's job names runner %q (%v)", unit.Test.Runner, err)
 	}
 }
+
+// A build unit (Kirk's build law, #8j1qygw) is its package's go test job made a build job, under the build kind's
+// ceiling, placed and rerun alike. Mutant: the kind refused, or its job not marked build.
+func TestABuildUnitIsABuildJob(t *testing.T) {
+	t.Parallel()
+	sha, base, key, runner := strings.Repeat("c", 40), strings.Repeat("b", 40), strings.Repeat("1", 64), strings.Repeat("e", 64)
+	build := KeyParts{Kind: "build", Package: protocol.AdamicModule + "/internal/native", Select: Select{Run: "^(TestBuildsTheArchive)$"},
+		Tools: Tools{Go: "go1.27.1", Clang: "clang 20", Runner: runner}}
+	placed, err := FutureJobUnit(key, build, sha, base, nil)
+	if err != nil || placed.Kind != "build" || !placed.Test.Build || placed.TimeoutSeconds != protocol.KindCeilings["build"] || placed.Test.Runner != runner ||
+		strings.Join(placed.Requires, ",") != "go,clang" {
+		t.Fatalf("a placed build unit is %+v (%v)", placed, err)
+	}
+	rerun, err := JobUnitFor(build, sha, strings.Repeat("7", 64))
+	if err != nil || !rerun.Test.Build || rerun.Test.Tree != strings.Repeat("7", 64) || rerun.Kind != "build" {
+		t.Fatalf("a build unit's rerun is %+v (%v)", rerun, err)
+	}
+	if !ReadsTreeBuild("build") {
+		t.Fatal("a build unit doesn't read its tree's build")
+	}
+}

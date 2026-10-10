@@ -137,7 +137,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return fail(err)
 	}
 	defer treeLock.Close()
-	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: append(planner.GateEnvironmentList(), planner.TreeBuildEnvironment()...),
+	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: planner.UnitEnvironment(planner.RunnersGoos, planner.RunnersGoarch),
 		Jobs: *jobs, Compile: *compile, Watched: watched, Phases: &clock.phases}
 	for _, path := range []string{build.Cache, build.Out, filepath.Join(directory, "logs")} {
 		if err = os.MkdirAll(path, 0o755); err != nil {
