@@ -1,10 +1,11 @@
 // Package gateinputs publishes the gate inputs and checks them for their readers. The gate inputs are the files
 // adamic's corpus and parity tests read beside the tree, under ~/adamic-tools/gate-inputs on a box (adamic's
 // docs/gate-inputs.md): the pinned TypeScript checkout and the cycle ledger's, the CSS fixtures, the formatters' npm
-// projects, the 100 MiB ignore corpus and the checker archive. A unit runs with them by one name, the sha256 of their
-// uncompressed tar, which the planner reads from ~/.loom/gate-inputs-manifest into every unit's key and test job
-// (protocol.TestJob.GateInputs, planner.KeyParts.GateInputs), and which a runner's prepare.sh fetches, checks and
-// unpacks into <root>/adamic-tools/gate-inputs.
+// projects and the 100 MiB ignore corpus. Nothing built from adamic's own tree is among them: the checker archive is
+// each tree's own product (#nee3cfe), so a box's checker/ is never packed. A unit runs with them by one name, the
+// sha256 of their uncompressed tar, which the planner reads from ~/.loom/gate-inputs-manifest into every unit's key and
+// test job (protocol.TestJob.GateInputs, planner.KeyParts.GateInputs), and which a runner's prepare.sh fetches, checks
+// and unpacks into <root>/adamic-tools/gate-inputs.
 //
 // The manifest, at gate-inputs/<name> in the public bucket, is text: one line per chunk of a tar.gz of that tar, each
 // chunk's sha256 in order, then "total <sha256> <bytes>" of the whole tar.gz, then "tar <name> <bytes>". A runner
@@ -53,9 +54,13 @@ const ChunkSize = 90 << 20
 // Root is the directory every entry of the tar.gz is under, the name prepare.sh unpacks into its tools directory.
 const Root = "gate-inputs"
 
-// Excluded are the paths under the directory that are a box's own outputs, never inputs: prepare.sh points
-// ADAMIC_CYCLE_LEDGER_OUTPUT at the first, and the cycle ledger's test writes it on every run.
-var Excluded = map[string]bool{"cycle-ledger-output.json": true}
+// Excluded are the paths under the directory, a file or a directory and all of it, that are a box's own outputs,
+// never inputs. prepare.sh points ADAMIC_CYCLE_LEDGER_OUTPUT at cycle-ledger-output.json, and the cycle ledger's test
+// writes it on every run. checker/ held the checker archive one adamic tree built (Oct 7), which internal/native's
+// tests linked against every tree's bridge, so a change to the bridge's C interface was judged against the old one:
+// the archive is now each tree's own product (adamic's TestProduct_CheckerArchive), and a box that still keeps one
+// for its own gate publishes without it.
+var Excluded = map[string]bool{"cycle-ledger-output.json": true, "checker": true}
 
 // Epoch is every entry's modification time.
 var Epoch = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -254,6 +259,9 @@ func writeTar(directory string, out io.Writer) error {
 		}
 		relative = filepath.ToSlash(relative)
 		if Excluded[relative] {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		name := Root

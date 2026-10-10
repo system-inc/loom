@@ -31,6 +31,8 @@ import (
 //	a Pin reading its file once, or keying on a manifest it didn't check: TestAPinRereadsItsFileAndChecksEachManifestOnce
 //	a Pin trusting a check forever, or a failed check: TestAPinChecksItsManifestAgainEveryHour
 //	HomeExpires missing a whole-bucket rule, or a rule on a key under the prefix: TestHomeExpiresNamesEveryRuleThatReachesThePrefix
+//	checker/ packed, or an excluded directory skipped only by its own entry (its files still packed):
+//	TestTheCheckerArchiveIsNeverAGateInput
 
 // git runs git in directory with no configuration but a fixed identity and times, and fails the test on an error.
 func git(t *testing.T, directory string, arguments ...string) string {
@@ -60,7 +62,8 @@ func write(t *testing.T, path, content string, mode os.FileMode) {
 }
 
 // inputsFixture is a small gate inputs directory: a pinned checkout with a skip-worktree path (as a sparse checkout
-// keeps one), an npm project with an executable, a link within the directory, and the cycle ledger's output.
+// keeps one), an npm project with an executable, a link within the directory, the cycle ledger's output, and the
+// checker archive a box may still keep for its own gate.
 func inputsFixture(t *testing.T) string {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "gate-inputs")
@@ -123,6 +126,31 @@ func TestPackGivesTheSameHashAfterABoxsOwnRuns(t *testing.T) {
 	write(t, filepath.Join(directory, "cycle-ledger-output.json"), `{"run":2,"longer":true}`, 0o644)
 	if after, _ := pack(t, directory); after.Name != before.Name {
 		t.Fatalf("a box's own runs moved the gate inputs' hash: %s then %s", before.Name, after.Name)
+	}
+}
+
+// A box that keeps a checker archive beside its gate inputs publishes without it: the archive is each tree's own
+// product (#nee3cfe), never a gate input. Whatever checker/ holds, the name is the directory's without it, and nothing
+// of it unpacks on a runner.
+func TestTheCheckerArchiveIsNeverAGateInput(t *testing.T) {
+	directory := inputsFixture(t)
+	held, chunks := pack(t, directory)
+	if _, err := os.Stat(filepath.Join(unpack(t, held, chunks), "checker")); !os.IsNotExist(err) {
+		t.Fatalf("checker/ was packed: %v", err)
+	}
+	if err := os.Remove(filepath.Join(directory, "checker", "tsgo.a")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(directory, "checker")); err != nil {
+		t.Fatal(err)
+	}
+	without, _ := pack(t, directory)
+	if without.Name != held.Name {
+		t.Fatalf("a directory with checker/ packs to %s, and without it to %s", held.Name, without.Name)
+	}
+	write(t, filepath.Join(directory, "checker", "tsgo.a"), "!<arch>\nanother tree's archive\n", 0o644)
+	if other, _ := pack(t, directory); other.Name != without.Name {
+		t.Fatalf("another checker archive moved the gate inputs' name: %s, not %s", other.Name, without.Name)
 	}
 }
 
