@@ -95,6 +95,13 @@ func TestAProductArchiveIsTheSameBytesFromTheSameFiles(t *testing.T) {
 	if !bytes.Equal(one, again) || !bytes.Equal(one, other) {
 		t.Fatalf("three archives of the same files: %s, %s, %s", digest(one), digest(again), digest(other))
 	}
+	// Whatever order its entries are given in.
+	forward := []archiveEntry{{Name: "x/one", File: filepath.Join(first, keyOf("b"), "b.a")}, {Name: "y/two", File: filepath.Join(first, keyOf("a"), "bin", "tool"), Executable: true}}
+	left, _ := writeArchive(forward)
+	right, _ := writeArchive([]archiveEntry{forward[1], forward[0]})
+	if !bytes.Equal(left, right) {
+		t.Fatal("one archive's entries in two orders made two archives")
+	}
 	// And it unpacks to the same files, executable where they were.
 	unpacked := t.TempDir()
 	if err = Unpack(one, unpacked, buildcachePath); err != nil {
