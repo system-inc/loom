@@ -2,7 +2,7 @@
 // each. It exits 0 when the unit passed, 1 when it failed and 2 when it is broken or couldn't be read.
 //
 //	loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] [--house-cache <url>] <unit.json | https URL | ->
-//	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>]
+//	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>] [--has <toolchains>]
 //	loom-runner install-serve
 //	loom-runner version
 //
@@ -37,11 +37,12 @@ import (
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/runner"
 	"github.com/system-inc/loom/serving"
+	"github.com/system-inc/loom/toolchains"
 )
 
 const usage = `usage:
   loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] [--machine <name>] [--house-cache <url>] <unit.json | https URL | ->
-  loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>]
+  loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>] [--house-cache <url>] [--has <toolchains>]
   loom-runner install-serve
   loom-runner version
 `
@@ -149,11 +150,17 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tree := flags.String("tree", "", "where a test job's checkout is kept across units (default <root>/adamic)")
 	releases := flags.String("releases", runner.DefaultReleases, "where a unit's runner is fetched by its sha256 when it names another than this one")
 	houseCache := flags.String("house-cache", os.Getenv(housecache.Variable), "the house cache, http://<host>:<port>, asked first for every blob and runner by its sha256 (default $"+housecache.Variable+")")
+	has := flags.String("has", "", "the toolchains this box claims for its pool, go,clang,node,wasiSdk: each probed before serve asks for anything, and a box whose claim fails asks for nothing")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 || *pool == "" || *tokenFile == "" || *worker == "" || *until <= 0 {
 		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	claims, err := toolchains.Parse(*has)
+	if err != nil {
+		fmt.Fprintf(stderr, "loom-runner: --has: %v\n", err)
 		return 2
 	}
 	if *houseCache != "" {
@@ -197,6 +204,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			HouseCache: *houseCache, LiveStatus: liveStatus(*root, livestatus.UnitPath)},
 		Report:     stderr,
 		Drain:      drain,
+		Has:        claims,
 		Releases:   *releases,
 		LiveStatus: liveStatus(*root, livestatus.ServePath),
 	})
