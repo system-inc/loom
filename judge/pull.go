@@ -107,9 +107,12 @@ type Puller struct {
 	Read   func(run string) ([]protocol.Event, error)                                                         // coordinator.ReadRunEvents, bound
 	Rerun  func(keyParts json.RawMessage, resources protocol.Resources, sha string) ([]protocol.Event, error) // planner.JobUnitFor with the unit's resources, then coordinator.RerunAlone
 	Log    func(run, sha256 string) ([]byte, error)                                                           // coordinator.ReadRunBlob, bound: each attempt's test log
-	Main   MainRecords
-	Queue  Queue
-	Loop   Loop // its Now is used; its collaborators are set per future
+	// NeedNow is a unit's declared need as of now (NeedOf over a fresh unit-needs.json); nil skips the need-changed
+	// rule.
+	NeedNow func(keyParts json.RawMessage, listed protocol.Resources) (protocol.Resources, error)
+	Main    MainRecords
+	Queue   Queue
+	Loop    Loop // its Now is used; its collaborators are set per future
 	// Stale is the backstop (Loom, Oct 10 01:10Z): a run with a unit still open and no event for this long is posted
 	// void as silent, so no future waits on a hand when a coordinator dies. Zero turns it off. The coordinator's own
 	// finished events for the units it gives up on are the real fix; this only moves a stuck run toward void.
@@ -272,6 +275,15 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	loop.Fabric = EventFabric{Rerun: func(unitKey, tree string) ([]protocol.Event, error) {
 		return puller.Rerun(parts[unitKey], resources[unitKey], tree)
 	}, Log: puller.Log}
+	if puller.NeedNow != nil {
+		loop.NeedGrew = func(unitKey string) (string, error) {
+			need, err := puller.NeedNow(parts[unitKey], resources[unitKey])
+			if err != nil {
+				return "", err
+			}
+			return NeedGrew(resources[unitKey], need), nil
+		}
+	}
 	loop.Main, loop.Queue = puller.Main, puller.Queue
 	record := ChangeRecord{Change: future.Change.Change, Sha: future.Change.Sha, Base: future.Change.Base, Owner: future.Change.Owner}
 	return loop, Job{Record: record, Change: record.Change, Future: future.Future, Base: future.Base, Run: run, Plan: plan}
@@ -418,6 +430,15 @@ func (pool PoolEntry) Takes(kind string) bool {
 		}
 	}
 	return false
+}
+
+// NeedGrew says how a declared need exceeds what a unit was placed with, empty when it doesn't. A listing without
+// resources placed the unit with none declared, so any declared need now is more.
+func NeedGrew(placed, need protocol.Resources) string {
+	if need.Cpus <= placed.Cpus && need.MemoryMegabytes <= placed.MemoryMegabytes {
+		return ""
+	}
+	return fmt.Sprintf("placed with %d cpus and %d MB, declared now %d cpus and %d MB", placed.Cpus, placed.MemoryMegabytes, need.Cpus, need.MemoryMegabytes)
 }
 
 // LoadPools reads pools.json, refusing a pool without a name, a runner, or positive memory and cpus.

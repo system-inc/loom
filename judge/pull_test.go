@@ -380,3 +380,74 @@ func TestARerunThatCantBePlacedIsVoidNeverAnError(t *testing.T) {
 		t.Fatalf("%+v, want void neverPlaced", record)
 	}
 }
+
+// Release's mutant (Oct 10 02:26Z): a unit that failed placed with no declared need, typeaware on 8 cores, and would
+// pass alone at its declared 16 cpus must never read flake or green. It's void, need changed, with no rerun placed; with
+// the same need on both sides, today's flake rule is unchanged.
+func TestAFailureWhoseNeedGrewIsVoidNeverAFlake(t *testing.T) {
+	tree := strings.Repeat("d", 40)
+	unit := strings.Repeat("1", 64)
+	for _, c := range []struct {
+		name   string
+		need   protocol.Resources
+		status string
+		reruns int
+	}{
+		{"need grew: void, nothing rerun", protocol.Resources{MemoryMegabytes: 9710, Cpus: 16}, "void", 0},
+		{"same need: the flake rule stands", protocol.Resources{}, "green", 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			units := []PlannedUnitWire{{UnitKey: unit, KeyParts: json.RawMessage(`{"package":"p","kind":"test"}`), Decision: "run"}}
+			source := listedFutures{{Future: tree, Base: baseTree, Change: PlannedChange{Change: "chg_A", Sha: tree, Base: baseTree}, Units: units}}
+			reruns := 0
+			queue := &StubQueue{}
+			puller := Puller{
+				Source: source,
+				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
+				Read:   func(string) ([]protocol.Event, error) { return finishedStream(unit, "failed"), nil },
+				Rerun: func(json.RawMessage, protocol.Resources, string) ([]protocol.Event, error) {
+					reruns++
+					return finishedStream("job", "passed"), nil
+				},
+				NeedNow: func(json.RawMessage, protocol.Resources) (protocol.Resources, error) { return c.need, nil },
+				Main:    NoMainRecords{},
+				Queue:   queue,
+				Loop:    Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: func() time.Time { return time.Date(2026, 10, 10, 2, 30, 0, 0, time.UTC) }},
+			}
+			if judged, err := puller.PullOnce(); err != nil || judged != 1 {
+				t.Fatalf("judged %d %v", judged, err)
+			}
+			post := queue.Posts[tree][0]
+			if post.Decision.Status != c.status || reruns != c.reruns {
+				t.Fatalf("run %s with %d reruns, want %s with %d", post.Decision.Status, reruns, c.status, c.reruns)
+			}
+			if c.status == "void" {
+				var record struct {
+					Status string  `json:"status"`
+					Infra  *string `json:"infra"`
+				}
+				if err := json.Unmarshal(post.Verdicts[0], &record); err != nil || record.Status != Void || record.Infra == nil || *record.Infra != InfraNeedChanged {
+					t.Fatalf("record %+v (%v), want void needChanged", record, err)
+				}
+				if len(post.Quarantine) != 0 {
+					t.Fatalf("quarantined %v for a need that grew", post.Quarantine)
+				}
+			}
+		})
+	}
+}
+
+func TestNeedGrewIsMoreCpusOrMemoryThanThePlacement(t *testing.T) {
+	if NeedGrew(protocol.Resources{}, protocol.Resources{Cpus: 16, MemoryMegabytes: 9710}) == "" {
+		t.Fatal("a 16-cpu need over a placement with none declared didn't grow")
+	}
+	if NeedGrew(protocol.Resources{Cpus: 4, MemoryMegabytes: 9710}, protocol.Resources{Cpus: 4, MemoryMegabytes: 16384}) == "" {
+		t.Fatal("more memory didn't grow")
+	}
+	if why := NeedGrew(protocol.Resources{Cpus: 16, MemoryMegabytes: 9710}, protocol.Resources{Cpus: 16, MemoryMegabytes: 9710}); why != "" {
+		t.Fatalf("the same need grew: %s", why)
+	}
+	if why := NeedGrew(protocol.Resources{Cpus: 16, MemoryMegabytes: 16384}, protocol.Resources{Cpus: 4}); why != "" {
+		t.Fatalf("a smaller need grew: %s", why)
+	}
+}

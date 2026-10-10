@@ -156,6 +156,9 @@ type Loop struct {
 	// RequireRunner is the logged fail-closed switch (Loom, Oct 10 01:52Z, a cutover condition): an attempt whose
 	// runner reports no sha256 is void, like one whose sha256 differs from its key's. Off, it's accepted, the gap named.
 	RequireRunner bool
+	// NeedGrew, when set, says how a unit's declared need now exceeds what its first attempt was placed with, empty
+	// when it doesn't (Release, Oct 10 02:26Z). Asked only of a failure about to be rerun alone.
+	NeedGrew func(unitKey string) (string, error)
 }
 
 // CensusConfig is what the census step reads: the tools tree's rows, whether an awaited branch is on main, and the
@@ -332,7 +335,18 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 			}
 			continue
 		}
-		// "rerunAlone": a failure is rerun alone on the candidate and on main before its cause is set.
+		// "rerunAlone": a failure is rerun alone on the candidate and on main before its cause is set, unless its
+		// declared need grew since it was placed: then Decide voids it before anything runs.
+		if evidence.NeedGrew == "" && evidence.Candidate == nil && loop.NeedGrew != nil {
+			grew, err := loop.NeedGrew(unit.UnitKey)
+			if err != nil {
+				return Verdict{}, nil, err
+			}
+			if grew != "" {
+				evidence.NeedGrew = grew
+				continue
+			}
+		}
 		if err := loop.rerunBoth(job, unit, &evidence, &verdict); err != nil {
 			return Verdict{}, nil, err
 		}

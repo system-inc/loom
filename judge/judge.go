@@ -51,6 +51,10 @@ const (
 	InfraNeverPlaced = "neverPlaced"
 	InfraRefused     = "refused"
 	InfraSilent      = "silent"
+	// InfraNeedChanged is a failure whose declared need grew after its first placement (Release, Oct 10 02:26Z): its
+	// alone reruns would run with more than the failing attempt had, so they can't judge it. Void, and the next
+	// attempt runs whole at the declared need. Never a flake, which would quarantine tests that were only under-placed.
+	InfraNeedChanged = "needChanged"
 )
 
 var infraKinds = map[string]bool{InfraDisk: true, InfraKill: true, InfraNeverPlaced: true, InfraRefused: true, InfraSilent: true}
@@ -240,7 +244,10 @@ type Evidence struct {
 	RequireRunner bool
 	// Phase marks a kind phase unit, one of the box fast gate's non-test stages (Loom, Oct 10 01:41Z): decided by its
 	// exit, as the box decides a stage, with no alone reruns.
-	Phase     bool
+	Phase bool
+	// NeedGrew says how the unit's declared need now exceeds what its first attempt was placed with; empty when it
+	// doesn't, or before the loop has asked (it asks only when a failure would go to alone reruns).
+	NeedGrew  string
 	Candidate *Rerun // the unit rerun alone on the candidate; nil until it has run
 	Main      *Rerun // the unit rerun alone on main at the future's base; nil until it has run
 	// MainRecorded is main's latest recorded verdict for this unit at the future's base, its test outcomes; nil when
@@ -311,6 +318,10 @@ func Decide(evidence Evidence) (Decision, error) {
 	case Failed:
 	default:
 		return Decision{}, fmt.Errorf("an attempt's status is passed, failed or broken, not %q", evidence.First.Status)
+	}
+	if evidence.NeedGrew != "" {
+		return Decision{Decided: true, Status: Void, Cause: CauseInfra, Infra: InfraNeedChanged,
+			Why: "failed, and its declared need grew since its placement (" + evidence.NeedGrew + "): reruns placed with more can't judge it; void, the next attempt runs whole at the declared need"}, nil
 	}
 	if evidence.Candidate == nil || evidence.Main == nil {
 		return Decision{Next: "rerunAlone", Why: "failed: rerun alone on the candidate and on main before a cause is set"}, nil

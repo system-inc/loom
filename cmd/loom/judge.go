@@ -179,6 +179,17 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Stale: judge.StaleAfter,
 	})
 	puller.Loop.RequireRunner = *requireRunner
+	if *poolsPath != "" {
+		// A failure is rerun with the need NeedOf reads now; when that's more than its attempt was placed with, it's
+		// void, need changed, never judged by reruns placed with more (Release, Oct 10 02:26Z).
+		puller.NeedNow = func(keyParts json.RawMessage, listed protocol.Resources) (protocol.Resources, error) {
+			needs, err := loadNeeds(*needsGit)
+			if err != nil {
+				return protocol.Resources{}, err
+			}
+			return judge.NeedOf(listed, keyParts, needs)
+		}
+	}
 	if *censusRows != "" {
 		census, err := censusConfig(strings.Split(*censusRows, ","), *censusHeavy, *censusGit)
 		if err != nil {
