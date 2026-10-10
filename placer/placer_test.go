@@ -87,6 +87,7 @@ func newHarness(t *testing.T, source judge.FutureSource, ledger Ledger) *harness
 			h.placements = append(h.placements, placement)
 			return nil
 		},
+		RunStarted: func(string) (bool, error) { return true, nil },
 		Void: func(future judge.PlannedFuture, attempt int, cause string) error {
 			h.voids = append(h.voids, cause)
 			return nil
@@ -208,7 +209,7 @@ func TestAPhaseWithNoJobIsReported(t *testing.T) {
 }
 
 // The ledger outlives the placer: a restart reads it and starts nothing it recorded, a crash's cut-short last line
-// included, which never finished and so never started anything.
+// included, which never finished and so never started anything. While one placer holds it, another can't open it.
 func TestARestartPlacesNothingTwice(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "placed.jsonl")
 	source := listedFutures{{Future: tree, Base: base, Attempt: 1, Units: everyKind(t)}}
@@ -217,6 +218,13 @@ func TestARestartPlacesNothingTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	newHarness(t, source, ledger).placeOnce(t, 1)
+	// A second placer beside the first is refused before it reads a record: both would start every attempt.
+	if second, err := OpenLedger(path); err == nil || !strings.Contains(err.Error(), "another placer holds it") {
+		t.Fatalf("a second placer took the held ledger (%v)", err)
+	} else if second != nil {
+		t.Fatal("a refused ledger came back")
+	}
+	ledger.Close()
 	file, _ := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
 	file.WriteString(`{"future":"` + strings.Repeat("9", 40) + `","attempt":1,"ru`)
 	file.Close()
@@ -224,6 +232,7 @@ func TestARestartPlacesNothingTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer reopened.Close()
 	restarted := newHarness(t, source, reopened)
 	restarted.placeOnce(t, 0)
 	if len(restarted.placements) != 0 || len(restarted.voids) != 0 {
