@@ -62,6 +62,7 @@ const usage = `usage:
   loom submit-token [--days N] <owner>
   loom coordinator-token <service> [--days N]
   loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--once] [--dry-run]
+  loom place --queue <url> --token-file <path> --pool-has <name>=<toolchains>... [--pools <file>] [--once] [--dry-run]
   loom unit-needs --gate-tools <dir> --package <directory> [--run <pattern>]
   loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>]
   loom build-actions --tree <dir> --gate-tools <dir> [--r2 <key file>] [--packages a,b] [--list]
@@ -80,6 +81,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "judge" {
 		return judgeLoop(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "place" {
+		return place(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "unit-needs" {
 		return unitNeeds(arguments[1:], stdout, stderr)
