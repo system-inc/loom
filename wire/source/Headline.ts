@@ -6,7 +6,8 @@
 //
 // A build tested is a future's whole decision, green or red: the judge's decision, or a whole verdict passed or failed
 // from today's gate. A void tested nothing and is counted apart. Main's red count is the number of units main's last
-// witness held red (main.red), zero once a witness of main's tip is green (main.green).
+// witness held red (main.red), zero once a witness of main's tip is green (main.green). A log line it can't read (not
+// JSON, or with no seq or time) is skipped, logged and counted in the reading, so one bad line never stops the headline.
 
 import { DurableObject } from 'cloudflare:workers';
 import { queueOf } from './Changes';
@@ -41,6 +42,8 @@ export interface HeadlineReading {
     // Main's red count now (null until a witness of main's tip is decided) and its points over the last day.
     mainRed: MainRedPoint | null;
     mainTrend: MainRedPoint[];
+    // Log lines the last read skipped because it couldn't read them, and the last event read before the first of them.
+    unreadable: { lines: number; afterSeq: number } | null;
 }
 
 export function headlineOf(environment: Env): DurableObjectStub {
@@ -69,9 +72,29 @@ export function headlineFact(event: QueueEvent): { outcome: HeadlineOutcome } | 
     return null;
 }
 
+// One log line as an event, or null when it isn't one the headline can place: not JSON, or with no seq or time.
+export function readEvent(line: string): QueueEvent | null {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(line);
+    }
+    catch {
+        return null;
+    }
+    if (typeof parsed !== 'object' || parsed === null) {
+        return null;
+    }
+    const event = parsed as Partial<QueueEvent>;
+    if (!Number.isSafeInteger(event.seq) || typeof event.at !== 'string' || Number.isNaN(Date.parse(event.at))) {
+        return null;
+    }
+    return { subject: {}, data: {}, ...event } as QueueEvent;
+}
+
 export class Headline extends DurableObject<Env> {
     private readonly sql: SqlStorage;
     private lastReadAt = 0;
+    private unreadable: { lines: number; afterSeq: number } | null = null;
     private reading: Promise<void> | null = null;
 
     constructor(context: DurableObjectState, environment: Env) {
@@ -112,6 +135,7 @@ export class Headline extends DurableObject<Env> {
         if (queue === null) {
             throw new Error("the queue isn't on the wire");
         }
+        let unreadable: { lines: number; afterSeq: number } | null = null;
         for (let page = 0; page < maximumPagesPerRead; page++) {
             const response = await queue.fetch(new Request(`https://queue/log?after=${this.cursor()}`));
             if (!response.ok) {
@@ -127,7 +151,12 @@ export class Headline extends DurableObject<Env> {
             this.ctx.storage.transactionSync(() => {
                 let seq = this.cursor();
                 for (const line of lines) {
-                    const event = JSON.parse(line) as QueueEvent;
+                    const event = readEvent(line);
+                    if (event === null) {
+                        unreadable = { lines: (unreadable?.lines ?? 0) + 1, afterSeq: unreadable?.afterSeq ?? seq };
+                        console.error(`headline: skipped a log line it can't read, after seq ${seq}: ${line.slice(0, 200)}`);
+                        continue;
+                    }
                     const fact = headlineFact(event);
                     const at = Date.parse(event.at);
                     if (fact !== null && 'outcome' in fact) {
@@ -144,6 +173,7 @@ export class Headline extends DurableObject<Env> {
                 break;
             }
         }
+        this.unreadable = unreadable;
         const now = Date.now();
         this.sql.exec('DELETE FROM decisions WHERE at < ?', now - keptMilliseconds);
         // The newest main point is kept however old, since it is main's red count now.
@@ -180,6 +210,7 @@ export class Headline extends DurableObject<Env> {
             voidLastHour: voidLastHour,
             mainRed: newest === undefined ? null : { at: new Date(newest.at).toISOString(), red: newest.red, main: newest.main },
             mainTrend: points,
+            unreadable: this.unreadable,
         };
     }
 }
