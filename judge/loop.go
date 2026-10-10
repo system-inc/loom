@@ -115,6 +115,9 @@ type Job struct {
 	Base   string // main's sha the future is built on
 	Run    string
 	Plan   []PlanUnit
+	// Earlier are this same future's earlier attempts' runs, newest first: a unit with no events in Run is judged from
+	// its newest passed attempt in one of them (Loom's ruling A, Oct 10 01:23Z), and nothing else is ever carried.
+	Earlier []string
 }
 
 // A FuturePost is the body of Queue's futures verdicts route, as proposed to Queue (Oct 9, 23:35Z).
@@ -265,6 +268,21 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 	if err != nil {
 		return Verdict{}, nil, err
 	}
+	carried := ""
+	for _, earlier := range job.Earlier {
+		if found {
+			break
+		}
+		// Fabric placed this attempt without the unit, since an earlier attempt of this future passed it: that attempt
+		// is judged as if it were this one's, through the same rules. A red or broken earlier attempt is never carried.
+		prior, priorFound, err := loop.Runs.Finished(earlier, unit.UnitKey)
+		if err != nil {
+			return Verdict{}, nil, err
+		}
+		if priorFound && prior.Attempt.Status == Passed {
+			first, found, carried = prior, true, earlier
+		}
+	}
 	if !found {
 		// A unit that never reported is placed again like any infra.
 		first = Finished{Attempt: Attempt{Status: Broken}, Infra: InfraSilent}
@@ -321,6 +339,9 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		case len(source.Tests) == 0 && !source.NoTestFiles, len(unrun(unit.Named, source.Tests)) > 0:
 			verdict.Status, verdict.Cause, verdict.RuleId = Failed, CauseChange, RuleZeroRun
 		}
+	}
+	if carried != "" && verdict.RuleId == Rule {
+		verdict.RuleId = Rule + " carried " + carried
 	}
 	if loop.Census != nil && verdict.Status == Passed {
 		// A unit is a whole package, so a skip, the pass that covers it and its siblings all run in it: the unit's census

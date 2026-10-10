@@ -421,3 +421,27 @@ func TestAReusedRecordCarriesTheTestsOfTheVerdictItReuses(t *testing.T) {
 		t.Fatal("a reused unit posted with nothing to read the verdict it reuses")
 	}
 }
+
+// runsByRun answers each (run, unit) on its own, so a job's earlier attempts can differ from its run.
+type runsByRun map[string]Finished
+
+func (runs runsByRun) Finished(run, unitKey string) (Finished, bool, error) {
+	finished, found := runs[run+" "+unitKey]
+	return finished, found, nil
+}
+
+func TestARedEarlierAttemptIsNeverCarried(t *testing.T) {
+	h := newHarness()
+	h.script("u", futureTree, passed())
+	runs := runsByRun{"run-1 u": failedWith("TestB")}
+	loop := Loop{Runs: runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Reused: stubReused{}, Now: time.Now}
+	job := censusJob(PlanUnit{UnitKey: "u"})
+	job.Run, job.Earlier = "run-2", []string{"run-1"}
+	post, err := loop.JudgeFuture(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(post.Verdicts[0]), "carried") || len(h.fabric.Asked) != 1 {
+		t.Fatalf("record %s, placements %v: a red earlier attempt must run again, not carry", post.Verdicts[0], h.fabric.Asked)
+	}
+}

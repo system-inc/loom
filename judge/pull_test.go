@@ -172,3 +172,45 @@ func TestARunWithNoEventsIsAgedFromTheFirstPassThatSawIt(t *testing.T) {
 		t.Fatalf("a backstop turned off said %q", why)
 	}
 }
+
+func TestAnEarlierAttemptsPassIsCarriedOnlyWithinTheSameFuture(t *testing.T) {
+	tree, other := strings.Repeat("d", 40), strings.Repeat("e", 40)
+	carried, placed, redBefore := strings.Repeat("1", 64), strings.Repeat("2", 64), strings.Repeat("3", 64)
+	runOf := func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) }
+	listing := func(units ...string) listedFutures {
+		wire := []PlannedUnitWire{}
+		for _, unit := range units {
+			wire = append(wire, PlannedUnitWire{UnitKey: unit, Decision: "run"})
+		}
+		return listedFutures{{Future: tree, Base: other, Attempt: 2, Change: PlannedChange{Change: "chg_A"}, Units: wire}}
+	}
+	streams := map[string][]protocol.Event{
+		runOf(tree, 1):  append(finishedStream(carried, "passed"), finishedStream(redBefore, "failed")...),
+		runOf(tree, 2):  finishedStream(placed, "passed"),
+		runOf(other, 1): finishedStream(redBefore, "passed"), // a pass on another future, never carried
+	}
+	pullerFor := func(source listedFutures, queue *StubQueue) Puller {
+		return NewPuller(Puller{Source: source, RunOf: runOf, Read: func(run string) ([]protocol.Event, error) { return streams[run], nil },
+			Rerun: func(json.RawMessage, string) ([]protocol.Event, error) { t.Fatal("placed a unit"); return nil, nil },
+			Main:  NoMainRecords{}, Queue: queue, Loop: Loop{Blobs: &StubBlobs{}, Reused: stubReused{}, Now: time.Now}})
+	}
+	queue := &StubQueue{}
+	if judged, err := pullerFor(listing(carried, placed), queue).PullOnce(); err != nil || judged != 1 {
+		t.Fatalf("judged %d (%v), want the future with its carried unit", judged, err)
+	}
+	post := queue.Posts[tree][0]
+	if post.Decision.Status != "green" || post.Run != runOf(tree, 2) {
+		t.Fatalf("decision %+v run %s", post.Decision, post.Run)
+	}
+	if !strings.Contains(string(post.Verdicts[0]), `"rule":"judge-v1 carried `+runOf(tree, 1)+`"`) || !strings.Contains(string(post.Verdicts[0]), `"run":"`+runOf(tree, 2)+`"`) {
+		t.Fatalf("carried record %s: want its source run in the rule and this run as its run", post.Verdicts[0])
+	}
+	if !strings.Contains(string(post.Verdicts[1]), `"rule":"judge-v1"`) {
+		t.Fatalf("placed record %s", post.Verdicts[1])
+	}
+	// A unit whose only earlier attempt failed here, and passed only on another future, is open: nothing is judged.
+	queue = &StubQueue{}
+	if judged, err := pullerFor(listing(redBefore, placed), queue).PullOnce(); err != nil || judged != 0 || len(queue.Posts) != 0 {
+		t.Fatalf("judged %d (%v) with a unit whose only pass was on another future", judged, err)
+	}
+}

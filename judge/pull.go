@@ -170,7 +170,18 @@ func (puller Puller) PullOnce() (int, error) {
 		if err != nil {
 			return judged, fmt.Errorf("future %s: reading run %s: %w", future.Future, run, err)
 		}
-		if open := openUnits(future, events); open > 0 {
+		// This future's earlier attempts, newest first: only these are ever carried from.
+		earlier := map[string][]protocol.Event{}
+		order := []string{}
+		for prior := attempt - 1; prior >= 1; prior-- {
+			priorRun := puller.RunOf(future.Future, prior)
+			priorEvents, err := puller.Read(priorRun)
+			if err != nil {
+				return judged, fmt.Errorf("future %s: reading run %s: %w", future.Future, priorRun, err)
+			}
+			earlier[priorRun], order = priorEvents, append(order, priorRun)
+		}
+		if open := openUnits(future, events, earlier); open > 0 {
 			if why := puller.stale(run, events, open); why != "" {
 				loop, job := puller.jobOf(future, run, events)
 				if _, err := loop.VoidFuture(job, InfraSilent, why); err != nil {
@@ -181,6 +192,7 @@ func (puller Puller) PullOnce() (int, error) {
 			continue
 		}
 		loop, job := puller.jobOf(future, run, events)
+		loop.Runs, job.Earlier = EventRuns{Read: runsOf(run, events, earlier), Log: puller.Log}, order
 		if _, err := loop.JudgeFuture(job); err != nil {
 			return judged, fmt.Errorf("future %s: %w", future.Future, err)
 		}
@@ -247,12 +259,20 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 	return loop, Job{Record: record, Change: record.Change, Future: future.Future, Base: future.Base, Run: run, Plan: plan}
 }
 
-// openUnits is how many units the future runs that have no finished event in its run.
-func openUnits(future PlannedFuture, events []protocol.Event) int {
+// openUnits is how many units the future runs that have no finished event in its run and no passed attempt in an
+// earlier run of it, which the judge carries.
+func openUnits(future PlannedFuture, events []protocol.Event, earlier map[string][]protocol.Event) int {
 	finished := map[string]bool{}
 	for _, event := range events {
 		if event.Type == "finished" {
 			finished[event.Unit] = true
+		}
+	}
+	for _, priorEvents := range earlier {
+		for _, unit := range future.Units {
+			if prior, found := FinishedFromEvents(eventsOf(priorEvents, unit.UnitKey)); found && prior.Attempt.Status == Passed {
+				finished[unit.UnitKey] = true
+			}
 		}
 	}
 	open := 0
@@ -262,4 +282,14 @@ func openUnits(future PlannedFuture, events []protocol.Event) int {
 		}
 	}
 	return open
+}
+
+// runsOf reads the current run's events or an earlier attempt's, by run id; any other run has none.
+func runsOf(run string, events []protocol.Event, earlier map[string][]protocol.Event) func(string) ([]protocol.Event, error) {
+	return func(asked string) ([]protocol.Event, error) {
+		if asked == run {
+			return events, nil
+		}
+		return earlier[asked], nil
+	}
 }
