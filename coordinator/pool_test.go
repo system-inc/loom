@@ -442,3 +442,25 @@ func TestARunTakesTheIdItIsGiven(t *testing.T) {
 		t.Fatal("a run id the wire won't take was accepted")
 	}
 }
+
+// A strict runner says nothing while a package's go test runs, so its pool gives a started unit a silence window
+// (--silence-drop) in place of three heartbeats (Oct 10: live units over 360 s were dropped all night). A worker silent
+// for six of its heartbeats that then passes is never dropped. Mutant: the window ignored, and the unit is dropped and
+// placed again.
+func TestAStrictPoolsUnitSilentPastThreeHeartbeatsIsNotDropped(t *testing.T) {
+	wire := newFakeWire(t)
+	wire.sleepers = 1
+	servePool(t, wire, "codex", 1)
+	pool := &PoolMachine{Pool: "codex", Wire: wire.server.URL, Secret: testSecret, Version: runner.Version,
+		GoPlatform: runtime.GOOS + "/" + runtime.GOARCH, QueueCheck: 50 * time.Millisecond, SilenceDrop: 5 * time.Second}
+	unit := poolUnit("quiet", "echo never")
+	unit.TimeoutSeconds = 30
+	result := run(t, config(wire, pool), unit)
+	if result.Verdict.Status != "green" {
+		t.Fatalf("verdict %+v", result.Verdict)
+	}
+	inRecord := unitEventsOf(result.Events, "quiet")
+	if startedCounts(inRecord)["quiet"] != 1 || strings.Contains(fmt.Sprint(inRecord), "its worker is gone") {
+		t.Fatalf("a silent unit that passed was dropped: %+v", inRecord)
+	}
+}

@@ -45,6 +45,7 @@ type fakeWire struct {
 	racing   int                        // the next cancels find a worker took one of the run's units just before them
 	swallow  int                        // the next asks to take a unit lose it, as an ask whose turn ended does
 	ghosts   int                        // the next units taken go to a worker that says started, then is gone
+	sleepers int                        // the next units taken go to a worker that says started, is silent 600 ms, then passes
 	reading  map[string]int             // reads of each run's log in flight
 	mostRead int                        // the most reads of one run's log ever in flight at once
 	server   *httptest.Server
@@ -315,6 +316,19 @@ func (wire *fakeWire) serveNext(writer http.ResponseWriter, claims protocol.Toke
 			swallowed := wire.swallow > 0
 			if swallowed {
 				wire.swallow--
+			}
+			if !swallowed && wire.sleepers > 0 {
+				wire.sleepers--
+				swallowed = true
+				unit := queue[0]
+				wire.lines[unit.Run] = append(wire.lines[unit.Run], protocol.Event{Run: unit.Run, Unit: unit.Unit, Sequence: unit.SequenceStart,
+					Time: time.Now().UTC().Format(timeLayout), Type: "started", Machine: "sleeper", HeartbeatSeconds: 0.1})
+				time.AfterFunc(600*time.Millisecond, func() {
+					wire.mutex.Lock()
+					defer wire.mutex.Unlock()
+					wire.lines[unit.Run] = append(wire.lines[unit.Run], protocol.Event{Run: unit.Run, Unit: unit.Unit, Sequence: unit.SequenceStart + 1,
+						Time: time.Now().UTC().Format(timeLayout), Type: "finished", Status: protocol.StatusPassed})
+				})
 			}
 			if !swallowed && wire.ghosts > 0 {
 				wire.ghosts--
