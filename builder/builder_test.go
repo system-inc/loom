@@ -433,6 +433,11 @@ func TestAFetchRefusesAPoisonedStore(t *testing.T) {
 		store.refs[key] = hex.EncodeToString(sum[:])
 		refused(t, runner, key)
 	})
+	t.Run("a ref that isn't a sha256", func(t *testing.T) {
+		store, runner, key, _ := built(t)
+		store.refs[key] = "latest"
+		refused(t, runner, key)
+	})
 	t.Run("a ref naming another key's manifest", func(t *testing.T) {
 		store, runner, key, _ := built(t)
 		other := keyOf("other")

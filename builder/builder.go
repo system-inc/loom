@@ -119,7 +119,11 @@ func (store Store) Manifest(key string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	content, err := store.blob(strings.TrimSpace(string(reference)))
+	target := strings.TrimSpace(string(reference))
+	if !productKeyPattern.MatchString(target) {
+		return Manifest{}, fmt.Errorf("refs/action/%s holds %q, not a manifest's sha256: the store is poisoned", key, target[:min(80, len(target))])
+	}
+	content, err := store.blob(target)
 	if err != nil {
 		return Manifest{}, err
 	}
