@@ -17,6 +17,7 @@ import (
 //	a Python test only docs name counted as gate logic: TestAPythonTestAScriptNamesIsGateLogicAndOneOnlyDocsNameIsNot
 //	a revert matched by anything but its exact inverse: TestARevertOfAMainCommitIsNamedAndAnythingElseIsNone
 //	main's head read from the local ref: TestMainsHeadIsOriginsOwnEvenWhenTheShasFetchFails
+//	main fetched without its refspec (a bare clone then has no origin/main): TestABareCloneOfThePublicRemoteReadsMain
 //	any failed fetch read as "origin lacks the sha": TestARemoteThatCantBeReadChecksNothingThisTick
 //	a git exit code left unchecked: TestGitsExitCodeIsCheckedEverywhere
 
@@ -147,6 +148,21 @@ func TestMainsHeadIsOriginsOwnEvenWhenTheShasFetchFails(t *testing.T) {
 	}
 	if facts["revertOf"] != nil || !reflect.DeepEqual(facts["diffPaths"], []string{}) || !reflect.DeepEqual(facts["gateNamed"], []map[string]any{}) {
 		t.Errorf("facts %v", facts)
+	}
+}
+
+// Workshop's clone is bare, of the public remote, whose fetch keeps no refspec: main still reaches origin/main.
+func TestABareCloneOfThePublicRemoteReadsMain(t *testing.T) {
+	made := newWorld(t)
+	bare := filepath.Join(made.root, "bridge.git")
+	gitIn(t, made.root, "clone", "-q", "--bare", made.origin, bare)
+	landed := made.pushFromAnotherTree(t)
+	facts, err := Clone{Repository: bare}.Facts(made.base, made.base)
+	if err != nil || facts["shaExists"] != true || facts["baseOnMain"] != true || facts["mainHead"] != landed {
+		t.Fatalf("facts %v, %v", facts, err)
+	}
+	if followed := gitIn(t, bare, "rev-parse", "refs/remotes/origin/main"); followed != landed {
+		t.Fatalf("origin/main is %s", followed)
 	}
 }
 

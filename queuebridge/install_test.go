@@ -21,7 +21,7 @@ import (
 func TestQueueBridgeConfReadsEachSettingOverWorkshopsDefaults(t *testing.T) {
 	home := "/home/ahra"
 	if config, err := ReadConfig("", home); err != nil || config != DefaultConfig(home) ||
-		config.Repository != "/home/ahra/loom-queue-bridge/adamic" || config.Secret != "/home/ahra/.loom/token-secret" {
+		config.Repository != "/home/ahra/loom-queue-bridge/adamic.git" || config.Secret != "/home/ahra/.loom/token-secret" {
 		t.Fatalf("an empty queue-bridge.conf read %+v, %v", config, err)
 	}
 	config, err := ReadConfig("# rehearsal\n  queue=http://127.0.0.1:8787  \nrepository = ~/adamic\nstate = /tmp/state\nsecret = ~/s\n", home)

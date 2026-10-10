@@ -25,8 +25,9 @@ func (err *GitError) Error() string {
 	return err.Text
 }
 
-// Clone is git's facts through this machine's clone of adamic, whose origin is GitHub. It must be a clone that keeps
-// refs/remotes/origin/* (git clone --no-checkout, not --bare), since main's ancestry is read from origin/main.
+// Clone is git's facts through this machine's clone of adamic, whose origin is the public
+// https://github.com/system-inc/adamic.git: the bridge is keyless (only the pusher holds a key). A bare clone does, since
+// main is fetched by an explicit refspec into refs/remotes/origin/main.
 type Clone struct {
 	Repository string
 }
@@ -227,8 +228,9 @@ func (clone Clone) Facts(sha, base string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// main on its own, checked, so origin/main is fresh for the ancestry below; then the sha, whose absence is an answer.
-	if _, err := clone.git([]string{"fetch", "-q", "--no-tags", "origin", "main"}); err != nil {
+	// main on its own, checked, so origin/main is fresh for the ancestry below (by an explicit refspec, which a bare
+	// clone's remote lacks); then the sha, whose absence is an answer.
+	if _, err := clone.git([]string{"fetch", "-q", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"}); err != nil {
 		return nil, err
 	}
 	fetched, err := clone.fetchSha(sha)
