@@ -125,6 +125,11 @@ func TraceAccesses(trace io.Reader, directory string) (TracedAccesses, error) {
 				// A write is never a read, and a failed one names nothing the run read either.
 			case (opened || call == "execve") && result >= 0 && !strings.Contains(arguments, "O_PATH"):
 				reads[path] = true
+				// The descriptor's decoded path is the file the kernel opened, every symlink resolved: that read is
+				// the run's too, wherever the name it opened by led.
+				if opened := openedPath.FindStringSubmatch(line); opened != nil {
+					reads[filepath.Clean(opened[1])] = true
+				}
 			default:
 				lookups[path] = true
 			}
@@ -144,6 +149,9 @@ func sortedKeys(set map[string]bool) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// openedPath is a successful open's decoded result, = 3</resolved/path>.
+var openedPath = regexp.MustCompile(`\)\s+=\s+\d+<(.+)>$`)
 
 // descriptor is a decoded directory argument: AT_FDCWD</dir> or 5</dir>.
 var descriptor = regexp.MustCompile(`^(?:AT_FDCWD|\d+)(?:<(.*?)>)?,\s*`)
@@ -284,7 +292,13 @@ func checkAccesses(tree, gateTools string, unit Unit, compilerPackages []string,
 			if !ok || declared[relative] {
 				continue
 			}
-			if index.inSubmodule(relative) {
+			// A path in a submodule, or one that resolves into one through a symlink (a superproject testdata link
+			// into cohere, say), is the read set's: its key follows the links to what they lead to.
+			resolved, err := index.resolve(relative)
+			if err != nil {
+				return nil, ReadSet{}, err
+			}
+			if resolved.touches {
 				if group.listing {
 					measured.Listings = append(measured.Listings, relative)
 				} else {

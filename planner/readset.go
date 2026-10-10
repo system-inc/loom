@@ -260,8 +260,9 @@ func readSetReads(tree string, files [][2]string, set ReadSet) (string, error) {
 	return pairsHash(pairs)
 }
 
-// A submoduleIndex is what the tree's submodules track, nested ones included, read from their own indexes: each
-// tracked path's mode and object, and each directory's tracked children (a directory's name ends in /).
+// A submoduleIndex is what the tree tracks, its submodules' files included (nested ones too, read from their own
+// indexes): each tracked path's mode and object, and each directory's tracked children (a directory's name ends in /).
+// Paths resolve through it as the kernel resolves them, through every tracked symlink on the way.
 type submoduleIndex struct {
 	tree     string
 	gitlinks map[string]string // the superproject's gitlinks, path to commit
@@ -269,8 +270,8 @@ type submoduleIndex struct {
 	children map[string]map[string]bool
 }
 
-// submoduleIndexes keeps the last index read for each tree, under the commits its gitlinks record: the planner keys
-// every unit of a tree against one listing of cohere's 72k files.
+// submoduleIndexes keeps the last index read for each tree, under its superproject index's listing (which holds the
+// gitlinks' commits): the planner keys every unit of a tree against one listing of cohere's 72k files.
 var submoduleIndexes = struct {
 	sync.Mutex
 	byTree map[string]submoduleIndexEntry
@@ -282,27 +283,31 @@ type submoduleIndexEntry struct {
 }
 
 func submoduleIndexOf(tree string) (*submoduleIndex, error) {
-	gitlinks, err := Gitlinks(tree)
+	superproject, err := lsFiles(tree)
 	if err != nil {
 		return nil, err
 	}
-	names := make([]string, 0, len(gitlinks))
-	for name := range gitlinks {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	signature := ""
-	for _, name := range names {
-		signature += name + " " + gitlinks[name] + "\n"
-	}
+	sum := sha256.Sum256(superproject)
+	signature := hex.EncodeToString(sum[:])
 	submoduleIndexes.Lock()
 	cached, found := submoduleIndexes.byTree[tree]
 	submoduleIndexes.Unlock()
 	if found && cached.signature == signature {
 		return cached.index, nil
 	}
-	index := &submoduleIndex{tree: tree, gitlinks: gitlinks, entries: map[string][2]string{}, children: map[string]map[string]bool{}}
+	index := &submoduleIndex{tree: tree, gitlinks: map[string]string{}, entries: map[string][2]string{}, children: map[string]map[string]bool{}}
+	names := []string{}
+	parseLsFiles(superproject, func(mode, object, name string) {
+		if mode == "160000" {
+			// A checked-out submodule's files come from its own index below; one that isn't stays a gitlink there.
+			index.gitlinks[name] = object
+			names = append(names, name)
+			return
+		}
+		index.add(mode, object, name)
+	})
 	if len(names) > 0 {
+		sort.Strings(names)
 		command := exec.Command("git", append([]string{"-C", tree, "ls-files", "-s", "-z", "--recurse-submodules", "--"}, names...)...)
 		var stderr bytes.Buffer
 		command.Stderr = &stderr
@@ -310,36 +315,55 @@ func submoduleIndexOf(tree string) (*submoduleIndex, error) {
 		if err != nil {
 			return nil, fmt.Errorf("git ls-files --recurse-submodules in %s: %w: %s", tree, err, strings.TrimSpace(stderr.String()))
 		}
-		for _, entry := range strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00") {
-			// <mode> <object> <stage>\t<path>
-			head, name, found := strings.Cut(entry, "\t")
-			fields := strings.Fields(head)
-			if !found || len(fields) != 3 {
-				continue
-			}
-			index.entries[name] = [2]string{fields[0], fields[1]}
-			for child := name; ; {
-				parent, base := path.Dir(child), path.Base(child)
-				if child != name {
-					base += "/"
-				}
-				if index.children[parent] == nil {
-					index.children[parent] = map[string]bool{}
-				}
-				known := index.children[parent][base]
-				index.children[parent][base] = true
-				// A directory already known has its ancestors already.
-				if known || parent == "." || parent == "/" {
-					break
-				}
-				child = parent
-			}
-		}
+		parseLsFiles(output, index.add)
 	}
 	submoduleIndexes.Lock()
 	submoduleIndexes.byTree[tree] = submoduleIndexEntry{signature: signature, index: index}
 	submoduleIndexes.Unlock()
 	return index, nil
+}
+
+func lsFiles(tree string) ([]byte, error) {
+	command := exec.Command("git", "-C", tree, "ls-files", "-s", "-z")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files -s in %s: %w: %s", tree, err, strings.TrimSpace(stderr.String()))
+	}
+	return output, nil
+}
+
+// parseLsFiles calls each with every entry of `git ls-files -s -z`'s output.
+func parseLsFiles(output []byte, each func(mode, object, name string)) {
+	for _, entry := range strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00") {
+		// <mode> <object> <stage>\t<path>
+		head, name, found := strings.Cut(entry, "\t")
+		fields := strings.Fields(head)
+		if found && len(fields) == 3 {
+			each(fields[0], fields[1], name)
+		}
+	}
+}
+
+func (index *submoduleIndex) add(mode, object, name string) {
+	index.entries[name] = [2]string{mode, object}
+	for child := name; ; {
+		parent, base := path.Dir(child), path.Base(child)
+		if child != name {
+			base += "/"
+		}
+		if index.children[parent] == nil {
+			index.children[parent] = map[string]bool{}
+		}
+		known := index.children[parent][base]
+		index.children[parent][base] = true
+		// A directory already known has its ancestors already.
+		if known || parent == "." || parent == "/" {
+			break
+		}
+		child = parent
+	}
 }
 
 // inSubmodule says whether a tree-relative path sits inside one of the tree's submodules.
@@ -352,44 +376,123 @@ func (index *submoduleIndex) inSubmodule(name string) bool {
 	return false
 }
 
-// checkedOut refuses a path under a submodule the tree hasn't checked out (ls-files lists it as a gitlink): its files
-// can't be keyed, and keying them absent would hide what the run read.
-func (index *submoduleIndex) checkedOut(name string) error {
-	for candidate := name; candidate != "." && candidate != "/"; candidate = path.Dir(candidate) {
-		if entry, found := index.entries[candidate]; found && entry[0] == "160000" && candidate != name {
-			return fmt.Errorf("%s is inside the submodule %s, which isn't checked out", name, candidate)
+// maxSymlinks is how many symlinks a resolution follows before it's refused, as the kernel's ELOOP.
+const maxSymlinks = 40
+
+// A resolution is where a tree-relative path leads on the tree: each tracked symlink it went through ("<link> ->
+// <target>"), the path it ends at (tree-relative, or absolute when a link left the tree), and whether any step was
+// inside a submodule.
+type resolution struct {
+	links    []string
+	resolved string
+	outside  bool
+	touches  bool
+}
+
+// resolve follows a path through the tree's tracked symlinks, every component and the last too, as open and stat
+// do: a symlinked directory or file keys its link and where it leads. A link's target is read from the checkout,
+// which the index's object for it names. A path under a submodule that isn't checked out is refused, since its files
+// can't be keyed.
+func (index *submoduleIndex) resolve(name string) (resolution, error) {
+	result := resolution{touches: index.inSubmodule(name)}
+	parts := strings.Split(name, "/")
+	resolved := ""
+	for followed := 0; len(parts) > 0; {
+		part := parts[0]
+		parts = parts[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if resolved == "" {
+				// Above the tree's root: the rest is outside it.
+				result.resolved, result.outside = path.Clean("/"+strings.Join(append([]string{index.tree, ".."}, parts...), "/")), true
+				return result, nil
+			}
+			resolved = path.Dir(resolved)
+			if resolved == "." {
+				resolved = ""
+			}
+			continue
 		}
+		candidate := path.Join(resolved, part)
+		if index.inSubmodule(candidate) {
+			result.touches = true
+		}
+		entry, tracked := index.entries[candidate]
+		if tracked && entry[0] == "160000" && len(parts) > 0 {
+			return resolution{}, fmt.Errorf("%s is inside the submodule %s, which isn't checked out", name, candidate)
+		}
+		if !tracked || entry[0] != "120000" {
+			resolved = candidate
+			continue
+		}
+		followed++
+		if followed > maxSymlinks {
+			return resolution{}, fmt.Errorf("%s: more than %d symlinks", name, maxSymlinks)
+		}
+		target, err := os.Readlink(filepath.Join(index.tree, filepath.FromSlash(candidate)))
+		if err != nil {
+			return resolution{}, fmt.Errorf("symlink %s: %w", candidate, err)
+		}
+		result.links = append(result.links, candidate+" -> "+target)
+		if filepath.IsAbs(target) {
+			relative, inside := inTree(index.tree, index.tree, target)
+			if !inside {
+				result.resolved, result.outside = path.Join(append([]string{target}, parts...)...), true
+				return result, nil
+			}
+			resolved, target = "", relative
+		}
+		parts = append(strings.Split(filepath.ToSlash(target), "/"), parts...)
 	}
-	return nil
+	result.resolved = resolved
+	if index.inSubmodule(resolved) {
+		result.touches = true
+	}
+	return result, nil
 }
 
-// pathState is a path's state on the tree: when a submodule tracks it, its mode and the object its index records (a
-// file's content, a symlink's target, a nested gitlink's commit), so keying a 66k-file set reads no file; "directory"
-// when a tracked file sits under it; else "absent". The planner's checkouts are clean, so the index is the checkout.
+// pathState is a path's state on the tree: the symlinks it resolves through, then where it ends: when the tree tracks
+// it, its mode and the object its index records (a file's content, a symlink's target, a nested gitlink's commit), so
+// keying a 66k-file set reads no file; "directory" when a tracked file sits under it; "outside" and the path when a
+// link left the tree; else "absent". The planner's checkouts are clean, so the index is the checkout.
 func (index *submoduleIndex) pathState(name string) (string, error) {
-	if err := index.checkedOut(name); err != nil {
+	result, err := index.resolve(name)
+	if err != nil {
 		return "", err
 	}
-	if entry, tracked := index.entries[name]; tracked {
-		return entry[0] + " " + entry[1], nil
+	state := ""
+	switch entry, tracked := index.entries[result.resolved]; {
+	case result.outside:
+		state = "outside " + result.resolved
+	case tracked:
+		state = entry[0] + " " + entry[1]
+	case index.children[result.resolved] != nil:
+		state = "directory"
+	default:
+		state = "absent"
 	}
-	if index.children[name] != nil {
-		return "directory", nil
-	}
-	return "absent", nil
+	return strings.Join(append(result.links, state), "\n"), nil
 }
 
-// listingState is a listed directory's state: the sha256 of its tracked children's sorted names, a directory's
-// ending in /.
+// listingState is a listed directory's state: the symlinks it resolves through, then the sha256 of the tracked
+// children's sorted names where it ends, a directory's ending in /.
 func (index *submoduleIndex) listingState(name string) (string, error) {
-	if err := index.checkedOut(name + "/."); err != nil {
+	result, err := index.resolve(name)
+	if err != nil {
 		return "", err
 	}
-	children := make([]string, 0, len(index.children[name]))
-	for child := range index.children[name] {
-		children = append(children, child)
+	if entry, tracked := index.entries[result.resolved]; tracked && entry[0] == "160000" {
+		return "", fmt.Errorf("%s lists the submodule %s, which isn't checked out", name, result.resolved)
+	}
+	children := []string{}
+	if !result.outside {
+		for child := range index.children[result.resolved] {
+			children = append(children, child)
+		}
 	}
 	sort.Strings(children)
 	sum := sha256.Sum256([]byte(strings.Join(children, "\n")))
-	return "listing " + hex.EncodeToString(sum[:]), nil
+	return strings.Join(append(result.links, "listing "+hex.EncodeToString(sum[:])), "\n"), nil
 }

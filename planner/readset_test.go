@@ -275,3 +275,67 @@ func TestRecordReadSetGrowsTheSetAndChecksItsName(t *testing.T) {
 		t.Fatal("a set file whose content isn't its name was read")
 	}
 }
+
+// symlink commits a symlink at name (tree-relative) to target, in the submodule or in the superproject.
+func (fixture readSetFixture) symlink(t *testing.T, name, target string) {
+	t.Helper()
+	if err := os.Symlink(target, filepath.Join(fixture.tree, filepath.FromSlash(name))); err != nil {
+		t.Fatal(err)
+	}
+	if inSub, found := strings.CutPrefix(name, "sub/"); found {
+		checkout := filepath.Join(fixture.tree, "sub")
+		gitIn(t, checkout, "add", inSub)
+		gitIn(t, checkout, "commit", "-q", "-m", "link")
+		gitIn(t, fixture.tree, "add", "sub")
+		return
+	}
+	gitIn(t, fixture.tree, "add", name)
+}
+
+// The review's proofs (unit-reads review, finding 1): a read through a symlink keys where the link leads. A file
+// opened or stat'ed through a submodule symlink, through a symlinked directory, through a superproject symlink into the
+// submodule, or past a symlink by .. (which the kernel resolves from where the link leads, not from its name): each is
+// measured by the name the run used, resolved through the tree's links, and an open by the file the kernel opened too
+// (the descriptor's decoded path), so a change to the file it reached moves the key. Mutants that each fail it: a set
+// path keyed by its name without following its links; the opened descriptor's path not recorded; a superproject path
+// that resolves into a submodule left out of the set.
+func TestAReadThroughASymlinkKeysWhereItLeads(t *testing.T) {
+	for _, check := range []struct {
+		name, link, target, call, opened, read, changed string
+	}{
+		{"an open through a submodule symlink to a file", "sub/link", "data.txt", "open", "../sub/link", "sub/data.txt", "data.txt"},
+		{"a stat through a submodule symlink to a file", "sub/link", "data.txt", "stat", "../sub/link", "", "data.txt"},
+		{"a stat through a symlinked directory", "sub/dl", "dir", "stat", "../sub/dl/a.txt", "", "dir/a.txt"},
+		{"an open through a superproject symlink into the submodule", "p/testdata", "../sub/dir", "open", "testdata/a.txt", "sub/dir/a.txt", "dir/a.txt"},
+		{"a stat through a superproject symlink into the submodule", "p/testdata", "../sub/dir", "stat", "testdata/a.txt", "", "dir/a.txt"},
+		{"an open by .. past a symlink", "sub/dl", "dir/inner", "open", "../sub/dl/../a.txt", "sub/dir/a.txt", "dir/a.txt"},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			useReadSets(t)
+			fixture := newReadSetFixture(t)
+			fixture.bump(t, map[string]string{"dir/inner/x.txt": "x\n"})
+			fixture.symlink(t, check.link, check.target)
+			coarse, _ := fixture.key(t)
+			trace := `9 newfstatat(AT_FDCWD<` + filepath.Join(fixture.tree, "p") + `>, "` + check.opened + `", {st_mode=S_IFREG|0644, ...}, 0) = 0` + "\n"
+			if check.call == "open" {
+				trace = `9 openat(AT_FDCWD<` + filepath.Join(fixture.tree, "p") + `>, "` + check.opened + `", O_RDONLY|O_CLOEXEC) = 3<` +
+					filepath.Join(fixture.tree, check.read) + ">\n"
+			}
+			first, err := CheckTrace(fixture.tree, fixture.gateTools, coarse, strings.NewReader(trace))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := RecordReadSet(ReadSetsDirectory, first.CodeKey, coarse, first.Measured); err != nil {
+				t.Fatal(err)
+			}
+			keyed, before := fixture.key(t)
+			if keyed.ReadSet == "" {
+				t.Fatalf("no read set keyed the unit; measured %+v", first.Measured)
+			}
+			fixture.bump(t, map[string]string{check.changed: "changed\n"})
+			if _, after := fixture.key(t); after == before {
+				t.Fatalf("sub/%s, read through %s, changed and the key stayed (measured %+v)", check.changed, check.link, first.Measured)
+			}
+		})
+	}
+}
