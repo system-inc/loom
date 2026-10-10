@@ -133,8 +133,10 @@ func (report WitnessReport) Lines() []string {
 	switch {
 	case len(report.KeyFaults) > 0:
 		verdict = "keyFault: a reused key reds uncached, a P0 against the keys"
+	case len(report.Unwitnessed) > 0:
+		verdict = "unwitnessed: a reused unit the witness never ran fails the proof, as a fault does"
 	case !report.Clean():
-		verdict = "incomplete: rerun the voids or witness every reused unit before it counts"
+		verdict = "incomplete: rerun the voids before it counts"
 	}
 	return append(lines, fmt.Sprintf("witness %s (key faults %d, unwitnessed %d, voids %d, ordinary reds %d)", verdict, len(report.KeyFaults), len(report.Unwitnessed), len(report.Voids), len(report.Reds)))
 }

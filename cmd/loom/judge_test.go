@@ -101,7 +101,8 @@ func TestJudgeWitnessExitsOneOnAKeyFaultAndThreeWhenIncomplete(t *testing.T) {
 	}{
 		{"clean", record("a", "passed") + "\n" + record("b", "failed") + "\n", 0, "witness clean"},
 		{"a reused key red", record("a", "failed") + "\n" + record("b", "passed") + "\n", 1, "keyFault a"},
-		{"unwitnessed", record("b", "passed") + "\n", 3, "unwitnessed a"},
+		{"unwitnessed", record("b", "passed") + "\n", 1, "unwitnessed a"},
+		{"a void to rerun", record("a", "void") + "\n" + record("b", "passed") + "\n", 3, "void a"},
 		{"from the log", `{"seq":4,"type":"verdict.decided","data":{"decision":{}}}` + "\n" + `{"seq":5,"type":"verdict.decided","data":{"verdict":` + record("a", "failed") + `}}` + "\n", 1, "keyFault a"},
 		{"two trees", record("a", "passed") + "\n" + strings.Replace(record("b", "passed"), `"t"`, `"u"`, 1) + "\n", 2, ""},
 	}

@@ -340,8 +340,9 @@ func judgeCarried(arguments []string, stdout io.Writer, stderr io.Writer) int {
 }
 
 // judgeWitness compares an uncached witness run's verdicts with the planner's plan at the same tree (#82d430f, proof 3,
-// Loom Oct 10 01:29Z), prints the report, and exits 1 on any key fault (a reused key red uncached), 3 when the witness
-// is incomplete (a reused unit unwitnessed, or a void), and 0 only when it's clean.
+// Loom Oct 10 01:29Z), prints the report, and exits 1 on any key fault (a reused key red uncached) or unwitnessed reuse
+// (Loom 01:30Z: a reused unit the witness never ran would pass the proof vacuously, so it fails it like a fault), 3
+// when the witness has a void to rerun, and 0 only when it's clean.
 func judgeWitness(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags := flag.NewFlagSet("judge witness", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -380,7 +381,7 @@ func judgeWitness(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stdout, line)
 	}
 	switch {
-	case len(report.KeyFaults) > 0:
+	case len(report.KeyFaults) > 0, len(report.Unwitnessed) > 0:
 		return 1
 	case !report.Clean():
 		return 3
