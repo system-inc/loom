@@ -3,7 +3,7 @@
 
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { QueueName } from '../../source/Changes';
 import { headlineFact, type HeadlineReading } from '../../source/Headline';
 import type { QueueEvent } from '../../source/Queue';
@@ -13,22 +13,36 @@ import { oldQueueLog } from './OldQueueLog';
 const queues = (env as unknown as { Queue: DurableObjectNamespace }).Queue;
 const headlines = (env as unknown as { Headline: DurableObjectNamespace }).Headline;
 
-// Writes events straight into the Queue object's log, as its own appends would have, so /log serves them.
-async function seed(events: QueueEvent[]): Promise<void> {
+// Writes events straight into the Queue object's log, as its own appends would have, so /log serves them. A row given
+// as [seq, text] is stored as that text, whatever it is. Storage is shared between tests here, so each test's rows are
+// taken out again after it, and the headline forgets what it read.
+const seeded: number[] = [];
+
+async function seed(events: (QueueEvent | [number, string])[]): Promise<void> {
     const queue = queues.get(queues.idFromName(QueueName));
     await runInDurableObject(queue, function (_instance: unknown, state: DurableObjectState) {
         for (const event of events) {
-            state.storage.sql.exec(
-                'INSERT INTO events (seq, json, hash, type, change) VALUES (?, ?, ?, ?, ?)',
-                event.seq,
-                JSON.stringify(event),
-                'h'.repeat(64),
-                event.type,
-                event.subject.change ?? null,
-            );
+            const row = Array.isArray(event)
+                ? { seq: event[0], json: event[1], type: 'change.submitted', change: null }
+                : { seq: event.seq, json: JSON.stringify(event), type: event.type, change: event.subject.change ?? null };
+            state.storage.sql.exec('INSERT INTO events (seq, json, hash, type, change) VALUES (?, ?, ?, ?, ?)', row.seq, row.json, 'h'.repeat(64), row.type, row.change);
+            seeded.push(row.seq);
         }
     });
 }
+
+afterEach(async function () {
+    const rows = seeded.splice(0);
+    await runInDurableObject(queues.get(queues.idFromName(QueueName)), function (_instance: unknown, state: DurableObjectState) {
+        for (const seq of rows) {
+            state.storage.sql.exec('DELETE FROM events WHERE seq = ?', seq);
+        }
+    });
+    await runInDurableObject(headlines.get(headlines.idFromName('headline')), function (instance: unknown, state: DurableObjectState) {
+        state.storage.sql.exec('DELETE FROM cursor; DELETE FROM decisions; DELETE FROM mains;');
+        (instance as { lastReadAt: number }).lastReadAt = 0;
+    });
+});
 
 // The log, its times moved so its last event is a minute ago, a second apart.
 function recentLog(): QueueEvent[] {
@@ -63,6 +77,9 @@ describe('the headline', function () {
         expect((await readHeadline()).status).toBe(401);
         expect((await readHeadline(await token('board', 'submit'))).status).toBe(403);
         const board = await token('board', 'board');
+        // A board token goes in the Authorization header, never the address, where a server would log it.
+        const inQuery = await call(`/ui/headline?token=${board}`);
+        expect(inQuery.status).toBe(401);
         const response = await readHeadline(board);
         expect(response.status).toBe(200);
         const reading = (await response.json()) as HeadlineReading;
@@ -72,6 +89,7 @@ describe('the headline', function () {
         expect(reading.buckets).toHaveLength(12);
         expect(reading.buckets[11]).toBe(3);
         expect(reading.mainRed?.red).toBe(0);
+        expect(reading.unreadable).toBeNull();
         expect(
             reading.mainTrend.map(function (point) {
                 return point.red;
@@ -90,5 +108,22 @@ describe('the headline', function () {
         expect(later.seq).toBe(22);
         expect(later.mainRed).toEqual({ at: at, red: 2, main: 'b'.repeat(40) });
         expect(later.testedLastHour).toBe(3);
+    });
+
+    it('skips a log line it can\'t read, names it, and reads on past it', async function () {
+        const at = new Date().toISOString();
+        await seed([
+            ...recentLog(),
+            [22, 'not a json line {'],
+            [23, JSON.stringify({ seq: 'twenty-three', at: at })],
+            { seq: 24, at: at, prev: '', type: 'main.red', subject: { change: 'chg_x' }, data: { main: 'c'.repeat(40), units: ['a', 'b'], witness: 'chg_x' } },
+        ]);
+        const response = await readHeadline(await token('board', 'board'));
+        expect(response.status).toBe(200);
+        const reading = (await response.json()) as HeadlineReading;
+        expect(reading.seq).toBe(24);
+        expect(reading.unreadable).toEqual({ lines: 2, afterSeq: 21 });
+        expect(reading.testedLastHour).toBe(3);
+        expect(reading.mainRed?.red).toBe(2);
     });
 });
