@@ -220,8 +220,30 @@ func TestABranchNamedForARefusalStillParksWhenItMoved(t *testing.T) {
 	}
 }
 
-// A tip the lander's clone never saw (main moved by someone else), or a sha already under main's tip: the change parks,
-// and main keeps its tip.
+// A tip the lander's clone never saw, main moved by someone else past the sha's base: the change parks, and main keeps
+// its tip.
+// A landing whose report was lost, and another landing on top of it since: the branch holds the sha, so the next pass
+// reports it landed (main and from the sha, as Queue takes a landing reported again), pushes nothing, and never parks.
+func TestALostReportUnderAnotherLandingIsReportedLanded(t *testing.T) {
+	made := newWorld(t)
+	tested := made.commit(t, "tested", made.main)
+	made.publish(t, tested, "a")
+	queue := &fakeQueue{landings: []Order{orderOf(change, tested, made.main)}, postStatus: 503}
+	if pass := Land(queue, made.hands("main"), made.log); pass != (Pass{Held: 1}) || made.tip(t, "main") != tested {
+		t.Fatalf("a refused report: pass %+v, main %s", pass, made.tip(t, "main"))
+	}
+	next := made.commit(t, "next", tested)
+	made.publish(t, next, "main")
+	queue.posts, queue.postStatus = nil, 0
+	if pass := Land(queue, made.hands("main"), made.log); pass != (Pass{Landed: 1}) || made.tip(t, "main") != next {
+		t.Fatalf("again: pass %+v, main %s, %q", pass, made.tip(t, "main"), made.logged)
+	}
+	if want := []post{{"/landings/" + change, map[string]any{"main": tested, "from": tested, "landed": tested}}}; !reflect.DeepEqual(queue.posts, want) ||
+		!strings.Contains(made.logged[len(made.logged)-1], "a landing whose report was lost") {
+		t.Fatalf("posted %+v, %q", queue.posts, made.logged)
+	}
+}
+
 func TestMainMovedPastTheShaParks(t *testing.T) {
 	for name, setup := range map[string]func(made *world) string{
 		"main moved, unseen": func(made *world) string {
@@ -230,12 +252,6 @@ func TestMainMovedPastTheShaParks(t *testing.T) {
 			sibling := made.commit(t, "sib", made.main)
 			made.publish(t, sibling, "s")
 			return sibling
-		},
-		"the sha under main": func(made *world) string {
-			a := made.commit(t, "a", made.main)
-			b := made.commit(t, "b", a)
-			made.publish(t, b, "main")
-			return a
 		},
 	} {
 		made := newWorld(t)

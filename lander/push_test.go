@@ -25,6 +25,7 @@ import (
 //	"stale info" not read as the branch moving: TestABranchMovedMidPassParksAndKeepsItsTip, TestRefusalsAreReadByWhatGitAndGitHubSaid
 //	the branch not read back after the push, or any read-back counted landed: TestAPushThatDidntStickIsHeld
 //	a read-back with another commit on top of the sha held: TestAPushWithACommitOnTopByTheReadBackLanded
+//	a branch already holding the sha under another landing parked, not reported: TestALostReportUnderAnotherLandingIsReportedLanded
 //	no sweep of the landing refs a killed pass left, or one that deletes nothing: TestAPassSweepsTheLandingRefsAKilledPassLeft
 //	the future not checked to be a commit: TestATagObjectAsTheFutureIsHeld
 //	a report the queue refused counted landed: TestALandingWhoseReportWasLostIsReportedAgain

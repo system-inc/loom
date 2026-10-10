@@ -229,9 +229,10 @@ type Pass struct {
 
 // Land is one pass over the landing orders, after sweeping the landing refs a killed pass left. Each is checked to be a change and a sha before git sees it, so an order
 // can never name a ref, an option or a forced refspec; the branch's tip is read before each push and reported as the
-// main it moved from, or the main a refusal found. A branch already at the order's sha is a landing whose report was
-// lost: it is reported again, from that sha, which Queue takes as the same landing. A report the queue doesn't take
-// holds the order, so the pass says so.
+// main it moved from, or the main a refusal found. A branch that already holds the order's sha (at it, or with other
+// landings on top) is a landing whose report was lost: before any push, it is reported again as main and from both the
+// sha, which Queue takes as the same landing, so it never parks. A report the queue doesn't take holds the order, so
+// the pass says so.
 func Land(queue Queue, hands Hands, log func(string)) Pass {
 	pass := Pass{}
 	if swept, err := hands.Sweep(); err != nil {
@@ -270,9 +271,9 @@ func Land(queue Queue, hands Hands, log func(string)) Pass {
 			pass.Held++
 			return pass
 		}
-		if from == order.Future {
-			if report(order, map[string]string{"main": order.Future, "from": from, "landed": order.Future},
-				fmt.Sprintf("landed %s: %s is already at %.12s, a landing whose report was lost", order.Change, hands.Branch, from)) {
+		if from == order.Future || hands.contains(from, order.Future) {
+			if report(order, map[string]string{"main": order.Future, "from": order.Future, "landed": order.Future},
+				fmt.Sprintf("landed %s: %s at %.12s already holds %.12s, a landing whose report was lost", order.Change, hands.Branch, from, order.Future)) {
 				pass.Landed++
 			}
 			continue
