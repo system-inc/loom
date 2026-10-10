@@ -2,6 +2,7 @@ package builder
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -30,9 +31,11 @@ import (
 //
 // The bucket's lifecycle deletes every blob, ref and tree index 7 days after its upload (trees/ by Loom's own rule,
 // Oct 10, so old indexes naming expired blobs don't pile up). So a blob or ref the store holds is relied on as it is
-// only while it was uploaded within FreshFor; an older one a build relies on is written again, the same bytes, which
-// starts its 7 days over (a held product is refreshed, never rebuilt), and a ref is only ever written after its blob
-// is fresh, so no ref written today names a blob that vanishes tomorrow.
+// only while it was uploaded within FreshFor; an older one a build relies on is copied onto itself in the bucket
+// (r2.Bucket.Refresh), the same bytes and no byte sent, which starts its 7 days over (a held product is refreshed, never
+// rebuilt), and a ref is only ever written after its blob is fresh, so no ref written today names a blob that vanishes
+// tomorrow. A refresh lands only over the object whose bytes were checked: its ETag, read with the bytes or matched to
+// this build's own.
 
 // FreshFor is how recently a blob or ref must have been uploaded for a builder to rely on it without writing it
 // again, leaving two of the lifecycle's 7 days for the runners that read it.
@@ -213,15 +216,15 @@ func (store Store) heldRef(key string) (heldRef, error) {
 	return heldRef{Sum: target, Object: object}, nil
 }
 
-// refreshRef keeps a held ref fresh: one written more than FreshFor ago is written again, the same bytes, only over
-// the very object read (If-Match on its ETag), so a runner that reads it has two days, as a blob's reader does. A ref
-// another builder rewrote first is read again and must still name sum.
+// refreshRef keeps a held ref fresh: one written more than FreshFor ago is copied onto itself, only over the very
+// object read (its ETag), so a runner that reads it has two days, as a blob's reader does. A ref another builder
+// rewrote first is read again and must still name sum.
 func (store Store) refreshRef(key string, held heldRef) error {
 	if store.now().Sub(held.Object.Modified) < FreshFor {
 		return nil
 	}
 	store.wrote()
-	err := store.Bucket.Put("refs/action/"+key, []byte(held.Sum), r2.PutOptions{ContentType: "text/plain", CacheControl: "no-cache", IfMatch: held.Object.ETag})
+	err := store.Bucket.Refresh("refs/action/"+key, held.Object.ETag)
 	if !errors.Is(err, r2.ErrChanged) {
 		return err
 	}
@@ -247,7 +250,8 @@ func (store Store) putBlob(sum string, content []byte) error {
 }
 
 // PutBlob makes the bucket hold content, fresh, at blobs/<its sha256>, and returns that sha256. A blob the bucket
-// holds from within FreshFor isn't sent again; one older, or missing, goes up, which starts its 7 days over.
+// holds from within FreshFor isn't sent again; one older is refreshed in the bucket when its ETag is content's MD5 (R2's
+// ETag for a single put), so the bytes held are these, and goes up otherwise, as a missing one does.
 func (store Store) PutBlob(content []byte) (string, error) {
 	_, err := store.sendBlob(content)
 	return digest(content), err
@@ -261,13 +265,33 @@ func (store Store) sendBlob(content []byte) (bool, error) {
 	switch {
 	case err == nil && !store.stale(object.Modified):
 		return false, nil
+	case err == nil && object.ETag == etag(content):
+		return store.refreshBlob(sum, content, object)
 	case err != nil && !errors.Is(err, r2.ErrNotFound):
 		return false, err
 	}
 	return true, store.putBlob(sum, content)
 }
 
-// heldBlob reads blob sum from the bucket, checked against its hash, and sends it again, the same bytes, when it was
+// etag is R2's ETag for content written in a single put: its MD5, quoted.
+func etag(content []byte) string {
+	sum := md5.Sum(content)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+// refreshBlob copies blob sum onto itself in the bucket, over the object held, whose bytes the caller checked are
+// content; a blob changed or gone meanwhile is sent again, content being what its name says. It reports whether
+// content went up.
+func (store Store) refreshBlob(sum string, content []byte, object r2.Object) (bool, error) {
+	store.wrote()
+	err := store.Bucket.Refresh("blobs/"+sum, object.ETag)
+	if !errors.Is(err, r2.ErrChanged) {
+		return false, err
+	}
+	return true, store.putBlob(sum, content)
+}
+
+// heldBlob reads blob sum from the bucket, checked against its hash, and refreshes it in the bucket when it was
 // uploaded more than FreshFor ago: a blob the store holds is refreshed, never rebuilt. A blob the bucket lacks is
 // ErrNotStored.
 func (store Store) heldBlob(sum string) ([]byte, error) {
@@ -283,7 +307,7 @@ func (store Store) heldBlob(sum string) ([]byte, error) {
 		return nil, fmt.Errorf("blob %s hashes to %s: the store is poisoned", sum, actual)
 	}
 	if store.stale(object.Modified) {
-		if err = store.putBlob(sum, content); err != nil {
+		if _, err = store.refreshBlob(sum, content, object); err != nil {
 			return nil, err
 		}
 	}
@@ -384,8 +408,8 @@ func (store Store) replaceGone(key string, held heldRef, archive []byte) (string
 }
 
 // Stored reports whether the bucket holds key's product, the sha256 of the archive its ref names, and whether that
-// archive is there. A held product is kept fresh, never rebuilt: its blob, uploaded more than FreshFor ago, is read
-// and sent again, the same bytes, and so is its ref. Only a ref whose blob the store no longer holds isn't stored, and
+// archive is there. A held product is kept fresh, never rebuilt: its blob, uploaded more than FreshFor ago, is read,
+// checked and refreshed in the bucket, and so is its ref. Only a ref whose blob the store no longer holds isn't stored, and
 // the caller says so when it builds again.
 func (store Store) Stored(key string) (string, bool, error) {
 	held, err := store.heldRef(key)

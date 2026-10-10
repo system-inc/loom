@@ -74,6 +74,43 @@ func TestABucketWritesReadsAndListsThroughTheS3Interface(t *testing.T) {
 	}
 }
 
+// A refresh copies a key onto itself in the bucket: its Last-Modified moves to now, its bytes, ETag and Cache-Control
+// stay, nothing is sent, and it lands only over the ETag read, like a put with If-Match.
+func TestARefreshRedatesAKeyWithoutSendingItsBytes(t *testing.T) {
+	fake := New(t)
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	fake.Now = func() time.Time { return now }
+	bucket := fake.Bucket()
+	if err := bucket.Put("blobs/a", []byte("held"), r2.PutOptions{CacheControl: "public, max-age=31536000, immutable"}); err != nil {
+		t.Fatal(err)
+	}
+	held, err := bucket.Head("blobs/a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(6 * 24 * time.Hour)
+	if err = bucket.Refresh("blobs/a", held.ETag); err != nil {
+		t.Fatal(err)
+	}
+	after, err := bucket.Head("blobs/a")
+	if err != nil || !after.Modified.Equal(now) || after.ETag != held.ETag || fake.CacheControl("blobs/a") != "public, max-age=31536000, immutable" {
+		t.Fatalf("%+v %v %q", after, err, fake.CacheControl("blobs/a"))
+	}
+	if content, _ := fake.Object("blobs/a"); string(content) != "held" || fake.Count("COPY", "blobs/a") != 1 || fake.Count("PUT", "blobs/a") != 1 {
+		t.Fatalf("%q %v", content, fake.Requests())
+	}
+	fake.Set("blobs/a", []byte("someone else's"), now)
+	if err = bucket.Refresh("blobs/a", held.ETag); !errors.Is(err, r2.ErrChanged) {
+		t.Fatalf("a refresh over another ETag: %v", err)
+	}
+	if err = bucket.Refresh("blobs/gone", held.ETag); !errors.Is(err, r2.ErrChanged) {
+		t.Fatalf("a refresh of nothing: %v", err)
+	}
+	if err = bucket.Refresh("releases/current.txt", held.ETag); err == nil || fake.Count("COPY", "releases/") != 0 {
+		t.Fatalf("a refresh outside Writable: %v", err)
+	}
+}
+
 // The fake refuses a request signed by another key, with another secret, or over other bytes than it carries.
 func TestTheFakeRefusesWhatIsntSignedForItsKey(t *testing.T) {
 	fake := New(t)

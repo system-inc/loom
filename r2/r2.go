@@ -273,15 +273,21 @@ func (bucket Bucket) GetObject(key string) ([]byte, Object, error) {
 	return nil, Object{}, fmt.Errorf("GET %s: %s: %s", key, response.Status, snippet(answer))
 }
 
+// writable refuses a key outside Writable.
+func writable(key string) error {
+	for _, prefix := range Writable {
+		if strings.HasPrefix(key, prefix) && len(key) > len(prefix) && !strings.Contains(key, "..") {
+			return nil
+		}
+	}
+	return fmt.Errorf("PUT %s: the action store writes only under %s", key, strings.Join(Writable, ", "))
+}
+
 // Put writes body at key, which must be under one of Writable. With IfNoneMatch, a key that already holds anything
 // is ErrExists; with IfMatch, a key that no longer holds that ETag is ErrChanged; either way it is left as it is.
 func (bucket Bucket) Put(key string, body []byte, options PutOptions) error {
-	writable := false
-	for _, prefix := range Writable {
-		writable = writable || (strings.HasPrefix(key, prefix) && len(key) > len(prefix))
-	}
-	if !writable || strings.Contains(key, "..") {
-		return fmt.Errorf("PUT %s: the action store writes only under %s", key, strings.Join(Writable, ", "))
+	if err := writable(key); err != nil {
+		return err
 	}
 	headers := map[string]string{}
 	if options.ContentType != "" {
@@ -312,6 +318,31 @@ func (bucket Bucket) Put(key string, body []byte, options PutOptions) error {
 		return ErrChanged
 	}
 	return fmt.Errorf("PUT %s: %s: %s", key, response.Status, snippet(answer))
+}
+
+// Refresh writes key onto itself inside the bucket (CopyObject from its own key), only while it still holds etag
+// (x-amz-copy-source-if-match): R2 dates the copy now, which starts the lifecycle's days over, and keeps its bytes,
+// ETag, Content-Type and Cache-Control, so a refresh sends no byte and changes none. ErrChanged when the key holds
+// another ETag or nothing at all, as a Put with IfMatch. Like Put, it reaches only Writable.
+func (bucket Bucket) Refresh(key, etag string) error {
+	if err := writable(key); err != nil {
+		return err
+	}
+	if etag == "" {
+		return fmt.Errorf("refreshing %s: no ETag to hold it to", key)
+	}
+	headers := map[string]string{"X-Amz-Copy-Source": "/" + bucket.Name + "/" + escape(key, false), "X-Amz-Copy-Source-If-Match": etag}
+	response, answer, err := bucket.do(http.MethodPut, key, nil, nil, headers)
+	if err != nil {
+		return err
+	}
+	switch response.StatusCode {
+	case http.StatusOK:
+		return nil
+	case http.StatusPreconditionFailed, http.StatusNotFound:
+		return ErrChanged
+	}
+	return fmt.Errorf("refreshing %s: %s: %s", key, response.Status, snippet(answer))
 }
 
 // listPage is one ListObjectsV2 answer.

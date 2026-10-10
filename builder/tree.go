@@ -760,7 +760,7 @@ func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error
 		default:
 			// Only an index this release reads is kept over this one: one in another format, or unreadable, is replaced.
 			if held, err := ParseTree(treeKey, content); err == nil && treeIndex.failures() > held.failures() {
-				kept, err := store.keep(key, held, content, object)
+				kept, err := store.keep(key, held, object)
 				if errors.Is(err, r2.ErrChanged) {
 					continue
 				}
@@ -804,12 +804,12 @@ func (index TreeIndex) blobs() []string {
 }
 
 // keep keeps a held index runnable when a worse build declines to replace it, rather than letting what it names
-// expire under its runners near day 7: every blob it names that was uploaded more than FreshFor ago is read and put
-// again, its own bytes, and so is the index itself, over the ETag read (r2.ErrChanged when another build wrote it
+// expire under its runners near day 7: every blob it names that was uploaded more than FreshFor ago is read, checked
+// and refreshed in the bucket, and so is the index itself, over the ETag read (r2.ErrChanged when another build wrote it
 // meanwhile, for the caller to read it again). Refreshing beats calling an old index replaceable: that would hand
 // runners the worse build, failed packages and all, when the better one only needed its blobs kept. An index naming a
 // blob the store no longer holds can't be kept, and keep reports false, so the worse but whole index takes its place.
-func (store Store) keep(key string, held TreeIndex, content []byte, object r2.Object) (bool, error) {
+func (store Store) keep(key string, held TreeIndex, object r2.Object) (bool, error) {
 	for _, sum := range held.blobs() {
 		store.read()
 		blob, err := store.Bucket.Head("blobs/" + sum)
@@ -829,7 +829,7 @@ func (store Store) keep(key string, held TreeIndex, content []byte, object r2.Ob
 	}
 	if store.stale(object.Modified) {
 		store.wrote()
-		if err := store.Bucket.Put(key, content, r2.PutOptions{ContentType: "application/json", CacheControl: "no-cache", IfMatch: object.ETag}); err != nil {
+		if err := store.Bucket.Refresh(key, object.ETag); err != nil {
 			return false, err
 		}
 	}
