@@ -197,6 +197,9 @@ func (bucket Bucket) do(method, key string, query url.Values, body []byte, heade
 		if body == nil {
 			request.Body, request.ContentLength = nil, 0
 		}
+		// The stored bytes, never a compressed copy: Go's client asks for gzip unless told otherwise, and R2 then
+		// answers a large object with a weak ETag (W/"..."), which no If-Match ever matches.
+		request.Header.Set("Accept-Encoding", "identity")
 		for name, value := range headers {
 			request.Header.Set(name, value)
 		}

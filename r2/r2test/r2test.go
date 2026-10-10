@@ -6,6 +6,7 @@
 package r2test
 
 import (
+	"compress/gzip"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
@@ -280,6 +281,15 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 			return
 		}
 		writer.Header().Set("Last-Modified", held.modified.UTC().Format(http.TimeFormat))
+		// As R2 does, a GET that takes gzip gets a large object compressed, under a weak ETag.
+		if request.Method == http.MethodGet && len(held.body) >= CompressedFrom && strings.Contains(request.Header.Get("Accept-Encoding"), "gzip") {
+			writer.Header().Set("Content-Encoding", "gzip")
+			writer.Header().Set("ETag", "W/"+etag(held.body))
+			compressor := gzip.NewWriter(writer)
+			compressor.Write(held.body)
+			compressor.Close()
+			return
+		}
 		writer.Header().Set("Content-Length", strconv.Itoa(len(held.body)))
 		writer.Header().Set("ETag", etag(held.body))
 		if request.Method == http.MethodGet {
@@ -304,6 +314,10 @@ func (fake *Fake) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		fail(writer, http.StatusMethodNotAllowed, "MethodNotAllowed", request.Method)
 	}
 }
+
+// CompressedFrom is the size from which a GET that takes gzip is answered compressed, as R2 answered a 148 KB tree
+// index on Oct 10 (a 3-byte object came back whole).
+const CompressedFrom = 1024
 
 // etag is an object's ETag as R2 gives one for a single put: its MD5, quoted.
 func etag(body []byte) string {

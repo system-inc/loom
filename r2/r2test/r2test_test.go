@@ -1,6 +1,7 @@
 package r2test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -61,6 +62,17 @@ func TestABucketWritesReadsAndListsThroughTheS3Interface(t *testing.T) {
 	}
 	if err = bucket.Put("refs/action/gone", []byte("one"), r2.PutOptions{IfMatch: read.ETag}); !errors.Is(err, r2.ErrChanged) {
 		t.Fatalf("a put over nothing: %v", err)
+	}
+	// A large object is read whole, under its strong ETag, so a put over it matches: R2 compresses a GET that takes
+	// gzip and weakens the ETag, which once failed every replacement of a tree's index. Mutant: no Accept-Encoding.
+	large := bytes.Repeat([]byte("index "), CompressedFrom)
+	fake.Set("trees/large.json", large, written)
+	content, read, err := bucket.GetObject("trees/large.json")
+	if err != nil || !bytes.Equal(content, large) || strings.HasPrefix(read.ETag, "W/") {
+		t.Fatalf("a large object read as %d bytes under %q: %v", len(content), read.ETag, err)
+	}
+	if err = bucket.Put("trees/large.json", large, r2.PutOptions{IfMatch: read.ETag}); err != nil {
+		t.Fatalf("a put over a large object's ETag: %v", err)
 	}
 	for index := range 5 {
 		bucket.Put(fmt.Sprintf("blobs/%c", 'b'+index), []byte("x"), r2.PutOptions{})
