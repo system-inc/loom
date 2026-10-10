@@ -37,6 +37,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.Var(poolHas, "pool-has", "the toolchains every worker of a pool has, <name>=<toolchain>,...; repeatable")
 	interval := flags.Duration("interval", 10*time.Second, "time between pulls")
 	once := flags.Bool("once", false, "pull once and exit")
+	dryRun := flags.Bool("dry-run", false, "judge and print each future's batch, posting nothing (before cutover, a posted green can land)")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -96,8 +97,11 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return result.Events, err
 		},
 		Main:  judge.NoMainRecords{},
-		Queue: judge.HTTPQueue{Base: *queue, Token: client},
+		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
 		Loop:  judge.Loop{Now: time.Now},
+	}
+	if *dryRun {
+		puller.Queue = printedQueue{out: stdout}
 	}
 	for runContext.Err() == nil {
 		count, err := puller.PullOnce()
@@ -119,4 +123,18 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// printedQueue is --dry-run's queue: it prints each batch as the line Queue would have been sent, and posts nothing.
+type printedQueue struct {
+	out io.Writer
+}
+
+func (queue printedQueue) PostVerdicts(future string, post judge.FuturePost) error {
+	encoded, err := json.Marshal(post)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(queue.out, "dry run, not posted: /futures/%s/verdicts %s\n", future, encoded)
+	return err
 }
