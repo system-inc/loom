@@ -103,23 +103,57 @@ func (client QueueClient) ParityInputs(future Future, gateInputs string) (Parity
 	if !Sha256Hex(gateInputs) {
 		return ParityInputs{}, fmt.Errorf("a parity plan needs the gate inputs' manifest sha256, not %q", gateInputs)
 	}
-	response, err := client.do("GET", "/changes/"+url.PathEscape(future.Changes[0]), nil)
+	paths, err := client.ChangePaths(future)
 	if err != nil {
 		return ParityInputs{}, err
 	}
+	return ParityInputs{GateInputs: gateInputs, ChangedPaths: paths}, nil
+}
+
+// ChangePaths is every path a future's changes touch, from each change's record (GET /changes/<change>).
+func (client QueueClient) ChangePaths(future Future) ([]string, error) {
+	paths := []string{}
+	for _, change := range future.Changes {
+		response, err := client.do("GET", "/changes/"+url.PathEscape(change), nil)
+		if err != nil {
+			return nil, err
+		}
+		var record struct {
+			Record struct {
+				Paths []string `json:"paths"`
+			} `json:"record"`
+		}
+		if response.StatusCode != http.StatusOK {
+			response.Body.Close()
+			return nil, fmt.Errorf("GET /changes/%s: %s", change, response.Status)
+		}
+		err = json.NewDecoder(response.Body).Decode(&record)
+		response.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("GET /changes/%s: %w", change, err)
+		}
+		paths = append(paths, record.Record.Paths...)
+	}
+	return paths, nil
+}
+
+// PostEmpty tells Queue a future moves no unit's key, so it has nothing to run (Queue, Oct 10 01:31Z). Queue takes it
+// only when every path of the future's changes ends in .md, as a second lock beside the planner's own.
+func (client QueueClient) PostEmpty(future, reason string) error {
+	body, err := json.Marshal(map[string]any{"empty": true, "reason": reason})
+	if err != nil {
+		return err
+	}
+	response, err := client.do("POST", "/futures/"+url.PathEscape(future)+"/plan", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
 	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return ParityInputs{}, fmt.Errorf("GET /changes/%s: %s", future.Changes[0], response.Status)
+	if response.StatusCode/100 != 2 {
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		return fmt.Errorf("POST /futures/%s/plan (empty): %s: %s", future, response.Status, strings.TrimSpace(string(detail)))
 	}
-	var change struct {
-		Record struct {
-			Paths []string `json:"paths"`
-		} `json:"record"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&change); err != nil {
-		return ParityInputs{}, fmt.Errorf("GET /changes/%s: %w", future.Changes[0], err)
-	}
-	return ParityInputs{GateInputs: gateInputs, ChangedPaths: change.Record.Paths}, nil
+	return nil
 }
 
 // PlannedFuture reads a planned future's base and change from Queue's planned listing (GET /futures?state=planned).
@@ -253,6 +287,21 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 			failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
 			continue
 		}
+		if !future.Parity && future.Select == nil {
+			empty, reason, err := unmoved(client, checkout, future, gateTools, tools, results)
+			if err != nil {
+				failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
+				continue
+			}
+			if empty {
+				if err := client.PostEmpty(future.Future, reason); err != nil {
+					failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
+					continue
+				}
+				planned++
+				continue
+			}
+		}
 		if err := client.PostPlan(future.Future, results); err != nil {
 			failures = append(failures, fmt.Sprintf("%s: %v", future.Future, err))
 			continue
@@ -263,4 +312,53 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 		return planned, fmt.Errorf("futures not planned: %s", strings.Join(failures, "; "))
 	}
 	return planned, nil
+}
+
+// unmoved says a future moves no unit's key: every unit keys at the future's tree as it keys at its base. That is read
+// from the keys, never from file extensions, so a Markdown file a test embeds or reads still plans its readers. Only
+// a change whose every path ends in .md is checked, since Queue refuses an empty plan for any other (and the base's
+// keys cost a second plan).
+func unmoved(client QueueClient, checkout Checkout, future Future, gateTools string, tools Tools, results []PlannedResult) (bool, string, error) {
+	if future.Base == "" {
+		return false, "", nil
+	}
+	paths, err := client.ChangePaths(future)
+	if err != nil {
+		return false, "", err
+	}
+	if len(paths) == 0 {
+		return false, "", nil
+	}
+	for _, path := range paths {
+		if !strings.HasSuffix(path, ".md") {
+			return false, "", nil
+		}
+	}
+	tree, cleanup, err := checkout(future.Base)
+	if err != nil {
+		return false, "", err
+	}
+	base, err := PlanTree(tree, gateTools, tools, MemoryIndex{}, true)
+	cleanup()
+	if err != nil {
+		return false, "", fmt.Errorf("base %s: %w", future.Base, err)
+	}
+	baseKeys := map[string]string{}
+	for _, unit := range base {
+		baseKeys[unit.Name] = unit.UnitKey
+	}
+	if len(base) != len(results) {
+		return false, "", nil
+	}
+	for _, unit := range results {
+		if baseKeys[unit.Name] != unit.UnitKey {
+			return false, "", nil
+		}
+	}
+	return true, fmt.Sprintf("no unit's key moved: all %d units key at %s as at base %s", len(results), short(future.Tree), short(future.Base)), nil
+}
+
+// short is a sha's first 12 characters, or all of it when shorter.
+func short(sha string) string {
+	return sha[:min(12, len(sha))]
 }

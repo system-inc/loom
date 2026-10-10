@@ -67,7 +67,7 @@ func PlanByKey(checkout Checkout, parent, sha, gateTools string, tools Tools, se
 	}
 	index := MemoryIndex{}
 	for _, unit := range parentPlan {
-		index[unit.UnitKey] = Verdict{UnitKey: unit.UnitKey, Status: "passed", Run: "parent-" + parent[:12]}
+		index[unit.UnitKey] = Verdict{UnitKey: unit.UnitKey, Status: "passed", Run: "parent-" + short(parent)}
 	}
 	return plan(sha, index, false)
 }

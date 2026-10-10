@@ -4,8 +4,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -103,5 +107,68 @@ func TestPullOncePlansEveryFutureAgainstTheIndex(t *testing.T) {
 	}
 	if got := decisions("fut-3"); len(got) != 1 || got["example.com/plan/a"] != "run" {
 		t.Errorf("fut-3 is a parity run of a alone, run though a's key passed: %v", got)
+	}
+}
+
+// A future moving no unit's key posts an empty plan, decided from the keys: a Markdown edit nothing reads is empty,
+// a Markdown file a unit reads (its testdata) plans its reader, and a Go edit plans normally.
+func TestAFutureMovingNoKeyPostsAnEmptyPlan(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := planFixture(t)
+	writeFiles(t, tree, map[string]string{"README.md": "readme\n", "a/testdata/notes.md": "notes\n"})
+	if output, err := exec.Command("git", "-C", tree, "add", ".").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v %s", err, output)
+	}
+	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
+	changes := map[string][]string{"chg-readme": {"README.md"}, "chg-notes": {"a/testdata/notes.md"}, "chg-go": {"a/a.go"}}
+	var lock sync.Mutex
+	posted := map[string]string{}
+	queue := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == "GET" && request.URL.Path == "/futures":
+			json.NewEncoder(writer).Encode(map[string][]Future{"futures": {
+				{Future: "readme", Tree: "readme", Base: "base-readme", Changes: []string{"chg-readme"}},
+				{Future: "notes", Tree: "notes", Base: "base-notes", Changes: []string{"chg-notes"}},
+				{Future: "go", Tree: "go", Base: "base-go", Changes: []string{"chg-go"}},
+			}})
+		case request.Method == "GET" && strings.HasPrefix(request.URL.Path, "/changes/"):
+			json.NewEncoder(writer).Encode(map[string]any{"record": map[string]any{"paths": changes[strings.TrimPrefix(request.URL.Path, "/changes/")]}})
+		case request.Method == "GET" && strings.HasPrefix(request.URL.Path, "/verdicts/"):
+			http.NotFound(writer, request)
+		case request.Method == "POST":
+			body, _ := io.ReadAll(request.Body)
+			lock.Lock()
+			posted[strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/futures/"), "/plan")] = string(body)
+			lock.Unlock()
+		}
+	}))
+	defer queue.Close()
+	// Each future's tree edits its change's file; its base doesn't.
+	edited := map[string]string{"readme": "README.md", "notes": "a/testdata/notes.md", "go": "a/a.go"}
+	originals := map[string][]byte{}
+	for _, path := range edited {
+		originals[path], _ = os.ReadFile(filepath.Join(tree, path))
+	}
+	checkout := func(sha string) (string, func(), error) {
+		for future, path := range edited {
+			content := originals[path]
+			if sha == future {
+				content = append(append([]byte{}, content...), "\n// moved\n"...)
+			}
+			os.WriteFile(filepath.Join(tree, path), content, 0o644)
+		}
+		return tree, func() {}, nil
+	}
+	client := QueueClient{Base: queue.URL, Token: "t"}
+	if _, err := PullOnce(client, checkout, gateTools, tools, HTTPIndex{Client: client}, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(posted["readme"], `"empty":true`) {
+		t.Errorf("a Markdown edit nothing reads posted %s, want an empty plan", posted["readme"])
+	}
+	for _, future := range []string{"notes", "go"} {
+		if !strings.HasPrefix(posted[future], "[") {
+			t.Errorf("%s posted %s, want its plan's units", future, posted[future])
+		}
 	}
 }
