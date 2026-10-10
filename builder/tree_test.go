@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/planner"
+	"github.com/system-inc/loom/r2"
 	"github.com/system-inc/loom/r2/r2test"
 )
 
@@ -305,6 +306,26 @@ func TestABuildFailureIsTheChangesOnlyWhenGoSaysWhy(t *testing.T) {
 	}
 	if planner.TreeKey("t", "go1.27.1", "linux", "amd64") == planner.TreeKey("t", "go1.27.1", "darwin", "arm64") {
 		t.Error("two platforms' builds share a key")
+	}
+}
+
+// A tree is indexed once the bucket holds trees/<key>.json, read from the bucket, and anything not a tree key is
+// refused before a request. Mutant: a missing index read as held.
+func TestATreeIsIndexedOnceTheBucketHoldsItsIndex(t *testing.T) {
+	fake, store := serve(t)
+	key := strings.Repeat("e", 64)
+	if indexed, err := store.TreeIndexed(key); err != nil || indexed {
+		t.Fatalf("before its index: %v %v", indexed, err)
+	}
+	bucket := fake.Bucket()
+	if err := bucket.Put("trees/"+key+".json", []byte("{}\n"), r2.PutOptions{ContentType: "application/json"}); err != nil {
+		t.Fatal(err)
+	}
+	if indexed, err := store.TreeIndexed(key); err != nil || !indexed {
+		t.Fatalf("after its index: %v %v", indexed, err)
+	}
+	if _, err := store.TreeIndexed("../releases/current"); err == nil {
+		t.Fatal("a path that isn't a tree key was asked")
 	}
 }
 

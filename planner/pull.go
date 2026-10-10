@@ -223,10 +223,7 @@ type Checkout func(sha string) (tree string, cleanup func(), err error)
 func GitCheckout(repository string) Checkout {
 	return func(sha string) (string, func(), error) {
 		git := func(arguments ...string) error {
-			command := exec.Command("git", append([]string{"-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "credential.helper=", "-c", "core.askPass=",
-				"-C", repository}, arguments...)...)
-			command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ASKPASS=", "SSH_ASKPASS=")
-			if output, err := command.CombinedOutput(); err != nil {
+			if output, err := KeylessGit(append([]string{"-C", repository}, arguments...)...).CombinedOutput(); err != nil {
 				return fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
 			}
 			return nil
@@ -247,6 +244,17 @@ func GitCheckout(repository string) Checkout {
 		}
 		return repository, func() {}, nil
 	}
+}
+
+// KeylessGit is git with arguments, keyless: no system or global configuration (whose url rewrites could send a fetch
+// over ssh with a key, and whose credential helpers could answer GitHub), no credential helper or askpass, and no
+// prompt; submodules recorded over ssh are fetched from GitHub over https. What it fetches is what the origin serves
+// anyone.
+func KeylessGit(arguments ...string) *exec.Cmd {
+	command := exec.Command("git", append([]string{"-c", "url.https://github.com/.insteadOf=git@github.com:", "-c", "credential.helper=", "-c", "core.askPass="},
+		arguments...)...)
+	command.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_ASKPASS=", "SSH_ASKPASS=")
+	return command
 }
 
 // PullOnce plans every unplanned future Queue serves and posts each plan back; it returns how many it planned. A

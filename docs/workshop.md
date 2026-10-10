@@ -2,6 +2,12 @@
 
 Workshop is the house's only builder (WSL2, 64 threads, 125 GB of memory, a 1 TB disk). `loom build-tree` builds one future's tree there cold and puts it in the action store (builder/store.go). Kirk's rules for the machine: it keeps at least 200 GB free, runs near 80% busy, and stays reachable. This is how `build-tree` keeps them.
 
+## Every planned future's tree (#w7agfa9)
+
+`loom build-trees` (package `treebuilder`, unit `treebuilder/systemd/loom-build-trees.service`) runs beside `loom place`. The planner keys each future's tree where it has it checked out (`planner.ReadTreeIdentity`, the one function `build-tree` keys with) and carries the key on every test and product unit of the plan. The builder reads Queue's planned listing every 10 s and builds the first tree a future runs whose `trees/<key>.json` the store lacks: it checks the commit out keyless in its own clone (`~/loom-trees/adamic`, origin the public repository, no user git configuration or credential) and runs `loom build-tree --tree-key <key>` in a child, which refuses a tree keying otherwise, under every floor and bound below. One tree at a time, and one builder: its ledger, `~/loom-trees/trees.jsonl`, is flocked.
+
+Each build is in the ledger before it starts and when it ends. Built: the index is up, and a package that didn't build is the index's to say (the change's red, or Workshop's broken). Failed: no index, Workshop's; the placer voids the future, naming why, and the builder tries the tree again after 30 minutes. Refused: a filesystem is under its floor, so nothing is checked out or built until it isn't. Interrupted: the builder stopped mid-build (every update restarts it, taking the build with it), and builds it again. A build past `--bound` (2 h) is killed with everything it started, and fails.
+
 ## Disk (#ckv0pmg)
 
 - **A floor at start.** `build-tree` doesn't start while the cache base or Go's build cache has under `--floor-gb` free (200), or the temporary directory has under `--temp-floor-gb` free (20, since it may be memory). It names which one and how much it has. With `GOCACHE=off` there is no build cache to watch.

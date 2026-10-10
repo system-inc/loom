@@ -8,6 +8,31 @@ import (
 	"testing"
 )
 
+// A keyless git reads none of the user's configuration: a global rewrite that would send a fetch from GitHub over ssh
+// (with the user's key) and a credential helper are both unseen, and an ssh URL is fetched over https. Mutants: the
+// global configuration read; the ssh rewrite dropped.
+func TestKeylessGitReadsNoUserConfiguration(t *testing.T) {
+	home := t.TempDir()
+	writeFiles(t, home, map[string]string{".gitconfig": "[url \"git@github.com:\"]\n\tinsteadOf = https://github.com/\n[credential]\n\thelper = store\n"})
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	clone := filepath.Join(t.TempDir(), "clone")
+	if output, err := exec.Command("git", "init", "-q", clone).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v %s", err, output)
+	}
+	for url, want := range map[string]string{"https://github.com/system-inc/adamic": "https://github.com/system-inc/adamic",
+		"git@github.com:system-inc/cohere.git": "https://github.com/system-inc/cohere.git"} {
+		exec.Command("git", "-C", clone, "remote", "remove", "origin").Run()
+		exec.Command("git", "-C", clone, "remote", "add", "origin", url).Run()
+		if got, err := KeylessGit("-C", clone, "ls-remote", "--get-url", "origin").Output(); err != nil || strings.TrimSpace(string(got)) != want {
+			t.Errorf("origin %s is fetched from %q (%v), want %s", url, strings.TrimSpace(string(got)), err, want)
+		}
+	}
+	if helper, _ := KeylessGit("-C", clone, "config", "--get-all", "credential.helper").Output(); strings.TrimSpace(string(helper)) != "" {
+		t.Errorf("a keyless git sees the credential helper %q", helper)
+	}
+}
+
 // GitCheckout moves one tree between futures with its submodule at each future's recorded commit, and leaves
 // nothing a previous plan made.
 func TestGitCheckoutBringsEachFuturesSubmodule(t *testing.T) {

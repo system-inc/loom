@@ -688,6 +688,20 @@ func (index TreeIndex) failures() int {
 	return count
 }
 
+// TreeIndexed says whether the bucket holds trees/<treeKey>.json, read from the bucket itself, never an edge's cache:
+// what Workshop's tree builder builds when it doesn't, and what the placer waits for before naming the build on a unit.
+func (store Store) TreeIndexed(treeKey string) (bool, error) {
+	if !productKeyPattern.MatchString(treeKey) {
+		return false, fmt.Errorf("%q isn't a tree key, 64 lowercase hex digits", treeKey)
+	}
+	store.read()
+	_, err := store.Bucket.Head("trees/" + treeKey + ".json")
+	if errors.Is(err, r2.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // writeIndex writes trees/<treeKey>.json, once every blob and ref it names is up, and reports whether it did. An
 // index the bucket already holds is replaced only by one with no more failed packages, and only over the very object
 // read (If-Match on its ETag; If-None-Match: * when there is none), so a worse build never takes a better one's place

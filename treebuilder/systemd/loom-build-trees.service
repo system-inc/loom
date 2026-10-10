@@ -1,0 +1,40 @@
+# Loom's tree builder on Workshop: `loom build-trees`'s loop (cmd/loom/buildtrees.go, package treebuilder), beside
+# loom-place. Every 10 s: GET /futures?state=planned; the first tree a planned future runs whose index the action
+# store lacks (trees/<key>.json, by the key its plan carries) is checked out keyless in ~/loom-trees/adamic and built by
+# this binary's `loom build-tree --tree-key <key>` in a child, one tree at a time, under build-tree's floors,
+# admission and bounded caches. Each build is in ~/loom-trees/trees.jsonl before it starts and when it ends; the placer
+# reads it. A user unit, installed as the placer's is (docs/updater.md):
+#
+#   mkdir -p ~/loom-trees && cp treebuilder/systemd/loom-build-trees.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now loom-build-trees.service
+#
+# The default KillMode (control-group): a stop or a restart (every update's hook restarts the daemons) kills the build
+# in flight with the builder, whose next start records it interrupted and builds it again. No build outlives the
+# builder that recorded it, and none runs twice at once.
+#
+# Its environment is adamic's toolchain (~/adamic-tools/env.sh: its Go, clang, node and WASI SDK) under
+# GOTOOLCHAIN=local, as build-tree ran by hand on Workshop. A tree's key names the Go release go reports inside the
+# tree under it, so loom-plan must run under the same: the two keys meet in --tree-key, and a tree they read apart
+# fails, named, and its future is voided as Loom's.
+#
+# Token: ~/.loom/build-trees-token, scope coordinator, run "build-trees" (`~/.loom/bin/loom coordinator-token --days 30
+# build-trees`), read once at start; it reads Queue's planned listing and nothing else. The action store is read and
+# written with ~/.loom/r2-releases.conf, as build-tree's is. The ledger is held by one builder at a time; a second
+# refuses to start.
+[Unit]
+Description=Loom tree builder: builds every planned future's tree the action store lacks, one at a time
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/loom-trees
+Environment=GOTOOLCHAIN=local
+ExecStart=/bin/bash -c 'source %h/adamic-tools/env.sh && exec %h/.loom/bin/loom build-trees --queue https://loom.system.inc --token-file %h/.loom/build-trees-token --clone %h/loom-trees/adamic --ledger %h/loom-trees/trees.jsonl --logs %h/loom-trees/logs --r2 %h/.loom/r2-releases.conf --cache %h/loom-builder/trees --interval 10s'
+Nice=10
+IOSchedulingClass=idle
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
