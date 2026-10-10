@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,11 +41,13 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	dryRun := flags.Bool("dry-run", false, "judge and print each future's batch, posting nothing (before cutover, a posted green can land)")
 	postOnly := flags.String("post", "", "with --dry-run, post this one future's batch (its tree sha) and print the rest: the first live batch, on Loom's word")
 	postParity := flags.Bool("post-parity", false, "with --dry-run, post the batches of parity futures (which never land) and print the rest: the steady judge before cutover")
+	void := flags.String("void", "", "post one listed future's run as void and exit, <tree>:<attempt> (the attempt Queue lists); needs --cause")
+	cause := flags.String("cause", "", "with --void, why the run is void, which leads the decision's problems")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0) {
-		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]]")
+		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]] [--void <tree>:<attempt> --cause <why>]")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -101,6 +104,22 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Main:  judge.NoMainRecords{},
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
 		Loop:  judge.Loop{Now: time.Now},
+	}
+	if *void != "" {
+		// A void moves nothing toward main: it is posted live even beside --dry-run, and Queue lists the next attempt.
+		tree, attemptText, found := strings.Cut(*void, ":")
+		attempt, err := strconv.Atoi(attemptText)
+		if !found || err != nil || attempt < 1 || *cause == "" {
+			fmt.Fprintln(stderr, "judge: --void <tree>:<attempt> --cause <why>")
+			return 2
+		}
+		post, err := puller.VoidOne(tree, attempt, *cause)
+		if err != nil {
+			fmt.Fprintln(stderr, "judge:", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "posted void: /futures/%s/verdicts run %s, %d units: %s\n", tree, post.Run, len(post.Plan), strings.Join(post.Decision.Problems, "; "))
+		return 0
 	}
 	if (*postOnly != "" || *postParity) && !*dryRun {
 		fmt.Fprintln(stderr, "judge: --post and --post-parity name what posts while every other future stays dry, so they need --dry-run")

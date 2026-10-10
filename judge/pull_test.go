@@ -64,3 +64,34 @@ func TestNoMainRecordsNeverExcusesAFailure(t *testing.T) {
 		t.Fatal("the stand-in claimed a main record")
 	}
 }
+
+func TestVoidOnePostsTheListedAttemptOnlyAndNeverReruns(t *testing.T) {
+	stopped := strings.Repeat("d", 40)
+	unit, never := strings.Repeat("1", 64), strings.Repeat("3", 64)
+	units := []PlannedUnitWire{{UnitKey: unit, Decision: "run"}, {UnitKey: never, Decision: "run"}}
+	source := listedFutures{{Future: stopped, Base: baseTree, Change: PlannedChange{Change: "chg_A"}, Units: units}}
+	queue := &StubQueue{}
+	puller := Puller{
+		Source: source,
+		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
+		Read:   func(run string) ([]protocol.Event, error) { return finishedStream(unit, "passed"), nil },
+		Rerun: func(json.RawMessage, string) ([]protocol.Event, error) {
+			t.Fatal("a void reran a unit")
+			return nil, nil
+		},
+		Main: NoMainRecords{}, Queue: queue, Loop: Loop{Now: time.Now},
+	}
+	if _, err := puller.VoidOne(stopped, 2, "stopped"); err == nil {
+		t.Fatal("voided attempt 2 while Queue lists attempt 1")
+	}
+	if _, err := puller.VoidOne(strings.Repeat("e", 40), 1, "stopped"); err == nil {
+		t.Fatal("voided a future Queue doesn't list")
+	}
+	post, err := puller.VoidOne(stopped, 1, "an operator's stop killed its loom run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if post.Run != "future-"+stopped+"-1" || post.Decision.Status != Void || len(queue.Posts[stopped]) != 1 {
+		t.Fatalf("post %+v, want run -1 void, posted once", post)
+	}
+}

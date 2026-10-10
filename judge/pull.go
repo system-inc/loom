@@ -125,32 +125,63 @@ func (puller Puller) PullOnce() (int, error) {
 		if !finishedAll(future, events) {
 			continue
 		}
-		parts := map[string]json.RawMessage{}
-		plan := []PlanUnit{}
-		for _, unit := range future.Units {
-			parts[unit.UnitKey] = unit.KeyParts
-			planUnit := PlanUnit{UnitKey: unit.UnitKey}
-			if unit.Decision == "reuse" {
-				planUnit.Reused = "reused"
-				if unit.Reused != nil && *unit.Reused != "" {
-					planUnit.Reused = *unit.Reused
-				}
-			}
-			plan = append(plan, planUnit)
-		}
-		loop := puller.Loop
-		loop.Runs = EventRuns{Read: func(string) ([]protocol.Event, error) { return events, nil }}
-		loop.Fabric = EventFabric{Rerun: func(unitKey, tree string) ([]protocol.Event, error) {
-			return puller.Rerun(parts[unitKey], tree)
-		}}
-		loop.Main, loop.Queue = puller.Main, puller.Queue
-		record := ChangeRecord{Change: future.Change.Change, Sha: future.Change.Sha, Base: future.Change.Base, Owner: future.Change.Owner}
-		if _, err := loop.JudgeFuture(Job{Record: record, Change: record.Change, Future: future.Future, Base: future.Base, Run: run, Plan: plan}); err != nil {
+		loop, job := puller.jobOf(future, run, events)
+		if _, err := loop.JudgeFuture(job); err != nil {
 			return judged, fmt.Errorf("future %s: %w", future.Future, err)
 		}
 		judged++
 	}
 	return judged, nil
+}
+
+// VoidOne posts one listed future's run as void, naming cause (Loop.VoidFuture): attempt must be the attempt Queue
+// lists, so a void is posted only for the run Queue is waiting on, and the next attempt is Queue's to list.
+func (puller Puller) VoidOne(tree string, attempt int, cause string) (FuturePost, error) {
+	futures, err := puller.Source.Planned()
+	if err != nil {
+		return FuturePost{}, err
+	}
+	for _, future := range futures {
+		if future.Future != tree {
+			continue
+		}
+		if listed := max(future.Attempt, 1); listed != attempt {
+			return FuturePost{}, fmt.Errorf("future %s: Queue lists attempt %d, not %d", tree, listed, attempt)
+		}
+		run := puller.RunOf(future.Future, attempt)
+		events, err := puller.Read(run)
+		if err != nil {
+			return FuturePost{}, fmt.Errorf("future %s: reading run %s: %w", tree, run, err)
+		}
+		loop, job := puller.jobOf(future, run, events)
+		return loop.VoidFuture(job, cause)
+	}
+	return FuturePost{}, fmt.Errorf("future %s isn't listed planned and undecided", tree)
+}
+
+// jobOf is the loop and job that judge one listed future from its run's events.
+func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.Event) (Loop, Job) {
+	parts := map[string]json.RawMessage{}
+	plan := []PlanUnit{}
+	for _, unit := range future.Units {
+		parts[unit.UnitKey] = unit.KeyParts
+		planUnit := PlanUnit{UnitKey: unit.UnitKey}
+		if unit.Decision == "reuse" {
+			planUnit.Reused = "reused"
+			if unit.Reused != nil && *unit.Reused != "" {
+				planUnit.Reused = *unit.Reused
+			}
+		}
+		plan = append(plan, planUnit)
+	}
+	loop := puller.Loop
+	loop.Runs = EventRuns{Read: func(string) ([]protocol.Event, error) { return events, nil }}
+	loop.Fabric = EventFabric{Rerun: func(unitKey, tree string) ([]protocol.Event, error) {
+		return puller.Rerun(parts[unitKey], tree)
+	}}
+	loop.Main, loop.Queue = puller.Main, puller.Queue
+	record := ChangeRecord{Change: future.Change.Change, Sha: future.Change.Sha, Base: future.Change.Base, Owner: future.Change.Owner}
+	return loop, Job{Record: record, Change: record.Change, Future: future.Future, Base: future.Base, Run: run, Plan: plan}
 }
 
 // finishedAll says whether every unit the future runs has a finished event in its run.

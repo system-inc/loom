@@ -8,6 +8,7 @@ package judge
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -115,6 +116,51 @@ func (loop Loop) JudgeFuture(job Job) (FuturePost, error) {
 		}
 		post.Decision.Kicks[verdict.UnitKey] = kick
 	}
+	if err := loop.Queue.PostVerdicts(job.Future, post); err != nil {
+		return FuturePost{}, fmt.Errorf("posting future %s: %w", job.Future, err)
+	}
+	return post, nil
+}
+
+// VoidFuture posts a future's run as void without judging it: the run ended and will never finish every unit, so
+// none of its readings is a verdict, and Queue counts the void and lists the next attempt (Loom's ruling, Oct 10
+// 00:58Z, on run -1 of 4beacfbb and 21287d58, whose loom run processes an operator's stop killed). Every unit the
+// plan runs is void as killed, its attempt kept as evidence when it reported; reused units stay as they were
+// reused, so a plan that ran nothing reads as Green says, as Queue recomputes it. cause leads the decision's problems
+// (Queue logs its own recomputed problems, so the cause also goes on the run's task). Nothing is rerun.
+func (loop Loop) VoidFuture(job Job, cause string) (FuturePost, error) {
+	if strings.TrimSpace(cause) == "" {
+		return FuturePost{}, fmt.Errorf("a voided run names its cause")
+	}
+	post := FuturePost{Change: job.Change, Run: job.Run, Rule: Rule, Plan: []string{}, Verdicts: []json.RawMessage{}, Quarantine: []TestOutcome{}}
+	verdicts := []Verdict{}
+	for _, unit := range job.Plan {
+		post.Plan = append(post.Plan, unit.UnitKey)
+		verdict := Verdict{UnitKey: unit.UnitKey, Change: job.Change, Future: job.Future, Run: job.Run, RuleId: Rule,
+			Attempts: []Attempt{}, Tests: []TestOutcome{}, Outputs: []string{}, DecidedAt: loop.Now().UTC().Format(time.RFC3339)}
+		if unit.Reused != "" {
+			verdict.Status, verdict.RuleId = Passed, Rule+" reused "+unit.Reused
+		} else {
+			finished, found, err := loop.Runs.Finished(job.Run, unit.UnitKey)
+			if err != nil {
+				return FuturePost{}, fmt.Errorf("unit %s: %w", unit.UnitKey, err)
+			}
+			if found {
+				verdict.Attempts = append(verdict.Attempts, finished.Attempt)
+				verdict.Tests, verdict.Outputs = nonNil(finished.Tests), nonNilStrings(finished.Outputs)
+			}
+			verdict.Status, verdict.Cause, verdict.Infra = Void, CauseInfra, InfraKill
+		}
+		verdicts = append(verdicts, verdict)
+		encoded, err := verdict.Canonical()
+		if err != nil {
+			return FuturePost{}, err
+		}
+		post.Verdicts = append(post.Verdicts, encoded)
+	}
+	decision := Green(post.Plan, verdicts)
+	decision.Problems = append([]string{"run " + job.Run + " void: " + cause}, decision.Problems...)
+	post.Decision = PostDecision{RunVerdict: decision, Kicks: map[string]Kick{}}
 	if err := loop.Queue.PostVerdicts(job.Future, post); err != nil {
 		return FuturePost{}, fmt.Errorf("posting future %s: %w", job.Future, err)
 	}

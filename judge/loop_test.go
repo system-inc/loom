@@ -210,3 +210,43 @@ func TestARedPostCarriesItsKickAndTheDecisionReadsAsQueueParsesIt(t *testing.T) 
 		}
 	}
 }
+
+func TestAVoidedRunPostsEveryRunUnitVoidAndRerunsNothing(t *testing.T) {
+	h := newHarness()
+	// u finished passed and v failed before the stop; w never started; x was reused.
+	h.runs["u"], h.runs["v"] = passed(), failedWith("TestB")
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: func() time.Time { return time.Date(2026, 10, 10, 1, 0, 0, 0, time.UTC) }}
+	post, err := loop.VoidFuture(Job{Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1",
+		Plan: []PlanUnit{{UnitKey: "u"}, {UnitKey: "v"}, {UnitKey: "w"}, {UnitKey: "x", Reused: "verdict-3"}}}, "an operator stopped the run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if post.Decision.Status != Void || len(post.Decision.Red) != 0 || len(post.Decision.Kicks) != 0 {
+		t.Fatalf("decision %+v, want void with no red and no kick", post.Decision)
+	}
+	if len(post.Decision.Problems) == 0 || post.Decision.Problems[0] != "run run-1 void: an operator stopped the run" {
+		t.Fatalf("problems %v, want the cause first", post.Decision.Problems)
+	}
+	for _, unit := range []string{"u", "v", "w"} {
+		if record := recordOf(t, post, unit); record.Status != Void || record.Cause != CauseInfra || record.Infra != InfraKill {
+			t.Fatalf("unit %s: %+v, want void infra kill", unit, record)
+		}
+	}
+	if record := recordOf(t, post, "x"); record.Status != Passed {
+		t.Fatalf("reused unit %+v, want passed", record)
+	}
+	if len(h.fabric.Asked) != 0 || len(h.queue.Posts[futureTree]) != 1 {
+		t.Fatalf("placements %v and %d posts, want none and one", h.fabric.Asked, len(h.queue.Posts[futureTree]))
+	}
+	if !strings.Contains(string(post.Verdicts[1]), `"tests":[{"outcome":"fail"`) {
+		t.Fatalf("v's record %s lacks its attempt's tests as evidence", post.Verdicts[1])
+	}
+}
+
+func TestAVoidNamesItsCause(t *testing.T) {
+	h := newHarness()
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: time.Now}
+	if _, err := loop.VoidFuture(Job{Run: "run-1"}, " "); err == nil {
+		t.Fatal("a void with no cause was posted")
+	}
+}
