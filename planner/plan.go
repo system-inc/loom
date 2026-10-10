@@ -89,7 +89,8 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	if err != nil {
 		return nil, err
 	}
-	if selection == nil {
+	if selection == nil || len(selection.Packages) == 0 {
+		// No selection, or a parity run with none (Release's mutants): every tested package.
 		tested := packages[:0]
 		for _, listed := range packages {
 			if len(listed.TestGoFiles)+len(listed.XTestGoFiles) > 0 {

@@ -133,3 +133,22 @@ func TestAParityUnitKeysWhatTheBoxRanWith(t *testing.T) {
 		t.Error("the same paths in another order moved the key")
 	}
 }
+
+// A parity run that names no selection (Release's mutants) plans every tested package with the box's inputs, run.
+func TestAParityRunWithoutASelectionPlansEveryTestedPackageWithItsInputs(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := planFixture(t)
+	inputs := ParityInputs{GateInputs: strings.Repeat("4", 64), ChangedPaths: []string{"a/a.go"}}
+	results, err := PlanSelected(tree, gateTools, Tools{Go: "go1.27.0"}, ParitySelect{}, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("planned %d units, want both tested packages", len(results))
+	}
+	for _, result := range results {
+		if result.Decision != "run" || result.KeyParts.GateInputs != inputs.GateInputs || result.KeyParts.Env["ADAMIC_GATE_CHANGED"] == "" {
+			t.Errorf("%s: %s, gate inputs %q, env %v", result.Name, result.Decision, result.KeyParts.GateInputs, result.KeyParts.Env)
+		}
+	}
+}

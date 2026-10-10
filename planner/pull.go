@@ -203,14 +203,19 @@ func PullOnce(client QueueClient, checkout Checkout, gateTools string, tools Too
 			continue
 		}
 		var results []PlannedResult
-		if future.Select != nil {
-			// A parity plan reruns the box record's selection as it was, so nothing is reused.
+		if future.Parity || future.Select != nil {
+			// A parity plan runs what the box ran (its selection, or every tested package when it names none) with the
+			// box's inputs, and reuses nothing.
+			selection := ParitySelect{}
+			if future.Select != nil {
+				selection = *future.Select
+			}
 			var inputs ParityInputs
 			if inputs, err = client.ParityInputs(future, gateInputs); err == nil {
-				results, err = PlanSelected(tree, gateTools, tools, *future.Select, inputs)
+				results, err = PlanSelected(tree, gateTools, tools, selection, inputs)
 			}
 		} else {
-			results, err = PlanTree(tree, gateTools, tools, index, future.Uncached || future.Parity)
+			results, err = PlanTree(tree, gateTools, tools, index, future.Uncached)
 		}
 		cleanup()
 		if err != nil {
