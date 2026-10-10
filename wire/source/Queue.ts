@@ -842,6 +842,9 @@ export function checkJudgeBatch(body: string, tree: string): JudgeBatch | string
 export class Queue extends DurableObject<Env> {
     private readonly sql: SqlStorage;
     private state: QueueState | null = null;
+    // The changes moved since the last board push, each with the seq of its newest event: kept in memory so a push
+    // reads nothing from storage. After an eviction it is empty, and the alarm falls back to the events after boardSeq.
+    private owed = new Map<string, number>();
     // The git facts' source: GitHub when the Worker holds a read token, else null, and the bridge posts them later.
     // A test sets its own on this object.
     history: History | null;
@@ -950,6 +953,7 @@ export class Queue extends DurableObject<Env> {
         );
         apply(state, event, hash);
         if (subject.change !== undefined) {
+            this.owed.set(subject.change, event.seq);
             await this.scheduleBoardPush();
         }
         return event;
@@ -976,12 +980,18 @@ export class Queue extends DurableObject<Env> {
     // Pushes every change an event touched since the last push, each as its summary now. Nothing is lost: until a push
     // succeeds, the sequence it covers stays owed and the next alarm tries again.
     override async alarm(): Promise<void> {
+        const evicted = this.state === null;
         const state = await this.current();
         const pushedSeq = Number(this.fact('boardSeq') ?? '0');
-        const moved = this.sql
-            .exec<{ change: string }>('SELECT DISTINCT change FROM events WHERE seq > ? AND change IS NOT NULL', pushedSeq)
-            .toArray();
+        // Normally the moved changes are in memory, and the push reads no rows. After an eviction the events after
+        // boardSeq (a primary-key range) name them.
+        const moved = evicted
+            ? this.sql.exec<{ change: string }>('SELECT DISTINCT change FROM events WHERE seq > ? AND change IS NOT NULL', pushedSeq).toArray()
+            : [...this.owed.keys()].map(function (change) {
+                  return { change: change };
+              });
         const head = state.seq;
+        this.owed.clear();
         this.setFact('boardPushedAt', String(Date.now()));
         try {
             const board = changeBoardOf(this.env);
@@ -1010,6 +1020,12 @@ export class Queue extends DurableObject<Env> {
             }
         }
         catch {
+            // Still owed: put them back, so the retry pushes them from memory too.
+            for (const row of moved) {
+                if (!this.owed.has(row.change)) {
+                    this.owed.set(row.change, head);
+                }
+            }
             await this.ctx.storage.setAlarm(Date.now() + BoardRetryMilliseconds);
             return;
         }

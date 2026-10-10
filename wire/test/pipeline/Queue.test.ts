@@ -464,6 +464,34 @@ describe("the queue's board pushes", function () {
             return context.storage.sql.exec<{ value: string }>("SELECT value FROM facts WHERE name = 'boardSeq'").toArray()[0]?.value;
         });
         expect(pushed).toBe(String((await logOf(queue)).length));
+        // A push reads no events: the moved changes come from memory (Web's cost cut).
+        const reads: string[] = [];
+        await runInDurableObject(queue, function (instance: Queue) {
+            const holder = instance as unknown as { sql: SqlStorage };
+            const exec = holder.sql.exec.bind(holder.sql);
+            holder.sql = new Proxy(holder.sql, {
+                get(target, name) {
+                    return name === 'exec'
+                        ? function (query: string, ...bindings: unknown[]) {
+                              if (/FROM events/.test(query)) {
+                                  reads.push(query);
+                              }
+                              return exec(query, ...(bindings as []));
+                          }
+                        : Reflect.get(target, name);
+                },
+            });
+        });
+        await postWhole(queue, id, sha(41), 'passed', null, 'second');
+        const another = ((await (await submit(queue, change(42))).json()) as { change: string }).change;
+        reads.length = 0;
+        expect(await runDurableObjectAlarm(queue)).toBe(true);
+        expect(reads).toEqual([]);
+        expect(
+            ((await (await board.get(board.idFromName('board')).fetch('https://board/changes')).json()) as { changes: { change: string }[] }).changes.some(function (line) {
+                return line.change === another;
+            }),
+        ).toBe(true);
     });
 });
 
