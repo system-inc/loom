@@ -35,6 +35,52 @@ func TestJobUnitForRunsThePlannedUnitAtACommit(t *testing.T) {
 	}
 }
 
+// A future's job unit is every kind under its key's id: a product as its package's go test under the product ceiling,
+// a phase as run.py's line at the key's tools merged onto the base, and changed paths carried only when they hash to
+// the key. gofmt, which no runner runs yet, is refused.
+func TestFutureJobUnitSaysEveryKindExactly(t *testing.T) {
+	t.Parallel()
+	sha, base, key := strings.Repeat("c", 40), strings.Repeat("b", 40), strings.Repeat("1", 64)
+	product := KeyParts{Kind: "product", Package: protocol.AdamicModule + "/internal/lower", Select: Select{Run: "^TestProduct_Lower$"}, Tools: Tools{Go: "go1.27.1"}}
+	unit, err := FutureJobUnit(key, product, sha, base, nil)
+	if err != nil || unit.Id != key || unit.Kind != "product" || unit.TimeoutSeconds != protocol.KindCeilings["product"] || unit.Test.Packages[0].Run != product.Select.Run {
+		t.Fatalf("the product's job is %+v (%v)", unit, err)
+	}
+	phase := KeyParts{Kind: "phase", Package: protocol.AdamicModule, Select: Select{Run: "wasi fixture-07"}, Tools: Tools{Go: "go1.27.1"}, GateTools: strings.Repeat("d", 40), Env: GateEnvironment}
+	unit, err = FutureJobUnit(key, phase, sha, base, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := protocol.Expand(protocol.Job{Name: "future", Units: []protocol.JobUnit{unit}}); err != nil || unit.Test.Phase != "wasi fixture-07" || unit.Test.Base != base || unit.Test.Tools != phase.GateTools {
+		t.Fatalf("the phase's job is %+v (%v)", unit.Test, err)
+	}
+	phase.Select.Run = GofmtPhase
+	if _, err := FutureJobUnit(key, phase, sha, base, nil); err == nil {
+		t.Error("gofmt, which no runner runs, got a job")
+	}
+	test := KeyParts{Kind: "test", Package: protocol.AdamicModule + "/internal/oracle", Env: map[string]string{"ADAMIC_GATE_CHANGED": ChangedPathsSum([]string{"b.go", "a.go"})}}
+	if unit, err := FutureJobUnit(key, test, sha, base, []string{"b.go", "a.go"}); err != nil || strings.Join(unit.Test.ChangedPaths, ",") != "a.go,b.go" {
+		t.Errorf("the changed paths came out %v (%v)", unit.Test.ChangedPaths, err)
+	}
+	if _, err := FutureJobUnit(key, test, sha, base, []string{"a.go"}); err == nil {
+		t.Error("paths that don't hash to the key were carried")
+	}
+}
+
+// ChangedPathsSum is exactly the env part KeyEnv makes of ChangedPathsFile's file, or no carried path would match.
+func TestChangedPathsSumIsTheKeysEnvPart(t *testing.T) {
+	t.Parallel()
+	paths := []string{"z/z.go", "a.go"}
+	file, err := ChangedPathsFile(t.TempDir(), paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := KeyEnv(map[string]string{"ADAMIC_GATE_CHANGED": file})
+	if err != nil || env["ADAMIC_GATE_CHANGED"] != ChangedPathsSum(paths) {
+		t.Fatalf("the key holds %s, the sum is %s (%v)", env["ADAMIC_GATE_CHANGED"], ChangedPathsSum(paths), err)
+	}
+}
+
 // KeyAt keys a planned unit's identity on another tree as PlanTree keys it there: the same tree gives the planned key,
 // and a tree where the unit's closure moved gives a new one.
 func TestKeyAtKeysTheUnitAsThePlanWould(t *testing.T) {

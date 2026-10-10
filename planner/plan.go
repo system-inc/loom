@@ -2,6 +2,8 @@ package planner
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -83,17 +85,26 @@ type ParityInputs struct {
 // ChangedPathsFile is the changed-paths file a test job's changedPaths become on the strict runner: sorted here, then
 // newline-joined with a trailing newline, as runner/strict.go writes it, so the key hashes what the tests read.
 func ChangedPathsFile(directory string, paths []string) (string, error) {
-	sorted := append([]string{}, paths...)
-	sort.Strings(sorted)
 	file, err := os.CreateTemp(directory, "changed-paths-*.txt")
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
-	if _, err := file.WriteString(strings.Join(sorted, "\n") + "\n"); err != nil {
+	if _, err := file.WriteString(changedPathsContent(paths)); err != nil {
 		return "", err
 	}
 	return file.Name(), nil
+}
+
+// ChangedPathsSum is the sha256 a unit's key holds for ADAMIC_GATE_CHANGED when the change touched paths (KeyEnv over
+// ChangedPathsFile's file), so the placer can check that the paths it carries are the ones the unit was keyed on.
+func ChangedPathsSum(paths []string) string {
+	sum := sha256.Sum256([]byte(changedPathsContent(paths)))
+	return hex.EncodeToString(sum[:])
+}
+
+func changedPathsContent(paths []string) string {
+	return strings.Join(sortedCopy(paths), "\n") + "\n"
 }
 
 // RunNames is the inverse of a parity unit's run pattern: the exact top-level test names ^(A|B)$ names, and true, or
