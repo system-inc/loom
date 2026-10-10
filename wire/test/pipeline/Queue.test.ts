@@ -12,7 +12,7 @@ function sha(seed: number): string {
 
 // A stand-in for GitHub: every sha exists, descends from main, and touches the paths it's given, unless told otherwise.
 function facts(overrides: Partial<GitFacts> = {}, diffPaths = ['internal/lower/a.go']): GitFacts {
-    return { shaExists: true, baseIsAncestor: true, baseOnMain: true, diffPaths: diffPaths, ...overrides };
+    return { shaExists: true, baseIsAncestor: true, baseOnMain: true, diffPaths: diffPaths, historyPaths: diffPaths, gateNamed: [], ...overrides };
 }
 
 // A fresh queue object per test, with git answered from a table keyed by sha and a pinned clock.
@@ -79,6 +79,10 @@ describe('the queue', function () {
             [sha(15)]: facts({}, ['internal/lower/a.go', 'internal/lower/b.go']),
             [sha(16)]: facts({}, ['stage3/fixtures/a.ts', 'stage3/fixtures/a_test.go']),
             [sha(17)]: facts({}, ['stage3/meter/m.py', 'stage3/meter/mutants/m-mutant.txt']),
+            [sha(18)]: facts({ historyPaths: ['cloud/elsewhere.sh', 'internal/lower/a.go'] }),
+            [sha(19)]: facts({ gateNamed: [{ path: 'cloud/a_test.py', users: ['cloud/run.sh'] }] }, ['cloud/a_test.py']),
+            [sha(20)]: facts({ historyPaths: undefined }),
+            [sha(21)]: facts({ baseOnMain: false }, []),
         });
         const cases: [Record<string, unknown>, string][] = [
             [change(10), 'is not on GitHub'],
@@ -90,6 +94,14 @@ describe('the queue', function () {
             [change(15), 'the paths leave out 1 of the diff base..sha: internal/lower/b.go'],
             // A harness change comes with its mutant evidence; a test file or testdata there isn't harness.
             [change(16, { paths: ['stage3/fixtures/a.ts', 'stage3/fixtures/a_test.go'] }), 'it changes test harness (stage3/fixtures/a.ts) with no mutant evidence'],
+            // A commit beyond base touching a path the final diff drops would be recorded as merged (#f8973gv).
+            [change(18), "its commits beyond base touch paths its diff doesn't: cloud/elsewhere.sh"],
+            // A Python test a non-test file names is gate logic (#xz7j9ea).
+            [change(19, { paths: ['cloud/a_test.py'] }), "cloud/a_test.py is named by cloud/run.sh, which isn't a test, so it's gate logic"],
+            // Facts with no history are no clearance: refused, never assumed clean.
+            [change(20), "git's facts carry no history or gate-logic check"],
+            // Only a witness of main can hold main red: a witness of a sha main doesn't hold is refused at the door.
+            [{ sha: sha(21), base: sha(21), owner: 'system_adamic_loom_judge', paths: [], parity: true, witness: true }, 'is not on main'],
         ];
         for (const [request, reason] of cases) {
             const response = await submit(queue, request);
@@ -101,7 +113,7 @@ describe('the queue', function () {
             log.map(function (event) {
                 return event.type;
             }),
-        ).toEqual(['change.refused', 'change.refused', 'change.refused', 'change.refused', 'change.refused', 'change.refused', 'change.refused']);
+        ).toEqual(Array(11).fill('change.refused'));
         expect(log[0]?.data).toMatchObject({ facts: { shaExists: false }, reason: `sha ${sha(10)} is not on GitHub` });
         expect((await submit(queue, change(17, { paths: ['stage3/meter/m.py', 'stage3/meter/mutants/m-mutant.txt'] }))).status).toBe(201);
     });

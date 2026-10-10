@@ -148,6 +148,10 @@ export interface GitFacts {
     diffPaths: string[];
     // The commit on main whose inverse this change's diff is, when it is a revert (the bridge's fact), else absent.
     revertOf?: string | null;
+    // Every path a non-merge commit in base..sha touches (#f8973gv). Absent, the change is refused: no history, no door.
+    historyPaths?: string[];
+    // Each Python test in the diff that a non-test file names, with those files (#xz7j9ea). Absent, refused too.
+    gateNamed?: { path: string; users: string[] }[];
 }
 
 export interface History {
@@ -485,6 +489,22 @@ export function gitRefusalOf(request: Omit<ChangeRecord, 'change' | 'submittedAt
     });
     if (harness.length > 0 && !request.paths.some((path) => /mutant/i.test(path))) {
         return `it changes test harness (${harness.slice(0, 3).join(', ')}) with no mutant evidence among its paths`;
+    }
+    // Its history, not only its tree (push-main l.796-805): a commit that touches a path the final diff drops is still
+    // recorded as merged, and a later plain merge of its branch then deletes the change.
+    if (facts.historyPaths === undefined || facts.gateNamed === undefined) {
+        return "git's facts carry no history or gate-logic check, so the change can't be cleared";
+    }
+    const history = facts.historyPaths.filter(function (path) {
+        return !diff.has(path);
+    });
+    if (history.length > 0) {
+        return `its commits beyond base touch paths its diff doesn't: ${history.slice(0, 5).join(', ')}; cherry-pick its own commits onto main instead`;
+    }
+    // A Python test a non-test file names is gate logic, and gate logic gets a gate (push-main l.787-795).
+    const named = facts.gateNamed[0];
+    if (named !== undefined) {
+        return `${named.path} is named by ${named.users.slice(0, 3).join(', ')}, which isn't a test, so it's gate logic: send it to Loom for a gate`;
     }
     return null;
 }
@@ -1593,12 +1613,23 @@ export class Queue extends DurableObject<Env> {
         if (parsed.revertOf !== undefined && parsed.revertOf !== null && (typeof parsed.revertOf !== 'string' || !shaPattern.test(parsed.revertOf))) {
             return jsonResponse(400, { error: 'revertOf is the main commit the change reverts, or null' });
         }
+        if (parsed.historyPaths !== undefined && !(Array.isArray(parsed.historyPaths) && parsed.historyPaths.every((path) => typeof path === 'string'))) {
+            return jsonResponse(400, { error: 'historyPaths is every path a non-merge commit in base..sha touches' });
+        }
+        const isNamed = function (item: unknown): item is { path: string; users: string[] } {
+            return isPlainObject(item) && typeof item.path === 'string' && Array.isArray(item.users) && item.users.every((user) => typeof user === 'string');
+        };
+        if (parsed.gateNamed !== undefined && !(Array.isArray(parsed.gateNamed) && parsed.gateNamed.every(isNamed))) {
+            return jsonResponse(400, { error: 'gateNamed is [{path, users}]: each Python test a non-test file names' });
+        }
         const facts: GitFacts = {
             shaExists: parsed.shaExists,
             baseIsAncestor: parsed.baseIsAncestor,
             baseOnMain: parsed.baseOnMain,
             diffPaths: [...(parsed.diffPaths as string[])].sort(),
             ...(typeof parsed.revertOf === 'string' ? { revertOf: parsed.revertOf } : {}),
+            ...(Array.isArray(parsed.historyPaths) ? { historyPaths: [...(parsed.historyPaths as string[])].sort() } : {}),
+            ...(Array.isArray(parsed.gateNamed) ? { gateNamed: parsed.gateNamed as { path: string; users: string[] }[] } : {}),
         };
         return this.ctx.blockConcurrencyWhile(async () => {
             const state = await this.current();
