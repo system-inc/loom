@@ -92,12 +92,17 @@ Workshop built and builds nothing (`runner/prebuilt.go`, #pcn6prz). In place of 
    same go test lines. A package whose test binary didn't compile or vet on Workshop is its red, said as go test says
    it, with Workshop's diagnostics; one that failed for Workshop's reasons is broken. A stand-in `go` comes first on
    the tests' `PATH`: read-only queries (`version`, `env`, `list` with allow-listed flags, none that builds or asks a
-   proxy) go to the runner's own go with its own settings, never the test's: `GOTOOLCHAIN=local` (which must report
-   exactly the tree's release, or the unit is unfit), `GOFLAGS=-mod=readonly`, `GOENV=off`, `GOSUMDB=off`, and
-   `GOPROXY=file://` the tree's module cache, which Workshop publishes with the tree (`go mod download all`, 63 MB for
-   adamic) and the runner fetches and unpacks once like a source, into a `GOMODCACHE` per tree that the blob cache's
-   bound counts, filled before the tests; a module it lacks breaks the unit, named. A tree with a `go.work` gets a
-   copy of it outside the source (`GOWORK`, its paths made absolute), so go writes no `go.work.sum` into the tree. Everything else is refused, and a
+   proxy) go to the runner's own go, which must report exactly the tree's release under `GOTOOLCHAIN=local` or the
+   unit is unfit. The test's own `GOFLAGS` and `GOTOOLCHAIN` pass through as it set them, so `go env` answers as it
+   did on Workshop (adamic keys products on them), when every flag is on an allow list (`-buildvcs`, `-trimpath`,
+   `-p`, `-mod=readonly`, `-mod=mod`, `-tags`, `-ldflags`, `-gcflags`, `-asmflags`, `-race`, `-cover...`,
+   `-pgo=off|auto`) and the toolchain is unset, `auto`, `local` or the tree's release. Above them the runner sets
+   `GOENV=off`, `GOSUMDB=off` and `GOPROXY=file://` the tree's module cache, which Workshop publishes with the tree
+   (`go mod download all`, 63 MB for adamic) and the runner fetches and unpacks once like a source, into a
+   `GOMODCACHE` per tree that the blob cache's bound counts, filled before the tests; a module it lacks breaks the
+   unit, named, and nothing reaches the network. A query in the tree's source, when the test set no `GOWORK`, uses a
+   copy of the tree's `go.work` outside the source (its paths made absolute), so go writes no `go.work.sum` into the
+   tree. Everything else is refused, and a
    red whose test was refused is broken, naming the command. With no go, a unit whose tests asked one is unfit.
 
 These binaries are Workshop's builds from Loom's store, not compiled on the instance from the public repository at the

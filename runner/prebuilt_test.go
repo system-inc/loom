@@ -71,6 +71,10 @@ import (
 //	the wait for the sweep lock unbounded: TestAWaitToMakeAPartialIsBounded
 //	the go.work copy unused: TestATestsModulesComeFromTheTreesModuleCache
 //	the go.work copy's paths left relative: TestAWorkspaceCopyNamesTheTreesDirectories
+//	the stand-in forcing its own GOFLAGS or GOTOOLCHAIN: TestTheTestsGoFlagsAndToolchainPassThrough
+//	GOFLAGS passed without its allow list, or any GOTOOLCHAIN passed: TestAFlagOrAToolchainOffTheListIsRefused,
+//	TestAnAllowedGoListNeverCompiles
+//	the go.work copy forced on a query outside the tree: TestAModuleOutsideTheTreeIsntForcedIntoItsWorkspace
 
 const lowerPackage = protocol.AdamicModule + "/internal/lower"
 
@@ -1243,7 +1247,7 @@ func TestAProxyQueryIsRefused(t *testing.T) {
 	fixture := newPrebuiltFixture(t)
 	fixture.withGo(t, "")
 	result, events, _ := runUnit(t, fixture.unit("^TestListUpdates$"), fixture.options(t))
-	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `the first "go list -m -u all"`) {
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `the first "go list -m -u all (`) {
 		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
 	}
 }
@@ -1356,5 +1360,39 @@ func TestAWorkspaceCopyNamesTheTreesDirectories(t *testing.T) {
 	}
 	if sums, err := os.ReadFile(filepath.Join(directory, "go.work.sum")); err != nil || string(sums) != "sums\n" {
 		t.Errorf("go.work.sum: %q %v", sums, err)
+	}
+}
+
+// The tests' own GOFLAGS and GOTOOLCHAIN reach the runner's go as they set them, when allowed, so go env answers as
+// it did on Workshop, where adamic's GoInputs keyed the products.
+func TestTheTestsGoFlagsAndToolchainPassThrough(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestGoEnv$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+}
+
+// A GOFLAGS flag off the allow list, or a toolchain neither the runner's nor the tree's, is refused and recorded, and
+// the red it makes is Loom's.
+func TestAFlagOrAToolchainOffTheListIsRefused(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	for test, refused := range map[string]string{"TestToolexec": "GOFLAGS=-toolexec=/bin/echo", "TestOtherToolchain": "GOTOOLCHAIN=go1.99.0"} {
+		result, events, _ := runUnit(t, fixture.unit("^"+test+"$"), fixture.options(t))
+		if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), refused) {
+			t.Errorf("%s: %s; errors %q", test, result.Status, errorPhases(events))
+		}
+	}
+}
+
+// A test's go list in a module of its own, outside the tree, isn't forced into the tree's workspace.
+func TestAModuleOutsideTheTreeIsntForcedIntoItsWorkspace(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestOutsideModule$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
 	}
 }

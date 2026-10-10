@@ -96,3 +96,43 @@ func TestListUpdates(t *testing.T) {
 		t.Fatalf("go list -m -u all: %v: %s", err, output)
 	}
 }
+
+// TestGoEnv asks go env for the flags and toolchain its own environment sets, as adamic's GoInputs does to key a
+// product: the answer must be its own.
+func TestGoEnv(t *testing.T) {
+	command := exec.Command("go", "env", "GOFLAGS", "GOTOOLCHAIN")
+	command.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false -trimpath -p=4", "GOTOOLCHAIN=auto")
+	if output, err := command.CombinedOutput(); err != nil || string(output) != "-buildvcs=false -trimpath -p=4\nauto\n" {
+		t.Fatalf("go env GOFLAGS GOTOOLCHAIN: %v: %q", err, output)
+	}
+}
+
+// TestToolexec asks for a go list whose GOFLAGS runs a tool of the test's choosing.
+func TestToolexec(t *testing.T) {
+	command := exec.Command("go", "list", ".")
+	command.Env = append(os.Environ(), "GOFLAGS=-toolexec=/bin/echo")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("go list: %v: %s", err, output)
+	}
+}
+
+// TestOtherToolchain asks for another Go release's go.
+func TestOtherToolchain(t *testing.T) {
+	command := exec.Command("go", "version")
+	command.Env = append(os.Environ(), "GOTOOLCHAIN=go1.99.0")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("go version: %v: %s", err, output)
+	}
+}
+
+// TestOutsideModule lists a module of the test's own, outside the tree and its workspace.
+func TestOutsideModule(t *testing.T) {
+	directory := t.TempDir()
+	os.WriteFile(filepath.Join(directory, "go.mod"), []byte("module example.com/outside\n\ngo 1.27\n"), 0o644)
+	os.WriteFile(filepath.Join(directory, "outside.go"), []byte("package outside\n"), 0o644)
+	command := exec.Command("go", "list", ".")
+	command.Dir = directory
+	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "example.com/outside") {
+		t.Fatalf("go list in a module outside the tree: %v: %s", err, output)
+	}
+}

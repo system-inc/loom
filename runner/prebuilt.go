@@ -404,13 +404,17 @@ func gunzipTo(blob io.Reader, path string) error {
 	return err
 }
 
-// delegatedEnvironment is what every go the runner runs for its tests sees above theirs, never the tests' own: the
-// runner's go and no other (GOTOOLCHAIN=local, so no Go is ever downloaded), no go env file and no GOFLAGS of the
-// test's (-mod=readonly alone, so nothing compiles or writes go.mod), the tree's module cache as the only proxy, no
-// checksum database, and a module cache per tree under the runner's root.
+// delegatedEnvironment is what every go the runner runs for its tests sees above theirs: no go env file, the tree's
+// module cache as the only proxy, no checksum database, and a module cache per tree under the runner's root, so
+// nothing reaches the network. The tests' own GOFLAGS and GOTOOLCHAIN pass through as they set them (adamic's
+// GoInputs keys products on what go env says of them, as Workshop's go said it), when the stand-in allows them.
 func delegatedEnvironment(proxy, moduleCache string) []string {
-	return []string{"GOTOOLCHAIN=local", "GOENV=off", "GOFLAGS=-mod=readonly", "GOPROXY=" + proxy, "GOSUMDB=off", "GOMODCACHE=" + moduleCache}
+	return []string{"GOENV=off", "GOPROXY=" + proxy, "GOSUMDB=off", "GOMODCACHE=" + moduleCache}
 }
+
+// runnersGo is what the runner's own go commands (the release check, filling the module cache, reading go.work) add
+// above delegatedEnvironment: the runner's go as itself, and no test's flags.
+var runnersGo = []string{"GOTOOLCHAIN=local", "GOFLAGS="}
 
 // workspaceCopy writes the tree's go.work, its paths made absolute, and its go.work.sum when it has one, into
 // directory, for the tests' go queries, and returns the copy's path: in workspace mode go writes the checksums it
@@ -506,8 +510,19 @@ list)
 	allowed=yes
 	for argument in "$@"; do case "$argument" in -deps | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=*) ;; -*) allowed=no ;; esac; done ;;
 esac
+# The test's own GOFLAGS and GOTOOLCHAIN pass through, each flag one that neither compiles, nor runs or reads anything
+# of the test's choosing, and the toolchain the tree's or the runner's own.
+set -f
+for flag in $GOFLAGS; do
+	case "$flag" in
+	-buildvcs | -buildvcs=* | -trimpath | -trimpath=* | -p=* | -mod=readonly | -mod=mod | -tags=* | -ldflags=* | -gcflags=* | -asmflags=* | -race | -race=* | -cover | -cover=* | -covermode=* | -coverpkg=* | -pgo=off | -pgo=auto) ;;
+	*) allowed=no ;;
+	esac
+done
+set +f
+case "${GOTOOLCHAIN:-auto}" in auto | local | RELEASE) ;; *) allowed=no ;; esac
 if [ "$allowed" = no ]; then
-	printf 'go %s\n' "$*" >> REFUSED
+	printf 'go %s (GOFLAGS=%s GOTOOLCHAIN=%s)\n' "$*" "$GOFLAGS" "$GOTOOLCHAIN" >> REFUSED
 	echo "loom-runner: go $*: this runner runs Workshop's prebuilt tests and never builds; a test that needs a build is Loom's to fix, never the change's" >&2
 	exit 1
 fi
@@ -551,7 +566,7 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 	} else {
 		goCommand := func(arguments ...string) ([]byte, error) {
 			command := exec.CommandContext(checkContext, real, arguments...)
-			command.Env, command.Dir = append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), directory
+			command.Env, command.Dir = append(append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), runnersGo...), directory
 			return command.CombinedOutput()
 		}
 		output, err := goCommand("env", "GOVERSION")
@@ -559,7 +574,7 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 			return goStandIn{}, fmt.Errorf("refused as unfit: the runner's go at %s is %q under GOTOOLCHAIN=local (%v), and the tree was built with %s: Loom's, never the change's",
 				real, says, err, release[0])
 		}
-		work, err := workspaceCopy(checkContext, real, append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), directory, filepath.Join(run.directory, "workspace-go"))
+		work, err := workspaceCopy(checkContext, real, append(append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), runnersGo...), directory, filepath.Join(run.directory, "workspace-go"))
 		if err != nil {
 			return goStandIn{}, fmt.Errorf("copying the tree's go.work: %w (Loom's, never the change's)", err)
 		}
@@ -586,14 +601,20 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 	for _, variable := range delegated {
 		name, value, _ := strings.Cut(variable, "=")
 		if name == "GOWORK" {
-			// A test that chose its own workspace (GOWORK=off, say) keeps it.
-			exports += "if [ -z \"$GOWORK\" ]; then GOWORK=" + shellQuote(value) + "; export GOWORK; fi\n"
+			// Only a query in the tree's source: one in a module of the test's own elsewhere would find it outside
+			// the workspace and fail. A test that chose its own workspace (GOWORK=off, say) keeps it.
+			tree := directory
+			if resolved, err := filepath.EvalSymlinks(directory); err == nil {
+				tree = resolved
+			}
+			exports += "if [ -z \"$GOWORK\" ]; then case \"$(pwd -P)\" in " + shellQuote(tree) + " | " + shellQuote(tree) + "/*) GOWORK=" +
+				shellQuote(value) + "; export GOWORK ;; esac; fi\n"
 			continue
 		}
 		exports += name + "=" + shellQuote(value) + "\nexport " + name + "\n"
 	}
 	script := strings.NewReplacer("REFUSED", shellQuote(standIn.refused), "UNANSWERED", shellQuote(standIn.unanswered),
-		"ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "ENVIRONMENT\n", exports).Replace(standInScript)
+		"ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release[0]), "ENVIRONMENT\n", exports).Replace(standInScript)
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
 		return goStandIn{}, err
 	}
