@@ -12,6 +12,10 @@ import (
 	"github.com/system-inc/loom/r2/r2test"
 )
 
+// pastFresh is an age a day past FreshFor and still within Lifecycle: a blob or ref this old is held, and must be
+// written again before anything relies on it.
+const pastFresh = FreshFor + 24*time.Hour
+
 // clocked is a builder's store on a fake bucket whose clock and the builder's both read *now.
 func clocked(t *testing.T, now *time.Time) (*r2test.Fake, Store) {
 	fake, store := serve(t)
@@ -21,7 +25,7 @@ func clocked(t *testing.T, now *time.Time) (*r2test.Fake, Store) {
 }
 
 // A blob the bucket holds from within FreshFor isn't sent again; one older is copied onto itself in the bucket, which
-// starts its 7 days over and sends no byte; one whose ETag isn't these bytes' MD5, or one gone, is sent.
+// starts its Lifecycle over and sends no byte; one whose ETag isn't these bytes' MD5, or one gone, is sent.
 func TestABlobIsSkippedOnlyWhileItIsFresh(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	fake, store := clocked(t, &now)
@@ -30,16 +34,16 @@ func TestABlobIsSkippedOnlyWhileItIsFresh(t *testing.T) {
 	if err != nil || fake.Count("PUT", "blobs/") != 1 || !fake.Modified("blobs/"+sum).Equal(now) {
 		t.Fatalf("a new blob: %v %v", err, fake.Requests())
 	}
-	now = now.Add(4 * 24 * time.Hour)
-	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 1 {
-		t.Fatalf("a blob 4 days old was sent again: %v %v", err, fake.Requests())
+	now = now.Add(FreshFor - 24*time.Hour)
+	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 1 || fake.Count("COPY", "blobs/") != 0 {
+		t.Fatalf("a blob a day short of FreshFor was sent or copied again: %v %v", err, fake.Requests())
 	}
 	now = now.Add(26 * time.Hour)
 	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 1 || fake.Count("COPY", "blobs/") != 1 || !fake.Modified("blobs/"+sum).Equal(now) {
-		t.Fatalf("a blob 5 days and 2 hours old wasn't refreshed in the bucket: %v %v", err, fake.Requests())
+		t.Fatalf("a blob 2 hours past FreshFor wasn't refreshed in the bucket: %v %v", err, fake.Requests())
 	}
 	// Held under its name but not these bytes, as a multipart upload's ETag would be: sent, never trusted.
-	fake.Set("blobs/"+sum, []byte("other bytes"), now.Add(-6*24*time.Hour))
+	fake.Set("blobs/"+sum, []byte("other bytes"), now.Add(-pastFresh))
 	if _, err = store.PutBlob(content); err != nil || fake.Count("PUT", "blobs/") != 2 || fake.Count("COPY", "blobs/") != 1 {
 		t.Fatalf("a held blob of other bytes wasn't sent: %v %v", err, fake.Requests())
 	}
@@ -51,7 +55,7 @@ func TestABlobIsSkippedOnlyWhileItIsFresh(t *testing.T) {
 		t.Fatalf("a blob the lifecycle took wasn't sent again: %v %v", err, fake.Requests())
 	}
 	// A blob the lifecycle takes between the look and the refresh is sent.
-	fake.Set("blobs/"+sum, content, now.Add(-6*24*time.Hour))
+	fake.Set("blobs/"+sum, content, now.Add(-pastFresh))
 	fake.Before = func(method, key string) {
 		if method == "COPY" {
 			fake.Delete(key)
@@ -62,14 +66,40 @@ func TestABlobIsSkippedOnlyWhileItIsFresh(t *testing.T) {
 	}
 }
 
-// A ref is only ever written after its blob is fresh: a product whose archive went up six days ago (an earlier
-// build's, the same bytes) gets its blob refreshed before the ref that names it is written.
+// A product held and asked for every day is copied once in each Lifecycle, in its last days, and never reaches its
+// end: FreshFor takes most of the lifecycle, so a held object costs one copy a lifecycle, not one every few days.
+// Mutants that each fail it: FreshFor at 5 days (a copy every fifth day); FreshFor at Lifecycle (expired first).
+func TestAHeldProductIsCopiedOnceALifecycle(t *testing.T) {
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	fake, store := clocked(t, &now)
+	key := keyOf("p")
+	archive := tarGzip(t, entry{name: key + "/tool", body: "tool"})
+	if _, err := store.Publish(key, archive); err != nil {
+		t.Fatal(err)
+	}
+	for end := now.Add(2 * Lifecycle); now.Before(end); now = now.Add(24 * time.Hour) {
+		for _, object := range []string{"blobs/" + digest(archive), "refs/action/" + key} {
+			if age := now.Sub(fake.Modified(object)); age >= Lifecycle {
+				t.Fatalf("%s reached %v, past Lifecycle", object, age)
+			}
+		}
+		if sum, stored, err := store.Stored(key); err != nil || !stored || sum != digest(archive) {
+			t.Fatalf("a held product on %v: %s %v %v", now, sum, stored, err)
+		}
+	}
+	if blobs, refs := fake.Count("COPY", "blobs/"), fake.Count("COPY", "refs/"); blobs > 2 || refs > 2 || fake.Count("PUT", "") != 2 {
+		t.Fatalf("two lifecycles of daily use copied the blob %d times and the ref %d, and put %d", blobs, refs, fake.Count("PUT", ""))
+	}
+}
+
+// A ref is only ever written after its blob is fresh: a product whose archive went up more than FreshFor ago (an
+// earlier build's, the same bytes) gets its blob refreshed before the ref that names it is written.
 func TestAFreshRefNeverNamesABlobAboutToExpire(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	fake, store := clocked(t, &now)
 	archive := tarGzip(t, entry{name: keyOf("p") + "/tool", body: "tool"})
 	key := keyOf("p")
-	fake.Set("blobs/"+digest(archive), archive, now.Add(-6*24*time.Hour))
+	fake.Set("blobs/"+digest(archive), archive, now.Add(-pastFresh))
 	if sum, err := store.Publish(key, archive); err != nil || sum != digest(archive) {
 		t.Fatalf("%s %v", sum, err)
 	}
@@ -83,7 +113,7 @@ func TestAFreshRefNeverNamesABlobAboutToExpire(t *testing.T) {
 	}
 	// A ref already held for the same archive is found, and it and its blob, both now past FreshFor, are refreshed in
 	// the bucket, the ref only over the object read (its ETag), blob first.
-	now = now.Add(5*24*time.Hour + time.Minute)
+	now = now.Add(FreshFor + time.Minute)
 	fake.ResetRequests()
 	if _, err := store.Publish(key, archive); err != nil {
 		t.Fatal(err)
@@ -98,10 +128,10 @@ func TestAFreshRefNeverNamesABlobAboutToExpire(t *testing.T) {
 	}
 	// A builder holding the action, its blob and ref gone stale, calls it stored and refreshes both, the blob once its
 	// bytes are read and checked: a held product is refreshed, never rebuilt.
-	now = now.Add(5*24*time.Hour + time.Minute)
+	now = now.Add(FreshFor + time.Minute)
 	fake.ResetRequests()
 	if sum, stored, err := store.Stored(key); err != nil || !stored || sum != digest(archive) {
-		t.Fatalf("a held product 5 days old: %s %v %v", sum, stored, err)
+		t.Fatalf("a held product past FreshFor: %s %v %v", sum, stored, err)
 	}
 	if fake.Count("PUT", "") != 0 || fake.Count("COPY", "blobs/") != 1 || fake.Count("COPY", "refs/") != 1 || !fake.Modified("blobs/"+digest(archive)).Equal(now) || !fake.Modified("refs/action/"+key).Equal(now) {
 		t.Fatalf("a stale held product wasn't refreshed: %v", fake.Requests())
@@ -135,7 +165,7 @@ func TestARefRefreshIsWrittenOnlyOverTheRefRead(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fake, store := clocked(t, &now)
 			fake.Set("blobs/"+digest(archive), archive, now)
-			fake.Set("refs/action/"+key, []byte(digest(archive)), now.Add(-6*24*time.Hour))
+			fake.Set("refs/action/"+key, []byte(digest(archive)), now.Add(-pastFresh))
 			fake.Before = func(method, path string) {
 				if method == "COPY" && path == "refs/action/"+key {
 					fake.Set(path, []byte(theirs+"\n"), now)
@@ -212,8 +242,8 @@ func TestTheAuditFindsAFreshRefWhoseBlobIsGoneOrAboutToBe(t *testing.T) {
 		t.Fatalf("an honest store: %+v %v", report, err)
 	}
 	fake.Delete("blobs/" + digest([]byte("archive a")))
-	fake.Set("blobs/"+digest([]byte("archive b")), []byte("archive b"), now.Add(-6*24*time.Hour))
-	fake.Set("refs/action/"+keyOf("c"), []byte(digest([]byte("archive c"))), now.Add(-6*24*time.Hour))
+	fake.Set("blobs/"+digest([]byte("archive b")), []byte("archive b"), now.Add(-pastFresh))
+	fake.Set("refs/action/"+keyOf("c"), []byte(digest([]byte("archive c"))), now.Add(-pastFresh))
 	fake.Delete("blobs/" + digest([]byte("archive c")))
 	report, err := Audit(store)
 	if err != nil || !report.Drift() || !slices.Equal(report.Dangling, []string{keyOf("a")}) || !slices.Equal(report.Stale, []string{keyOf("b")}) || report.Expiring != 1 {
@@ -273,7 +303,7 @@ func TestARefWhoseBlobIsGoneIsPointedAtTheRebuild(t *testing.T) {
 	gone := keyOf("an archive the lifecycle took")
 	rebuilt := tarGzip(t, entry{name: key + "/tool", body: "built again, other bytes"})
 	fake, store := serve(t)
-	fake.Set("refs/action/"+key, []byte(gone), time.Now().Add(-6*24*time.Hour))
+	fake.Set("refs/action/"+key, []byte(gone), time.Now().Add(-pastFresh))
 	if sum, err := store.Publish(key, rebuilt); err != nil || sum != digest(rebuilt) {
 		t.Fatalf("a rebuild over a ref whose blob is gone: %s %v", sum, err)
 	}
@@ -310,7 +340,7 @@ func TestARefWhoseBlobIsGoneIsPointedAtTheRebuild(t *testing.T) {
 // and the worse but whole one takes its place.
 func TestAKeptIndexAndEverythingItNamesAreKeptFresh(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
-	old := now.Add(-6 * 24 * time.Hour)
+	old := now.Add(-pastFresh)
 	source, product, binary := []byte("a source chunk"), []byte("a product's archive"), []byte("a test binary")
 	chunks := []SourceChunk{{Blob: digest(source), First: "a", Last: "a", Files: 1, Bytes: int64(len(source))}}
 	better := TreeIndex{Format: TreeIndexFormat, Tree: "t", Source: chunks, Products: map[string]string{keyOf("p"): digest(product)},

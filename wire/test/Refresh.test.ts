@@ -1,12 +1,13 @@
 import { env } from 'cloudflare:workers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { blobKey, FreshForMilliseconds } from '../source/Blobs';
+import { blobKey, FreshForMilliseconds, RunsFreshForMilliseconds } from '../source/Blobs';
 import { blobPath, call, freshRun, randomBytes, sha256Hex, token } from './Helpers';
 
-// Both buckets delete what they hold 7 days after its upload, so a held object written or asked for again past
-// FreshFor is written again onto itself in R2, its own bytes, which starts its 7 days over; one within FreshFor is left
-// as it is. R2 stamps an upload with its own clock, so these move the Worker's clock (Date) past FreshFor instead,
-// which ages everything already held.
+// Both buckets delete what they hold a fixed time after its upload (loom-runs 7 days, loom-artifacts 30), so a held
+// object written or asked for again past its bucket's freshness (RunsFreshForMilliseconds for Store,
+// FreshForMilliseconds for PublicStore) is written again onto itself in R2, its own bytes, which starts its bucket's
+// days over; one within it is left as it is. R2 stamps an upload with its own clock, so these move the Worker's clock
+// (Date) past the freshness instead, which ages everything already held.
 function age(milliseconds: number): void {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(Date.now() + milliseconds);
@@ -16,7 +17,10 @@ afterEach(function () {
     vi.useRealTimers();
 });
 
-const stale = FreshForMilliseconds + 60 * 60 * 1000;
+const hour = 60 * 60 * 1000;
+// Past each bucket's freshness by an hour.
+const runStale = RunsFreshForMilliseconds + hour;
+const publicStale = FreshForMilliseconds + hour;
 
 // A write moves an object's upload time on: R2's clock is real, and the Worker's has been moved ahead of it, so a
 // rewrite is anything uploaded after the original.
@@ -43,7 +47,7 @@ describe('a held blob written again', function () {
         expect(await again.json()).toMatchObject({ stored: false, refreshed: false });
         expect(await uploaded(env.Store, blobKey(sha256))).toBe(first?.uploaded.getTime());
 
-        age(stale);
+        age(runStale);
         const refreshed = await call(blobPath(run, sha256), { method: 'PUT', bearer: await token(run, 'coordinator'), body: body });
         expect(refreshed.status).toBe(200);
         expect(await refreshed.json()).toMatchObject({ sha256: sha256, bytes: body.length, stored: false, refreshed: true });
@@ -63,7 +67,7 @@ describe('a held blob written again', function () {
         expect((await call(path, { method: 'HEAD', bearer: await token(freshRun(), 'coordinator') })).status).toBe(200);
         expect(await uploaded(env.PublicStore, blobKey(sha256))).toBe(first);
 
-        age(stale);
+        age(publicStale);
         const head = await call(path, { method: 'HEAD', bearer: await token('workshop', 'publish') });
         expect(head.status).toBe(200);
         expect(head.headers.get('Content-Length')).toBe('1024');
@@ -82,7 +86,7 @@ describe('a held blob written again', function () {
         const sha256 = await sha256Hex(body);
         expect((await call(blobPath(run, sha256), { method: 'PUT', bearer: await token(run, 'coordinator'), body: body })).status).toBe(201);
         const first = await uploaded(env.Store, blobKey(sha256));
-        age(stale);
+        age(runStale);
         expect((await call(blobPath(run, sha256), { method: 'HEAD', bearer: await token(run, 'coordinator') })).status).toBe(200);
         expect(await uploaded(env.Store, blobKey(sha256))).toBeGreaterThan(first);
     });
@@ -91,7 +95,7 @@ describe('a held blob written again', function () {
         const body = randomBytes(512);
         const sha256 = await sha256Hex(body);
         await env.PublicStore.put(blobKey(sha256), randomBytes(512));
-        age(stale);
+        age(publicStale);
         const put = await call(`/public/blobs/${sha256}`, { method: 'PUT', bearer: await token('workshop', 'publish'), body: body });
         expect(put.status).toBe(201);
         expect(new Uint8Array((await (await env.PublicStore.get(blobKey(sha256)))?.arrayBuffer()) ?? new ArrayBuffer(0))).toEqual(body);
@@ -113,7 +117,7 @@ describe('a held ref written again', function () {
         expect(await fresh.json()).toMatchObject({ created: false, refreshed: false });
         expect(await uploaded(env.PublicStore, `refs/build/${name}`)).toBe(firstRef);
 
-        age(stale);
+        age(publicStale);
         const later = await token('workshop', 'publish');
         const refreshed = await call(ref, { method: 'PUT', bearer: later, body: sha256 });
         expect(refreshed.status).toBe(200);
@@ -124,6 +128,38 @@ describe('a held ref written again', function () {
         // A stale ref asked to change is still refused, and left as it is.
         const other = await sha256Hex(randomBytes(16));
         expect((await call(ref, { method: 'PUT', bearer: later, body: other })).status).toBe(409);
+    });
+});
+
+describe('each bucket by its own lifecycle', function () {
+    // Past loom-runs' freshness and within loom-artifacts': a run's blob is refreshed, and a public blob and ref are
+    // left as they are, so an artifact is copied once in its 30 days, not every few days as a run's blob is in its 7.
+    // Mutants that each fail it: FreshForMilliseconds at 5 days; Store refreshed by FreshForMilliseconds.
+    it("refreshes a run's blob and leaves an artifact that is fresh by its own lifecycle", async function () {
+        const run = freshRun();
+        const runBody = randomBytes(48);
+        const runSha256 = await sha256Hex(runBody);
+        const coordinator = await token(run, 'coordinator');
+        expect((await call(blobPath(run, runSha256), { method: 'PUT', bearer: coordinator, body: runBody })).status).toBe(201);
+        const publicBody = randomBytes(48);
+        const publicSha256 = await sha256Hex(publicBody);
+        const name = await sha256Hex(randomBytes(8));
+        const publisher = await token('workshop', 'publish');
+        expect((await call(`/public/blobs/${publicSha256}`, { method: 'PUT', bearer: publisher, body: publicBody })).status).toBe(201);
+        expect((await call(`/public/refs/build/${name}`, { method: 'PUT', bearer: publisher, body: publicSha256 })).status).toBe(201);
+        const firstRun = await uploaded(env.Store, blobKey(runSha256));
+        const firstPublic = await uploaded(env.PublicStore, blobKey(publicSha256));
+        const firstRef = await uploaded(env.PublicStore, `refs/build/${name}`);
+
+        age(runStale);
+        expect((await call(blobPath(run, runSha256), { method: 'HEAD', bearer: await token(run, 'coordinator') })).status).toBe(200);
+        expect(await uploaded(env.Store, blobKey(runSha256))).toBeGreaterThan(firstRun);
+        const later = await token('workshop', 'publish');
+        expect((await call(`/public/blobs/${publicSha256}`, { method: 'HEAD', bearer: later })).status).toBe(200);
+        const ref = await call(`/public/refs/build/${name}`, { method: 'PUT', bearer: later, body: publicSha256 });
+        expect(await ref.json()).toMatchObject({ created: false, refreshed: false });
+        expect(await uploaded(env.PublicStore, blobKey(publicSha256))).toBe(firstPublic);
+        expect(await uploaded(env.PublicStore, `refs/build/${name}`)).toBe(firstRef);
     });
 });
 
@@ -139,7 +175,7 @@ describe('a cache entry', function () {
         // Each blob against its own first upload: the event log went up after the output, so it can't stand in for it.
         const firstOutput = await uploaded(env.Store, blobKey(await sha256Hex(output)));
         const firstEvents = await uploaded(env.Store, blobKey(await sha256Hex(events)));
-        age(stale);
+        age(runStale);
         const key = await sha256Hex(randomBytes(32));
         const entry = {
             key: key,

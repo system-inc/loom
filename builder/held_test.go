@@ -177,10 +177,10 @@ func TestTwoTreesSharingAProductBuildItOnce(t *testing.T) {
 		t.Fatalf("the product went up %d times and its ref %d: %v", blobs, refs, fake.Requests())
 	}
 
-	// Six days on, the blob and its ref are about to expire: the third tree fetches the blob, uses it, and refreshes
-	// both in the bucket.
-	fake.Set("blobs/"+archive, mustObject(t, fake, "blobs/"+archive), time.Now().Add(-6*24*time.Hour))
-	fake.Set("refs/action/"+sharedProduct, mustObject(t, fake, "refs/action/"+sharedProduct), time.Now().Add(-6*24*time.Hour))
+	// A day past FreshFor, the blob and its ref are in their last days: the third tree fetches the blob, uses it, and
+	// refreshes both in the bucket.
+	fake.Set("blobs/"+archive, mustObject(t, fake, "blobs/"+archive), time.Now().Add(-pastFresh))
+	fake.Set("refs/action/"+sharedProduct, mustObject(t, fake, "refs/action/"+sharedProduct), time.Now().Add(-pastFresh))
 	third, log := heldBuild(t, store, "3")
 	if !strings.Contains(log, " fetched ") || third.Products[sharedProduct] != archive {
 		t.Fatalf("the third tree: %q, %s", log, third.Products[sharedProduct])
@@ -254,7 +254,7 @@ func TestHeldProductsAsksAgainAfterAFailure(t *testing.T) {
 	fake, store := serve(t)
 	archive := tarGzip(t, entry{name: sharedProduct + "/tool", body: "the tool"}, entry{name: sharedProduct + ".inputs", body: "name shared"})
 	fake.Set("blobs/"+digest(archive), archive, time.Now())
-	fake.Set("refs/action/"+sharedProduct, []byte(digest(archive)), time.Now().Add(-6*24*time.Hour))
+	fake.Set("refs/action/"+sharedProduct, []byte(digest(archive)), time.Now().Add(-pastFresh))
 	var refuse atomic.Bool
 	refuse.Store(true)
 	fake.Answer = func(method, key string) int {

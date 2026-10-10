@@ -32,17 +32,23 @@ import (
 //	trees/<treeKey>.json      a tree's index (TreeIndex): each package's binary, the products its tests read, the
 //	                          source's chunks
 //
-// The bucket's lifecycle deletes every blob, ref and tree index 7 days after its upload (trees/ by Loom's own rule,
-// Oct 10, so old indexes naming expired blobs don't pile up). So a blob or ref the store holds is relied on as it is
-// only while it was uploaded within FreshFor; an older one a build relies on is copied onto itself in the bucket
-// (r2.Bucket.Refresh), the same bytes and no byte sent, which starts its 7 days over (a held product is refreshed, never
-// rebuilt), and a ref is only ever written after its blob is fresh, so no ref written today names a blob that vanishes
-// tomorrow. A refresh lands only over the object whose bytes were checked: its ETag, read with the bytes or matched to
-// this build's own.
+// The bucket's lifecycle deletes every blob, ref and tree index 30 days (Lifecycle) after its upload (trees/ by Loom's
+// own rule, Oct 10, so old indexes naming expired blobs don't pile up). So a blob or ref the store holds is relied on
+// as it is only while it was uploaded within FreshFor; an older one a build relies on is copied onto itself in the
+// bucket (r2.Bucket.Refresh), the same bytes and no byte sent, which starts its 30 days over (a held product is
+// refreshed, never rebuilt), and a ref is only ever written after its blob is fresh, so no ref written today names a
+// blob that vanishes tomorrow. A refresh lands only over the object whose bytes were checked: its ETag, read with the
+// bytes or matched to this build's own.
+
+// Lifecycle is how long the bucket keeps a blob, ref or tree index after its upload: its rules blobs-expire-30d,
+// refs-expire-30d and trees-expire-30d (Kirk, Oct 10). loom-runs, the run logs' bucket, keeps its own 7 days, and no
+// builder writes it.
+const Lifecycle = 30 * 24 * time.Hour
 
 // FreshFor is how recently a blob or ref must have been uploaded for a builder to rely on it without writing it
-// again, leaving two of the lifecycle's 7 days for the runners that read it.
-const FreshFor = 5 * 24 * time.Hour
+// again, leaving the last five days of Lifecycle for the runners that read it: a held object is copied once in its
+// last five days, not every day after its first few.
+const FreshFor = Lifecycle - 5*24*time.Hour
 
 // PublicRead is the action store's public domain, which anyone reads with no credentials.
 const PublicRead = "https://artifacts.loom.system.inc"
@@ -271,8 +277,8 @@ func (store Store) heldRef(key string) (heldRef, error) {
 }
 
 // refreshRef keeps a held ref fresh: one written more than FreshFor ago is copied onto itself, only over the very
-// object read (its ETag), so a runner that reads it has two days, as a blob's reader does. A ref another builder
-// rewrote first is read again and must still name sum.
+// object read (its ETag), so a runner that reads it has the days the lifecycle leaves past FreshFor, as a blob's
+// reader does. A ref another builder rewrote first is read again and must still name sum.
 func (store Store) refreshRef(key string, held heldRef) error {
 	if store.now().Sub(held.Object.Modified) < FreshFor {
 		return nil
