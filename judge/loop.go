@@ -6,6 +6,7 @@ package judge
 // collaborator is an interface, so a named stub stands in until the real part lands (StubFabric, StubQueue below).
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -565,20 +566,35 @@ func unrun(named []string, tests []TestOutcome) []string {
 
 // reuse makes a reused unit's record: passed, naming the verdict it reuses, and carrying that verdict's tests object
 // whole (Loom, Oct 10 01:19Z): the same key is the same verdict, so parity on a reused unit still compares its tests.
+// The record names the run its tests came from, which is the index's newest pass for the key: once another candidate
+// decided the same key after the plan was taken, that's no longer the run the plan named (#ybxadkf, ce0ef503 at 23:12Z).
+// A key whose newest verdict isn't a pass backs no reuse any more: the unit is void, and the run with it, never stuck.
 func (loop Loop) reuse(verdict *Verdict, unit PlanUnit) error {
 	if loop.Reused == nil {
 		return fmt.Errorf("unit %s is reused, and nothing reads the verdict it reuses", unit.UnitKey)
 	}
-	tests, err := loop.Reused.Tests(unit.UnitKey, unit.Reused)
+	reused, err := loop.Reused.Tests(unit.UnitKey, unit.Reused)
 	if err != nil {
 		return fmt.Errorf("unit %s reuses %s: %w", unit.UnitKey, unit.Reused, err)
 	}
-	verdict.Status, verdict.RuleId, verdict.reusedTests = Passed, Rule+" reused "+unit.Reused, tests
+	if reused.Unbacked != "" {
+		verdict.Status, verdict.Cause, verdict.Infra, verdict.RuleId = Void, CauseInfra, InfraRefused, Rule+" reused "+unit.Reused+" unbacked"
+		return nil
+	}
+	verdict.Status, verdict.RuleId, verdict.reusedTests = Passed, Rule+" reused "+cmp.Or(reused.Run, unit.Reused), reused.Tests
 	return nil
 }
 
-// ReusedRecords reads the tests object of the verdict a reused unit reuses: the index's passed verdict for its key, from
-// run reused (PlanUnit.Reused; "reused" when the listing named no run).
+// ReusedRecords reads the verdict a reused unit reuses: the index's newest verdict for its key (PlanUnit.Reused names
+// the run the plan named; "reused" when the listing named none).
 type ReusedRecords interface {
-	Tests(unitKey, reused string) (json.RawMessage, error)
+	Tests(unitKey, reused string) (ReusedVerdict, error)
+}
+
+// A ReusedVerdict is the index's newest pass for a reused unit's key: its tests object and the run that posted it. Unbacked
+// says why there is none to reuse (the key's newest verdict failed or is void), and then Tests and Run are empty.
+type ReusedVerdict struct {
+	Tests    json.RawMessage
+	Run      string
+	Unbacked string
 }

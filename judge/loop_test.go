@@ -27,8 +27,8 @@ func (runs stubRuns) Finished(run, unitKey string) (Finished, bool, error) {
 // stubReused answers every reused unit with one tests object, naming the run it reuses.
 type stubReused struct{}
 
-func (stubReused) Tests(unitKey, reused string) (json.RawMessage, error) {
-	return json.RawMessage(`{"failed":0,"inline":[],"passed":7,"sha256":"` + strings.Repeat("7", 64) + `","skipped":0}`), nil
+func (stubReused) Tests(unitKey, reused string) (ReusedVerdict, error) {
+	return ReusedVerdict{Tests: json.RawMessage(`{"failed":0,"inline":[],"passed":7,"sha256":"` + strings.Repeat("7", 64) + `","skipped":0}`), Run: reused}, nil
 }
 
 type stubMain map[string][]TestOutcome
@@ -790,5 +790,39 @@ func TestASlowPassThroughTheLoop(t *testing.T) {
 	post := h.judge(t, PlanUnit{UnitKey: "u", Kind: KindTest})
 	if strings.Contains(string(post.Verdicts[0]), "warnings") || len(h.fabric.Asked) != 0 {
 		t.Fatalf("a fast pass's record %s, placements %v: want no warnings field and nothing rerun", post.Verdicts[0], h.fabric.Asked)
+	}
+}
+
+// stubIndex answers each reused key with one ReusedVerdict.
+type stubIndex map[string]ReusedVerdict
+
+func (index stubIndex) Tests(unitKey, reused string) (ReusedVerdict, error) {
+	return index[unitKey], nil
+}
+
+// A reused unit's record names the run its tests came from, the key's newest pass even when the plan named an earlier
+// one; a key whose newest verdict isn't a pass makes the unit void and the run void, posted, never a stuck future.
+func TestAReuseFollowsItsKeysNewestPassAndAnUnbackedOneIsVoid(t *testing.T) {
+	tests := json.RawMessage(`{"failed":0,"inline":[],"passed":4,"sha256":"` + strings.Repeat("4", 64) + `","skipped":0}`)
+	h := newHarness()
+	h.runs["v"] = passed()
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 10, 23, 20, 0, 0, time.UTC) },
+		Reused: stubIndex{"later": {Tests: tests, Run: "future-3282-1"}, "gone": {Unbacked: "the index's newest verdict for gone is failed, from run future-3282-1"}}}
+	post, err := loop.JudgeFuture(Job{Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1",
+		Plan: []PlanUnit{{UnitKey: "later", Reused: "future-ebdb-4"}, {UnitKey: "v"}}})
+	if err != nil || post.Decision.Status != "green" {
+		t.Fatalf("post %+v %v, want green", post.Decision, err)
+	}
+	if record := string(post.Verdicts[0]); !strings.Contains(record, `"rule":"judge-v1 reused future-3282-1"`) || !strings.Contains(record, `"passed":4`) {
+		t.Fatalf("the reused record %s, want the newest pass's run and tests", record)
+	}
+	h = newHarness()
+	loop.Queue = h.queue
+	post, err = loop.JudgeFuture(Job{Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1", Plan: []PlanUnit{{UnitKey: "gone", Reused: "future-ebdb-4"}}})
+	if err != nil || post.Decision.Status != "void" || len(h.queue.Posts[futureTree]) != 1 {
+		t.Fatalf("post %+v %v, want posted void", post.Decision, err)
+	}
+	if record := recordOf(t, post, "gone"); record.Status != Void || record.Infra != InfraRefused {
+		t.Fatalf("the unbacked record %+v, want void refused", record)
 	}
 }
