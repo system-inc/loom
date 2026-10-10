@@ -37,7 +37,7 @@ func TestJobUnitForRunsThePlannedUnitAtACommit(t *testing.T) {
 
 // A future's job unit is every kind under its key's id: a product as its package's go test under the product ceiling,
 // a phase as run.py's line at the key's tools merged onto the base, and changed paths carried only when they hash to
-// the key. gofmt, which no runner runs yet, is refused.
+// the key. gofmt's phase is the one phase that carries them (TestTheGofmtPhaseCarriesTheChangesPathsOnlyWhenTheyMatch).
 func TestFutureJobUnitSaysEveryKindExactly(t *testing.T) {
 	t.Parallel()
 	sha, base, key := strings.Repeat("c", 40), strings.Repeat("b", 40), strings.Repeat("1", 64)
@@ -54,16 +54,48 @@ func TestFutureJobUnitSaysEveryKindExactly(t *testing.T) {
 	if _, err := protocol.Expand(protocol.Job{Name: "future", Units: []protocol.JobUnit{unit}}); err != nil || unit.Test.Phase != "wasi fixture-07" || unit.Test.Base != base || unit.Test.Tools != phase.GateTools {
 		t.Fatalf("the phase's job is %+v (%v)", unit.Test, err)
 	}
-	phase.Select.Run = GofmtPhase
-	if _, err := FutureJobUnit(key, phase, sha, base, nil); err == nil {
-		t.Error("gofmt, which no runner runs, got a job")
-	}
 	test := KeyParts{Kind: "test", Package: protocol.AdamicModule + "/internal/oracle", Env: map[string]string{"ADAMIC_GATE_CHANGED": ChangedPathsSum([]string{"b.go", "a.go"})}}
 	if unit, err := FutureJobUnit(key, test, sha, base, []string{"b.go", "a.go"}); err != nil || strings.Join(unit.Test.ChangedPaths, ",") != "a.go,b.go" {
 		t.Errorf("the changed paths came out %v (%v)", unit.Test.ChangedPaths, err)
 	}
 	if _, err := FutureJobUnit(key, test, sha, base, []string{"a.go"}); err == nil {
 		t.Error("paths that don't hash to the key were carried")
+	}
+}
+
+// gofmt's phase unit, which the runner runs itself, is a phase job carrying the change's paths, sorted, when they hash
+// to its key's ADAMIC_GATE_CHANGED; paths that don't, or none for a key that holds them, are refused, and no other
+// phase carries paths at all. Mutant: phaseJob accepting mismatched paths.
+func TestTheGofmtPhaseCarriesTheChangesPathsOnlyWhenTheyMatch(t *testing.T) {
+	t.Parallel()
+	sha, base, key := strings.Repeat("c", 40), strings.Repeat("b", 40), strings.Repeat("1", 64)
+	env := map[string]string{"ADAMIC_GATE_CHANGED": ChangedPathsSum([]string{"b.go", "a.go"})}
+	for name, value := range GateEnvironment {
+		env[name] = value
+	}
+	gofmt := KeyParts{Kind: "phase", Package: protocol.AdamicModule, Select: Select{Run: protocol.GofmtPhase}, Tools: Tools{Go: "go1.27.1"}, GateTools: strings.Repeat("d", 40), Env: env}
+	unit, err := FutureJobUnit(key, gofmt, sha, base, []string{"b.go", "a.go"})
+	if err != nil {
+		t.Fatalf("gofmt keyed on its change's paths got no job: %v", err)
+	}
+	if _, err := protocol.Expand(protocol.Job{Name: "future", Units: []protocol.JobUnit{unit}}); err != nil || unit.Kind != "phase" || unit.Test.Phase != protocol.GofmtPhase ||
+		strings.Join(unit.Test.ChangedPaths, ",") != "a.go,b.go" || unit.Test.Base != base || unit.Test.Tools != gofmt.GateTools {
+		t.Fatalf("gofmt's job is %+v (%v)", unit.Test, err)
+	}
+	for name, changed := range map[string][]string{"a path short": {"a.go"}, "another path": {"a.go", "c.go"}, "no paths": {}, "no record": nil} {
+		if _, err := FutureJobUnit(key, gofmt, sha, base, changed); err == nil {
+			t.Errorf("%s: gofmt was carried paths that don't hash to its key", name)
+		}
+	}
+	vet := gofmt
+	vet.Select.Run = "vet"
+	if _, err := FutureJobUnit(key, vet, sha, base, []string{"b.go", "a.go"}); err == nil {
+		t.Error("a run.py phase keyed on changed paths got a job carrying them")
+	}
+	// Keyed on no paths (the change touched none), gofmt carries none, and the runner passes it with nothing to check.
+	gofmt.Env = GateEnvironment
+	if unit, err := FutureJobUnit(key, gofmt, sha, base, nil); err != nil || len(unit.Test.ChangedPaths) != 0 {
+		t.Errorf("gofmt keyed on no paths came out %+v (%v)", unit.Test, err)
 	}
 }
 

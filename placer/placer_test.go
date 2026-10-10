@@ -194,17 +194,28 @@ func TestAUnitNeedingAToolNoPoolHasIsReportedNotDropped(t *testing.T) {
 	}
 }
 
-// A kind the runners can't run yet is reported the same way: gofmt is a planned phase run.py doesn't hold.
-func TestAPhaseWithNoJobIsReported(t *testing.T) {
+// gofmt's phase unit, keyed on the change's paths, is placed on the phase pool carrying them; paths that don't hash
+// to its key void the attempt naming the mismatch.
+func TestTheGofmtPhaseIsPlacedCarryingTheChangesPaths(t *testing.T) {
 	units := everyKind(t)
 	var parts planner.KeyParts
 	json.Unmarshal(units[2].KeyParts, &parts)
-	parts.Select.Run = planner.GofmtPhase
+	parts.Select.Run = protocol.GofmtPhase
+	parts.Env["ADAMIC_GATE_CHANGED"] = planner.ChangedPathsSum([]string{"b.go", "a.go"})
 	units[2] = plannedUnit(t, phaseKey, "phase:gofmt", "run", parts)
-	h := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: units}}, &MemoryLedger{})
-	h.placeOnce(t, 0)
-	if len(h.placements) != 0 || len(h.voids) != 1 || !strings.Contains(h.voids[0], `phase unit phase:gofmt: phase "gofmt" has no job yet`) {
-		t.Fatalf("placements %d, voids %v", len(h.placements), h.voids)
+	future := judge.PlannedFuture{Future: tree, Base: base, Attempt: 1, Change: judge.PlannedChange{Change: "chg_A"}, Units: units}
+	h := newHarness(t, listedFutures{future}, &MemoryLedger{})
+	h.placer.ChangePaths = func(change string) ([]string, error) { return []string{"a.go", "b.go"}, nil }
+	h.placeOnce(t, 1)
+	gofmt, placed := unitOf(t, h.placements[0], phaseKey)
+	if gofmt.Test.Phase != protocol.GofmtPhase || strings.Join(gofmt.Test.ChangedPaths, ",") != "a.go,b.go" || strings.Join(placed.Pools, ",") != "box-phase" {
+		t.Fatalf("gofmt is %+v on %v", gofmt.Test, placed.Pools)
+	}
+	other := newHarness(t, listedFutures{future}, &MemoryLedger{})
+	other.placer.ChangePaths = func(change string) ([]string, error) { return []string{"a.go"}, nil }
+	other.placeOnce(t, 0)
+	if len(other.voids) != 1 || !strings.Contains(other.voids[0], `phase unit phase:gofmt: phase "gofmt" is keyed on changed paths`) {
+		t.Fatalf("voids %v, want the mismatch named", other.voids)
 	}
 }
 

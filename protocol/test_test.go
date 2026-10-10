@@ -95,7 +95,7 @@ func phaseJob() TestJob {
 
 // A phase job is the same checked data in its other form: a phase line and the gate tools' commit, never packages.
 func TestAPhaseJobIsChecked(t *testing.T) {
-	for _, phase := range []string{"vet", "wasi fixture-07", "stage3 adamic:compile", "catalog 12"} {
+	for _, phase := range []string{"vet", "wasi fixture-07", "stage3 adamic:compile", "catalog 12", GofmtPhase} {
 		job := phaseJob()
 		job.Phase = phase
 		if err := CheckTestJob(job); err != nil {
@@ -103,19 +103,22 @@ func TestAPhaseJobIsChecked(t *testing.T) {
 		}
 	}
 	refused := map[string]func(job *TestJob){
-		"packages beside a phase":   func(job *TestJob) { job.Packages = testJob().Packages },
-		"no tools":                  func(job *TestJob) { job.Tools = "" },
-		"a branch for tools":        func(job *TestJob) { job.Tools = "loom/planner-reads" },
-		"no base":                   func(job *TestJob) { job.Base = "" },
-		"a flag for a phase":        func(job *TestJob) { job.Phase = "--full" },
-		"a flag for a unit":         func(job *TestJob) { job.Phase = "wasi --tools=/tmp/x" },
-		"a third word":              func(job *TestJob) { job.Phase = "wasi a b" },
-		"shell text in a phase":     func(job *TestJob) { job.Phase = "vet; curl x | sh" },
-		"a substitution in a unit":  func(job *TestJob) { job.Phase = "wasi $(id)" },
-		"doubled spaces":            func(job *TestJob) { job.Phase = "wasi  a" },
-		"tools on a go test job":    func(job *TestJob) { job.Phase, job.Packages = "", testJob().Packages },
-		"an uppercase phase":        func(job *TestJob) { job.Phase = "Vet" },
-		"a line break in the phase": func(job *TestJob) { job.Phase = "vet\nid" },
+		"packages beside a phase":     func(job *TestJob) { job.Packages = testJob().Packages },
+		"no tools":                    func(job *TestJob) { job.Tools = "" },
+		"a branch for tools":          func(job *TestJob) { job.Tools = "loom/planner-reads" },
+		"no base":                     func(job *TestJob) { job.Base = "" },
+		"a flag for a phase":          func(job *TestJob) { job.Phase = "--full" },
+		"a flag for a unit":           func(job *TestJob) { job.Phase = "wasi --tools=/tmp/x" },
+		"a third word":                func(job *TestJob) { job.Phase = "wasi a b" },
+		"shell text in a phase":       func(job *TestJob) { job.Phase = "vet; curl x | sh" },
+		"a substitution in a unit":    func(job *TestJob) { job.Phase = "wasi $(id)" },
+		"doubled spaces":              func(job *TestJob) { job.Phase = "wasi  a" },
+		"tools on a go test job":      func(job *TestJob) { job.Phase, job.Packages = "", testJob().Packages },
+		"an uppercase phase":          func(job *TestJob) { job.Phase = "Vet" },
+		"a line break in the phase":   func(job *TestJob) { job.Phase = "vet\nid" },
+		"changed paths beside run.py": func(job *TestJob) { job.ChangedPaths = []string{"a.go"} },
+		"a unit for gofmt":            func(job *TestJob) { job.Phase, job.ChangedPaths = GofmtPhase+" a.go", []string{"a.go"} },
+		"a gofmt path climbing out":   func(job *TestJob) { job.Phase, job.ChangedPaths = GofmtPhase, []string{"../a.go"} },
 	}
 	for name, change := range refused {
 		job := phaseJob()
@@ -123,5 +126,11 @@ func TestAPhaseJobIsChecked(t *testing.T) {
 		if err := CheckTestJob(job); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// gofmt's phase job alone carries the change's paths: they are what it checks.
+	job := phaseJob()
+	job.Phase, job.ChangedPaths = GofmtPhase, []string{"internal/lower/lower.go", "README.md"}
+	if err := CheckTestJob(job); err != nil {
+		t.Errorf("a gofmt phase job carrying its paths refused: %v", err)
 	}
 }

@@ -40,8 +40,9 @@ func JobUnitFor(parts KeyParts, sha string) (protocol.JobUnit, error) {
 // FutureJobUnit is the job that runs one planned unit of any kind in its future's run, for the placer (`loom place`).
 // Its id is the unit's key, which is how the judge reads a future run's units (coordinator.FutureRun). A test or
 // product unit is a go test job of its package and selection; a phase unit is a phase job of its run.py line at the
-// key's gate tools commit, merged onto base, as PhaseUnits says the placer builds it. changed are the future's changed
-// paths, carried only for a unit keyed on them, and only when they hash to the key's ADAMIC_GATE_CHANGED. A unit
+// key's gate tools commit, merged onto base, as PhaseUnits says the placer builds it (gofmt, which the runner runs
+// itself, likewise). changed are the future's changed paths, carried only for a unit keyed on them, and only when they
+// hash to the key's ADAMIC_GATE_CHANGED. A unit
 // that can't be said exactly as a job is refused with why, never placed as something near it.
 func FutureJobUnit(unitKey string, parts KeyParts, sha, base string, changed []string) (protocol.JobUnit, error) {
 	switch parts.Kind {
@@ -53,7 +54,7 @@ func FutureJobUnit(unitKey string, parts KeyParts, sha, base string, changed []s
 		}
 		return jobUnitOf(unitKey, parts, test, testOutputs)
 	case "phase":
-		test, err := phaseJob(parts, sha, base)
+		test, err := phaseJob(parts, sha, base, changed)
 		if err != nil {
 			return protocol.JobUnit{}, err
 		}
@@ -90,20 +91,27 @@ func goTestJob(parts KeyParts, sha string, changed []string) (*protocol.TestJob,
 }
 
 // phaseJob is the phase job of a phase unit: its run.py unit line at the gate tools commit its key names, at sha
-// merged onto base. gofmt is refused: run.py doesn't hold it (PhaseUnits plans it beside run.py's units), and a phase
-// job runs only run.py, so no runner has a job that runs it yet.
-func phaseJob(parts KeyParts, sha, base string) (*protocol.TestJob, error) {
+// merged onto base. gofmt's (protocol.GofmtPhase), which the runner runs itself, is keyed on the change's paths, so it
+// carries them, checked against the key as goTestJob checks a test's; any other phase carries none. Any env a phase
+// job can't say is refused.
+func phaseJob(parts KeyParts, sha, base string, changed []string) (*protocol.TestJob, error) {
 	line := parts.Select.Run
-	if fields := strings.Fields(line); len(fields) > 0 && fields[0] == GofmtPhase {
-		return nil, fmt.Errorf("phase %q has no job yet: run.py doesn't hold it, and a phase job runs only run.py", line)
-	}
+	test := &protocol.TestJob{Repository: protocol.AdamicRepository, Sha: sha, Base: base, GateInputs: parts.GateInputs,
+		Phase: line, Tools: parts.GateTools}
 	for name, value := range parts.Env {
-		if GateEnvironment[name] != value {
+		switch {
+		case GateEnvironment[name] == value:
+			// The strict runner sets the four switches itself.
+		case name == "ADAMIC_GATE_CHANGED" && line == protocol.GofmtPhase && changed != nil:
+			if sum := ChangedPathsSum(changed); sum != value {
+				return nil, fmt.Errorf("phase %q is keyed on changed paths %.12s, and the change's %d paths hash to %.12s", line, value, len(changed), sum)
+			}
+			test.ChangedPaths = sortedCopy(changed)
+		default:
 			return nil, fmt.Errorf("phase %q sets %s=%s, which a phase job can't carry", line, name, value)
 		}
 	}
-	return &protocol.TestJob{Repository: protocol.AdamicRepository, Sha: sha, Base: base, GateInputs: parts.GateInputs,
-		Phase: line, Tools: parts.GateTools}, nil
+	return test, nil
 }
 
 // jobUnitOf wraps a checked test job as a job unit of the key's kind, under its ceiling, requiring every toolchain

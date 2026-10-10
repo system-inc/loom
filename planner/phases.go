@@ -9,17 +9,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-)
 
-// GofmtPhase is the phase unit run.py doesn't hold: gofmt -l over the change's .go files, red on any output (Loom,
-// Oct 10 01:42Z). Its key carries the change's paths, since what it checks is exactly them.
-const GofmtPhase = "gofmt"
+	"github.com/system-inc/loom/protocol"
+)
 
 // JudgedPhase is the run.py phase the judge's census step runs on the new path, so it isn't planned as a unit.
 const JudgedPhase = "census"
 
 // PhaseUnits are a future's phase units (Loom, Oct 10 01:41Z): one per unit the box fast gate runs on this change, as
-// run.py itself lists them at the gate tools (run.py --list-units, never retyped here), plus gofmt. A phase is keyed on
+// run.py itself lists them at the gate tools (run.py --list-units, never retyped here), plus gofmt
+// (protocol.GofmtPhase), which the runner runs itself and whose key alone carries the change's paths. A phase is keyed on
 // the whole tree (its git tree object) and the gate tools commit, so it never reuses across trees, and it always runs
 // tonight: its reads closure is 1.1. Its unit line is the key's select.run, from which the placer builds
 // run.py --phase <first word> [--unit <rest>], with the tools checked out at the key's gateTools. Its runner is the
@@ -84,9 +83,9 @@ func PhaseUnits(tree, gateTools, base, sha string, tools Tools, inputs ParityInp
 		}
 	}
 	results := []PlannedResult{}
-	for _, line := range append(lines, GofmtPhase) {
+	for _, line := range append(lines, protocol.GofmtPhase) {
 		env, err := KeyEnv(environment)
-		if line == GofmtPhase {
+		if line == protocol.GofmtPhase {
 			env, err = KeyEnv(gofmtEnvironment)
 		}
 		if err != nil {

@@ -18,6 +18,11 @@ const MaximumPatternBytes = 64 << 10
 
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
+// GofmtPhase is the one phase run.py doesn't hold, which the runner runs itself: gofmt -l over the change's .go files,
+// red on any output (Loom, Oct 10 01:42Z). It names no unit, and it is the only phase job that carries ChangedPaths,
+// since what it checks is exactly them.
+const GofmtPhase = "gofmt"
+
 // phaseNamePattern is a phase of the box fast gate as run.py names it (coverage, vet, wasi, ...).
 var phaseNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
@@ -43,7 +48,8 @@ type TestJob struct {
 	// GateInputs is the sha256 of the gate inputs' manifest in Loom's public store (the pinned TypeScript, the
 	// formatters' libraries and corpora), fetched and checked by hash. Empty: none.
 	GateInputs string `json:"gateInputs,omitempty"`
-	// ChangedPaths are the paths the change touched, which the tests read through ADAMIC_GATE_CHANGED.
+	// ChangedPaths are the paths the change touched, which the tests read through ADAMIC_GATE_CHANGED, and which a
+	// gofmt phase job checks. No other phase job carries them.
 	ChangedPaths []string `json:"changedPaths,omitempty"`
 	// Sample is the commit ADAMIC_GATE_SAMPLE names, for the tests that sample a corpus by commit. Empty: unset.
 	Sample string `json:"sample,omitempty"`
@@ -94,6 +100,10 @@ func CheckTestJob(job TestJob) error {
 			return fmt.Errorf("phase %q isn't run.py's unit line, a phase and at most one unit", job.Phase)
 		case len(fields) == 2 && !phaseUnitPattern.MatchString(fields[1]):
 			return fmt.Errorf("phase %q: its unit %q isn't a plain token", job.Phase, fields[1])
+		case fields[0] == GofmtPhase && len(fields) != 1:
+			return fmt.Errorf("phase %q: gofmt names no unit, it checks the change's paths", job.Phase)
+		case fields[0] != GofmtPhase && len(job.ChangedPaths) > 0:
+			return fmt.Errorf("phase %q carries changed paths, and only gofmt's phase job checks them", job.Phase)
 		}
 	} else if job.Tools != "" {
 		return fmt.Errorf("tools names a phase job's gate tools, and this job has no phase")
