@@ -185,7 +185,14 @@ export interface UnitEntry {
     keyParts: Record<string, unknown>;
     decision: 'reuse' | 'run';
     reused: string | null;
+    // What the unit needs to be placed (Planner, from cloud/fast-gate/unit-needs.json): placement only, never in the key.
+    resources: Resources | null;
     verdict: UnitVerdict | null;
+}
+
+export interface Resources {
+    memoryMegabytes: number;
+    cpus: number;
 }
 
 // A tree to test and the changes in it, in order, keyed by the tree's sha. Slice 1's futures are one change each,
@@ -629,6 +636,7 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
                 keyParts: event.data.keyParts as Record<string, unknown>,
                 decision: event.data.decision as UnitEntry['decision'],
                 reused: (event.data.reused ?? null) as string | null,
+                resources: (event.data.resources ?? null) as Resources | null,
                 // The same key is the same verdict, so a reused one decides this tree too.
                 verdict: reused === null ? null : { ...reused, future: future.tree },
             });
@@ -819,6 +827,18 @@ export interface PlannedUnit {
     decision: 'reuse' | 'run';
     reason: string;
     reused: string | null;
+    resources: Resources | null;
+}
+
+function isResources(value: unknown): value is Resources {
+    return (
+        isPlainObject(value) &&
+        Object.keys(value).sort().join(',') === 'cpus,memoryMegabytes' &&
+        Number.isSafeInteger(value.memoryMegabytes) &&
+        (value.memoryMegabytes as number) > 0 &&
+        Number.isSafeInteger(value.cpus) &&
+        (value.cpus as number) > 0
+    );
 }
 
 // The planner's body for POST /futures/<tree>/plan: the unit list, each unit once, its key computed from its parts.
@@ -849,6 +869,9 @@ export async function checkPlan(body: string): Promise<PlannedUnit[] | string> {
         if (item.reused !== undefined && (typeof item.reused !== 'string' || item.reused === '')) {
             return `unit ${item.name}'s reused names the run whose verdict it reuses`;
         }
+        if (item.resources !== undefined && item.resources !== null && !isResources(item.resources)) {
+            return `unit ${item.name}'s resources is {memoryMegabytes, cpus}, each a positive whole number`;
+        }
         if (names.has(item.name) || keys.has(item.unitKey)) {
             return `unit ${item.name} is planned twice`;
         }
@@ -865,6 +888,7 @@ export async function checkPlan(body: string): Promise<PlannedUnit[] | string> {
             decision: item.decision,
             reason: typeof item.reason === 'string' ? item.reason : '',
             reused: typeof item.reused === 'string' ? item.reused : null,
+            resources: isResources(item.resources) ? { memoryMegabytes: item.resources.memoryMegabytes, cpus: item.resources.cpus } : null,
         });
     }
     return units;
@@ -958,6 +982,9 @@ export class Queue extends DurableObject<Env> {
     // The changes moved since the last board push, each with the seq of its newest event: kept in memory so a push
     // reads nothing from storage. After an eviction it is empty, and the alarm falls back to the events after boardSeq.
     private owed = new Map<string, number>();
+    // Whether blocks may turn on: not until a block can resolve (#6d7179w), or one rule.changed would stall every change
+    // in a block nothing lands (Loom, 01:11Z). A test turns it on for itself.
+    blocksReady = false;
     // The git facts' source: GitHub when the Worker holds a read token, else null, and the bridge posts them later.
     // A test sets its own on this object.
     history: History | null;
@@ -1292,6 +1319,9 @@ export class Queue extends DurableObject<Env> {
             return jsonResponse(400, { error: 'the body is {rule: blocks, value: {on, budget}, commit: the landed commit that changed it}' });
         }
         const value = { on: parsed.value.on, budget: parsed.value.budget as number };
+        if (value.on && !this.blocksReady) {
+            return jsonResponse(422, { error: "blocks can't turn on until a block can resolve and free its slot (#6d7179w, not landed)" });
+        }
         const commit = parsed.commit;
         return this.ctx.blockConcurrencyWhile(async () => {
             await this.append('rule.changed', {}, { rule: 'blocks', value: value, commit: commit });
@@ -1560,7 +1590,15 @@ export class Queue extends DurableObject<Env> {
                 await this.append(
                     'unit.planned',
                     { change: future.changes[0], future: tree, unitKey: unit.unitKey },
-                    { name: unit.name, keyParts: unit.keyParts, decision: unit.decision, reason: unit.reason, reused: unit.reused, verdict: reused },
+                    {
+                        name: unit.name,
+                        keyParts: unit.keyParts,
+                        decision: unit.decision,
+                        reason: unit.reason,
+                        reused: unit.reused,
+                        verdict: reused,
+                        ...(unit.resources === null ? {} : { resources: unit.resources }),
+                    },
                 );
             }
             return jsonResponse(200, { future: tree, planned: units.length });
@@ -1795,7 +1833,14 @@ export class Queue extends DurableObject<Env> {
                     attempt: future.voids + 1,
                     change: { change: record?.change, sha: record?.sha, base: record?.base, owner: record?.owner },
                     units: [...(future.units?.values() ?? [])].map(function (unit) {
-                        return { unitKey: unit.unitKey, name: unit.name, keyParts: unit.keyParts, decision: unit.decision, reused: unit.reused };
+                        return {
+                            unitKey: unit.unitKey,
+                            name: unit.name,
+                            keyParts: unit.keyParts,
+                            decision: unit.decision,
+                            reused: unit.reused,
+                            ...(unit.resources === null ? {} : { resources: unit.resources }),
+                        };
                     }),
                 };
             });

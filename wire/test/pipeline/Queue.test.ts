@@ -584,6 +584,11 @@ describe('blocks, behind their switch', function () {
             return queue.fetch('https://queue/rules', { method: 'POST', body: JSON.stringify(body) });
         };
         expect((await rules({ rule: 'blocks', value: { on: true, budget: 2 } })).status).toBe(400);
+        // Not until a block can resolve.
+        expect((await rules({ rule: 'blocks', value: { on: true, budget: 2 }, commit: sha(99) })).status).toBe(422);
+        await runInDurableObject(queue, function (instance: Queue) {
+            instance.blocksReady = true;
+        });
         expect((await rules({ rule: 'blocks', value: { on: true, budget: 2 }, commit: sha(99) })).status).toBe(200);
         const first = await idOf({}, 52);
         expect(await (await queue.fetch(`https://queue/changes/${first}`)).json()).toMatchObject({ future: null });
@@ -621,6 +626,9 @@ describe('blocks, behind their switch', function () {
 
     it("parks a change that conflicts with the ones ahead of it in its block, with the paths", async function () {
         const queue = await freshQueue();
+        await runInDurableObject(queue, function (instance: Queue) {
+            instance.blocksReady = true;
+        });
         await queue.fetch('https://queue/rules', { method: 'POST', body: JSON.stringify({ rule: 'blocks', value: { on: true, budget: 4 }, commit: sha(99) }) });
         const id = ((await (await submit(queue, change(61))).json()) as { change: string }).change;
         const response = await queue.fetch('https://queue/blocks/1/built', { method: 'POST', body: JSON.stringify({ base: main, prefixes: [], conflicts: [{ change: id, paths: ['x.go'] }] }) });
@@ -656,6 +664,25 @@ describe('a resubmit', function () {
         const restacked = (await logOf(queue)).find((event) => event.type === 'change.restacked');
         expect(restacked).toMatchObject({ subject: { change: id }, data: { from: sha(41), to: sha(42) } });
         expect((await replay(await logOf(queue))).changes.get(id)?.record.sha).toBe(sha(42));
+    });
+});
+
+describe("a plan's resources", function () {
+    it('ride from the plan to unit.planned and the judge listing, placement only, and a plan without them replays the same', async function () {
+        const queue = await freshQueue();
+        await submit(queue, change(71));
+        const units = await planOf(['a', 'b']);
+        expect((await postPlan(queue, sha(71), [{ ...units[0], resources: { memoryMegabytes: 0, cpus: 2 } }, units[1]])).status).toBe(422);
+        expect((await postPlan(queue, sha(71), [{ ...units[0], resources: { memoryMegabytes: 4096, cpus: 2, disk: 1 } }, units[1]])).status).toBe(422);
+        expect((await postPlan(queue, sha(71), [{ ...units[0], resources: { memoryMegabytes: 4096, cpus: 2 } }, units[1]])).status).toBe(200);
+        const listed = (await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: { units: Record<string, unknown>[] }[] };
+        expect(listed.futures[0]?.units[0]).toMatchObject({ unitKey: units[0]?.unitKey, resources: { memoryMegabytes: 4096, cpus: 2 } });
+        expect(listed.futures[0]?.units[1]).not.toHaveProperty('resources');
+        const log = await logOf(queue);
+        const replayed = await replay(log);
+        expect(replayed.head).toBe((await (await queue.fetch('https://queue/head')).json() as { head: string }).head);
+        expect(replayed.futures.get(sha(71))?.units?.get(units[0]?.unitKey ?? '')?.resources).toEqual({ memoryMegabytes: 4096, cpus: 2 });
+        expect(replayed.futures.get(sha(71))?.units?.get(units[1]?.unitKey ?? '')?.resources).toBe(null);
     });
 });
 
@@ -786,7 +813,7 @@ describe('a landing order', function () {
             const units = new Map(
                 verdicts.map(function (verdict, index) {
                     const key = String(index).repeat(64);
-                    return [key, { unitKey: key, name: `u${index}`, keyParts: {}, decision: 'run' as const, reused: null, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
+                    return [key, { unitKey: key, name: `u${index}`, keyParts: {}, decision: 'run' as const, reused: null, resources: null, verdict: verdict === null ? null : { ...verdict, unitKey: key } }];
                 }),
             );
             return { tree: sha(1), base: main, changes: [], units: units, whole: null, decided: { run: 'r', status: 'green' }, voids: 0, judged: true };
