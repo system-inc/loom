@@ -13,8 +13,11 @@ function sha(seed: number): string {
 
 // A stand-in for GitHub: every sha exists, descends from main, and touches the paths it's given, unless told otherwise.
 function facts(overrides: Partial<GitFacts> = {}, diffPaths = ['internal/lower/a.go']): GitFacts {
-    return { shaExists: true, baseIsAncestor: true, baseOnMain: true, diffPaths: diffPaths, historyPaths: diffPaths, gateNamed: [], ...overrides };
+    return { shaExists: true, baseIsAncestor: true, baseOnMain: true, diffPaths: diffPaths, historyPaths: diffPaths, gateNamed: [], pins: [], ...overrides };
 }
+
+// adamic's cohere pin, fetchable keyless from its public remote.
+const cohere = { path: 'cohere', url: 'https://github.com/system-inc/cohere.git', sha: sha(0), fetchable: true };
 
 // git's facts for a witness of a main commit, read while main's head was `head` (the commit itself, unless told).
 function headOf(seed: number, head = seed): GitFacts {
@@ -96,6 +99,10 @@ describe('the queue', function () {
             [sha(19)]: facts({ gateNamed: [{ path: 'cloud/a_test.py', users: ['cloud/run.sh'] }] }, ['cloud/a_test.py']),
             [sha(20)]: facts({ historyPaths: undefined }),
             [sha(21)]: facts({ baseOnMain: false }, []),
+            [sha(22)]: facts({ pins: [cohere, { path: 'cohere/TypeScript', url: 'https://github.com/system-inc/TypeScript.git', sha: sha(98), fetchable: false, reason: 'a keyless fetch refused it: not our ref' }] }),
+            [sha(23)]: facts({ pins: [{ ...cohere, url: 'git@github.com:system-inc/cohere.git', fetchable: false, reason: "its url is ssh, which needs a key a runner doesn't hold" }] }),
+            [sha(24)]: facts({ pins: undefined }),
+            [sha(25)]: facts({ pins: [cohere, { path: 'cohere/TypeScript', url: 'https://github.com/system-inc/TypeScript.git', sha: sha(98), fetchable: true }] }),
         });
         const cases: [Record<string, unknown>, string][] = [
             [change(10), 'is not on GitHub'],
@@ -115,6 +122,11 @@ describe('the queue', function () {
             [change(20), "git's facts carry no history or gate-logic check"],
             // Only a witness of main can hold main red: a witness of a sha main doesn't hold is refused at the door.
             [{ sha: sha(21), base: sha(21), owner: 'system_adamic_loom_judge', paths: [], parity: true, witness: true }, 'is not on main'],
+            // A pin a runner can't fetch keyless is named, each one, before any future is built (#yt2jw5q).
+            [change(22), `1 submodule pin a runner can't fetch without a key: cohere/TypeScript at ${sha(98).slice(0, 12)} from https://github.com/system-inc/TypeScript.git (a keyless fetch refused it: not our ref)`],
+            [change(23), "cohere at 000000000000 from git@github.com:system-inc/cohere.git (its url is ssh, which needs a key a runner doesn't hold)"],
+            // Facts with no pins are no clearance either.
+            [change(24), "git's facts carry no submodule pins"],
         ];
         for (const [request, reason] of cases) {
             const response = await submit(queue, request);
@@ -126,9 +138,15 @@ describe('the queue', function () {
             log.map(function (event) {
                 return event.type;
             }),
-        ).toEqual(Array(11).fill('change.refused'));
+        ).toEqual(Array(14).fill('change.refused'));
         expect(log[0]?.data).toMatchObject({ facts: { shaExists: false }, reason: `sha ${sha(10)} is not on GitHub` });
         expect((await submit(queue, change(17, { paths: ['stage3/meter/m.py', 'stage3/meter/mutants/m-mutant.txt'] }))).status).toBe(201);
+        // Every pin fetchable, at every depth: the change joins the line.
+        expect((await submit(queue, change(25))).status).toBe(201);
+        const refusal = log.find(function (event) {
+            return event.data.reason !== undefined && String(event.data.reason).includes('submodule pin');
+        });
+        expect(refusal?.data).toMatchObject({ facts: { pins: [{ path: 'cohere', fetchable: true }, { path: 'cohere/TypeScript', fetchable: false }] } });
     });
 
     it('refuses a malformed change before asking git', async function () {
@@ -486,6 +504,10 @@ describe('a queue with no GitHub credential', function () {
             return queue.fetch(`https://queue/submissions/${id}/facts`, { method: 'POST', body: JSON.stringify(body) });
         };
         expect((await post(first, { shaExists: true })).status).toBe(400);
+        // Pins that aren't {path, url, sha, fetchable} are no facts.
+        for (const pins of [{}, [{ path: 'cohere', url: '', sha: 'nope', fetchable: true }], [{ path: 'cohere', url: '', sha: sha(98) }], [{ ...cohere, reason: 7 }]]) {
+            expect((await post(first, facts({ pins: pins as never }))).status).toBe(400);
+        }
         expect(await (await post(first, facts())).json()).toMatchObject({ change: first, state: 'queued', future: sha(1) });
         expect((await post(first, facts())).status).toBe(409);
         expect(await (await post(second, facts({ baseOnMain: false }))).json()).toMatchObject({ change: second, state: 'refused' });

@@ -30,3 +30,22 @@ Today only the bridge reads git, and it reads one change at a time under its loc
 A re-witness of a sha builds a new future on the same tree. Run ids are `future-<tree>-<attempt>`, so the new future continues the attempt count. Its `future.built` logs `attemptsBefore`. The planned listing names `firstAttempt`, and the judge carries a pass only from `firstAttempt` on.
 
 The Queue refuses any batch on such a future whose run, or a run a record says it carried (test or phase), is below `firstAttempt`. A judge or placer from before `firstAttempt` would carry an earlier future's passes. Deploy them first, then the Worker.
+
+## Submodule pins
+
+Every runner fetches every submodule pin with no key, so the bridge proves each pin the same way before the queue clears a change (#yt2jw5q). git's facts carry `pins`: every gitlink in the change's tree at any depth (adamic's `cohere`, cohere's `cohere/TypeScript`), each as `{path, url, sha, fetchable, reason?}`.
+
+- **The url** is what the parent commit's `.gitmodules` names for the path, with `./` and `../` resolved against the parent's url.
+- **fetchable** comes from a keyless fetch of that sha from that url, shallow and blob-less, into a scratch store that is removed afterwards.
+  - The fetch sees no global or system git settings, so no `insteadOf` rewrites https to ssh and no credential helper runs.
+  - `HOME` is the scratch, so no `~/.netrc` is read. No prompt runs and no ssh.
+  - A pin that fetches is followed into its own tree.
+- **Unfetchable, with its reason:**
+  - an ssh url, or a url that isn't http(s);
+  - a path `.gitmodules` doesn't name;
+  - a commit the remote refuses (`not our ref`, an unadvertised object, a repository that isn't found or wants a login).
+- **Unknown.** Any other failure says nothing about the pin: a host that won't resolve, a timeout, GitHub's 5xx. The bridge posts no facts that tick, and the change waits. It is never refused or passed on a guess.
+
+The queue refuses a change whose pins aren't all fetchable before any future is built. The refusal is logged and names each unfetchable pin. Facts without `pins` are no clearance, like facts without `historyPaths`. So the queue's pins rule ships only once the bridge that posts pins is the one running.
+
+`loom queue-bridge pins [--repository <clone>] <sha>` prints a commit's pins as the bridge would post them. It exits 1 when one is unfetchable and 3 when git or a remote couldn't say.
