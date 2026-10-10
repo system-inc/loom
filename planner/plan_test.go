@@ -71,18 +71,19 @@ func TestPlanTreeReusesUnmovedKeysAndRunsMovedOnes(t *testing.T) {
 }
 
 // A parity plan is exactly the box record's selection: its packages and no others, every unit run though its key
-// passed, and a split package's unit runs exactly its named tests.
+// passed, a selected package with no tests included, and a split package's unit runs exactly its named tests.
 func TestPlanSelectedRunsExactlyTheSelection(t *testing.T) {
 	t.Parallel()
 	tree, gateTools := planFixture(t)
 	tools := Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}
-	selection := ParitySelect{Packages: []string{"example.com/plan/a"}, Tests: map[string][]string{"example.com/plan/a": {"TestZ.1", "TestA"}}}
+	selection := ParitySelect{Packages: []string{"example.com/plan/a", "example.com/plan/compiler"}, Tests: map[string][]string{"example.com/plan/a": {"TestZ.1", "TestA"}}}
 	results, err := PlanSelected(tree, gateTools, tools, selection)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Name != "example.com/plan/a" || results[0].Decision != "run" {
-		t.Fatalf("a parity plan of a alone: %+v", results)
+	// compiler has no tests, but the box record ran it (go test passes it), so the plan holds it too.
+	if len(results) != 2 || results[0].Name != "example.com/plan/a" || results[1].Name != "example.com/plan/compiler" || results[0].Decision != "run" || results[1].Decision != "run" {
+		t.Fatalf("a parity plan of a and the test-less compiler: %+v", results)
 	}
 	if run := results[0].KeyParts.Select.Run; run != `^(TestA|TestZ\.1)$` {
 		t.Errorf("a's unit runs %q, want exactly TestA and TestZ.1", run)

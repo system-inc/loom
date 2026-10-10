@@ -57,26 +57,36 @@ func exactRun(tests []string) (string, error) {
 type keyFunction func(tree, gateTools string, unit Unit, tools Tools, compilerPackages []string) (KeyParts, error)
 
 func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached bool, keyFor keyFunction, selection *ParitySelect) ([]PlannedResult, error) {
-	module, packages, err := testedPackages(tree)
+	module, packages, err := listPackages(tree)
 	if err != nil {
 		return nil, err
 	}
-	if selection != nil {
-		tested := map[string]listedPackage{}
+	if selection == nil {
+		tested := packages[:0]
 		for _, listed := range packages {
-			tested[listed.ImportPath] = listed
+			if len(listed.TestGoFiles)+len(listed.XTestGoFiles) > 0 {
+				tested = append(tested, listed)
+			}
 		}
-		packages = packages[:0]
+		packages = tested
+	} else {
+		// A parity plan holds the box record's packages as it ran them, one without tests included (go test passes it
+		// with no test files), since Queue refuses a plan whose packages differ from the selection.
+		listedByPath := map[string]listedPackage{}
+		for _, listed := range packages {
+			listedByPath[listed.ImportPath] = listed
+		}
+		packages = []listedPackage{}
 		for _, importPath := range selection.Packages {
-			listed, found := tested[importPath]
+			listed, found := listedByPath[importPath]
 			if !found {
-				return nil, fmt.Errorf("selected package %s has no tests on this tree", importPath)
+				return nil, fmt.Errorf("selected package %s isn't a package on this tree", importPath)
 			}
 			packages = append(packages, listed)
 		}
 		for importPath := range selection.Tests {
-			if _, found := tested[importPath]; !found {
-				return nil, fmt.Errorf("the selection names tests of %s, which isn't a tested package", importPath)
+			if _, found := listedByPath[importPath]; !found {
+				return nil, fmt.Errorf("the selection names tests of %s, which isn't a package on this tree", importPath)
 			}
 		}
 	}
@@ -126,8 +136,8 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	return results, nil
 }
 
-// testedPackages lists the tree's module path and its packages that have tests.
-func testedPackages(tree string) (string, []listedPackage, error) {
+// listPackages lists the tree's module path and its packages.
+func listPackages(tree string) (string, []listedPackage, error) {
 	module, err := modulePath(tree)
 	if err != nil {
 		return "", nil, err
@@ -147,9 +157,7 @@ func testedPackages(tree string) (string, []listedPackage, error) {
 		if err := decoder.Decode(&listed); err != nil {
 			return "", nil, err
 		}
-		if len(listed.TestGoFiles)+len(listed.XTestGoFiles) > 0 {
-			packages = append(packages, listed)
-		}
+		packages = append(packages, listed)
 	}
 	sort.Slice(packages, func(left, right int) bool { return packages[left].ImportPath < packages[right].ImportPath })
 	return module, packages, nil
