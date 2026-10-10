@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/system-inc/loom/builder"
 )
 
 // build-tree exits 1 when a package failed, and when the store kept an earlier build's index, saying so.
@@ -44,5 +47,17 @@ func TestATreeThatWontGoIsAWarningOnceItsIndexIsUp(t *testing.T) {
 	}
 	if _, err := os.Stat(tree); !os.IsNotExist(err) {
 		t.Fatal("the tree's directory is still there")
+	}
+}
+
+// The cache base and Go's build cache keep the floor, the temporary directory its own, and GOCACHE=off watches none.
+func TestBuildTreeWatchesEachFilesystemAtItsFloor(t *testing.T) {
+	watched := buildTreeWatches("/trees", "/gocache", "/tmp", 200, 20)
+	want := map[string]builder.Watch{"the cache base": {Path: "/trees", Floor: 200}, "Go's build cache": {Path: "/gocache", Floor: 200}, "the temporary directory": {Path: "/tmp", Floor: 20}}
+	if !maps.Equal(watched, want) {
+		t.Fatalf("%v", watched)
+	}
+	if _, watching := buildTreeWatches("/trees", "off", "/tmp", 200, 20)["Go's build cache"]; watching {
+		t.Fatal("GOCACHE=off was watched")
 	}
 }

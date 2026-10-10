@@ -76,12 +76,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if trimmed > 0 {
 		fmt.Fprintf(stderr, "build-tree: trimmed %.1f GB from Go's build cache, least recently used first\n", float64(trimmed)/float64(builder.GB))
 	}
-	// The temporary directory keeps a smaller floor of its own: it may be memory.
-	watched := map[string]builder.Watch{"the cache base": {Path: *cache, Floor: floor}, "the temporary directory": {Path: os.TempDir(), Floor: tempFloor}}
-	// GOCACHE=off has no cache to trim or watch, and stops nothing.
-	if strings.TrimSpace(string(goCache)) != "off" {
-		watched["Go's build cache"] = builder.Watch{Path: strings.TrimSpace(string(goCache)), Floor: floor}
-	}
+	watched := buildTreeWatches(*cache, strings.TrimSpace(string(goCache)), os.TempDir(), floor, tempFloor)
 	if err = builder.CheckFloor(watched, nil); err != nil {
 		return fail(fmt.Errorf("not starting: %w", err))
 	}
@@ -177,6 +172,17 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
 	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten)
+}
+
+// buildTreeWatches are the filesystems a build writes, each with its floor: the cache base and Go's build cache keep
+// floor, the temporary directory, which may be memory, a smaller one of its own, and GOCACHE=off has no cache to
+// watch, so it stops nothing.
+func buildTreeWatches(cache, goCache, temporary string, floor, temporaryFloor uint64) map[string]builder.Watch {
+	watched := map[string]builder.Watch{"the cache base": {Path: cache, Floor: floor}, "the temporary directory": {Path: temporary, Floor: temporaryFloor}}
+	if goCache != "off" {
+		watched["Go's build cache"] = builder.Watch{Path: goCache, Floor: floor}
+	}
+	return watched
 }
 
 // finishTree removes the tree's working directory once its index is up (kept otherwise, for a retry) and exits. A
