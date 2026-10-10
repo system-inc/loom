@@ -27,7 +27,8 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tokenFile := flags.String("token-file", filepath.Join(home, ".loom", "build-token"), "file holding this builder's build token")
 	packages := flags.String("packages", "", "comma-separated import paths to build (default: every package with a product test)")
 	scratch := flags.String("scratch", "", "where each action's build log goes (default: the system temporary directory)")
-	cache := flags.String("cache", filepath.Join(home, "loom-builder", "cache"), "the build's buildcache directory, shared by its actions and kept between builds")
+	cache := flags.String("cache", filepath.Join(home, "loom-builder", "cache"), "the base of each tree's own buildcache directory, <base>/<tree hash>, shared only by that tree's actions")
+	keepCaches := flags.Int("keep-caches", 2, "tree caches kept under --cache, newest first")
 	jobs := flags.Int("jobs", 4, "actions built at once")
 	indexDirectory := flags.String("index", filepath.Join(home, "loom-builder", "index"), "Workshop's index of what the store holds, so deciding reads nothing ('' for none)")
 	trustIndex := flags.Bool("trust-index", true, "an index miss builds without asking the store (the store's 200 or 409 still checks it)")
@@ -36,7 +37,7 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 	if *tree == "" || *gateTools == "" || (*write == "" && !*list) {
-		fmt.Fprintln(stderr, "usage: loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--read <url>] [--token-file <path>] [--packages a,b] [--cache <dir>] [--jobs N] [--index <dir>] [--scratch <dir>] [--list]")
+		fmt.Fprintln(stderr, "usage: loom build-actions --tree <dir> --gate-tools <dir> --write <https://pipeline/actions> [--read <url>] [--token-file <path>] [--packages a,b] [--cache <dir>] [--keep-caches N] [--jobs N] [--index <dir>] [--scratch <dir>] [--list]")
 		return 2
 	}
 	selected := []string{}
@@ -99,6 +100,11 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		defer index.Close()
 	}
+	treeCache, err := builder.TreeCache(*cache, *tree, *keepCaches)
+	if err != nil {
+		fmt.Fprintln(stderr, "build-actions:", err)
+		return 1
+	}
 	work := builder.Builder{
 		Tree:       *tree,
 		Index:      index,
@@ -106,7 +112,7 @@ func buildActions(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Store:      builder.Store{Read: strings.TrimSuffix(*read, "/"), Write: strings.TrimSuffix(*write, "/"), Token: strings.TrimSpace(string(token)), Requests: requests},
 		Key:        key,
 		Run:        builder.GoTest(*tree),
-		Cache:      *cache,
+		Cache:      treeCache,
 		Scratch:    *scratch,
 		Jobs:       *jobs,
 	}
