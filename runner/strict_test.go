@@ -24,7 +24,7 @@ import (
 //	prepare.sh fetching the commit into the checkout, not an empty store (a planted local commit then passes): TestPrepareRefusesACommitGitHubDoesntHave
 //	a trim reaching the host's /tmp (as a mutant, only /tmp/go-buildloom-canary-*): TestPrepareNamesNoHostPath, TestPrepareTouchesNothingOutsideItsRoot
 //	a strict runner's root anything but /tmp: TestAStrictRunnersRootIsTmpAndOthersKeepTheirOwn
-//	the unit's own GOCACHE dropped, or GOCACHEPROG kept: TestEachTestUnitBuildsOnAGoCacheOfItsOwn
+//	the unit's own GOCACHE or ADAMIC_BUILD_CACHE_DIR dropped, or GOCACHEPROG kept: TestEachTestUnitBuildsOnAGoCacheOfItsOwn
 //	a phase job run without --phase-jobs: TestAPhaseJobRunsRunPyFromTheGateToolsAtItsCommit
 
 const testSha = "0123456789abcdef0123456789abcdef01234567"
@@ -374,13 +374,13 @@ func TestEachTestUnitBuildsOnAGoCacheOfItsOwn(t *testing.T) {
 	os.MkdirAll(seen, 0o755)
 	bin := filepath.Join(fixture.directory, "bin")
 	os.WriteFile(filepath.Join(bin, "go"), []byte(`#!/bin/bash
-printf '%s %s %s\n' "${GOCACHE}" "${GOCACHEPROG-unset}" "$(ls -A "${GOCACHE}" | wc -l)" > "`+seen+`/go-$$"
+printf '%s %s %s %s %s\n' "${GOCACHE}" "${GOCACHEPROG-unset}" "$(ls -A "${GOCACHE}" | wc -l)" "${ADAMIC_BUILD_CACHE_DIR}" "$(ls -A "${ADAMIC_BUILD_CACHE_DIR}" | wc -l)" > "`+seen+`/go-$$"
 case "$*" in *-exec*) exit 0 ;; esac
 printf '{"Action":"pass","Package":"%s","Test":"TestA"}\n' "${!#}"
 `), 0o755)
 	prepareScript = []byte(`#!/bin/bash
 mkdir -p "$1"
-printf 'PATH=%s\0HOME=%s\0GOCACHE=%s\0GOCACHEPROG=%s\0' "` + bin + `:/usr/bin:/bin" "${HOME}" "` + shared + `" "` + bin + `/cacheprog" > "$5"
+printf 'PATH=%s\0HOME=%s\0GOCACHE=%s\0GOCACHEPROG=%s\0ADAMIC_BUILD_CACHE_DIR=%s\0' "` + bin + `:/usr/bin:/bin" "${HOME}" "` + shared + `" "` + bin + `/cacheprog" "` + shared + `" > "$5"
 `)
 	caches := map[string]bool{}
 	for range 2 {
@@ -396,8 +396,11 @@ printf 'PATH=%s\0HOME=%s\0GOCACHE=%s\0GOCACHEPROG=%s\0' "` + bin + `:/usr/bin:/b
 		for _, entry := range entries[len(before):] {
 			line, _ := os.ReadFile(filepath.Join(seen, entry.Name()))
 			fields := strings.Fields(string(line))
-			if len(fields) != 3 || fields[0] == shared || !strings.Contains(fields[0], "loom-unit-") || fields[1] != "unset" {
+			if len(fields) != 5 || fields[0] == shared || !strings.Contains(fields[0], "loom-unit-") || fields[1] != "unset" {
 				t.Fatalf("go ran with GOCACHE, GOCACHEPROG and entries %q: not the unit's own cache", line)
+			}
+			if fields[3] == shared || !strings.Contains(fields[3], "loom-unit-") || fields[4] != "0" {
+				t.Fatalf("go ran with ADAMIC_BUILD_CACHE_DIR and entries %q: not the unit's own empty cache", line)
 			}
 			caches[fields[0]] = true
 		}

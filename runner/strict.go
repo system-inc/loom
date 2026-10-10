@@ -347,6 +347,14 @@ func (run *unitRun) testEnvironment(environmentFile string, job *protocol.TestJo
 	}
 	environment["GOCACHE"] = goCache
 	delete(environment, "GOCACHEPROG")
+	// adamic's own build cache likewise: its key misses a header reached by a relative #include, hand-rolled products'
+	// undeclared files and headers outside the repository (Builder, Oct 10 02:27Z), so a warm one can serve a stale
+	// product. Each unit's starts empty, to be filled only from the action store (Release's ruling).
+	adamicCache := filepath.Join(run.directory, "adamic-build")
+	if err := os.MkdirAll(adamicCache, 0o755); err != nil {
+		return nil, err
+	}
+	environment["ADAMIC_BUILD_CACHE_DIR"] = adamicCache
 	if len(job.ChangedPaths) > 0 {
 		changed := filepath.Join(run.directory, "changed-paths.txt")
 		if err := os.WriteFile(changed, []byte(strings.Join(job.ChangedPaths, "\n")+"\n"), 0o644); err != nil {
