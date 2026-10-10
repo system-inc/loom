@@ -20,6 +20,8 @@
 package judge
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -87,8 +89,60 @@ type Verdict struct {
 	censusFailing []string
 }
 
+// TestsRef is a record's tests field, by reference (Loom's ruling, Oct 10 01:16Z): a Durable Object's SQLite value caps
+// at 2 MB and one package's record ran to 750 KB inline. The whole list is a blob in the action store, read tokenless at
+// adamic-store.kirkouimet.com/blobs/<sha256>; the record carries its hash, the counts, and inline only the tests that
+// failed or never ended, so a red names its test without a fetch.
+type TestsRef struct {
+	Sha256  string        `json:"sha256"`
+	Passed  int           `json:"passed"`
+	Failed  int           `json:"failed"`
+	Skipped int           `json:"skipped"`
+	Inline  []TestOutcome `json:"inline"`
+}
+
+// testsRow is one row of the tests list, its fields in key order so the list's JSON is canonical.
+type testsRow struct {
+	Outcome string `json:"outcome"`
+	Package string `json:"package"`
+	Test    string `json:"test"`
+}
+
+// TestsList is the canonical tests list blob for tests, every row sorted by package then test as canonical JSON (keys
+// sorted, no whitespace), and the reference a record carries to it. Never-ended rows (outcome run) are in the list and
+// inline, and in no count.
+func TestsList(tests []TestOutcome) ([]byte, TestsRef) {
+	rows := make([]testsRow, 0, len(tests))
+	ref := TestsRef{Inline: []TestOutcome{}}
+	for _, outcome := range tests {
+		rows = append(rows, testsRow{Outcome: outcome.Outcome, Package: outcome.Package, Test: outcome.Test})
+		switch outcome.Outcome {
+		case "pass":
+			ref.Passed++
+		case "skip":
+			ref.Skipped++
+		case "fail":
+			ref.Failed++
+			ref.Inline = append(ref.Inline, outcome)
+		default:
+			ref.Inline = append(ref.Inline, outcome)
+		}
+	}
+	sort.SliceStable(rows, func(left, right int) bool {
+		if rows[left].Package != rows[right].Package {
+			return rows[left].Package < rows[right].Package
+		}
+		return rows[left].Test < rows[right].Test
+	})
+	content, _ := json.Marshal(rows) // rows of three strings always encode
+	sum := sha256.Sum256(content)
+	ref.Sha256 = hex.EncodeToString(sum[:])
+	return content, ref
+}
+
 // Canonical writes the verdict as contract v1 asks of every record: sorted keys, no insignificant whitespace,
-// empty lists as [], and an empty cause or infra as null.
+// empty lists as [], an empty cause or infra as null, and its tests by reference (TestsRef), whose list blob must be in
+// the store before the record is posted.
 func (verdict Verdict) Canonical() ([]byte, error) {
 	type plain Verdict
 	encoded, err := json.Marshal(plain(verdict))
@@ -99,11 +153,21 @@ func (verdict Verdict) Canonical() ([]byte, error) {
 	if err := json.Unmarshal(encoded, &fields); err != nil {
 		return nil, err
 	}
-	for _, name := range []string{"attempts", "tests", "outputs"} {
+	for _, name := range []string{"attempts", "outputs"} {
 		if fields[name] == nil {
 			fields[name] = []any{}
 		}
 	}
+	_, ref := TestsList(verdict.Tests)
+	encodedRef, err := json.Marshal(ref)
+	if err != nil {
+		return nil, err
+	}
+	var tests map[string]any
+	if err := json.Unmarshal(encodedRef, &tests); err != nil {
+		return nil, err
+	}
+	fields["tests"] = tests
 	for _, name := range []string{"cause", "infra"} {
 		if fields[name] == "" {
 			fields[name] = nil

@@ -1,7 +1,10 @@
 package judge
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -43,10 +46,11 @@ type harness struct {
 	fabric *StubFabric
 	main   stubMain
 	queue  *StubQueue
+	blobs  *StubBlobs
 }
 
 func newHarness() harness {
-	return harness{runs: stubRuns{}, fabric: &StubFabric{Script: map[string][]Finished{}}, main: stubMain{}, queue: &StubQueue{}}
+	return harness{runs: stubRuns{}, fabric: &StubFabric{Script: map[string][]Finished{}}, main: stubMain{}, queue: &StubQueue{}, blobs: &StubBlobs{}}
 }
 
 func (h harness) script(unit, tree string, answers ...Finished) {
@@ -54,7 +58,7 @@ func (h harness) script(unit, tree string, answers ...Finished) {
 }
 
 func (h harness) judge(t *testing.T, plan ...PlanUnit) FuturePost {
-	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: func() time.Time { return time.Date(2026, 10, 9, 23, 45, 0, 0, time.UTC) }}
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 9, 23, 45, 0, 0, time.UTC) }}
 	post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: baseTree, Owner: "system_adamic_library"}, Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1", Plan: plan})
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +219,7 @@ func TestAVoidedRunPostsEveryRunUnitVoidAndRerunsNothing(t *testing.T) {
 	h := newHarness()
 	// u finished passed and v failed before the stop; w never started; x was reused.
 	h.runs["u"], h.runs["v"] = passed(), failedWith("TestB")
-	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: func() time.Time { return time.Date(2026, 10, 10, 1, 0, 0, 0, time.UTC) }}
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 10, 1, 0, 0, 0, time.UTC) }}
 	post, err := loop.VoidFuture(Job{Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1",
 		Plan: []PlanUnit{{UnitKey: "u"}, {UnitKey: "v"}, {UnitKey: "w"}, {UnitKey: "x", Reused: "verdict-3"}}}, InfraKill, "an operator stopped the run")
 	if err != nil {
@@ -238,14 +242,14 @@ func TestAVoidedRunPostsEveryRunUnitVoidAndRerunsNothing(t *testing.T) {
 	if len(h.fabric.Asked) != 0 || len(h.queue.Posts[futureTree]) != 1 {
 		t.Fatalf("placements %v and %d posts, want none and one", h.fabric.Asked, len(h.queue.Posts[futureTree]))
 	}
-	if !strings.Contains(string(post.Verdicts[1]), `"tests":[{"outcome":"fail"`) {
+	if !strings.Contains(string(post.Verdicts[1]), `"inline":[{"outcome":"fail","package":"`+nativePackage+`","test":"TestB"}]`) {
 		t.Fatalf("v's record %s lacks its attempt's tests as evidence", post.Verdicts[1])
 	}
 }
 
 func TestAVoidNamesItsCause(t *testing.T) {
 	h := newHarness()
-	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: time.Now}
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: time.Now}
 	if _, err := loop.VoidFuture(Job{Run: "run-1"}, InfraKill, " "); err == nil {
 		t.Fatal("a void with no cause was posted")
 	}
@@ -259,7 +263,7 @@ func skippedUnit(test, why string) Finished {
 
 func censusLoop(h harness) Loop {
 	rows := []CensusRow{{File: "internal/native/a_test.go", ID: "m", Callers: []string{"TestMeasured"}, Message: `"a measurement"`, Class: "measurement", Provides: "timing"}}
-	return Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Now: time.Now, Census: &CensusConfig{Rows: rows, Platform: "linux"}}
+	return Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: time.Now, Census: &CensusConfig{Rows: rows, Platform: "linux"}}
 }
 
 func censusJob(plan ...PlanUnit) Job {
@@ -354,5 +358,46 @@ func TestATestRedComesBeforeACensusRed(t *testing.T) {
 	reading, err := ReadingOf(futureTree, post)
 	if err != nil || len(post.Decision.Red) != 2 || reading.FirstStep != "tests" || reading.FirstFailure != testPackage+" TestB" {
 		t.Fatalf("red %v, reading %+v (%v): want both red and the step tests", post.Decision.Red, reading, err)
+	}
+}
+
+func TestTheTestsListIsCanonicalAndCounted(t *testing.T) {
+	content, ref := TestsList([]TestOutcome{outcome("TestB", "pass"), outcome("TestA/sub", "skip"), outcome("TestA", "fail"), outcome("TestC", "run")})
+	want := `[{"outcome":"fail","package":"` + testPackage + `","test":"TestA"},{"outcome":"skip","package":"` + testPackage + `","test":"TestA/sub"},` +
+		`{"outcome":"pass","package":"` + testPackage + `","test":"TestB"},{"outcome":"run","package":"` + testPackage + `","test":"TestC"}]`
+	if string(content) != want {
+		t.Fatalf("list\n%s\nwant\n%s", content, want)
+	}
+	sum := sha256.Sum256(content)
+	if ref.Sha256 != hex.EncodeToString(sum[:]) || ref.Passed != 1 || ref.Failed != 1 || ref.Skipped != 1 || len(ref.Inline) != 2 || ref.Inline[1].Outcome != "run" {
+		t.Fatalf("ref %+v", ref)
+	}
+}
+
+func TestEveryListIsInTheStoreBeforeThePostNamesIt(t *testing.T) {
+	h := newHarness()
+	h.runs["u"] = passed()
+	post := h.judge(t, PlanUnit{UnitKey: "u"})
+	var record struct {
+		Tests TestsRef `json:"tests"`
+	}
+	if err := json.Unmarshal(post.Verdicts[0], &record); err != nil {
+		t.Fatal(err)
+	}
+	held, found := h.blobs.Held[record.Tests.Sha256]
+	if !found || !strings.Contains(string(held), `"test":"TestA"`) || record.Tests.Passed != 1 {
+		t.Fatalf("record names %s, store holds %v", record.Tests.Sha256, h.blobs.Held)
+	}
+	// A list the store refuses is never named by a posted record.
+	refused := newHarness()
+	refused.runs["u"] = passed()
+	refused.blobs.Fail = errors.New("store down")
+	loop := Loop{Runs: refused.runs, Fabric: refused.fabric, Main: refused.main, Queue: refused.queue, Blobs: refused.blobs, Now: time.Now}
+	if _, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "u"})); err == nil || len(refused.queue.Posts) != 0 {
+		t.Fatalf("posted %v (%v) past a refused list", refused.queue.Posts, err)
+	}
+	loop.Blobs = nil
+	if _, err := loop.JudgeFuture(censusJob(PlanUnit{UnitKey: "u"})); err == nil || len(refused.queue.Posts) != 0 {
+		t.Fatal("posted with no store")
 	}
 }

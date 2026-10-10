@@ -76,7 +76,7 @@ func TestTheLoopsPostIsABatchQueueTakes(t *testing.T) {
 	h.runs[unit], h.runs[other] = failedWith("TestB"), passed()
 	h.script(unit, futureTree, failedWith("TestB"))
 	h.script(unit, baseTree, passed())
-	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: HTTPQueue{Base: server.URL, Token: "coordinator-token"},
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: HTTPQueue{Base: server.URL, Token: "coordinator-token"}, Blobs: &StubBlobs{},
 		Now: func() time.Time { return time.Date(2026, 10, 9, 23, 50, 0, 0, time.UTC) }}
 	_, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: baseTree, Owner: "system_adamic_library"},
 		Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1", Plan: []PlanUnit{{UnitKey: unit}, {UnitKey: other}}})
@@ -100,5 +100,28 @@ func TestARefusedBatchIsAnError(t *testing.T) {
 	err := HTTPQueue{Base: server.URL, Token: "t"}.PostVerdicts(futureTree, FuturePost{})
 	if err == nil || !strings.Contains(err.Error(), "409") || !strings.Contains(err.Error(), "another run") {
 		t.Fatalf("err %v, want the 409 and Queue's reason", err)
+	}
+}
+
+func TestHTTPBlobsPutsTheListWithABuildToken(t *testing.T) {
+	var path, authorization, body string
+	status := http.StatusCreated
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		content, _ := io.ReadAll(request.Body)
+		path, authorization, body = request.Method+" "+request.URL.Path, request.Header.Get("Authorization"), string(content)
+		writer.WriteHeader(status)
+	}))
+	defer server.Close()
+	blobs := HTTPBlobs{Base: server.URL, Token: func() (string, error) { return "build-token", nil }}
+	content, ref := TestsList([]TestOutcome{outcome("TestA", "pass")})
+	if err := blobs.Put(ref.Sha256, content); err != nil {
+		t.Fatal(err)
+	}
+	if path != "PUT /actions/blobs/"+ref.Sha256 || authorization != "Bearer build-token" || body != string(content) {
+		t.Fatalf("%s %s %s", path, authorization, body)
+	}
+	status = http.StatusBadRequest
+	if err := blobs.Put(ref.Sha256, content); err == nil {
+		t.Fatal("a refused put read as stored")
 	}
 }

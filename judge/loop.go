@@ -51,6 +51,47 @@ type Queue interface {
 	PostVerdicts(future string, post FuturePost) error
 }
 
+// Blobs puts a tests list in the action store (PUT /actions/blobs/<sha256>, a build token); it returns only once the
+// store holds it, since no record may name a blob the store lacks.
+type Blobs interface {
+	Put(sha256 string, content []byte) error
+}
+
+// post puts every record's tests list in the store, then posts the batch: no record names a blob the store lacks.
+func (loop Loop) post(future string, post FuturePost, verdicts []Verdict) error {
+	if loop.Blobs == nil {
+		return fmt.Errorf("no blob store: a record's tests go by reference, so nothing can post without one")
+	}
+	for _, verdict := range verdicts {
+		content, ref := TestsList(verdict.Tests)
+		if err := loop.Blobs.Put(ref.Sha256, content); err != nil {
+			return fmt.Errorf("unit %s's tests list %s: %w", verdict.UnitKey, ref.Sha256, err)
+		}
+	}
+	if err := loop.Queue.PostVerdicts(future, post); err != nil {
+		return fmt.Errorf("posting future %s: %w", future, err)
+	}
+	return nil
+}
+
+// StubBlobs is an in-memory store, for tests and dry runs: it keeps every list it's given.
+type StubBlobs struct {
+	Held map[string][]byte
+	Fail error // when set, every Put fails with it
+}
+
+// Put keeps the list.
+func (stub *StubBlobs) Put(sha256 string, content []byte) error {
+	if stub.Fail != nil {
+		return stub.Fail
+	}
+	if stub.Held == nil {
+		stub.Held = map[string][]byte{}
+	}
+	stub.Held[sha256] = content
+	return nil
+}
+
 // A PlanUnit is one planned unit of a future: run, or reused from an earlier passed verdict of the exact same key.
 type PlanUnit struct {
 	UnitKey string
@@ -95,6 +136,7 @@ type Loop struct {
 	Fabric Fabric
 	Main   MainRecords
 	Queue  Queue
+	Blobs  Blobs // where each record's tests list goes before its post
 	Now    func() time.Time
 	// Census, when set, holds every unit whose tests passed to the skip census (#esdkm67); nil skips the step.
 	Census *CensusConfig
@@ -145,8 +187,8 @@ func (loop Loop) JudgeFuture(job Job) (FuturePost, error) {
 		}
 		post.Decision.Kicks[verdict.UnitKey] = kick
 	}
-	if err := loop.Queue.PostVerdicts(job.Future, post); err != nil {
-		return FuturePost{}, fmt.Errorf("posting future %s: %w", job.Future, err)
+	if err := loop.post(job.Future, post, verdicts); err != nil {
+		return FuturePost{}, err
 	}
 	return post, nil
 }
@@ -194,8 +236,8 @@ func (loop Loop) VoidFuture(job Job, infra, cause string) (FuturePost, error) {
 	decision := Green(post.Plan, verdicts)
 	decision.Problems = append([]string{"run " + job.Run + " void: " + cause}, decision.Problems...)
 	post.Decision = PostDecision{RunVerdict: decision, Kicks: map[string]Kick{}}
-	if err := loop.Queue.PostVerdicts(job.Future, post); err != nil {
-		return FuturePost{}, fmt.Errorf("posting future %s: %w", job.Future, err)
+	if err := loop.post(job.Future, post, verdicts); err != nil {
+		return FuturePost{}, err
 	}
 	return post, nil
 }

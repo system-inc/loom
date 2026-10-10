@@ -162,21 +162,23 @@ func ReadingOf(sha string, post FuturePost) (Reading, error) {
 	failures, skips := []string{}, []string{}
 	for _, raw := range post.Verdicts {
 		var record struct {
-			UnitKey string        `json:"unitKey"`
-			Tests   []TestOutcome `json:"tests"`
-			Rule    string        `json:"rule"`
+			UnitKey string   `json:"unitKey"`
+			Tests   TestsRef `json:"tests"`
+			Rule    string   `json:"rule"`
 		}
 		if err := json.Unmarshal(raw, &record); err != nil {
 			return Reading{}, err
 		}
-		for _, outcome := range record.Tests {
-			switch {
-			case outcome.Outcome == "pass":
-				reading.PassedTests++
-			case outcome.Outcome == "fail" && red[record.UnitKey]:
+		reading.PassedTests += record.Tests.Passed
+		for _, outcome := range record.Tests.Inline {
+			if outcome.Outcome == "fail" && red[record.UnitKey] {
 				failures = append(failures, outcome.Package+" "+outcome.Test)
-			case outcome.Outcome == "skip" && red[record.UnitKey] && record.Rule == RuleCensus:
-				skips = append(skips, outcome.Package+" "+outcome.Test)
+			}
+		}
+		if red[record.UnitKey] && record.Rule == RuleCensus {
+			// A census red's tests passed: its kick names the skips the census refused.
+			for _, refused := range post.Decision.Kicks[record.UnitKey].Tests {
+				skips = append(skips, refused.Package+" "+refused.Test)
 			}
 		}
 	}

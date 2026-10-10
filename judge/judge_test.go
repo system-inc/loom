@@ -163,7 +163,8 @@ func TestTheRecordIsCanonicalWithContractFieldNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := `{"attempts":[],"cause":null,"change":"chg_X","decidedAt":"2026-10-09T23:30:00Z","future":"` + strings.Repeat("b", 40) +
-		`","infra":null,"outputs":[],"rule":"judge-v1","run":"r1","status":"passed","tests":[],"unitKey":"` + strings.Repeat("a", 64) + `"}`
+		`","infra":null,"outputs":[],"rule":"judge-v1","run":"r1","status":"passed","tests":{"failed":0,"inline":[],"passed":0,` +
+		`"sha256":"4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945","skipped":0},"unitKey":"` + strings.Repeat("a", 64) + `"}`
 	if string(encoded) != want {
 		t.Fatalf("got\n%s\nwant\n%s", encoded, want)
 	}
@@ -173,7 +174,7 @@ func TestTheRecordIsCanonicalWithContractFieldNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, field := range []string{`"exit":2`, `"finishedAt":"f"`, `"machine":"m"`, `"runner":"r"`, `"startedAt":"s"`, `"status":"broken"`, `"wallSeconds":1.5`,
-		`"outcome":"fail"`, `"package":"` + testPackage + `"`, `"test":"TestA"`, `"cause":"infra"`, `"infra":"kill"`} {
+		`"failed":1,"inline":[{"outcome":"fail","package":"` + testPackage + `","test":"TestA"}],"passed":0`, `"cause":"infra"`, `"infra":"kill"`} {
 		if !strings.Contains(string(attempt), field) {
 			t.Fatalf("%s lacks %s", attempt, field)
 		}
