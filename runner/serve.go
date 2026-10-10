@@ -44,9 +44,9 @@ type ServeOptions struct {
 	MinimumFreeMegabytes int64
 	// UnfitPause is how long serve waits before looking at an unfit disk again. Zero means 30 s.
 	UnfitPause time.Duration
-	// RunnerPause is how long serve asks for nothing after refusing a unit whose job names another runner: its pool's
-	// pin and this box's release disagree until one of them moves. Zero means 10 minutes.
-	RunnerPause time.Duration
+	// Releases is where a unit's runner is fetched by its sha256 when the unit names one other than this runner
+	// (runners.go). Empty means DefaultReleases.
+	Releases string
 	// Drain, once it delivers or closes, ends serving as the deadline does: nothing more is asked for, and the unit in
 	// hand runs to its finish. A box's loom-serve unit drains on SIGHUP, so a release restarts serve and breaks nothing.
 	Drain <-chan struct{}
@@ -103,8 +103,8 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	if options.UnfitPause == 0 {
 		options.UnfitPause = 30 * time.Second
 	}
-	if options.RunnerPause == 0 {
-		options.RunnerPause = 10 * time.Minute
+	if options.Releases == "" {
+		options.Releases = DefaultReleases
 	}
 	if options.freeMegabytes == nil {
 		options.freeMegabytes = freeMegabytes
@@ -135,8 +135,10 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 	}()
 	summary := ServeSummary{}
 	failures := 0
-	// otherRunner says why serve stands down after a unit named another runner, while it does.
-	otherRunner := ""
+	runners := runnerCache{directory: filepath.Join(unitOptions.testRoot(), runnerDirectoryName), releases: options.Releases, client: unitOptions.Client}
+	// unhad counts the units in a row whose runner couldn't be had: past two, serve waits a little before it asks again,
+	// so a store that is down doesn't void a whole queue in seconds. Any unit whose runner was had starts it over.
+	unhad := 0
 	for {
 		if serveContext.Err() != nil {
 			summary.Stopped = "by a signal"
@@ -211,7 +213,7 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 			pause(drainContext, options.Deadline.Add(-options.Margin), time.Second-time.Since(asked))
 			continue
 		}
-		result := Run(serveContext, unit, unitOptions)
+		result, had := runners.run(serveContext, unit, unitOptions)
 		summary.Units++
 		switch result.Status {
 		case protocol.StatusPassed:
@@ -221,19 +223,15 @@ func Serve(serveContext context.Context, options ServeOptions) (ServeSummary, er
 		default:
 			summary.Broken++
 		}
-		if result.OtherRunner != "" {
-			// The pool's pin and this box's release disagree, so every unit it holds would be refused here: ask for none
-			// for a while, since a release (which drains this serve) or a moved pin is what ends it.
-			otherRunner = fmt.Sprintf("its units name runner %.12s, and this runner is %.12s", result.OtherRunner, selfSha256())
-			fmt.Fprintf(options.Report, "loom-runner serve: unfit: %s; asking for no unit for %v\n", otherRunner, options.RunnerPause)
-			pause(drainContext, options.Deadline.Add(-options.Margin), options.RunnerPause)
-			if drainContext.Err() == nil && time.Until(options.Deadline) >= options.Margin {
-				otherRunner = ""
-			}
+		if had {
+			unhad = 0
+			continue
 		}
-	}
-	if summary.Unfit == "" {
-		summary.Unfit = otherRunner
+		unhad++
+		fmt.Fprintf(options.Report, "loom-runner serve: unit %s's runner couldn't be had (%d in a row)\n", unit.Unit, unhad)
+		if unhad > 2 {
+			pause(drainContext, options.Deadline.Add(-options.Margin), serveBackoff(unhad-2))
+		}
 	}
 	summary.Seconds = time.Since(started).Seconds()
 	return summary, nil

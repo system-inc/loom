@@ -56,9 +56,10 @@ type TestJob struct {
 	ChangedPaths []string `json:"changedPaths,omitempty"`
 	// Sample is the commit ADAMIC_GATE_SAMPLE names, for the tests that sample a corpus by commit. Empty: unset.
 	Sample string `json:"sample,omitempty"`
-	// Runner is the runner binary's sha256 the unit's key names (keyParts.tools.runner): a runner whose own sha256 isn't
-	// this one refuses the job as unfit before anything runs, since the judge voids whatever another runner computes.
-	// Empty: any runner (a product's key names none).
+	// Runner is the runner binary's sha256 the unit's key names (keyParts.tools.runner): a serving runner hands the job
+	// to that runner, fetched from the release store, and a runner whose own sha256 isn't this one, given the job by
+	// hand, refuses it as unfit before anything runs, since the judge voids whatever another runner computes. Empty:
+	// any runner (a product's key names none).
 	Runner string `json:"runner,omitempty"`
 	// Phase, in place of Packages, is one non-test phase of the box fast gate: run.py's unit line, the phase and, for
 	// wasi, stage3 or catalog, its one unit (the planner's phase units, keyParts.select.run). The runner builds

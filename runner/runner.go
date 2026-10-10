@@ -123,12 +123,10 @@ func (options Options) withDefaults() Options {
 }
 
 // A Result is how one unit ended: its status as the finished event reported it, and the workspace it ran
-// in, which is gone by now unless Options.Keep was set. OtherRunner is the runner a test job named when this runner
-// refused it for not being that one, which a serving runner reads as unfit.
+// in, which is gone by now unless Options.Keep was set.
 type Result struct {
-	Status      string
-	Workspace   string
-	OtherRunner string
+	Status    string
+	Workspace string
 }
 
 // LoadUnit reads a unit from a file, from standard input ("-"), or from an https URL, and decodes it
@@ -180,14 +178,34 @@ type unitRun struct {
 	directory string // made for this unit; holds the workspace and the staging area for fetched blobs
 	workspace string // where the inputs land and the command runs
 	staging   string // fetched blobs wait here, verified, until they are placed
-	// otherRunner is the runner the unit's test job named, when it isn't this one and the unit was refused for it.
-	otherRunner string
 }
 
 // Run runs one unit and streams its events to options.Events. Every path through it ends with exactly one
 // finished event, and the event stream is complete whatever happens to the wire. Cancelling runContext
 // kills the unit's process group and finishes the unit broken: the runner was stopped, nothing was proved.
 func Run(runContext context.Context, unit protocol.Unit, options Options) Result {
+	run := begin(unit, options)
+	status := run.execute(runContext)
+	if run.directory != "" && !run.options.Keep {
+		if err := removeDirectory(run.directory); err != nil {
+			fmt.Fprintf(run.options.Diagnostics, "loom-runner: removing workspace %s: %v\n", run.directory, err)
+		}
+	}
+	run.finish(status)
+	return Result{Status: status, Workspace: run.workspace}
+}
+
+// refuse finishes a unit this runner can't run at all, broken, with the error that says why: started (this runner's
+// own), the error and finished, posted where the unit says as any unit's are, so the coordinator reads it Loom's.
+func refuse(unit protocol.Unit, options Options, phase string, err error) Result {
+	run := begin(unit, options)
+	run.fail(phase, err)
+	run.finish(protocol.StatusBroken)
+	return Result{Status: protocol.StatusBroken}
+}
+
+// begin readies a unit's run, its wire posting if the unit names one, and emits its started event.
+func begin(unit protocol.Unit, options Options) *unitRun {
 	options = options.withDefaults()
 	run := &unitRun{unit: unit, options: options}
 	run.emitter = &emitter{run: unit.Run, unit: unit.Unit, sequence: max(0, unit.SequenceStart), writer: options.Events, now: time.Now}
@@ -214,15 +232,7 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 		InputHashes:      inputHashes,
 		HeartbeatSeconds: options.Heartbeat.Seconds(),
 	})
-
-	status := run.execute(runContext)
-	if run.directory != "" && !options.Keep {
-		if err := removeDirectory(run.directory); err != nil {
-			fmt.Fprintf(options.Diagnostics, "loom-runner: removing workspace %s: %v\n", run.directory, err)
-		}
-	}
-	run.finish(status)
-	return Result{Status: status, Workspace: run.workspace, OtherRunner: run.otherRunner}
+	return run
 }
 
 // execute is the unit's life between started and finished, and returns the status finished reports.
@@ -238,9 +248,9 @@ func (run *unitRun) execute(runContext context.Context) string {
 		}
 	}
 	// A job runs only on the runner its key names: the judge voids what another computes, so running it would only
-	// spend the unit's time. A runner that can't read its own binary can't be that one.
+	// spend the unit's time. A serving runner hands such a job to that runner (runners.go), so this is a unit given to
+	// `loom-runner run` by hand. A runner that can't read its own binary can't be that one.
 	if job := run.unit.Test; job != nil && job.Runner != "" && job.Runner != selfSha256() {
-		run.otherRunner = job.Runner
 		own := selfSha256()
 		if own == "" {
 			own = "unreadable"

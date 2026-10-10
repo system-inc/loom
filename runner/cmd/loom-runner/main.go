@@ -1,7 +1,7 @@
 // Command loom-runner runs one Loom unit on this machine and streams its events to stdout, one JSON line
 // each. It exits 0 when the unit passed, 1 when it failed and 2 when it is broken or couldn't be read.
 //
-//	loom-runner run [--workspace <directory>] [--keep] <unit.json | https URL | ->
+//	loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] <unit.json | https URL | ->
 //	loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
 //	loom-runner install-serve
 //	loom-runner version
@@ -36,7 +36,7 @@ import (
 )
 
 const usage = `usage:
-  loom-runner run [--workspace <directory>] [--keep] <unit.json | https URL | ->
+  loom-runner run [--workspace <directory>] [--keep] [--strict] [--phase-jobs] [--exclusive] [--root <directory>] [--tree <directory>] <unit.json | https URL | ->
   loom-runner serve --pool <wire>/pools/<pool> --token-file <file> --worker <name> --until <duration> [--strict] [--exclusive] [--root <directory>] [--tree <directory>] [--workspace <directory>] [--log <file>]
   loom-runner install-serve
   loom-runner version
@@ -68,6 +68,12 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	workspace := flags.String("workspace", "", "where to make the unit's workspace (default $TMPDIR)")
 	keep := flags.Bool("keep", false, "leave the workspace in place after the run")
+	// A serving runner hands a unit naming this runner to it with its own settings (runner/runners.go).
+	strict := flags.Bool("strict", false, "run only a structured test job; refuse argv")
+	phaseJobs := flags.Bool("phase-jobs", false, "also take a phase job")
+	exclusive := flags.Bool("exclusive", false, "this machine is the runner's alone")
+	root := flags.String("root", "", "where a test job keeps its caches between units")
+	tree := flags.String("tree", "", "where a test job's checkout is kept across units")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return 2
 	}
@@ -88,6 +94,11 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Keep:            *keep,
 		Events:          stdout,
 		Diagnostics:     stderr,
+		Strict:          *strict,
+		PhaseJobs:       *phaseJobs,
+		Exclusive:       *exclusive,
+		Root:            *root,
+		Tree:            *tree,
 	})
 	if *keep && result.Workspace != "" {
 		fmt.Fprintf(stderr, "loom-runner: workspace kept at %s\n", result.Workspace)
@@ -119,6 +130,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	exclusive := flags.Bool("exclusive", false, "this machine is the runner's alone (a Codex instance): a test job may clear HOME's caches and run adamic's setup there; a house box never passes it")
 	root := flags.String("root", "", "where a test job keeps its caches between units (default /tmp with --exclusive)")
 	tree := flags.String("tree", "", "where a test job's checkout is kept across units (default <root>/adamic)")
+	releases := flags.String("releases", runner.DefaultReleases, "where a unit's runner is fetched by its sha256 when it names another than this one")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -160,6 +172,7 @@ func serve(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Unit:     runner.Options{WorkspaceParent: *workspace, Events: events, Diagnostics: stderr, Strict: *strict, PhaseJobs: *phaseJobs, Exclusive: *exclusive, Root: *root, Tree: *tree},
 		Report:   stderr,
 		Drain:    drain,
+		Releases: *releases,
 	})
 	fmt.Fprintln(stdout, summary)
 	if err != nil {

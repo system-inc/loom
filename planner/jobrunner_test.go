@@ -7,8 +7,8 @@ import (
 	"github.com/system-inc/loom/protocol"
 )
 
-// Every job names the runner its key names, which alone may run it (docs/serving.md): a box whose release isn't the
-// pool's pin refuses it before anything runs. A product's key names no runner, so its job names none.
+// Every job names the runner its key names, which alone may run it (docs/serving.md): a serving box hands it to that
+// runner, whatever release the box itself runs. A product's key names no runner, so its job names none.
 func TestEveryJobNamesItsKeysRunner(t *testing.T) {
 	t.Parallel()
 	sha, base, key, runner := strings.Repeat("c", 40), strings.Repeat("b", 40), strings.Repeat("1", 64), strings.Repeat("e", 64)
