@@ -169,6 +169,7 @@ func Run(runContext context.Context, config Config, job protocol.Job) (Result, e
 		record: newRecord(run, relay.Enqueue), machines: map[string]bool{},
 	}
 	coordinator.schedule(runContext, plan)
+	coordinator.closeUnplaced()
 
 	if err := relay.Drain(time.Now().Add(2 * time.Minute)); err != nil {
 		fmt.Fprintf(config.Log, "wire: not every event reached the wire (the verdict stands on the coordinator's record): %v\n", err)
@@ -343,6 +344,7 @@ func (coordinator *coordinator) skipBlocked() {
 		if _, blocked := coordinator.needsOf(state); blocked != "" {
 			state.status = "skipped"
 			coordinator.record.note(id, placeError("not placed: it needs %s", blocked))
+			coordinator.closeBroken(id)
 			fmt.Fprintf(coordinator.config.Log, "%s: not placed, it needs %s\n", id, blocked)
 		}
 	}
@@ -386,6 +388,7 @@ func (coordinator *coordinator) placeReady(runContext context.Context) bool {
 			// No machine of the run could ever take it: it's never placed, and the run is void for it.
 			state.status = "skipped"
 			coordinator.record.note(state.planned.Id, placeError("not placed: no machine of the run has %s", missing))
+			coordinator.closeBroken(state.planned.Id)
 			fmt.Fprintf(coordinator.config.Log, "%s: not placed, no machine of the run has %s\n", state.planned.Id, missing)
 			continue
 		}
@@ -614,9 +617,35 @@ func (coordinator *coordinator) attempt(runContext context.Context, state *unitS
 		}
 	}
 	state.status = status
+	if status == "dropped" {
+		// Given up for good: its drop is the last error in its stream, so it closes broken there.
+		coordinator.closeBroken(id)
+	}
 	select {
 	case coordinator.wake <- struct{}{}:
 	default: // a wake is already pending; the scheduler looks at every unit when it runs
+	}
+}
+
+// closeBroken ends the stream of a unit that will never finish with a finished event, status broken, after the error
+// that says why: a unit given up for good, never placed, or left when the run ended. The judge reads it as the
+// machine's or Loom's, by rule, instead of waiting for a finished no runner will send (#tmfpwap: three runs voided by
+// hand on Oct 10 because a dropped unit left them open). Decide reads it as void, as it read "never finished".
+func (coordinator *coordinator) closeBroken(id string) {
+	coordinator.record.note(id, protocol.Event{Type: "finished", Status: protocol.StatusBroken})
+}
+
+// closeUnplaced closes every unit still waiting when scheduling ends, which happens only when the coordinator was
+// stopped or no slot could ever take it.
+func (coordinator *coordinator) closeUnplaced() {
+	coordinator.mutex.Lock()
+	defer coordinator.mutex.Unlock()
+	for _, id := range coordinator.order {
+		if state := coordinator.units[id]; state.status == "" && !state.running {
+			state.status = protocol.StatusBroken
+			coordinator.record.note(id, placeError("never placed: the run ended before a slot took it"))
+			coordinator.closeBroken(id)
+		}
 	}
 }
 

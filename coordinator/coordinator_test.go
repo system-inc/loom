@@ -475,9 +475,39 @@ func TestAUnitDroppedTwiceLeavesTheRunVoid(t *testing.T) {
 	if result.Verdict.Status != "void" || len(flaky.ran) != 4 {
 		t.Fatalf("verdict %+v after %d attempts", result.Verdict, len(flaky.ran))
 	}
-	if !strings.Contains(strings.Join(result.Verdict.Problems, "\n"), "unit a never finished") {
+	if !strings.Contains(strings.Join(result.Verdict.Problems, "\n"), "unit a is broken") {
 		t.Fatalf("problems %q", result.Verdict.Problems)
 	}
+	// Given up for good, each unit's stream ends with the drop that says why and its closing finished, so the judge
+	// never waits on it.
+	for _, unit := range []string{"a", "b"} {
+		if why := closedBroken(wire.events(result.Run), result.Run, unit); !strings.Contains(why, "dropped the unit") {
+			t.Fatalf("unit %s isn't closed after its drop: %q", unit, why)
+		}
+	}
+}
+
+// closedBroken is the message of the place error just before a unit's last event, when that last event is its only
+// finished and says broken; "" otherwise.
+func closedBroken(events []protocol.Event, run string, unit string) string {
+	var stream []protocol.Event
+	finished := 0
+	for _, event := range events {
+		if event.Run == run && event.Unit == unit {
+			stream = append(stream, event)
+			if event.Type == "finished" {
+				finished++
+			}
+		}
+	}
+	if len(stream) < 2 || finished != 1 {
+		return ""
+	}
+	last, before := stream[len(stream)-1], stream[len(stream)-2]
+	if last.Type != "finished" || last.Status != protocol.StatusBroken || before.Type != "error" || before.Phase != protocol.PhasePlace {
+		return ""
+	}
+	return before.Message
 }
 
 func TestALateUnitIsDroppedAndPlacedAgain(t *testing.T) {
@@ -495,6 +525,12 @@ func TestALateUnitIsDroppedAndPlacedAgain(t *testing.T) {
 	}
 	if !strings.Contains(fmt.Sprint(wire.events(result.Run)), "ran past its timeout") {
 		t.Fatal("the late drop isn't in the record")
+	}
+	// Dropped once and placed again, it isn't given up: nothing closes it, and its one finished is the runner's.
+	for _, event := range wire.events(result.Run) {
+		if event.Unit == "a" && event.Type == "finished" && event.Status != protocol.StatusPassed {
+			t.Fatalf("a unit placed again was closed %s", event.Status)
+		}
 	}
 }
 
@@ -531,8 +567,8 @@ func TestAUnitWhoseNeedFailedIsNotPlacedAndTheRunIsVoidNamingTheFailure(t *testi
 	if result.Verdict.Status != "void" || !reflect.DeepEqual(result.Verdict.Failed, []string{"build"}) {
 		t.Fatalf("verdict %+v", result.Verdict)
 	}
-	if !strings.Contains(fmt.Sprint(wire.events(result.Run)), "not placed: it needs build, which ended failed") {
-		t.Fatal("the skip isn't in the record")
+	if why := closedBroken(wire.events(result.Run), result.Run, "tests"); why != "not placed: it needs build, which ended failed" {
+		t.Fatalf("the skipped unit isn't closed after its skip: %q", why)
 	}
 }
 
@@ -688,6 +724,24 @@ func TestAStoppedCoordinatorStillDecidesVoidAndPostsIt(t *testing.T) {
 	}
 	if result.Verdict.Status != "void" || wire.verdict[result.Run].Status != "void" {
 		t.Fatalf("verdict %+v, posted %+v", result.Verdict, wire.verdict[result.Run])
+	}
+}
+
+func TestAUnitTheStoppedRunNeverPlacedIsClosedBroken(t *testing.T) {
+	wire := newFakeWire(t)
+	stopping, stop := context.WithCancel(context.Background())
+	time.AfterFunc(300*time.Millisecond, stop)
+	units := []protocol.JobUnit{shell("slow", "sleep 20"), shell("next", "echo next")}
+	result, err := Run(stopping, config(wire, LocalMachine{Label: "box"}), protocol.Job{Name: "j", Units: units})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if why := closedBroken(wire.events(result.Run), result.Run, "next"); why != "never placed: the run ended before a slot took it" {
+		t.Fatalf("the unplaced unit isn't closed: %q", why)
+	}
+	if again := protocol.Decide(result.Run, []string{"slow", "next"}, wire.events(result.Run)); again.Status != "void" ||
+		strings.Contains(strings.Join(again.Problems, "\n"), "never finished") {
+		t.Fatalf("the wire's events decide %+v", again)
 	}
 }
 
