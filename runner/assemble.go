@@ -91,7 +91,7 @@ func stateOf(directory string, chunks []builder.SourceChunk) (sourceState, error
 			return err
 		}
 		name, err := filepath.Rel(directory, path)
-		if err != nil || name == "." || name == sourceMarker {
+		if err != nil || name == "." {
 			return err
 		}
 		info, err := entry.Info()
@@ -257,7 +257,7 @@ func (cache sourceCache) claim(base *sourceBase) string {
 	base.lock = lock
 	difference := "it isn't whole"
 	if (&heldSource{sum: base.sum, directory: base.directory}).whole() {
-		difference = changed(base.directory, base.state)
+		difference = changed(filepath.Join(base.directory, sourceTreeName), base.state)
 	}
 	if difference != "" {
 		os.Remove(cache.statePath(base.sum))
@@ -323,9 +323,11 @@ func (cache sourceCache) assemble(assembleContext context.Context, held *heldSou
 	}
 	defer lock.Close()
 	scratch := lock.Name()
-	// Removed while still locked, whatever it holds: nothing, once the tree is named.
+	// Removed while still locked, whatever it holds: nothing, once the source is named.
 	defer removeDirectory(scratch)
-	tree := filepath.Join(scratch, "tree")
+	// The source's directory, renamed to its name whole: its tree, and its marker beside it, never in it.
+	source := filepath.Join(scratch, "source")
+	tree := filepath.Join(source, sourceTreeName)
 	kept := map[builder.SourceChunk]bool{}
 	if base != nil {
 		if done.passed = cache.claim(base); done.passed != "" {
@@ -353,7 +355,7 @@ func (cache sourceCache) assemble(assembleContext context.Context, held *heldSou
 		done.unpacked++
 	}
 	if err = os.MkdirAll(tree, 0o755); err == nil {
-		err = os.WriteFile(filepath.Join(tree, sourceMarker), []byte(held.sum+"\n"), 0o444)
+		err = os.WriteFile(filepath.Join(source, sourceMarker), []byte(held.sum+"\n"), 0o444)
 	}
 	if err != nil {
 		return done, err
@@ -364,7 +366,7 @@ func (cache sourceCache) assemble(assembleContext context.Context, held *heldSou
 	}
 	// Everything under the name is on disk before the name is.
 	syscall.Sync()
-	if err = os.Rename(tree, held.directory); err != nil {
+	if err = os.Rename(source, held.directory); err != nil {
 		if held.whole() {
 			held.ready = true
 			return done, nil
@@ -377,23 +379,30 @@ func (cache sourceCache) assemble(assembleContext context.Context, held *heldSou
 	return done, nil
 }
 
-// spend makes base, held exclusively, the start of a new tree at tree: its state removed, then it renamed there (so a
-// runner killed from here on leaves it whole at its name, or inside the unpacking a sweep removes, never a state
-// naming another tree), its lock file removed, its marker taken out, and the entries of each of its chunks chunks
-// lacks removed, deepest first, then the directories that leaves empty. It returns the chunks the tree still holds.
+// spend makes base, held exclusively, the start of a new tree at tree: its state and its marker removed, so a runner
+// killed from here on leaves at its name only a source never trusted, or nothing, never a state or a marker naming
+// another tree; then its tree renamed there, its emptied directory and its lock file removed, and the entries of each
+// of its chunks chunks lacks removed, deepest first, then the directories that leaves empty. It returns the chunks the
+// tree still holds.
 func (cache sourceCache) spend(base *sourceBase, chunks []builder.SourceChunk, tree string, done *assembly) (map[builder.SourceChunk]bool, error) {
 	if err := os.Remove(cache.statePath(base.sum)); err != nil {
 		return nil, err
 	}
-	if err := os.Rename(base.directory, tree); err != nil {
+	if err := os.Remove(filepath.Join(base.directory, sourceMarker)); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(tree), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(filepath.Join(base.directory, sourceTreeName), tree); err != nil {
+		return nil, err
+	}
+	if err := os.Remove(base.directory); err != nil {
 		return nil, err
 	}
 	os.Remove(filepath.Join(cache.directory, base.sum+".lock"))
 	base.release()
 	done.base = base.sum
-	if err := os.Remove(filepath.Join(tree, sourceMarker)); err != nil {
-		return nil, err
-	}
 	// A chunk is kept whole or not at all: its blob, its range and its count, so a range the new index draws
 	// narrower around the same blob unpacks again, refused as a fresh assembly would refuse it.
 	wanted := map[builder.SourceChunk]bool{}

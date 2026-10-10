@@ -24,8 +24,11 @@ import (
 // source is assembled from its chunks (assemble.go) and named by builder.SourceSum; its module cache is one archive,
 // named by its blob's sha256:
 //
+//   - A source's name is a directory holding its tree, tree/, where the tests run, and beside it its completion marker
+//     (sourceMarker, holding its sha256). The runner adds nothing inside the tree: it holds the archive's entries and
+//     nothing else (adamic refuses a file its tracked manifest doesn't list, Oct 10).
 //   - A source is unpacked into .unpacking-<sha256>-<random>, which its unpacker holds locked, gets its completion
-//     marker (sourceMarker, holding its sha256), is synced once, and only then is renamed to its name. A directory at a
+//     marker, is synced once, and only then is renamed to its name. A directory at a
 //     source's name without its marker (a crash that lost what wasn't on disk) is never trusted: it is removed and
 //     unpacked again. A .unpacking- or .removing- directory whose lock no one holds is a dead runner's, swept before
 //     the next unit.
@@ -46,8 +49,12 @@ var keepSources = 4
 const unpackingPrefix = ".unpacking-"
 const sourceRemovingPrefix = ".removing-"
 
-// sourceMarker is the file a whole unpacked source holds at its top, naming its sha256.
-const sourceMarker = ".loom-source"
+// sourceMarker is the file a whole source's directory holds beside its tree, naming its sha256, and sourceTreeName the
+// tree's own directory there, which holds the archive's entries and nothing else.
+const (
+	sourceMarker   = ".loom-source"
+	sourceTreeName = "tree"
+)
 
 // A sourceCache is a runner's unpacked sources, under its root.
 type sourceCache struct {
@@ -91,6 +98,11 @@ func (cache sourceCache) hold(waitContext context.Context, sum string) (*heldSou
 		os.Chtimes(held.directory, now, now)
 	}
 	return held, nil
+}
+
+// tree is the source's tree: the archive's entries, where the tests run.
+func (held *heldSource) tree() string {
+	return filepath.Join(held.directory, sourceTreeName)
 }
 
 // whole reports whether the source's directory holds its completion marker, naming it.
@@ -188,7 +200,7 @@ func (cache sourceCache) unpack(unpackContext context.Context, held *heldSource,
 	}
 	defer lock.Close()
 	scratch := lock.Name()
-	if err = builder.Unpack(contextReader{unpackContext, archive}, scratch, nil); err == nil {
+	if err = builder.Unpack(contextReader{unpackContext, archive}, filepath.Join(scratch, sourceTreeName), nil); err == nil {
 		err = os.WriteFile(filepath.Join(scratch, sourceMarker), []byte(held.sum+"\n"), 0o444)
 	}
 	if err != nil {

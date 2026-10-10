@@ -37,10 +37,10 @@ import (
 //	TestAnAssemblyKilledPartwayLeavesNothingTrusted
 //	a fetched chunk's hash unchecked, or a cached one's: TestACorruptChunkIsNeverAssembled
 //	a kept tree on tmpfs made into another: TestAKeptTreeOnTmpfsIsNeverMadeIntoAnother
+//	a marker written inside a source's tree, or a module cache's: TestARunnerAddsNothingInsideATree
 //	a kept chunk matched by its blob alone, not its range and count: TestAKeptChunkIsMatchedWholeNotByItsBlob
 
-// describeTree describes every entry under directory but the marker: its type and mode, a link's target, a file's
-// bytes.
+// describeTree describes every entry under directory: its type and mode, a link's target, a file's bytes.
 func describeTree(t *testing.T, directory string) map[string]string {
 	t.Helper()
 	described := map[string]string{}
@@ -50,7 +50,7 @@ func describeTree(t *testing.T, directory string) map[string]string {
 		}
 		name, _ := filepath.Rel(directory, path)
 		info, err := entry.Info()
-		if err != nil || name == "." || name == sourceMarker {
+		if err != nil || name == "." {
 			return err
 		}
 		description := info.Mode().String()
@@ -145,7 +145,7 @@ func assembleTree(t *testing.T, cache sourceCache, chunks []builder.SourceChunk,
 	if done.passed != "" {
 		why = append(why, done.passed)
 	}
-	return held.directory, done, why
+	return held.tree(), done, why
 }
 
 // A tree one chunk from a kept tree is made from it, unpacking that chunk alone, and is exactly the tree its whole
@@ -224,7 +224,7 @@ func TestAChangedKeptTreeIsNeverMadeIntoAnother(t *testing.T) {
 				t.Error("the changed tree's state is kept")
 			}
 			// It still serves its own units, as it is.
-			if _, err := os.Stat(filepath.Join(treeDirectory, sourceMarker)); err != nil {
+			if _, err := os.Stat(filepath.Join(filepath.Dir(treeDirectory), sourceMarker)); err != nil {
 				t.Error("the changed tree was removed")
 			}
 		})
@@ -278,7 +278,7 @@ func TestAHeldKeptTreeIsNeverSpent(t *testing.T) {
 	if err != nil || done.base != "" || !strings.Contains(done.passed, "held by a unit") || !unit.whole() {
 		t.Fatalf("C beside an A held after the pick: %+v %v", done, err)
 	}
-	sameTree(t, held.directory, append(treeA[:len(treeA):len(treeA)], tarEntry{name: "m/x/v.txt", kind: tar.TypeReg, content: "v\n"}))
+	sameTree(t, held.tree(), append(treeA[:len(treeA):len(treeA)], tarEntry{name: "m/x/v.txt", kind: tar.TypeReg, content: "v\n"}))
 }
 
 // A hold waits for its tree's lock no longer than its time: a unit of a tree being spent or removed is held to its
@@ -746,5 +746,40 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A runner adds nothing inside a tree: after a unit, its source's tree holds exactly the archive's entries, and its
+// module cache's exactly that archive's, each marker beside its tree (adamic refuses a file its tracked manifest
+// doesn't list, so a marker in the tree reds its lint on every runner, Oct 10).
+func TestARunnerAddsNothingInsideATree(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	if result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t)); result.Status != protocol.StatusPassed {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+	sources := filepath.Join(fixture.directory, "root", sourceDirectoryName)
+	sameTree(t, filepath.Join(sources, fixture.tree.source, sourceTreeName), fixtureFiles())
+	modules := t.TempDir()
+	if err := builder.Unpack(bytes.NewReader(fixtureBinary.modules), modules, nil); err != nil {
+		t.Fatal(err)
+	}
+	want, got := describeTree(t, modules), describeTree(t, filepath.Join(sources, fixture.tree.modules, sourceTreeName))
+	if len(want) != len(got) {
+		t.Errorf("the module cache's tree holds %d entries, its archive %d", len(got), len(want))
+	}
+	for name, description := range want {
+		if got[name] != description {
+			t.Errorf("the module cache's %s is %q, its archive's %q", name, got[name], description)
+		}
+	}
+	for _, sum := range []string{fixture.tree.source, fixture.tree.modules} {
+		entries, _ := os.ReadDir(filepath.Join(sources, sum))
+		names := []string{}
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if strings.Join(names, " ") != sourceMarker+" "+sourceTreeName {
+			t.Errorf("%s holds %q, not its marker and its tree", sum, names)
+		}
 	}
 }

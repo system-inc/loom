@@ -202,7 +202,7 @@ func (run *unitRun) runPrebuilt(runContext context.Context, job *protocol.TestJo
 		}
 	}
 	sources.trim(keepSources)
-	source := held.directory
+	source := held.tree()
 	products := filepath.Join(run.directory, "adamic-build")
 	binaries := filepath.Join(run.directory, "binaries")
 	if err := unpackPrebuilt(prepareContext, index, packages, files, products, binaries); err != nil {
@@ -638,7 +638,7 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 	}
 	proxy, moduleCache := "off", filepath.Join(run.directory, "modules")
 	if index.Modules != "" {
-		proxy, moduleCache = "file://"+filepath.Join(sources.directory, index.Modules), sources.moduleCache(index.Modules)
+		proxy, moduleCache = "file://"+filepath.Join(sources.directory, index.Modules, sourceTreeName), sources.moduleCache(index.Modules)
 	}
 	delegated := delegatedEnvironment(proxy, moduleCache)
 	real, err := lookPath("go", environment["PATH"])

@@ -961,7 +961,7 @@ func TestSourcesAreBoundedAndAHeldOneStays(t *testing.T) {
 	cache.trim(1)
 	present := ""
 	for index, source := range held {
-		if _, err := os.Stat(filepath.Join(source.directory, "file")); err == nil {
+		if _, err := os.Stat(filepath.Join(source.tree(), "file")); err == nil {
 			present += fmt.Sprint(index)
 		}
 	}
@@ -1285,9 +1285,9 @@ func TestATestsModulesComeFromTheTreesModuleCache(t *testing.T) {
 		t.Error("go wrote HOME's module cache")
 	}
 	// The tree's source, shared by every unit of the tree, is as Workshop archived it: go wrote no go.work.sum there.
-	source := filepath.Join(fixture.directory, "root", sourceDirectoryName, fixture.tree.source)
+	source := filepath.Join(fixture.directory, "root", sourceDirectoryName, fixture.tree.source, sourceTreeName)
 	filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() == sourceMarker {
+		if err != nil || entry.IsDir() {
 			return err
 		}
 		name, _ := filepath.Rel(source, path)

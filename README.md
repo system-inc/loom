@@ -87,7 +87,8 @@ Workshop built and builds nothing (`runner/prebuilt.go`, #pcn6prz). In place of 
    written to a locked `.partial-` and renamed only when whole, so a kill or a full disk never leaves a blob's name on
    anything else; the index, every fetch and every wait on another unit's fetch end at the unit's deadline; whatever
    the store lacks or can't give whole is named, and the unit is broken, never red;
-3. keeps each tree's source at `<root>/loom-sources/<sum of its chunk list>` for every unit of the tree, assembled from
+3. keeps each tree's source at `<root>/loom-sources/<sum of its chunk list>/tree` for every unit of the tree, its
+   completion marker beside the tree, never in it (the runner adds nothing where the tests run), assembled from
    its chunks (each a gzipped tar of a run of its paths, named by its sha256, its range in the index; 836 for adamic's
    98,459 files) beside it under a lock, every entry in its chunk's range, marked complete, synced once and only then
    renamed, never trusted without its marker, held by a lock while a unit runs in it. A tree sharing at least half its
