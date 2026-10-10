@@ -35,10 +35,13 @@ type State struct {
 	Since    time.Time      `json:"since"` // when the phase began
 	Order    Order          `json:"order"`
 	Baseline map[string]int `json:"baseline,omitempty"` // the canary services' restarts when the soak began
-	Lagging  []string       `json:"lagging,omitempty"`  // boxes that didn't report the release in time
-	Held     []string       `json:"held,omitempty"`     // boxes a hold kept off it
-	Why      string         `json:"why,omitempty"`      // why it stopped
-	Failed   string         `json:"failed,omitempty"`   // the commit that stopped a release, never released again until retried
+	// Promoting is a soak the canary passed, whose promotion was sent but not yet read back where the boxes read it:
+	// the next pass finishes it, never judging the canary again over a promotion the boxes may already follow.
+	Promoting bool     `json:"promoting,omitempty"`
+	Lagging   []string `json:"lagging,omitempty"` // boxes that didn't report the release in time
+	Held      []string `json:"held,omitempty"`    // boxes a hold kept off it
+	Why       string   `json:"why,omitempty"`     // why it stopped
+	Failed    string   `json:"failed,omitempty"`  // the commit that stopped a release, never released again until retried
 }
 
 // Steps are what the watcher does to the world, each swapped in tests.
@@ -382,6 +385,9 @@ func (watcher *Watcher) canary(state *State) error {
 // soak holds the canary to the release: still on it, its services restarting no more than allowed, and at the soak's
 // end heard from since it began, every service active, and its serve asking its pool.
 func (watcher *Watcher) soak(callContext context.Context, state *State) error {
+	if state.Promoting {
+		return watcher.promote(callContext, state)
+	}
 	report, err := ReadReport(filepath.Join(watcher.Config.State, "reports"), watcher.Config.Canary)
 	if err != nil {
 		return err
@@ -427,8 +433,15 @@ func (watcher *Watcher) soak(callContext context.Context, state *State) error {
 			return nil
 		}
 	}
-	// A person may have published by hand during the soak (a rollback is copying an older manifest over current.txt
-	// and uploading it): what they published stands, and the canary isn't promoted over it.
+	return watcher.promote(callContext, state)
+}
+
+// promote ends a soak the canary passed. A person may have published by hand during it (a rollback is copying an older
+// manifest over current.txt and uploading it): what they published stands, and the canary isn't promoted over it.
+// Otherwise the commit's own manifest is sent where the boxes read it and read back, and only then does the out
+// directory say so: until then it still says what the boxes read, so a promotion that never reaches them leaves the
+// canary for `loom release rollback` to end. Once sent, the promotion is finished by whichever pass reads it back.
+func (watcher *Watcher) promote(callContext context.Context, state *State) error {
 	local, err := ReadPublished(watcher.Config.Out)
 	if err != nil {
 		return err
@@ -442,34 +455,41 @@ func (watcher *Watcher) soak(callContext context.Context, state *State) error {
 	if err != nil {
 		return fmt.Errorf("reading what the boxes read before promoting %s: %w", short(state.Commit), err)
 	}
-	// The commit alone there is this release's own promotion, uploaded by a pass that couldn't read it back.
+	// The commit alone there is this release's own promotion, sent by a pass that couldn't read it back.
 	if !Alone(remote, state.Commit) {
 		if remote.CanaryVersion() != state.Commit {
 			watcher.stop(state, fmt.Sprintf("%s/current.txt, what the boxes read, no longer publishes the canary of %s (it reads %s); someone published by hand during the soak, and nothing is promoted over it",
 				watcher.Config.Base, short(state.Commit), describeManifest(remote)))
 			return nil
 		}
-		if err := watcher.upload(callContext, state.Commit); err != nil {
-			watcher.stop(state, "uploading the promotion: "+err.Error())
+		state.Promoting = true
+		uploaded := watcher.upload(callContext, state.Commit)
+		remote, err = watcher.Steps.Published(callContext)
+		switch {
+		case err != nil && uploaded != nil:
+			watcher.stop(state, fmt.Sprintf("uploading the promotion: %v; and %s/current.txt can't be read back (%v), so the boxes may follow either: read it before anything else; %s/current.txt still publishes the canary",
+				uploaded, watcher.Config.Base, err, watcher.Config.Out))
 			return nil
-		}
-		if remote, err = watcher.Steps.Published(callContext); err != nil {
+		case err != nil:
 			return fmt.Errorf("reading back the promotion of %s: %w", short(state.Commit), err)
-		}
-		if !Alone(remote, state.Commit) {
+		case Alone(remote, state.Commit):
+			// The boxes read it, whatever upload.sh said of itself.
+		case uploaded != nil:
+			watcher.stop(state, "uploading the promotion: "+uploaded.Error())
+			return nil
+		default:
 			watcher.stop(state, fmt.Sprintf("uploaded %s's manifest as current.txt, but %s/current.txt reads %s; %s/current.txt still publishes the canary",
 				short(state.Commit), watcher.Config.Base, describeManifest(remote), watcher.Config.Out))
 			return nil
 		}
 	}
-	// Only once the boxes read the promotion does the out directory: until then it still says what they read, so a
-	// failed upload leaves the canary for `loom release rollback` to end.
 	if err := watcher.Steps.Promote(state.Commit); err != nil {
 		watcher.stop(state, "promoting: "+err.Error())
 		return nil
 	}
+	state.Promoting = false
 	state.Phase, state.Since = PhaseFleet, watcher.Now().UTC()
-	watcher.say("%s stayed healthy for %s; %s promoted to every box, waiting up to %s for each to report it", canary, watcher.Config.Soak, short(state.Commit), watcher.Config.FleetWithin)
+	watcher.say("%s stayed healthy for %s; %s promoted to every box, waiting up to %s for each to report it", watcher.Config.Canary, watcher.Config.Soak, short(state.Commit), watcher.Config.FleetWithin)
 	return nil
 }
 
@@ -547,8 +567,9 @@ func (watcher *Watcher) Watch(callContext context.Context) {
 }
 
 // Rollback ends a canary: the fleet's own release becomes current.txt again, alone, uploaded and read back where the
-// boxes read it before the out directory says so, and the canary host returns to it (its previous version, still on disk). It refuses while a release is moving, and when there is no
-// canary to end; rolling the whole fleet back is publishing an older manifest by hand (docs/updater.md).
+// boxes read it before the out directory says so, and the canary host returns to it (its previous version, still on
+// disk). It refuses while a release is moving, and when there is no canary to end; rolling the whole fleet back is
+// publishing an older manifest by hand (docs/updater.md).
 func Rollback(callContext context.Context, config Config, steps Steps, log io.Writer) error {
 	lock, err := Lock(config.Out)
 	if err != nil {
