@@ -6,9 +6,10 @@ Commands in, artifacts out. A runner holds no credential but its tokens (below);
 `protocol/` holds its Go types; `runner/` and `coordinator/` (with `cmd/loom`) are the Go module's parts; `wire/` is the Cloudflare Worker, live at https://runs.loom.system.inc.
 `updater/` is how the house machines get Loom's binaries: Workshop builds and publishes them once per commit, and each machine's updater installs them (`docs/updater.md`).
 `serving/` keeps each Linux house machine serving its pool on the release's runner, a systemd user unit the updater's hook installs and reloads (`docs/serving.md`).
+`cutover/cutover.sh` is the one switch between the old path to adamic main and the lander, and its rehearsal on a scratch branch (`docs/cutover.md`).
 The work and its laws live in the task tree at #system_adamic_developer_tools_loom.
 
-Tests, from a clean clone: `go test ./...`, then in `wire/` `pnpm install --frozen-lockfile && pnpm test && pnpm check`, and `updater/update_test.sh`. There is no CI service: Loom gates itself once the coordinator exists.
+Tests, from a clean clone: `go test ./...`, then in `wire/` `pnpm install --frozen-lockfile && pnpm test && pnpm check`, and `updater/update_test.sh` and `cutover/cutover_test.sh`. There is no CI service: Loom gates itself once the coordinator exists.
 
 ## What a strict worker does
 
