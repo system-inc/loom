@@ -186,9 +186,7 @@ waiting:
 		case <-escalate:
 			signalGroup(group, syscall.SIGKILL)
 		case <-heartbeat.C:
-			if run.emitter.silentFor() >= run.options.Heartbeat {
-				run.emitter.emit(protocol.Event{Type: "output", Stream: "runner", Text: fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds())})
-			}
+			run.emitter.beat(run.options.Heartbeat, fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds()))
 		}
 	}
 	wall := time.Since(started)

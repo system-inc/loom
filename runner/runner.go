@@ -232,9 +232,7 @@ func (run *unitRun) beat() (stop func()) {
 			case <-quiet:
 				return
 			case <-ticker.C:
-				if run.emitter.silentFor() >= run.options.Heartbeat {
-					run.emitter.emit(protocol.Event{Type: "output", Stream: "runner", Text: fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds())})
-				}
+				run.emitter.beat(run.options.Heartbeat, fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds()))
 			}
 		}
 	}()
