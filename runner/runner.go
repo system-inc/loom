@@ -91,6 +91,9 @@ type Options struct {
 	LiveStatus string
 	// free reads a filesystem's free bytes; nil means builder.Free. Tests plant a full disk through it.
 	free func(path string) (uint64, error)
+	// toolchainChecks probes the toolchains a unit requires; nil means the process's own (sharedToolchainChecks).
+	// Tests plant one.
+	toolchainChecks *toolchainChecks
 }
 
 func (options Options) withDefaults() Options {
@@ -198,6 +201,8 @@ type unitRun struct {
 	workspace string // where the inputs land and the command runs
 	staging   string // fetched blobs wait here, verified, until they are placed
 	live      *livestatus.Writer
+	// missingTools is each toolchain the unit requires that this machine was found to lack, said on finished.
+	missingTools []string
 }
 
 // Run runs one unit and streams its events to options.Events. Every path through it ends with exactly one
@@ -302,6 +307,9 @@ func (run *unitRun) execute(runContext context.Context) string {
 		run.fail(protocol.PhaseStart, fmt.Errorf("refused as unfit: the job's key names runner %.12s, and this runner is %.12s: Loom's, never the change's", job.Runner, own))
 		return protocol.StatusBroken
 	}
+	if !run.checkToolchains(runContext) {
+		return protocol.StatusBroken
+	}
 	if err := run.makeWorkspace(); err != nil {
 		run.fail(protocol.PhaseStart, err)
 		return protocol.StatusBroken
@@ -363,17 +371,17 @@ func (run *unitRun) finish(status string) {
 	defer run.live.Close()
 	wire := run.emitter.wire
 	if wire == nil {
-		run.emitter.emit(protocol.Event{Type: "finished", Status: status})
+		run.emitter.emit(protocol.Event{Type: "finished", Status: status, MissingTools: run.missingTools})
 		return
 	}
 	deadline := time.Now().Add(run.options.WireDrainTimeout)
 	if err := wire.Drain(deadline); err != nil {
 		wire.Abandon()
 		run.fail(protocol.PhaseWire, fmt.Errorf("the wire didn't take every event; stdout holds the whole stream: %w", err))
-		run.emitter.emit(protocol.Event{Type: "finished", Status: status})
+		run.emitter.emit(protocol.Event{Type: "finished", Status: status, MissingTools: run.missingTools})
 		return
 	}
-	run.emitter.emit(protocol.Event{Type: "finished", Status: status})
+	run.emitter.emit(protocol.Event{Type: "finished", Status: status, MissingTools: run.missingTools})
 	if err := wire.Drain(deadline.Add(5 * time.Second)); err != nil {
 		fmt.Fprintf(run.options.Diagnostics, "loom-runner: the wire missed the finished event (stdout has it): %v\n", err)
 	}

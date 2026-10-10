@@ -143,6 +143,7 @@ func (run *unitRun) runTest(runContext context.Context) string {
 	for _, testPackage := range job.Packages {
 		if wasiPattern.MatchString(testPackage.Run) {
 			if err := wasiReady(environment); err != nil {
+				run.missingTools = []string{"wasiSdk"}
 				run.fail(protocol.PhaseStart, err)
 				return protocol.StatusBroken
 			}

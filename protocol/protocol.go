@@ -120,6 +120,10 @@ type Unit struct {
 	// SequenceStart is the sequence the runner's first event takes: 0 for a first attempt. A pool unit placed
 	// again continues its stream on the wire from where the record stands, since its runner posts there itself.
 	SequenceStart int `json:"sequenceStart,omitempty"`
+	// Requires is the toolchains the unit's key names (JobUnit's): the runner checks each works before it runs the unit,
+	// and a unit it finds one missing or broken for finishes broken with missingTools, void (#vv28ewd). A runner takes it
+	// a release before anything sends it, since a runner's decode refuses a field it doesn't know.
+	Requires []string `json:"requires,omitempty"`
 }
 
 type Endpoint struct {
