@@ -38,11 +38,12 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	interval := flags.Duration("interval", 10*time.Second, "time between pulls")
 	once := flags.Bool("once", false, "pull once and exit")
 	dryRun := flags.Bool("dry-run", false, "judge and print each future's batch, posting nothing (before cutover, a posted green can land)")
+	postOnly := flags.String("post", "", "with --dry-run, post this one future's batch (its tree sha) and print the rest: the first live batch, on Loom's word")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0) {
-		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run]")
+		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--interval 10s] [--once] [--dry-run [--post <tree>]]")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -100,8 +101,12 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
 		Loop:  judge.Loop{Now: time.Now},
 	}
+	if *postOnly != "" && !*dryRun {
+		fmt.Fprintln(stderr, "judge: --post names the one future to post while every other stays dry, so it needs --dry-run")
+		return 2
+	}
 	if *dryRun {
-		puller.Queue = printedQueue{out: stdout}
+		puller.Queue = scopedQueue{post: *postOnly, live: puller.Queue, dry: printedQueue{out: stdout}}
 	}
 	for runContext.Err() == nil {
 		count, err := puller.PullOnce()
@@ -137,4 +142,19 @@ func (queue printedQueue) PostVerdicts(future string, post judge.FuturePost) err
 	}
 	_, err = fmt.Fprintf(queue.out, "dry run, not posted: /futures/%s/verdicts %s\n", future, encoded)
 	return err
+}
+
+// scopedQueue posts only the one named future's batch to Queue and prints every other, so the first live batch can be
+// one future Loom names while the rest stay dry.
+type scopedQueue struct {
+	post string
+	live judge.Queue
+	dry  judge.Queue
+}
+
+func (queue scopedQueue) PostVerdicts(future string, post judge.FuturePost) error {
+	if queue.post != "" && future == queue.post {
+		return queue.live.PostVerdicts(future, post)
+	}
+	return queue.dry.PostVerdicts(future, post)
 }
