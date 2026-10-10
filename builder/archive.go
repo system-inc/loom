@@ -212,7 +212,7 @@ func Unpack(archive []byte, directory string, allowed func(name string) bool) er
 		if !filepath.IsLocal(filepath.FromSlash(name)) || path.Clean(name) != name {
 			return fmt.Errorf("entry %q: %w", name, errOutside)
 		}
-		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+		for parent := path.Dir(name); parent != "." && parent != "/"; parent = path.Dir(parent) {
 			if links[parent] {
 				return fmt.Errorf("entry %q is under the link %s: %w", name, parent, errOutside)
 			}
