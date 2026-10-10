@@ -14,7 +14,8 @@
 #	sed 's/|| !ended\[sections - 1\]) fail/) fail/' loom-update.sh > m.sh && updater/update_test.sh m.sh                   # fails 3: a cut manifest installs
 #	sed 's/ \&\&$/ \&\& true ||/' loom-update.sh > m.sh && updater/update_test.sh m.sh                                        # fails 1: a corrupt house cache blob installs
 #	sed 's#"${base}/current.txt"#"${house:-${base}}/current.txt"#' loom-update.sh > m.sh && updater/update_test.sh m.sh    # fails 4: the house cache's stale current.txt
-#	sed 's/\[ -n "${house}" \] \&\& say/[ -n "${house}" ] \&\& refuse/' loom-update.sh > m.sh && updater/update_test.sh m.sh # fails 2: no fallback past the house cache
+#	sed 's/\[ -n "${asking}" \] \&\& say/[ -n "${asking}" ] \&\& refuse/' loom-update.sh > m.sh && updater/update_test.sh m.sh # fails 2: no fallback past the house cache
+#	sed 's/ \&\& asking=$//' loom-update.sh > m.sh && updater/update_test.sh m.sh                                         # fails 2: a failed house cache asked for every file
 set -u
 here=$(cd "$(dirname "$0")" && pwd) failures=0
 updater=$(cd "$(dirname "${1:-${here}/loom-update.sh}")" && pwd)/$(basename "${1:-${here}/loom-update.sh}")
@@ -258,12 +259,14 @@ houseRunner=$(awk -v platform="${platform}" '$1 == "loom-runner" && $2 == platfo
 echo "runner evil ${platform}" > "${T}/house/blobs/${houseRunner}"
 before=$(blobs)
 housed corrupted
-check house-cache-corrupt-blob-refused 'code 0 && [ "$(now corrupted version)" = "${e}" ] && [ "$(runs corrupted loom-runner)" = "runner 5 ${platform}" ] && [ "$(blobs)" = $((before + 1)) ] && grep -q "the house cache .* didn.t give loom-runner whole" ${T}/corrupted/.loom/update.log'
+# The files go in sha256 order: the corrupt one, and every one after it, come from the base.
+fromBase=$(LC_ALL=C awk -v platform="${platform}" -v bad="${houseRunner}" 'NF == 3 && $2 == platform && $3 >= bad' "${T}/out/manifests/${e}.txt" | wc -l | tr -d ' ')
+check house-cache-corrupt-blob-refused 'code 0 && [ "$(now corrupted version)" = "${e}" ] && [ "$(runs corrupted loom-runner)" = "runner 5 ${platform}" ] && [ "$(blobs)" = $((before + fromBase)) ] && grep -q "the house cache .* didn.t give loom-runner whole" ${T}/corrupted/.loom/update.log && grep -q "($((2 - fromBase)) through the house cache)" ${T}/corrupted/.loom/update.log'
 kill "${houseServer}" 2> /dev/null
 wait "${houseServer}" 2> /dev/null
 before=$(blobs)
 housed downstairs
-check house-cache-down-falls-back 'code 0 && [ "$(now downstairs version)" = "${e}" ] && [ "$(blobs)" = $((before + 2)) ] && [ $(grep -c "the house cache .* didn.t give" ${T}/downstairs/.loom/update.log) -eq 2 ]'
+check house-cache-down-falls-back 'code 0 && [ "$(now downstairs version)" = "${e}" ] && [ "$(blobs)" = $((before + 2)) ] && [ $(grep -c "the house cache .* didn.t give" ${T}/downstairs/.loom/update.log) -eq 1 ]'
 
 # publish.sh's guards: the wrong compiler, too little disk, and a Go main it doesn't ship each refuse before any
 # build, and change nothing in the out directory.

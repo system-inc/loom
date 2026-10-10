@@ -239,7 +239,7 @@ if [ -d "${target}" ]; then
 else
 	staging=${versions}/.${version}.$$
 	mkdir "${staging}" || refuse "making ${staging}"
-	downloaded=0 linked=0 housed=0
+	downloaded=0 linked=0 housed=0 asking=${house}
 	while read -r sha name; do
 		# A file an installed version holds, still hashing to its name, is linked from it.
 		kept=
@@ -255,12 +255,13 @@ else
 		fi
 		temporary=${staging}/.${name}.download
 		# The house cache first, when there is one: what it can't give whole and hashing to its name (down, slow,
-		# lacking it, corrupt) the base gives, so a bad house cache costs a download, never a wrong byte.
-		if [ -n "${house}" ] && curl -fsS --connect-timeout 2 -m 600 -o "${temporary}" "${house}${base_path}/blobs/${sha}" 2> /dev/null &&
+		# trickling under a byte a second for 10 s, lacking it, corrupt) the base gives, and every file after it too, so
+		# a bad house cache costs one try and a download, never a wrong byte.
+		if [ -n "${asking}" ] && curl -fsS --connect-timeout 2 --speed-limit 1 --speed-time 10 -m 600 -o "${temporary}" "${asking}${base_path}/blobs/${sha}" 2> /dev/null &&
 			[ "$(hash "${temporary}")" = "${sha}" ]; then
 			housed=$((housed + 1))
 		else
-			[ -n "${house}" ] && say "the house cache ${house} didn't give ${name} whole (blobs/${sha}); fetching it from ${base}" && rm -f "${temporary}"
+			[ -n "${asking}" ] && say "the house cache ${house} didn't give ${name} whole (blobs/${sha}); the base gives it and the rest" && rm -f "${temporary}" && asking=
 			curl -fsS -m 600 -o "${temporary}" "${base}/blobs/${sha}" || refuse "downloading ${name} (${base}/blobs/${sha})"
 			got=$(hash "${temporary}")
 			[ "${got}" = "${sha}" ] || refuse "${name} from ${base}/blobs/${sha} hashes to ${got}; nothing installed, ${installed:-nothing} stays"
