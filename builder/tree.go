@@ -10,7 +10,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -94,6 +96,51 @@ type TreeBuild struct {
 	Out         string
 	Environment []string
 	Jobs        int
+	// Compile is how many packages Warm compiles at once in its one go process, and the most the later phases'
+	// go processes compile between them (Workshop, Oct 10: 32 jobs of go test each compiling 64 at once ran 459
+	// compilers on 64 threads, filled 110G of 125G, and starved sshd). Zero means every thread but four.
+	Compile int
+}
+
+// compile is Compile, or every thread but four, so the machine can always answer.
+func (build TreeBuild) compile() int {
+	if build.Compile > 0 {
+		return build.Compile
+	}
+	return max(1, runtime.NumCPU()-4)
+}
+
+// perJob is each later go process's share of compile, so Jobs of them never compile more than compile at once.
+func (build TreeBuild) perJob() string {
+	return strconv.Itoa(max(1, build.compile()/max(1, build.Jobs)))
+}
+
+// Warm compiles every package's tests once, in one go process, compile at a time, running none: each dependency
+// compiles once for the whole tree, and the products and binaries after it start from a warm build cache instead
+// of each compiling the tree's dependencies again at once.
+func (build TreeBuild) Warm(packages []planner.ProductTest) error {
+	if len(packages) == 0 {
+		return nil
+	}
+	nothing, err := exec.LookPath("true")
+	if err != nil {
+		return err
+	}
+	arguments := []string{"test", "-count=1", "-run", "^$", "-exec", nothing, "-p", strconv.Itoa(build.compile())}
+	for _, test := range packages {
+		arguments = append(arguments, "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
+	}
+	command := exec.Command("go", arguments...)
+	command.Dir = build.Tree
+	command.Env = build.environment()
+	if output, err := command.CombinedOutput(); err != nil {
+		tail := output
+		if len(tail) > 4000 {
+			tail = tail[len(tail)-4000:]
+		}
+		return fmt.Errorf("go test -exec true: %v\n%s", err, tail)
+	}
+	return nil
 }
 
 func (build TreeBuild) environment(extra ...string) []string {
@@ -108,7 +155,7 @@ func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 		started := time.Now()
 		result := TreePackage{Package: test.Package, Directory: test.Directory, Products: []string{}}
 		binary := filepath.Join(build.Out, strings.ReplaceAll(test.Package, "/", "_")+".test")
-		command := exec.Command("go", "test", "-c", "-o", binary, "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
+		command := exec.Command("go", "test", "-c", "-p", build.perJob(), "-o", binary, "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
 		command.Dir = build.Tree
 		command.Env = build.environment()
 		if output, err := command.CombinedOutput(); err != nil {
@@ -138,7 +185,7 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 	parallel(len(tests), build.Jobs, func(index int) {
 		test := tests[index]
 		log := filepath.Join(logs, fmt.Sprintf("product-%d.log", index))
-		command := exec.Command("go", "test", "-count=1", "-run", "^"+test.Test+"$", "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
+		command := exec.Command("go", "test", "-count=1", "-p", build.perJob(), "-run", "^"+test.Test+"$", "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
 		command.Dir = build.Tree
 		command.Env = build.environment("ADAMIC_BUILD_LOG=" + log)
 		output, err := command.CombinedOutput()

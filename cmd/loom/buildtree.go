@@ -31,8 +31,9 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	keep := flags.Int("keep", 2, "tree directories kept under --cache, newest first")
 	indexDirectory := flags.String("index", filepath.Join(home, "loom-builder", "index"), "Workshop's index of what the store holds")
 	jobs := flags.Int("jobs", 8, "packages built at once")
+	compile := flags.Int("compile", 0, "packages compiled at once across every go process (0: every thread but four)")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || *write == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> --write <https://pipeline/actions> [--future <sha>] [--cache <dir>] [--keep N] [--jobs N] [--index <dir>] [--token-file <path>]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> --write <https://pipeline/actions> [--future <sha>] [--cache <dir>] [--keep N] [--jobs N] [--compile N] [--index <dir>] [--token-file <path>]")
 		return 2
 	}
 	started := time.Now()
@@ -58,7 +59,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: builder.GateEnvironment(), Jobs: *jobs}
+	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: builder.GateEnvironment(), Jobs: *jobs, Compile: *compile}
 	for _, path := range []string{build.Cache, build.Out, filepath.Join(directory, "logs")} {
 		if err = os.MkdirAll(path, 0o755); err != nil {
 			return fail(err)
@@ -72,6 +73,12 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	warmStarted := time.Now()
+	if err = build.Warm(packages); err != nil {
+		// A package that doesn't compile is named again by its own binary below; the rest are warm.
+		fmt.Fprintf(stderr, "loom: warming the tree: %v\n", err)
+	}
+	warmSeconds := time.Since(warmStarted).Seconds()
 	productsStarted := time.Now()
 	products, productFailures := build.Products(productTests, filepath.Join(directory, "logs"))
 	productSeconds := time.Since(productsStarted).Seconds()
@@ -113,7 +120,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	encoder.Encode(map[string]any{
 		"tree": treeHash, "future": *future, "treeKey": builder.TreeKey(treeHash, treeIndex.Go, builder.GateEnvironment()), "indexManifest": manifest,
 		"packages": len(packages), "failed": failed, "productTests": len(productTests),
-		"productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
+		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
 		"seconds": time.Since(started).Seconds(), "sourceBytes": sourceInfo.Size(),
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})

@@ -56,6 +56,9 @@ func TestUsesTheProductAndTestdata(t *testing.T) {
 	if err != nil || len(packages) != 2 {
 		t.Fatalf("test packages %+v %v", packages, err)
 	}
+	if err = build.Warm(packages); err != nil {
+		t.Fatal(err)
+	}
 	built := build.Binaries(packages)
 	for _, result := range built {
 		if result.Error != "" || result.Binary == "" || result.Bytes == 0 {
@@ -142,5 +145,27 @@ func untar(archive, directory string) error {
 			}
 			os.WriteFile(path, body, os.FileMode(header.Mode))
 		}
+	}
+}
+
+// Warm compiles every package in one go process and fails, naming the package, when one doesn't compile; a
+// compile limit of one still finishes.
+func TestWarmCompilesEveryPackageOnceAndNamesOneThatDoesNotCompile(t *testing.T) {
+	tree := gitTree(t, map[string]string{
+		"go.mod":         "module example.com/warm\n\ngo 1.22\n",
+		"good/g.go":      "package good\n\nfunc Answer() int { return 42 }\n",
+		"good/g_test.go": "package good\n\nimport \"testing\"\n\nfunc TestAnswer(t *testing.T) {\n\tif Answer() != 42 {\n\t\tt.Fatal(\"answer\")\n\t}\n}\n",
+		"bad/b_test.go":  "package bad\n\nimport \"testing\"\n\nfunc TestBroken(t *testing.T) { undefinedThing() }\n",
+	})
+	build := TreeBuild{Tree: tree, Cache: t.TempDir(), Environment: GateEnvironment(), Jobs: 1, Compile: 1}
+	if err := build.Warm([]planner.ProductTest{{Package: "example.com/warm/good", Directory: "good"}}); err != nil {
+		t.Fatalf("a package that compiles: %v", err)
+	}
+	err := build.Warm([]planner.ProductTest{{Package: "example.com/warm/good", Directory: "good"}, {Package: "example.com/warm/bad", Directory: "bad"}})
+	if err == nil || !strings.Contains(err.Error(), "undefinedThing") {
+		t.Fatalf("a package that doesn't compile: %v", err)
+	}
+	if build.perJob() != "1" || (TreeBuild{Compile: 60, Jobs: 8}).perJob() != "7" || (TreeBuild{Compile: 4, Jobs: 8}).perJob() != "1" {
+		t.Fatal("each job's share of the compile limit")
 	}
 }
