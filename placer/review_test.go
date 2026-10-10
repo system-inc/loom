@@ -2,6 +2,7 @@ package placer
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -189,5 +190,71 @@ func TestTheLedgerKeepsListedFuturesAndDropsOldUnlistedOnes(t *testing.T) {
 	_, voidKept := ledger.LastVoid(gone)
 	if !keptListed || keptGone || !keptFresh || voidKept {
 		t.Fatalf("kept listed %v, gone %v (void %v), fresh %v", keptListed, keptGone, voidKept, keptFresh)
+	}
+}
+
+type failingFutures struct{}
+
+func (failingFutures) Planned() ([]judge.PlannedFuture, error) { return nil, errors.New("Queue: 503") }
+
+// When every run ends before its first event, each with its own log tail (a broken loom, a wire refusing every plan),
+// the voids are held by exit status alone and a pass voids at most one future: no future is cycled every pass.
+// Mutants: the tail in the hold key (every attempt voided again), the pass going on after an early exit's void.
+func TestRunsThatAllEndEarlyNeverCycleTheFutures(t *testing.T) {
+	trees := []string{strings.Repeat("a", 40), strings.Repeat("c", 40), strings.Repeat("e", 40)}
+	source := listedFutures{}
+	for _, tree := range trees {
+		source = append(source, judge.PlannedFuture{Future: tree, Base: base, Attempt: 1, Units: everyKind(t)})
+	}
+	h := newHarness(t, source, &MemoryLedger{})
+	exits := make(chan Exit, 64)
+	h.placer.Exits = exits
+	h.placer.RunStarted = func(string) (bool, error) { return false, nil }
+	placed := map[string]int{}
+	h.placer.Start = func(placement Placement) error {
+		placed[placement.Future]++
+		exits <- Exit{Future: placement.Future, Attempt: placement.Attempt, Run: placement.Run, Status: "exit status 3",
+			Tail: fmt.Sprintf("loom: run %s refused at %s", placement.Run, h.now.Format(time.RFC3339Nano))}
+		return nil
+	}
+	h.placer.Void = func(future judge.PlannedFuture, attempt int, cause string) error {
+		h.voids = append(h.voids, cause)
+		for index := range source {
+			if source[index].Future == future.Future {
+				source[index].Attempt++ // Queue counts the void and lists the next attempt
+			}
+		}
+		return nil
+	}
+	for range 25 {
+		before := len(h.voids)
+		h.now = h.now.Add(time.Minute)
+		h.placer.PlaceOnce()
+		if len(h.voids)-before > 1 {
+			t.Fatalf("one pass voided %d futures", len(h.voids)-before)
+		}
+	}
+	for _, tree := range trees {
+		if placed[tree] > 2 {
+			t.Errorf("future %.8s placed %d times in 25 minutes, want its first attempt and one more, held", tree, placed[tree])
+		}
+	}
+	if len(h.voids) != len(trees) {
+		t.Fatalf("voids %d, want one a future", len(h.voids))
+	}
+}
+
+// Ended runs are taken off the channel even when Queue won't answer, so an outage never blocks the runs' reporters.
+// Mutant: the channel drained only after the listing is read.
+func TestEndedRunsAreDrainedThroughAnOutage(t *testing.T) {
+	h := newHarness(t, failingFutures{}, &MemoryLedger{})
+	exits := make(chan Exit, 1)
+	h.placer.Exits = exits
+	exits <- Exit{Future: tree, Attempt: 1, Run: "future-" + tree + "-1", Status: "exit status 3"}
+	if _, err := h.placer.PlaceOnce(); err == nil {
+		t.Fatal("the outage passed silently")
+	}
+	if len(exits) != 0 || len(h.placer.exited) != 1 {
+		t.Fatalf("%d left on the channel, %d held", len(exits), len(h.placer.exited))
 	}
 }

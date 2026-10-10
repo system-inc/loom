@@ -76,6 +76,9 @@ type Record struct {
 	Carried  int          `json:"carried,omitempty"`
 	Unplaced []string     `json:"unplaced,omitempty"`
 	Void     string       `json:"void,omitempty"`
+	// Hold is the void's stable reason class, what a later void of the future is held by: never a log's tail or a run
+	// id, which differ every attempt.
+	Hold string `json:"hold,omitempty"`
 	// StartFailed is why its run didn't start: the attempt counts as not placed, and is placed again until voided.
 	StartFailed string `json:"startFailed,omitempty"`
 	// Exit is how its loom run ended, when this placer saw it end; EarlyExit is the void's cause when it ended before
@@ -171,6 +174,9 @@ func (read readError) Unwrap() error { return read.err }
 // pass while the cause holds.
 var errStopPass = errors.New("the pass stops at a run that didn't start")
 
+// errEndPass ends a pass quietly after an early exit's void: nothing failed, but the next void waits a pass.
+var errEndPass = errors.New("the pass ends after a void for a run that ended early")
+
 var treePattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // PlanHash is a plan's identity in the ledger: the sha256 of its units' keys and decisions, sorted. An attempt whose
@@ -189,6 +195,8 @@ func PlanHash(units []judge.PlannedUnitWire) string {
 // never stops the others, save a run that didn't start; the errors come back joined, and a future that erred is tried
 // again next pass, or later when its reads keep failing.
 func (placer *Placer) PlaceOnce() (int, error) {
+	// Drained before any read, so ended runs never back up behind a Queue or pool table that won't answer.
+	placer.drainExits()
 	futures, err := placer.Source.Planned()
 	if err != nil {
 		return 0, err
@@ -206,6 +214,9 @@ func (placer *Placer) PlaceOnce() (int, error) {
 			continue
 		}
 		placed, err := pass.placeOne(future)
+		if err == errEndPass {
+			break
+		}
 		var read readError
 		switch {
 		case errors.As(err, &read):
@@ -232,17 +243,21 @@ func (placer *Placer) PlaceOnce() (int, error) {
 	return started, nil
 }
 
-// recordExits records each run seen ending since the last pass, and marks one that ended before its run's first
-// event, whose attempt is then voided by placeOne.
-func (placer *Placer) recordExits() []string {
-	for drained := false; !drained; {
+// drainExits takes every run ending waiting on Exits into exited, for recordExits.
+func (placer *Placer) drainExits() {
+	for {
 		select {
 		case exit := <-placer.Exits:
 			placer.exited = append(placer.exited, exit)
 		default:
-			drained = true
+			return
 		}
 	}
+}
+
+// recordExits records each run seen ending since the last pass, and marks one that ended before its run's first
+// event, whose attempt is then voided by placeOne.
+func (placer *Placer) recordExits() []string {
 	failures, waiting := []string{}, []Exit{}
 	for _, exit := range placer.exited {
 		record, found := placer.Ledger.Find(exit.Future, exit.Attempt)
@@ -284,6 +299,7 @@ type pass struct {
 	placer *Placer
 	pools  []Pool
 	needs  *planner.UnitNeeds
+	voided bool // the last void call posted, not held
 }
 
 // candidate is one unit the attempt runs, as a job, with the pools that take it.
@@ -324,7 +340,7 @@ func (pass *pass) readFailed(future judge.PlannedFuture, read readError) error {
 	attempt := max(future.Attempt, 1)
 	record := Record{Future: future.Future, Attempt: attempt, Run: coordinator.FutureRun(future.Future, attempt), At: now.UTC().Format(time.RFC3339),
 		PlanHash: PlanHash(future.Units), Unplaced: []string{fmt.Sprintf("its reads failed for %d min: %v", int(now.Sub(failure.first).Minutes()), read.err)}}
-	if err := pass.void(future, attempt, record, false); err != nil {
+	if err := pass.void(future, attempt, record, ""); err != nil {
 		return fmt.Errorf("%v; voiding it: %w", read, err)
 	}
 	delete(placer.failing, future.Future)
@@ -344,13 +360,21 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 		switch {
 		case record.Void != "":
 		case record.EarlyExit != "":
+			// Held by its exit status alone, and the pass stops after one: runs that all end early (a broken loom, a
+			// wire refusing every plan) void one future a pass and each future once a window, never every one each pass.
 			record.Unplaced = []string{record.EarlyExit}
-			return false, pass.void(future, attempt, record, true)
+			if err := pass.void(future, attempt, record, "early exit: "+record.Exit); err != nil {
+				return false, errors.Join(errStopPass, err)
+			}
+			if pass.voided {
+				return false, errEndPass
+			}
+			return false, nil
 		case record.PlanHash != "" && record.PlanHash != PlanHash(future.Units):
 			// Queue planned it again after it was placed: the wire holds run's first plan, so only a fresh attempt runs
 			// the new one.
 			record.Unplaced = []string{fmt.Sprintf("its plan changed after %s was placed with another", run)}
-			return false, pass.void(future, attempt, record, false)
+			return false, pass.void(future, attempt, record, "")
 		}
 		return false, nil
 	}
@@ -410,7 +434,7 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 	record.Unplaced = append(record.Unplaced, pass.pin(candidates)...)
 	record.At = placer.Now().UTC().Format(time.RFC3339)
 	if len(record.Unplaced) > 0 {
-		return false, pass.void(future, attempt, record, true)
+		return false, pass.void(future, attempt, record, "unplaced: "+strings.ReplaceAll(strings.Join(record.Unplaced, "; "), run, "<run>"))
 	}
 	if len(candidates) == 0 {
 		// Every unit reused or carried: the judge decides the attempt from the earlier runs, with nothing to run.
@@ -451,7 +475,7 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 			return false, errors.Join(errStopPass, err)
 		}
 		record.Unplaced = []string{"its coordinator run didn't start: " + err.Error()}
-		if err := pass.void(future, attempt, record, true); err != nil {
+		if err := pass.void(future, attempt, record, "start: "+strings.ReplaceAll(record.StartFailed, run, "<run>")); err != nil {
 			return false, errors.Join(errStopPass, err)
 		}
 		return false, fmt.Errorf("%w: %v", errStopPass, err)
@@ -460,14 +484,16 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 	return true, nil
 }
 
-// void posts the attempt void as Loom's, naming every unit it couldn't place, and records it. When hold, the same cause
-// again within UnfitEvery of the last (each read with its own run id taken out) waits: said once, voided when the
-// window ends, so it never loops each pass.
-func (pass *pass) void(future judge.PlannedFuture, attempt int, record Record, hold bool) error {
+// void posts the attempt void as Loom's, naming every unit it couldn't place, and records it. A void with a hold key
+// (a stable reason class: the unplaced causes or start error with the run id taken out, an early exit's status) waits
+// when the future's last void had the same key within UnfitEvery: said once, voided when the window ends, so it never
+// loops each pass. An empty key never waits.
+func (pass *pass) void(future judge.PlannedFuture, attempt int, record Record, hold string) error {
 	placer := pass.placer
+	pass.voided = false
 	cause := "not placed: " + strings.Join(record.Unplaced, "; ")
 	last, found := placer.Ledger.LastVoid(future.Future)
-	if hold && found && strings.ReplaceAll(last.Void, last.Run, "<run>") == strings.ReplaceAll(cause, record.Run, "<run>") {
+	if hold != "" && found && last.Hold == hold {
 		if at, err := time.Parse(time.RFC3339, last.At); err == nil && placer.Now().Sub(at) < placer.UnfitEvery {
 			placer.note(record.Run+" "+cause, fmt.Sprintf("%s: held, %s as attempt %d was; voided again after %s", record.Run, cause, last.Attempt, at.Add(placer.UnfitEvery).Format(time.RFC3339)))
 			return nil
@@ -476,7 +502,7 @@ func (pass *pass) void(future judge.PlannedFuture, attempt int, record Record, h
 	if err := placer.Void(future, attempt, cause); err != nil {
 		return fmt.Errorf("posting attempt %d void (%s): %w", attempt, cause, err)
 	}
-	record.Void, record.At = cause, placer.Now().UTC().Format(time.RFC3339)
+	record.Void, record.Hold, record.At, pass.voided = cause, hold, placer.Now().UTC().Format(time.RFC3339), true
 	fmt.Fprintf(placer.Log, "void %s: %s\n", record.Run, cause)
 	return placer.Ledger.Append(record)
 }
