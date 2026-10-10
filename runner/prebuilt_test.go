@@ -1254,3 +1254,66 @@ func TestTheModuleCachesCountTowardTheBound(t *testing.T) {
 		}
 	}
 }
+
+// A removal a dead runner left holding a GOMODCACHE, read-only as go leaves it, is swept whole; and what is left in the
+// sources' directory, a live unpacking among it, counts toward the blob cache's bound.
+func TestASweepRemovesAReadOnlyLeftoverAndCountsWhatStays(t *testing.T) {
+	root := t.TempDir()
+	sources := newSourceCache(root)
+	left := filepath.Join(sources.directory, sourceRemovingPrefix+"dead", "tree", moduletest.Path+"@"+moduletest.Version)
+	os.MkdirAll(left, 0o755)
+	os.WriteFile(filepath.Join(left, "go.mod"), []byte("module x\n"), 0o444)
+	os.Chmod(left, 0o555)
+	t.Cleanup(func() { removeDirectory(root) })
+	sources.sweep()
+	if _, err := os.Stat(filepath.Join(sources.directory, sourceRemovingPrefix+"dead")); err == nil {
+		t.Fatal("a read-only leftover stayed")
+	}
+	contents := [][]byte{bytes.Repeat([]byte("a"), 100), bytes.Repeat([]byte("b"), 100), bytes.Repeat([]byte("c"), 100)}
+	served, sums := newBlobServer(t, contents...)
+	cache := blobCache{directory: filepath.Join(root, blobDirectoryName), limit: 350, store: served.server.URL, client: served.server.Client()}
+	for index, sum := range sums {
+		readBlob(t, cache, sum)
+		at := time.Now().Add(time.Duration(index-10) * time.Minute)
+		os.Chtimes(filepath.Join(cache.directory, sum), at, at)
+	}
+	live := filepath.Join(sources.directory, unpackingPrefix+"live")
+	os.MkdirAll(live, 0o755)
+	os.WriteFile(filepath.Join(live, "file"), bytes.Repeat([]byte("u"), 200), 0o644)
+	if err := cache.trim(nil); err != nil {
+		t.Fatal(err)
+	}
+	for index, sum := range sums {
+		_, err := os.Stat(filepath.Join(cache.directory, sum))
+		if (index < 2) != (err != nil) {
+			t.Errorf("blob %d of 3, oldest first: present %v, with 200 bytes in an unpacking and a 350 byte bound", index+1, err == nil)
+		}
+	}
+}
+
+// A fetch waiting to make its partial while a sweep holds the cache's sweep lock waits only as long as its unit.
+func TestAWaitToMakeAPartialIsBounded(t *testing.T) {
+	served, sums := newBlobServer(t, []byte("a blob"))
+	cache := testCache(t, served, 1<<30)
+	os.MkdirAll(cache.directory, 0o755)
+	sweep, err := lockDirectory(cache.directory, syscall.LOCK_EX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sweep.Close()
+	waitContext, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := cache.open(waitContext, sums[0])
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+			t.Fatalf("the wait ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a wait for the sweep lock outlived the unit's time")
+	}
+}

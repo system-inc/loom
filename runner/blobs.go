@@ -179,7 +179,7 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File
 	case response.StatusCode != http.StatusOK:
 		return nil, 0, fmt.Errorf("%s/blobs/%s answered %s", cache.store, sum, response.Status)
 	}
-	partial, err := lockedTemporary(cache.directory, partialPrefix+sum+"-", false)
+	partial, err := lockedTemporary(fetchContext, cache.directory, partialPrefix+sum+"-", false)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -217,11 +217,17 @@ func (cache blobCache) fetch(fetchContext context.Context, sum string) (*os.File
 	return partial, size, nil
 }
 
-// moduleCacheBytes is what the trees' GOMODCACHEs beside the unpacked sources hold, which the cache's bound counts.
-func (cache blobCache) moduleCacheBytes() int64 {
-	caches, _ := filepath.Glob(filepath.Join(filepath.Dir(cache.directory), sourceDirectoryName, "*"+moduleCacheSuffix))
+// keptBytes is what the cache's bound counts beside the blobs: the trees' GOMODCACHEs beside the unpacked sources,
+// and every unpacking or removal there, a live one's or one a sweep couldn't remove.
+func (cache blobCache) keptBytes() int64 {
+	sources := filepath.Join(filepath.Dir(cache.directory), sourceDirectoryName)
+	kept := []string{}
+	for _, pattern := range []string{"*" + moduleCacheSuffix, unpackingPrefix + "*", sourceRemovingPrefix + "*"} {
+		matched, _ := filepath.Glob(filepath.Join(sources, pattern))
+		kept = append(kept, matched...)
+	}
 	total := int64(0)
-	for _, directory := range caches {
+	for _, directory := range kept {
 		filepath.WalkDir(directory, func(path string, entry os.DirEntry, err error) error {
 			if err == nil && entry.Type().IsRegular() {
 				if info, err := entry.Info(); err == nil {
@@ -296,12 +302,32 @@ func lockDirectory(directory string, how int) (*os.File, error) {
 	return lock, nil
 }
 
+// waitForLock takes a lock on file (syscall.LOCK_SH or LOCK_EX), waiting no longer than waitContext.
+func waitForLock(waitContext context.Context, file *os.File, how int) error {
+	for {
+		err := syscall.Flock(int(file.Fd()), how|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			return err
+		}
+		select {
+		case <-waitContext.Done():
+			return fmt.Errorf("waiting for %s: %w", file.Name(), waitContext.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 // lockedTemporary makes an in-progress file (or, with isDirectory, a directory) in directory named pattern plus a
 // random suffix, and returns it open with an exclusive lock held for as long as it stays open: a fetch's partial, a
-// source's unpacking, a removal. Its name appears only under the directory's shared sweep lock.
-func lockedTemporary(directory, pattern string, isDirectory bool) (*os.File, error) {
-	sweep, err := lockDirectory(directory, syscall.LOCK_SH)
+// source's unpacking, a removal. Its name appears only under the directory's shared sweep lock, waited for no longer
+// than waitContext.
+func lockedTemporary(waitContext context.Context, directory, pattern string, isDirectory bool) (*os.File, error) {
+	sweep, err := os.OpenFile(filepath.Join(directory, sweepLockName), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
+		return nil, err
+	}
+	defer sweep.Close()
+	if err = waitForLock(waitContext, sweep, syscall.LOCK_SH); err != nil {
 		return nil, err
 	}
 	defer sweep.Close()
@@ -343,7 +369,7 @@ func (cache blobCache) trim(keep map[string]bool) error {
 	if err != nil {
 		return err
 	}
-	total := inFlight + cache.moduleCacheBytes()
+	total := inFlight + cache.keptBytes()
 	for _, blob := range blobs {
 		total += blob.size
 	}

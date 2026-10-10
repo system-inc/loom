@@ -171,12 +171,12 @@ func (cache sourceCache) unpack(unpackContext context.Context, held *heldSource,
 			held.ready = true
 			return nil
 		}
-		if err := cache.moveAway(held.directory); err != nil {
+		if err := cache.moveAway(unpackContext, held.directory); err != nil {
 			return fmt.Errorf("removing an unmarked source at %s: %w", held.directory, err)
 		}
 	}
 	// Held while it unpacks: an unpacking whose lock is free is a dead runner's.
-	lock, err := lockedTemporary(cache.directory, unpackingPrefix+held.sum+"-", true)
+	lock, err := lockedTemporary(unpackContext, cache.directory, unpackingPrefix+held.sum+"-", true)
 	if err != nil {
 		return err
 	}
@@ -203,9 +203,9 @@ func (cache sourceCache) unpack(unpackContext context.Context, held *heldSource,
 	return nil
 }
 
-// moveAway renames directory to a locked .removing- directory and removes it.
-func (cache sourceCache) moveAway(directory string) error {
-	lock, err := lockedTemporary(cache.directory, sourceRemovingPrefix+filepath.Base(directory)+"-", true)
+// moveAway renames directory to a locked .removing- directory and removes it, waiting no longer than waitContext.
+func (cache sourceCache) moveAway(waitContext context.Context, directory string) error {
+	lock, err := lockedTemporary(waitContext, cache.directory, sourceRemovingPrefix+filepath.Base(directory)+"-", true)
 	if err != nil {
 		return err
 	}
@@ -240,7 +240,9 @@ func (cache sourceCache) sweep() {
 		}
 		path := filepath.Join(cache.directory, name)
 		if lockFree(path) {
-			os.RemoveAll(path)
+			// Once, and with what a GOMODCACHE made read-only made writable first: what still won't go stays, counted
+			// toward the blob cache's bound (keptBytes), for the next sweep, never retried here under the lock.
+			removeDirectory(path)
 		}
 	}
 }
@@ -272,6 +274,9 @@ func (cache sourceCache) trim(keep int) {
 	}
 }
 
+// removalWait bounds a removal's wait for the sources' sweep lock: a trim belongs to no unit's time.
+var removalWait = time.Minute
+
 // remove removes one source unless a unit holds it: renamed away whole first, then emptied.
 func (cache sourceCache) remove(sum string) {
 	lockPath := filepath.Join(cache.directory, sum+".lock")
@@ -289,9 +294,11 @@ func (cache sourceCache) remove(sum string) {
 	} else if named, err := os.Stat(lockPath); err != nil || !os.SameFile(locked, named) {
 		return
 	}
-	if cache.moveAway(filepath.Join(cache.directory, sum)) == nil {
+	waitContext, cancel := context.WithTimeout(context.Background(), removalWait)
+	defer cancel()
+	if cache.moveAway(waitContext, filepath.Join(cache.directory, sum)) == nil {
 		if _, err := os.Lstat(cache.moduleCache(sum)); err == nil {
-			cache.moveAway(cache.moduleCache(sum))
+			cache.moveAway(waitContext, cache.moduleCache(sum))
 		}
 		os.Remove(lockPath)
 	}
