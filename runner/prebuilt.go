@@ -618,12 +618,17 @@ func workspaceCopy(copyContext context.Context, real string, environment []strin
 	return copied, nil
 }
 
-// A goStandIn is the go a prebuilt unit's tests find first on PATH, and the files it writes what they asked of it in:
+// A StandIn is the go a prebuilt unit's tests find first on PATH, and the files it writes what they asked of it in:
 // each build it refused, each read-only query the runner's go answered (with its exit), each one no go here could.
-type goStandIn struct {
+type StandIn struct {
 	refused, answered, unanswered string
 	// build is a build job's: every go command its tests run goes through, and a failed one is theirs (protocol.TestJob.Build).
 	build bool
+}
+
+// Refused is each go command the stand-in refused, one line each: a build, or a query off its allow list.
+func (standIn StandIn) Refused() []string {
+	return fileLines(standIn.refused)
 }
 
 // standInScript is the stand-in go. A read-only query (version, env, list, each with only the flags on its allow list:
@@ -713,15 +718,26 @@ exit "$status"
 // GOTOOLCHAIN=local, or the unit is unfit, both named, and every module the tree needs is put in the tree's own
 // GOMODCACHE before the tests run, so none of them sees go fetch one, and a module the cache lacks breaks the unit,
 // named. With no go, the record says so.
-func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, index builder.TreeIndex, sources sourceCache, directory string, build bool) (goStandIn, error) {
+func (run *unitRun) standInGo(checkContext context.Context, environment map[string]string, index builder.TreeIndex, sources sourceCache, directory string, build bool) (StandIn, error) {
 	release := strings.Fields(index.Go)
 	if len(release) == 0 {
-		return goStandIn{}, fmt.Errorf("the tree's index names no Go release: the store is poisoned")
+		return StandIn{}, fmt.Errorf("the tree's index names no Go release: the store is poisoned")
 	}
 	proxy, moduleCache := "off", filepath.Join(run.directory, "modules")
 	if index.Modules != "" {
 		proxy, moduleCache = "file://"+filepath.Join(sources.directory, index.Modules, sourceTreeName), sources.moduleCache(index.Modules)
 	}
+	return StandInGo(checkContext, run.directory, directory, release[0], proxy, moduleCache, index.Modules, build, environment, run.say)
+}
+
+// StandInGo writes the stand-in go under directory, a unit's own, and puts it first on environment's PATH for tests run
+// in source, the tree's source: the runner's go, found on environment's PATH or else the process's, answers their
+// read-only queries as release, the tree's Go release, reading modules through proxy into moduleCache, and when modules
+// names the tree's module cache blob, every module the tree needs is put in moduleCache first. build is a build job's
+// (protocol.TestJob.Build), whose go commands all go through. say says what it found.
+// A prebuilt unit runs behind it, and so does build-tree's key check (cmd/loom), so a key the runner's go would move
+// moves there too (#nm31pcn).
+func StandInGo(checkContext context.Context, directory, source, release, proxy, moduleCache, modules string, build bool, environment map[string]string, say func(string)) (StandIn, error) {
 	delegated := delegatedEnvironment(proxy, moduleCache)
 	real, err := lookPath("go", environment["PATH"])
 	if err != nil {
@@ -729,49 +745,49 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 	}
 	if err != nil {
 		real = ""
-		run.say("no go here: a test's read-only go query goes unanswered, and a unit that asks one is unfit; no test builds here")
+		say("no go here: a test's read-only go query goes unanswered, and a unit that asks one is unfit; no test builds here")
 	} else {
 		goCommand := func(arguments ...string) ([]byte, error) {
 			command := exec.CommandContext(checkContext, real, arguments...)
-			command.Env, command.Dir = append(append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), runnersGo...), directory
+			command.Env, command.Dir = append(append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), runnersGo...), source
 			return command.CombinedOutput()
 		}
 		output, err := goCommand("env", "GOVERSION")
-		if says := strings.TrimSpace(string(output)); err != nil || says != release[0] {
-			return goStandIn{}, fmt.Errorf("refused as unfit: the runner's go at %s is %q under GOTOOLCHAIN=local (%v), and the tree was built with %s: Loom's, never the change's",
-				real, says, err, release[0])
+		if says := strings.TrimSpace(string(output)); err != nil || says != release {
+			return StandIn{}, fmt.Errorf("refused as unfit: the runner's go at %s is %q under GOTOOLCHAIN=local (%v), and the tree was built with %s: Loom's, never the change's",
+				real, says, err, release)
 		}
-		work, err := workspaceCopy(checkContext, real, append(append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), runnersGo...), directory, filepath.Join(run.directory, "workspace-go"))
+		work, err := workspaceCopy(checkContext, real, append(append(packageEnvironment(environment, protocol.TestPackage{}), delegated...), runnersGo...), source, filepath.Join(directory, "workspace-go"))
 		if err != nil {
-			return goStandIn{}, fmt.Errorf("copying the tree's go.work: %w (Loom's, never the change's)", err)
+			return StandIn{}, fmt.Errorf("copying the tree's go.work: %w (Loom's, never the change's)", err)
 		}
 		if work != "" {
 			delegated = append(delegated, "GOWORK="+work)
 		}
-		if index.Modules != "" {
+		if modules != "" {
 			started := time.Now()
 			if output, err := goCommand("mod", "download", "all"); err != nil {
 				lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-				return goStandIn{}, fmt.Errorf("a module the tree needs isn't in its module cache, blob %s (%v): %s: Loom's, never the change's", index.Modules, err, lines[len(lines)-1])
+				return StandIn{}, fmt.Errorf("a module the tree needs isn't in its module cache, blob %s (%v): %s: Loom's, never the change's", modules, err, lines[len(lines)-1])
 			}
-			run.say(fmt.Sprintf("the tree's modules are in %s in %.1f s", moduleCache, time.Since(started).Seconds()))
+			say(fmt.Sprintf("the tree's modules are in %s in %.1f s", moduleCache, time.Since(started).Seconds()))
 		}
-		run.say("go at " + real + " answers the tests' read-only go queries as " + release[0] + ", from the tree's module cache; no test builds or downloads here")
+		say("go at " + real + " answers the tests' read-only go queries as " + release + ", from the tree's module cache; no test builds or downloads here")
 	}
-	bin := filepath.Join(run.directory, "stand-in")
+	bin := filepath.Join(directory, "stand-in")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
-		return goStandIn{}, err
+		return StandIn{}, err
 	}
-	standIn := goStandIn{refused: filepath.Join(run.directory, "go-refused"), answered: filepath.Join(run.directory, "go-answered"),
-		unanswered: filepath.Join(run.directory, "go-unanswered"), build: build}
+	standIn := StandIn{refused: filepath.Join(directory, "go-refused"), answered: filepath.Join(directory, "go-answered"),
+		unanswered: filepath.Join(directory, "go-unanswered"), build: build}
 	exports := ""
 	for _, variable := range delegated {
 		name, value, _ := strings.Cut(variable, "=")
 		if name == "GOWORK" {
 			// Only a query in the tree's source: one in a module of the test's own elsewhere would find it outside
 			// the workspace and fail. A test that chose its own workspace (GOWORK=off, say) keeps it.
-			tree := directory
-			if resolved, err := filepath.EvalSymlinks(directory); err == nil {
+			tree := source
+			if resolved, err := filepath.EvalSymlinks(source); err == nil {
 				tree = resolved
 			}
 			exports += "if [ -z \"$GOWORK\" ]; then case \"$(pwd -P)\" in " + shellQuote(tree) + " | " + shellQuote(tree) + "/*) GOWORK=" +
@@ -781,17 +797,17 @@ func (run *unitRun) standInGo(checkContext context.Context, environment map[stri
 		exports += name + "=" + shellQuote(value) + "\nexport " + name + "\n"
 	}
 	// The copy of the tree's go.work, and the tree's own as a test there finds it, for the stand-in to answer with.
-	workCopy, workTree := "", filepath.Join(directory, "go.work")
+	workCopy, workTree := "", filepath.Join(source, "go.work")
 	for _, variable := range delegated {
 		if name, value, _ := strings.Cut(variable, "="); name == "GOWORK" {
 			workCopy = value
 		}
 	}
 	script := strings.NewReplacer("WORKCOPY", shellQuote(workCopy), "WORKTREE", shellQuote(workTree), "REFUSED", shellQuote(standIn.refused),
-		"UNANSWERED", shellQuote(standIn.unanswered), "ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release[0]),
+		"UNANSWERED", shellQuote(standIn.unanswered), "ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release),
 		"BUILD", strconv.FormatBool(build), "ENVIRONMENT\n", exports).Replace(standInScript)
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
-		return goStandIn{}, err
+		return StandIn{}, err
 	}
 	if environment["PATH"] == "" {
 		// An empty entry would be the working directory.
@@ -813,7 +829,7 @@ func fileLines(path string) []string {
 
 // settleGo says on the record what the tests asked of go, and decides what it means for the unit: a query no go here
 // could answer makes it unfit; a build refused, or a query that failed here, makes a red Loom's, never the change's.
-func (run *unitRun) settleGo(standIn goStandIn, status string) string {
+func (run *unitRun) settleGo(standIn StandIn, status string) string {
 	counts, order := map[string]int{}, []string{}
 	failed := []string{}
 	for _, line := range fileLines(standIn.answered) {

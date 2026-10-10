@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -47,8 +48,10 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	floorGB := flags.Uint64("floor-gb", 100, "free space the cache base and Go's build cache keep, in GB: below it the build doesn't start, and no job starts")
 	tempFloorGB := flags.Uint64("temp-floor-gb", 20, "free space the temporary directory keeps, in GB (it may be memory)")
 	goCacheGB := flags.Uint64("go-cache-gb", 500, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
+	keyCheckMode := flags.String("key-check", "sampled", "whether a runner's keys are checked against Workshop's before the index goes up: sampled, always or never (keycheck.go)")
+	dry := flags.Bool("dry", false, "build and check the tree, print its summary, and upload nothing")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--keys <file>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--keys <file>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--key-check sampled|always|never] [--dry]")
 		return 2
 	}
 	started := time.Now()
@@ -249,6 +252,47 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		treeIndex.Packages[result.Package] = result
 	}
 	clock.lap(&clock.phases.ModuleCache)
+	// A runner's keys against Workshop's, on the trees the sampling picks: a moved key is its package's Workshop failure,
+	// so its units are Loom's before any runs. A check that can't run is said and gates nothing (a moved key fails safe
+	// on the runner anyway).
+	signature, err := keyCheckSignature(identity.Go)
+	if err != nil {
+		return fail(err)
+	}
+	due, keyCheckWhy, err := keyCheckDue(*cache, *keyCheckMode, signature)
+	if err != nil {
+		return fail(err)
+	}
+	var keysChecked *keyCheck
+	keyCheckError := ""
+	if due {
+		phase("checking keys", nil)
+		packaged := []builder.TreePackage{}
+		for _, result := range built {
+			packaged = append(packaged, treeIndex.Packages[result.Package])
+		}
+		checked, err := checkKeys(context.Background(), build, directory, packaged, products, source, identity.Go, *jobs)
+		keysChecked = &checked
+		if err != nil {
+			keyCheckError = err.Error()
+			fmt.Fprintf(stderr, "build-tree: the key check didn't finish, so it gates nothing: %v\n", err)
+		}
+		for pkg, moved := range checked.Moved {
+			fmt.Fprintf(stderr, "build-tree: a product's key moved between Workshop and a runner in %s: %s\n", pkg, strings.Join(moved, "; "))
+			if entry := treeIndex.Packages[pkg]; entry.Error == "" {
+				entry.Error = "a product's key moved between Workshop and a runner (#nm31pcn): " + strings.Join(moved, "; ")
+				entry.Failure = builder.WorkshopFailure
+				treeIndex.Packages[pkg] = entry
+			}
+		}
+	}
+	if *dry {
+		json.NewEncoder(stdout).Encode(map[string]any{"tree": identity.Tree, "treeKey": identity.Key(), "dry": true, "packages": len(packages),
+			"productTests": len(productTests), "products": len(distinct), "productSeconds": clock.phases.Products, "binarySeconds": clock.phases.Binaries,
+			"keyCheck": keysChecked, "keyCheckWhy": keyCheckWhy, "keyCheckError": keyCheckError, "seconds": time.Since(started).Seconds()})
+		phase("built", nil)
+		return 0
+	}
 	phase("uploading", nil)
 	treeIndex.Seconds = time.Since(started).Seconds()
 	// The module cache goes up before the index that names it, as every other blob does.
@@ -285,6 +329,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"seconds": clock.phases.Total, "phases": clock.phases, "sourceChunks": len(source.Chunks), "sourceBytes": source.Bytes(),
 		"sourceChunksSent": source.Sent, "sourceBytesSent": source.SentBytes, "node": treeIndex.Node,
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
+		"keyCheck": keysChecked, "keyCheckWhy": keyCheckWhy, "keyCheckError": keyCheckError,
 	})
 	writePhaseTable(stderr, clock.phases)
 	phase("built", func(tree *livestatus.Tree) { tree.Failed = failed })
