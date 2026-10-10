@@ -14,7 +14,7 @@
 # immutable and current.txt as no-cache, since every machine polls it. Its keys come from a key=value file,
 # LOOM_UPLOAD_CREDENTIALS or else ~/.loom/r2-releases.conf: account_id, access_key_id and secret_access_key. The
 # key pair reaches curl on its standard input, never its command line, so ps never shows it. Releases go under
-# releases/: the bucket's blobs/ and refs/ are test products its lifecycle expires after 7 days.
+# releases/: the bucket's blobs/, refs/ and trees/ are test products its lifecycle expires after 30 days.
 #
 # It holds <out>/.release.lock throughout (release-lock.sh), so a person's upload never interleaves with the release
 # watcher's, and refuses when the lock is held.

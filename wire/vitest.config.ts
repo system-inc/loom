@@ -11,6 +11,6 @@ export default defineConfig({
             },
         }),
     ],
-    // loom's tests run against its own Worker, in vitest.pipeline.config.ts.
-    test: { exclude: [...configDefaults.exclude, 'test/pipeline/**'] },
+    // loom's tests run against its own Worker, in vitest.pipeline.config.ts; the Node ones in vitest.node.config.ts.
+    test: { exclude: [...configDefaults.exclude, 'test/pipeline/**', 'test/node/**'] },
 });

@@ -28,8 +28,8 @@ var testOutputs = []protocol.Output{{Glob: "loom-out/test.jsonl.gz"}, {Glob: "lo
 // rerun reuses nothing. The id is the package's path and the commit, so a rerun of one unit on the candidate and on
 // main's base never share one.
 func JobUnitFor(parts KeyParts, sha, tree string) (protocol.JobUnit, error) {
-	if parts.Kind != "test" {
-		return protocol.JobUnit{}, fmt.Errorf("a %q unit has no job yet; only test units rerun", parts.Kind)
+	if parts.Kind != "test" && parts.Kind != "build" {
+		return protocol.JobUnit{}, fmt.Errorf("a %q unit has no job yet; only test and build units rerun", parts.Kind)
 	}
 	if tree == "" {
 		return protocol.JobUnit{}, fmt.Errorf("a rerun at %.12s names no tree build, and a runner never builds", sha)
@@ -38,7 +38,7 @@ func JobUnitFor(parts KeyParts, sha, tree string) (protocol.JobUnit, error) {
 	if err != nil {
 		return protocol.JobUnit{}, err
 	}
-	test.Tree = tree
+	test.Tree, test.Build = tree, parts.Kind == "build"
 	directory := strings.TrimPrefix(parts.Package, protocol.AdamicModule+"/")
 	id := strings.Trim(notIdCharacters.ReplaceAllString(strings.ToLower(directory), "-"), "-") + "-" + sha[:12]
 	return jobUnitOf(id, parts, test, testOutputs)
@@ -53,12 +53,14 @@ func JobUnitFor(parts KeyParts, sha, tree string) (protocol.JobUnit, error) {
 // that can't be said exactly as a job is refused with why, never placed as something near it.
 func FutureJobUnit(unitKey string, parts KeyParts, sha, base string, changed []string) (protocol.JobUnit, error) {
 	switch parts.Kind {
-	case "test", "product":
-		// A product unit is its package's TestProduct_X under the product kind's ceiling (ProductKeys).
+	case "test", "build", "product":
+		// A product unit is its package's TestProduct_X under the product kind's ceiling (ProductKeys); a build unit is its
+		// package's declared builds, a build job (Kirk's build law, #8j1qygw).
 		test, err := goTestJob(parts, sha, changed)
 		if err != nil {
 			return protocol.JobUnit{}, err
 		}
+		test.Build = parts.Kind == "build"
 		return jobUnitOf(unitKey, parts, test, testOutputs)
 	case "phase":
 		test, err := phaseJob(parts, sha, base, changed)
@@ -68,7 +70,7 @@ func FutureJobUnit(unitKey string, parts KeyParts, sha, base string, changed []s
 		// run.py writes its own record under loom-out/phase; a phase has no test log, and the judge asks for none.
 		return jobUnitOf(unitKey, parts, test, nil)
 	}
-	return protocol.JobUnit{}, fmt.Errorf("a %q unit has no job: its kind isn't test, product or phase", parts.Kind)
+	return protocol.JobUnit{}, fmt.Errorf("a %q unit has no job: its kind isn't test, build, product or phase", parts.Kind)
 }
 
 // goTestJob is the go test job of a test or product unit's package and selection at sha, naming the runner its key

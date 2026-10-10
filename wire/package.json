@@ -3,7 +3,7 @@
     "private": true,
     "type": "module",
     "scripts": {
-        "test": "vitest run && vitest run --config vitest.pipeline.config.ts",
+        "test": "vitest run && vitest run --config vitest.pipeline.config.ts && vitest run --config vitest.node.config.ts",
         "check": "tsc --noEmit",
         "deploy": "wrangler deploy",
         "deploy:pipeline": "wrangler deploy --config pipeline.jsonc",

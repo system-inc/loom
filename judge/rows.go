@@ -42,6 +42,9 @@ type UnitRow struct {
 	SystemSeconds float64 `json:"systemSeconds,omitempty"`
 	// Status is its finished event's (passed, failed or broken), empty when it never finished.
 	Status string `json:"status,omitempty"`
+	// OverBudget marks a test unit that passed past the run budget (RunBudgetSeconds, #ccewvra): green with a warning,
+	// so the rollups can count and name the units to split.
+	OverBudget bool `json:"overBudget,omitempty"`
 	// The runner's timing event, its fields at the row's top level; all zero from a runner that sends none.
 	protocol.Timing
 }
@@ -101,6 +104,7 @@ func GatherRows(future PlannedFuture, attempt int, run string, events []protocol
 				row.Finished, row.Status = event.Time, event.Status
 			}
 		}
+		row.OverBudget = row.Kind == KindTest && row.Status == protocol.StatusPassed && row.WallSeconds > RunBudgetSeconds
 		if placedFound {
 			row.Placed = placedAt
 			placedTime, placedError := time.Parse(time.RFC3339Nano, placedAt)

@@ -729,3 +729,66 @@ func TestAWarmPassNeverDecidesEvenCarried(t *testing.T) {
 		})
 	}
 }
+
+func slowPassed(wall float64) Finished {
+	finished := passed()
+	finished.Attempt.WallSeconds = wall
+	return finished
+}
+
+// Through the loop (#ccewvra): a slow pass's record carries its warning, a branch that made it slow is red with both
+// walls in its kick, a verify's slow pass reruns nothing, and a fast pass's record has no warnings field at all.
+func TestASlowPassThroughTheLoop(t *testing.T) {
+	cases := []struct {
+		name   string
+		base   string
+		alone  map[string]Finished // by tree
+		run    string
+		asked  int
+		record string // must be in the unit's record
+	}{
+		{"a branch that made it slow is red", baseTree, map[string]Finished{futureTree: slowPassed(80), baseTree: slowPassed(30)}, "red", 2,
+			`"warnings":[{"baseWallSeconds":30,"budgetSeconds":60,"kind":"overBudget","wallSeconds":74}]`},
+		{"a branch that didn't is green with a warning", baseTree, map[string]Finished{futureTree: slowPassed(80), baseTree: slowPassed(75)}, "green", 2,
+			`"warnings":[{"baseWallSeconds":75,"budgetSeconds":60,"kind":"overBudget","wallSeconds":74}]`},
+		{"a verify's slow pass is green with a warning, nothing rerun", futureTree, nil, "green", 0,
+			`"warnings":[{"budgetSeconds":60,"kind":"overBudget","wallSeconds":74}]`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			h.runs["u"] = slowPassed(74)
+			for tree, finished := range c.alone {
+				h.script("u", tree, finished)
+			}
+			loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 10, 22, 0, 0, 0, time.UTC) }}
+			post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: c.base, Owner: "system_adamic_library"}, Change: "chg_A",
+				Future: futureTree, Base: c.base, Run: "run-1", Plan: []PlanUnit{{UnitKey: "u", Kind: KindTest}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if post.Decision.Status != c.run || len(h.fabric.Asked) != c.asked {
+				t.Fatalf("run %s with placements %v, want %s and %d", post.Decision.Status, h.fabric.Asked, c.run, c.asked)
+			}
+			if !strings.Contains(string(post.Verdicts[0]), c.record) {
+				t.Fatalf("record %s lacks %s", post.Verdicts[0], c.record)
+			}
+			kick, kicked := post.Decision.Kicks["u"]
+			if kicked != (c.run == "red") || (kicked && !strings.Contains(kick.Why, "80.0 s on the candidate and 30.0 s on main's base")) {
+				t.Fatalf("kicks %+v", post.Decision.Kicks)
+			}
+		})
+	}
+	// Only a test unit is held to the run budget: a product that builds for minutes is no warning and reruns nothing.
+	h := newHarness()
+	h.runs["u"] = slowPassed(300)
+	if post := h.judge(t, PlanUnit{UnitKey: "u", Kind: "product"}); strings.Contains(string(post.Verdicts[0]), "warnings") || len(h.fabric.Asked) != 0 {
+		t.Fatalf("a slow product's record %s, placements %v: want no warning and nothing rerun", post.Verdicts[0], h.fabric.Asked)
+	}
+	h = newHarness()
+	h.runs["u"] = slowPassed(12)
+	post := h.judge(t, PlanUnit{UnitKey: "u", Kind: KindTest})
+	if strings.Contains(string(post.Verdicts[0]), "warnings") || len(h.fabric.Asked) != 0 {
+		t.Fatalf("a fast pass's record %s, placements %v: want no warnings field and nothing rerun", post.Verdicts[0], h.fabric.Asked)
+	}
+}

@@ -157,6 +157,25 @@ func (client QueueClient) PostEmpty(future, reason string) error {
 	return nil
 }
 
+// Unplan asks Queue to withdraw a future's plan so it's planned again (POST /futures/<tree>/unplan {by, reason}): Queue
+// takes it only after a void and while no green or red stands (#0zndrgw), and logs it with who and why.
+func (client QueueClient) Unplan(future, by, reason string) error {
+	body, err := json.Marshal(map[string]any{"by": by, "reason": reason})
+	if err != nil {
+		return err
+	}
+	response, err := client.do("POST", "/futures/"+url.PathEscape(future)+"/unplan", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode/100 != 2 {
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		return fmt.Errorf("POST /futures/%s/unplan: %s: %s", future, response.Status, strings.TrimSpace(string(detail)))
+	}
+	return nil
+}
+
 // PlannedFuture reads a planned future's base and change from Queue's planned listing (GET /futures?state=planned).
 func (client QueueClient) PlannedFuture(future string) (Future, error) {
 	response, err := client.do("GET", "/futures?state=planned", nil)

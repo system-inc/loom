@@ -41,7 +41,8 @@ type Options struct {
 	// KillGrace is how long a timed-out process group has between SIGTERM and SIGKILL. Zero means 5 s.
 	KillGrace time.Duration
 	// Heartbeat is how long a unit may go silent before the runner says it's still running, an output event
-	// on the runner stream, so whoever watches can tell a quiet unit from a runner that's gone. Zero means 2 min.
+	// on the runner stream, so whoever watches can tell a quiet unit from a runner that's gone: the coordinator places a
+	// unit again once its runner has been silent two heartbeats (#ravqt9s). Zero means 20 s.
 	Heartbeat time.Duration
 	// OutputGrace is how long the runner keeps reading output after the command exits and its group is
 	// killed, for a process that left the group and still holds the pipes. Zero means 2 s.
@@ -108,7 +109,7 @@ func (options Options) withDefaults() Options {
 		options.Client = &http.Client{Transport: transport}
 	}
 	if options.Heartbeat == 0 {
-		options.Heartbeat = 2 * time.Minute
+		options.Heartbeat = 20 * time.Second
 	}
 	if options.KillGrace == 0 {
 		options.KillGrace = 5 * time.Second
@@ -204,7 +205,9 @@ type unitRun struct {
 // kills the unit's process group and finishes the unit broken: the runner was stopped, nothing was proved.
 func Run(runContext context.Context, unit protocol.Unit, options Options) Result {
 	run := begin(unit, options)
+	stopBeating := run.beat()
 	status := run.execute(runContext)
+	stopBeating()
 	if run.directory != "" && !run.options.Keep {
 		if err := removeDirectory(run.directory); err != nil {
 			fmt.Fprintf(run.options.Diagnostics, "loom-runner: removing workspace %s: %v\n", run.directory, err)
@@ -212,6 +215,31 @@ func Run(runContext context.Context, unit protocol.Unit, options Options) Result
 	}
 	run.finish(status)
 	return Result{Status: status, Workspace: run.workspace}
+}
+
+// beat says the unit is still running whenever it has been silent a heartbeat, for as long as it runs, until stop: a
+// fetch, an unpacking or a preparation the runner does itself says nothing of its own, and a unit silent two heartbeats
+// is placed again (#ravqt9s: Chonchon slept mid-unit, and its unit waited 23 minutes for the judge's backstop).
+func (run *unitRun) beat() (stop func()) {
+	started := time.Now()
+	quiet, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(run.options.Heartbeat / 4)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-quiet:
+				return
+			case <-ticker.C:
+				run.emitter.beat(run.options.Heartbeat, fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds()))
+			}
+		}
+	}()
+	return func() {
+		close(quiet)
+		<-done
+	}
 }
 
 // begin readies a unit's run, its wire posting if the unit names one, and emits its started event.

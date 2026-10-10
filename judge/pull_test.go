@@ -643,6 +643,13 @@ func TestAnOverBudgetUnitIsVoidNeverRedFlakeOrGreen(t *testing.T) {
 		stream := finishedStream(unit, "failed")
 		return append(stream[:len(stream)-1], protocol.Event{Unit: unit, Type: "error", Phase: phase, Message: message}, stream[len(stream)-1])
 	}
+	// The runner's own deadline on the exit event, as run 4 of the verify of ebdb6c53 stopped seven units at 90 s.
+	exitWith := func(exit protocol.Event) []protocol.Event {
+		stream := finishedStream(unit, "failed")
+		exit.Unit, exit.Type, exit.Code = unit, "exit", code(1)
+		stream[1] = exit
+		return stream
+	}
 	for _, c := range []struct {
 		name   string
 		first  []protocol.Event
@@ -651,6 +658,8 @@ func TestAnOverBudgetUnitIsVoidNeverRedFlakeOrGreen(t *testing.T) {
 		infra  string
 		reruns int
 	}{
+		{"stopped at the runner's deadline", exitWith(protocol.Event{TimedOut: true, WallSeconds: 90.4}), finishedStream("job", "passed"), "void", InfraOverBudget, 0},
+		{"a signal from outside stays a kill, placed again", exitWith(protocol.Event{Signal: "killed"}), finishedStream("job", "passed"), "green", "", 1},
 		{"over its run budget", overBudget(protocol.PhaseRun, "overBudgetRun: 60 s"), finishedStream("job", "passed"), "void", InfraOverBudget, 0},
 		{"over its ready budget", overBudget(protocol.PhaseStart, "overBudgetReady: 30 s"), finishedStream("job", "passed"), "void", InfraOverBudget, 0},
 		{"the word in another phase", overBudget(protocol.PhaseUpload, "overBudgetRun"), finishedStream("job", "failed"), "red", "", 2},

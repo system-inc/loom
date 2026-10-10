@@ -15,6 +15,7 @@ import (
 	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/planner"
+	"github.com/system-inc/loom/resident"
 )
 
 // buildTree is Kirk's shape on Workshop: one future's tree built cold, every test package's binary and the products
@@ -36,6 +37,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	future := flags.String("future", "", "the future's commit")
 	wantKey := flags.String("tree-key", "", "the tree key the plan carries for this tree: refused before building when the tree keys otherwise")
 	wantGo := flags.String("go", "", "the Go release the plan's units are keyed on: refused before building when this go is another")
+	keysFile := flags.String("keys", "", "the resident's keys for this tree (`loom build-trees --resident`): its test packages and closure keys, read instead of asked of go again; refused when they're another tree's")
 	storeFlags := addStoreFlags(flags)
 	cache := flags.String("cache", filepath.Join(home, "loom-builder", "trees"), "the base of each tree's own build directory, <base>/<tree hash>")
 	nodeCache := flags.String("node-cache", filepath.Join(home, "loom-builder", "node"), "where each npm project's packages are installed once per lockfile, <base>/<lockfile sha256>, and the pinned npm")
@@ -46,7 +48,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	tempFloorGB := flags.Uint64("temp-floor-gb", 20, "free space the temporary directory keeps, in GB (it may be memory)")
 	goCacheGB := flags.Uint64("go-cache-gb", 500, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--keys <file>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
 		return 2
 	}
 	started := time.Now()
@@ -75,6 +77,15 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Tree: &livestatus.Tree{Key: identity.Key(), Future: *future, Phase: "readying", StartedAt: started}})
 	if err = checkTreeKey(identity, *wantKey, *wantGo, runtime.GOOS+"/"+runtime.GOARCH); err != nil {
 		return fail(err)
+	}
+	// The resident's keys, read before anything is built, so keys of another tree refuse the build rather than name it.
+	var keys *resident.Keys
+	if *keysFile != "" {
+		read, err := resident.ReadKeys(*keysFile, identity.Tree)
+		if err != nil {
+			return fail(err)
+		}
+		keys = &read
 	}
 	requests := &builder.Requests{}
 	store, err := storeFlags.open(requests)
@@ -135,7 +146,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(fmt.Errorf("the tree's npm packages: %w", err))
 	}
-	packages, err := builder.TestPackages(*tree)
+	packages, err := testPackages(*tree, keys)
 	if err != nil {
 		return fail(err)
 	}
@@ -261,6 +272,14 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	})
 	phase("built", func(tree *livestatus.Tree) { tree.Failed = failed })
 	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten, treeLock)
+}
+
+// testPackages are the tree's test packages: the resident's, when its keys came with the build, else go's.
+func testPackages(tree string, keys *resident.Keys) ([]planner.ProductTest, error) {
+	if keys != nil {
+		return keys.Packages, nil
+	}
+	return builder.TestPackages(tree)
 }
 
 // checkTreeKey refuses to build a tree here unless this machine is the runners' platform (host, GOOS/GOARCH), whose

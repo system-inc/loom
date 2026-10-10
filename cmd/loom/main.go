@@ -71,6 +71,7 @@ const usage = `usage:
   loom units [--days N | --day YYYY-MM-DD] [--name <text>] [--box <text>] [--kind <kind>] [--status <status>] [--by name|box|day] [--json] [--r2 <key file>]
   loom build-tree --tree <dir> [--r2 <key file>] [--future <sha>] [--tree-key <key>] [--jobs N]
   loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--r2 <key file>] [--once]
+  loom resident-check --tree <clone> --from <commit> --to <commit> [--mutant <path>]
   loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--lifecycle-unchecked] [--dry-run]
   loom gate-inputs check [--manifest-file <path>] [<name>]
   loom push [--config <push.conf>]
@@ -150,6 +151,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "build-trees" {
 		return buildTrees(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "resident-check" {
+		return residentCheck(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "gate-inputs" {
 		return gateInputs(arguments[1:], stdout, stderr)

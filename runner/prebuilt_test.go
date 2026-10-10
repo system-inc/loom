@@ -1065,6 +1065,29 @@ func TestABuildIsRefusedWithAGoHere(t *testing.T) {
 	}
 }
 
+// A build job's tests build (Kirk's build law, #8j1qygw): the go build a test job's stand-in refuses goes through to the
+// real go, of the tree's release, and what it makes is the test's: here the fixture's tree holds no source for the tool,
+// so the build fails, and the build job is the change's red, never Loom's broken. Mutants: the build flag ignored by the
+// stand-in (refused, broken); settleGo turning a build job's failed go command into Loom's broken.
+func TestABuildJobsTestsBuildWithTheRealGo(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	built := fixture.tree.index.Packages[lowerPackage]
+	built.Products = []string{}
+	fixture.tree.index.Packages[lowerPackage] = built
+	fixture.tree.publish(t)
+	unit := fixture.unit("^TestProduct$")
+	unit.Test.Build = true
+	result, events, _ := runUnit(t, unit, fixture.options(t))
+	runner := strings.Join(outputLines(events, "runner"), "\n")
+	if !strings.Contains(runner, "answered for the tests, 1 times: go build -o ") || strings.Contains(runner, "never builds or downloads") {
+		t.Fatalf("the build job's go build wasn't let through:\n%s", runner)
+	}
+	if result.Status != protocol.StatusFailed || strings.Contains(errorPhases(events), "Loom's") || !strings.Contains(testLog(t, result), "building the product") {
+		t.Fatalf("a build job whose build fails: %s; errors %q", result.Status, errorPhases(events))
+	}
+}
+
 // A package whose test code didn't compile on Workshop is the change's red, said as go test -json says it.
 func TestABuildErrorIsTheChangesRed(t *testing.T) {
 	fixture := newPrebuiltFixture(t)
@@ -1115,6 +1138,44 @@ func TestAStalledStoreBreaksTheUnitInItsTime(t *testing.T) {
 	result, events, _ := runUnit(t, unit, fixture.options(t))
 	if result.Status != protocol.StatusBroken || time.Since(started) > 8*time.Second || !strings.Contains(errorPhases(events), "deadline exceeded") {
 		t.Fatalf("a 2 s unit on a stalled store: %s after %.1f s; errors %q", result.Status, time.Since(started).Seconds(), errorPhases(events))
+	}
+}
+
+// A unit says it's still running through every phase, its own fetch among them, which says nothing while a store
+// trickles: the coordinator places a unit again once it has been silent two heartbeats (#ravqt9s), so a slow fetch must
+// never read as a worker gone. Mutant: no unit-wide beat, and the stalled fetch is silent to its deadline.
+func TestAUnitBeatsThroughAStalledFetch(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	stall := make(chan struct{})
+	defer close(stall)
+	inner := fixture.store.server.Config.Handler
+	fixture.store.server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if !strings.HasPrefix(request.URL.Path, "/blobs/") {
+			inner.ServeHTTP(writer, request)
+			return
+		}
+		writer.Header().Set("Content-Length", "1000000")
+		writer.WriteHeader(http.StatusOK)
+		writer.Write([]byte("x"))
+		writer.(http.Flusher).Flush()
+		select {
+		case <-stall:
+		case <-time.After(20 * time.Second):
+		}
+	})
+	unit := fixture.unit("^TestA$")
+	unit.TimeoutSeconds = 2
+	options := fixture.options(t)
+	options.Heartbeat = 300 * time.Millisecond
+	_, events, _ := runUnit(t, unit, options)
+	beats := 0
+	for _, line := range outputLines(events, "runner") {
+		if strings.Contains(line, "still running after") {
+			beats++
+		}
+	}
+	if beats < 3 {
+		t.Fatalf("%d beats through a 2 s stalled fetch with a 300 ms heartbeat:\n%s", beats, strings.Join(outputLines(events, "runner"), "\n"))
 	}
 }
 
