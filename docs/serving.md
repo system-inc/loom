@@ -57,6 +57,14 @@ A box's 64 threads and 125 GB held one unit at a time mostly idle (#ef2rgaq). Wi
 
 ## Installing
 
+Beyond Ubuntu's own git, curl and python3 and the adamic-tools serve's units use, a box needs one package, installed once as the sudoer:
+
+```bash
+sudo apt-get install -y strace
+```
+
+- **strace** traces the precise-keys dry runs (#vt46geg), which run under `~/levers` at nice 19 beside serve's units. Home and Cloud got it by hand on Oct 10 (6.8, Workshop's version, docs/workshop.md); a rebuilt box gets it here.
+
 Once per box, after the updater is installed and has a release with `install-serve`:
 
 ```bash
