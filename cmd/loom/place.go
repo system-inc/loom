@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,7 +33,6 @@ type placeSettings struct {
 	queue, tokenFile, wire, source, poolsPath, needsGit *string
 	warmRunnersFile, warmAttempts, ledgerPath, runs     *string
 	treesLedger                                         *string
-	poolHas                                             poolHasFlag
 	priority, poolSlots                                 *int
 	unfitEvery, keep, interval, treeWait                *time.Duration
 	once, dryRun, trees                                 *bool
@@ -45,13 +43,12 @@ func parsePlaceFlags(arguments []string, stderr io.Writer) (placeSettings, error
 	flags := flag.NewFlagSet("place", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	home, _ := os.UserHomeDir()
-	settings := placeSettings{poolHas: poolHasFlag{}}
+	settings := placeSettings{}
 	settings.queue = flags.String("queue", "", "loom's base URL")
 	settings.tokenFile = flags.String("token-file", "", "file holding the coordinator token")
 	settings.wire = flags.String("wire", "https://runs.loom.system.inc", "the wire's origin, where runs' events live and units are queued")
 	settings.source = flags.String("source", defaultSource(), "this repository's checkout, which `loom run` builds the pool runner's version from")
-	settings.poolsPath = flags.String("pools", filepath.Join(home, ".loom", "pools.json"), "the pool table, read every pass: each pool's runner, kinds, memory, cpus and cold mark")
-	flags.Var(settings.poolHas, "pool-has", "the toolchains every worker of a pool has, <name>=<toolchain>,..., as the judge's; a pool without one has none; repeatable")
+	settings.poolsPath = flags.String("pools", filepath.Join(home, ".loom", "pools.json"), "the pool table, read every pass: each pool's runner, kinds, memory, cpus, cold mark and toolchains (has)")
 	settings.needsGit = flags.String("needs-git", "", "a clone of Adamic whose origin's loom/planner-reads holds unit-needs.json, for a unit whose plan carried no need")
 	settings.warmRunnersFile = flags.String("warm-runners-file", filepath.Join(home, "loom-judge", "warm-runners.txt"), "the steady judge's warm runners: a test unit keyed on one goes only to a cold pool; a missing file means none")
 	settings.warmAttempts = flags.String("warm-attempts", filepath.Join(home, "loom-judge", "warm-attempts.txt"), "the steady judge's warm-attempts file, for the units the judge carries; a missing file means none")
@@ -72,7 +69,7 @@ func parsePlaceFlags(arguments []string, stderr io.Writer) (placeSettings, error
 		return settings, err
 	}
 	if *settings.queue == "" || *settings.tokenFile == "" || *settings.priority < 0 || *settings.priority > 1000 || *settings.poolSlots < 1 || flags.NArg() != 0 {
-		return settings, errors.New("usage: loom place --queue <url> --token-file <path> --pool-has <name>=<toolchains>... [--pools <file>] [--needs-git <clone>] [--wire <url>] [--r2 <key file>] [--ledger <file>] [--runs <dir>] [--priority 40] [--pool-slots 32] [--keep 168h] [--interval 10s] [--once] [--dry-run]")
+		return settings, errors.New("usage: loom place --queue <url> --token-file <path> [--pools <file>] [--needs-git <clone>] [--wire <url>] [--r2 <key file>] [--ledger <file>] [--runs <dir>] [--priority 40] [--pool-slots 32] [--keep 168h] [--interval 10s] [--once] [--dry-run]")
 	}
 	// The placer's named void must land before the judge's silent one.
 	if *settings.treeWait <= 0 || *settings.treeWait >= judge.StaleAfter {
@@ -114,7 +111,7 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if _, err := os.Stat(*settings.warmAttempts); errors.Is(err, os.ErrNotExist) {
 		*settings.warmAttempts = ""
 	}
-	readTable, err := poolReader(*settings.poolsPath, settings.poolHas, stderr)
+	readTable, err := poolReader(*settings.poolsPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "place:", err)
 		return 1
@@ -243,49 +240,28 @@ func treeStateReader(store builder.Store, ledgerPath string) func(tree string) (
 	}
 }
 
-// poolReader reads the pool table joined with --pool-has. At start a --pool-has naming a pool the table doesn't hold
-// is refused, since it says nothing; after start such a pool was taken out of the table, which only warns (once per
-// name), so one pool leaving never stops every placement.
-func poolReader(path string, has poolHasFlag, warn io.Writer) (func() ([]placer.Pool, error), error) {
-	table, err := readPools(path)
-	if err != nil {
+// poolReader reads the pool table once now, so a bad one stops the placer at start, and gives back what reads it again
+// each pass: each pool with its toolchains, from its has.
+func poolReader(path string) (func() ([]placer.Pool, error), error) {
+	if _, err := readPools(path); err != nil {
 		return nil, err
 	}
-	if _, unknown := placerPools(table, has); len(unknown) > 0 {
-		return nil, fmt.Errorf("--pool-has names pools the table doesn't hold: %s", strings.Join(unknown, ", "))
-	}
-	warned := map[string]bool{}
 	return func() ([]placer.Pool, error) {
 		table, err := readPools(path)
 		if err != nil {
 			return nil, err
 		}
-		pools, unknown := placerPools(table, has)
-		for _, name := range unknown {
-			if !warned[name] {
-				warned[name] = true
-				fmt.Fprintf(warn, "place: pool %s left the pool table; its --pool-has is unused\n", name)
-			}
-		}
-		return pools, nil
+		return placerPools(table), nil
 	}, nil
 }
 
-// placerPools joins the pool table with --pool-has: each pool with the toolchains its workers have, and the names
-// --pool-has gives that the table doesn't hold.
-func placerPools(table []judge.PoolEntry, has poolHasFlag) ([]placer.Pool, []string) {
+// placerPools is the pool table as the placer takes it.
+func placerPools(table []judge.PoolEntry) []placer.Pool {
 	pools := []placer.Pool{}
 	for _, entry := range table {
-		pools = append(pools, placer.Pool{PoolEntry: entry, Has: has[entry.Name]})
+		pools = append(pools, placer.Pool{PoolEntry: entry})
 	}
-	unknown := []string{}
-	for name := range has {
-		if !slices.ContainsFunc(table, func(entry judge.PoolEntry) bool { return entry.Name == name }) {
-			unknown = append(unknown, name)
-		}
-	}
-	sort.Strings(unknown)
-	return pools, unknown
+	return pools
 }
 
 // runOptions are what every placed run shares: where its files go, the wire, the source its pool version is named

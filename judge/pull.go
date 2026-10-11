@@ -483,6 +483,11 @@ type PoolEntry struct {
 	// MachinePrefixes name the workers of a pool whose instances come and go (Codex's, codex-<hostname>, #54pcx41): a
 	// worker whose machine name starts with one is the pool's, as one its Machines list names.
 	MachinePrefixes []string `json:"machinePrefixes,omitempty"`
+	// Has is the toolchains every worker of the pool has (protocol.Toolchains): a unit whose key requires one is placed and
+	// rerun only on a pool that has it. It lives here, beside the machines it is true of, and nowhere else: the placer and
+	// the judge read it from this one file, so turning a pool on or off is one edit (#pzrz9r8; the units carried it as
+	// --pool-has, and a hand-made drop-in had to change both).
+	Has []string `json:"has,omitempty"`
 }
 
 // Names says whether a worker reporting machine in its started events is one of the pool's: Machines names it, or it
@@ -607,6 +612,11 @@ func LoadPools(content []byte) ([]PoolEntry, error) {
 		if slices.Contains(pool.MachinePrefixes, "") {
 			// An empty prefix would name every worker the pool's.
 			return nil, fmt.Errorf("pools.json: pool %s has an empty machine prefix", pool.Name)
+		}
+		for _, toolchain := range pool.Has {
+			if !slices.Contains(protocol.Toolchains, toolchain) {
+				return nil, fmt.Errorf("pools.json: pool %s has %q, which isn't a toolchain (%s)", pool.Name, toolchain, strings.Join(protocol.Toolchains, ", "))
+			}
 		}
 	}
 	return table.Pools, nil

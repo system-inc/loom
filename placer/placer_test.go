@@ -28,8 +28,8 @@ func (futures listedFutures) Planned() ([]judge.PlannedFuture, error) { return f
 // fixturePools are Oct 10's two kinds of pool: a test pool with every toolchain, and the phase pool, phase only.
 func fixturePools() []Pool {
 	return []Pool{
-		{PoolEntry: judge.PoolEntry{Name: "codex-strict", Runner: testRunner, MemoryMegabytes: 16384, Cpus: 4, Cold: true}, Has: []string{"go", "clang", "node", "wasiSdk"}},
-		{PoolEntry: judge.PoolEntry{Name: "box-phase", Runner: phaseRunner, MemoryMegabytes: 65536, Cpus: 8, Kinds: []string{"phase"}}, Has: []string{"go", "clang", "node"}},
+		{PoolEntry: judge.PoolEntry{Name: "codex-strict", Runner: testRunner, MemoryMegabytes: 16384, Cpus: 4, Cold: true, Has: []string{"go", "clang", "node", "wasiSdk"}}},
+		{PoolEntry: judge.PoolEntry{Name: "box-phase", Runner: phaseRunner, MemoryMegabytes: 65536, Cpus: 8, Kinds: []string{"phase"}, Has: []string{"go", "clang", "node"}}},
 	}
 }
 
@@ -290,7 +290,7 @@ func TestARunHoldsNoPoolThatWouldTakeAUnitOnTheWrongRunner(t *testing.T) {
 	units := everyKind(t)[:2]
 	h := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: units}}, &MemoryLedger{})
 	h.placer.Pools = func() ([]Pool, error) {
-		stale := Pool{PoolEntry: judge.PoolEntry{Name: "stale-strict", Runner: strings.Repeat("0", 64), MemoryMegabytes: 16384, Cpus: 4}, Has: []string{"go", "clang", "node"}}
+		stale := Pool{PoolEntry: judge.PoolEntry{Name: "stale-strict", Runner: strings.Repeat("0", 64), MemoryMegabytes: 16384, Cpus: 4, Has: []string{"go", "clang", "node"}}}
 		return append(fixturePools(), stale), nil
 	}
 	h.placeOnce(t, 1)
