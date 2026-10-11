@@ -62,7 +62,7 @@ const usage = `usage:
   loom submit-token [--days N] <owner>
   loom coordinator-token <service> [--days N]
   loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--once] [--dry-run]
-  loom place --queue <url> --token-file <path> --pool-has <name>=<toolchains>... [--pools <file>] [--once] [--dry-run]
+  loom place --queue <url> --token-file <path> [--pools <file>] [--once] [--dry-run]
   loom unit-needs --gate-tools <dir> --package <directory> [--run <pattern>]
   loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>] [--key-parts <file> [--read-sets <dir>] [--no-reuse <file>]]
   loom build-actions --tree <dir> --gate-tools <dir> [--r2 <key file>] [--packages a,b] [--list]
@@ -71,6 +71,7 @@ const usage = `usage:
   loom units [--days N | --day YYYY-MM-DD] [--name <text>] [--box <text>] [--kind <kind>] [--status <status>] [--by name|box|day] [--json] [--r2 <key file>]
   loom build-tree --tree <dir> [--r2 <key file>] [--future <sha>] [--tree-key <key>] [--jobs N]
   loom build-trees --queue <url> --token-file <path> [--clone <dir>] [--ledger <file>] [--r2 <key file>] [--once]
+  loom resident-check --tree <clone> --from <commit> --to <commit> [--mutant <path>]
   loom gate-inputs publish [--dir <dir>] [--manifest-file <path>] [--r2 <key file>] [--lifecycle-unchecked] [--dry-run]
   loom gate-inputs check [--manifest-file <path>] [<name>]
   loom push [--config <push.conf>]
@@ -78,6 +79,7 @@ const usage = `usage:
   loom queue-bridge [--config <queue-bridge.conf>]
   loom queue-bridge install
   loom queue-bridge pins [--repository <clone>] <sha>
+  loom install-units
   loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--tailnet] [--public]
   loom house-cache install
   loom release watch [--config <file>] [--wire <url>]
@@ -151,6 +153,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "build-trees" {
 		return buildTrees(arguments[1:], stdout, stderr)
 	}
+	if len(arguments) > 0 && arguments[0] == "resident-check" {
+		return residentCheck(arguments[1:], stdout, stderr)
+	}
 	if len(arguments) > 0 && arguments[0] == "gate-inputs" {
 		return gateInputs(arguments[1:], stdout, stderr)
 	}
@@ -159,6 +164,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "queue-bridge" {
 		return queueBridge(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "install-units" {
+		return installUnits(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "house-cache" {
 		return houseCache(arguments[1:], stdout, stderr)

@@ -39,7 +39,7 @@ func TestPoolStatusReadsThePoolWithABoardToken(t *testing.T) {
 			http.Error(writer, "no", http.StatusForbidden)
 			return
 		}
-		io.WriteString(writer, `{"queued":2,"workers":[{"worker":"codex-1","cpus":8,"seenAt":"2026-10-08T20:00:00Z","took":"tests[shard=1]"},{"worker":"codex-2","cpus":4,"seenAt":"2026-10-08T20:00:30Z","took":null}]}`)
+		io.WriteString(writer, `{"queued":2,"workers":[{"worker":"codex-1","cpus":8,"seenAt":"2026-10-08T20:00:00Z","took":"tests[shard=1]"},{"worker":"codex-2","cpus":4,"seenAt":"2026-10-08T20:00:30Z","took":null}],"live":[]}`)
 	}))
 	defer server.Close()
 	status, err := readPoolStatus(server.Client(), server.URL, secret, "codex")

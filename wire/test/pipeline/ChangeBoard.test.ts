@@ -63,7 +63,7 @@ describe('the board of changes', function () {
         const refused: [unknown, string][] = [
             [{ ...summary(change), extra: 1 }, 'the summary is exactly change, owner, sha, state, future, units and updatedAt'],
             [summary('chg_X'), 'change is a change id'],
-            [summary(change, { state: 'merged' as ChangeSummary['state'] }), 'state is one of queued, building, testing, landed, red, parked, refused, witnessed'],
+            [summary(change, { state: 'merged' as ChangeSummary['state'] }), 'state is one of queued, building, testing, landed, red, parked, refused, witnessed, withdrawn'],
             [summary(change, { sha: 'abc' }), 'sha is a commit'],
             [summary(change, { units: { planned: 1, passed: -1, failed: 0, void: 0 } }), 'units is exactly planned, passed, failed and void, each a count'],
             [summary(change, { updatedAt: 'yesterday' }), 'updatedAt is an RFC 3339 UTC time'],
@@ -103,7 +103,7 @@ describe('the board of changes', function () {
         // The page puts it at the end of the track, green, named for what it is, and never in the line on its way.
         const html = await (await call('/board')).text();
         expect(html).toContain('landed: 6, witnessed: 6 }[line.state]');
-        expect(html).toContain("line.state === 'witnessed') { name = 'Witnessed';");
+        expect(html).toContain("line.state === 'witnessed') { name = 'Verified';");
         expect(html).toContain("line.state === 'witnessed') { verdict = ['Green', 'green',");
         expect(html).toContain("var onTheWay = ['queued', 'building', 'testing', 'parked'];");
     });

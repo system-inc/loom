@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
 	"github.com/system-inc/loom/protocol"
@@ -24,9 +25,9 @@ import (
 )
 
 // The shipped unit runs `loom build-trees` with flags it takes, under adamic's toolchain and GOTOOLCHAIN=local (the
-// environment a tree's key is read in, the planner's too), and with the default KillMode, so a restart stops the build
-// in flight with the builder rather than leaving it unrecorded. Mutants: GOTOOLCHAIN=local or env.sh taken out;
-// KillMode=process.
+// environment a tree's key is read in, the planner's too), and with KillMode=process, so a restart ends the builder
+// alone and the next one adopts the build in flight from its running record (#apsj7zp). Mutants: GOTOOLCHAIN=local or
+// env.sh taken out; the KillMode line taken out.
 func TestTheShippedTreeBuilderUnitBuildsUnderAdamicsToolchain(t *testing.T) {
 	unit, err := os.ReadFile("../../treebuilder/systemd/loom-build-trees.service")
 	if err != nil {
@@ -35,8 +36,8 @@ func TestTheShippedTreeBuilderUnitBuildsUnderAdamicsToolchain(t *testing.T) {
 	if !bytes.Contains(unit, []byte("\nEnvironment=GOTOOLCHAIN=local\n")) || !bytes.Contains(unit, []byte("'. %h/adamic-tools/env.sh && exec ")) {
 		t.Fatal("the unit doesn't build under adamic's toolchain with GOTOOLCHAIN=local")
 	}
-	if bytes.Contains(unit, []byte("\nKillMode=")) {
-		t.Fatal("the unit sets a KillMode: a restart must take the build in flight with the builder")
+	if !bytes.Contains(unit, []byte("\nKillMode=process\n")) {
+		t.Fatal("the unit's restart would kill the build in flight: no KillMode=process")
 	}
 	arguments, err := buildTreesUnitCommand(unit, "/home/loom")
 	if err != nil {
@@ -87,19 +88,24 @@ func TestABuildTreeChildIsBoundedAndSaysHowItEnded(t *testing.T) {
 	failing := filepath.Join(directory, "failing")
 	os.WriteFile(failing, []byte("#!/bin/bash\necho \"build-tree: the plan carries tree key $3\"\nexit 1\n"), 0o755)
 	log := filepath.Join(directory, "b.log")
-	err = runBuildTree(context.Background(), failing, []string{"--tree-key", want.Tree}, log, time.Minute)
+	pids := []int{}
+	recorded := func(pid int) error { pids = append(pids, pid); return nil }
+	err = runBuildTree(context.Background(), failing, []string{"--tree-key", want.Tree}, log, time.Minute, recorded)
 	if err == nil || !strings.Contains(err.Error(), "exit status 1") || !strings.Contains(err.Error(), "the plan carries tree key") {
 		t.Fatalf("a failing build-tree: %v", err)
 	}
 	if info, err := os.Stat(log); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("its log: %v %v", info.Mode(), err)
 	}
+	if len(pids) != 1 || pids[0] <= 0 {
+		t.Fatalf("the child's pid was recorded as %v", pids)
+	}
 
 	child := filepath.Join(directory, "child")
 	hanging := filepath.Join(directory, "hanging")
 	os.WriteFile(hanging, []byte("#!/bin/bash\nsleep 30 &\necho $! > \""+child+"\"\nwait\n"), 0o755)
 	started := time.Now()
-	err = runBuildTree(context.Background(), hanging, nil, log, 300*time.Millisecond)
+	err = runBuildTree(context.Background(), hanging, nil, log, 300*time.Millisecond, recorded)
 	if err == nil || !strings.Contains(err.Error(), "past its 300ms bound") || time.Since(started) > 5*time.Second {
 		t.Fatalf("a build-tree that never ends gave %v after %v", err, time.Since(started))
 	}
@@ -135,11 +141,12 @@ func TestTheBuildersCloneHasOnlyThePublicOrigin(t *testing.T) {
 	}
 }
 
-// A graceful stop mid-build (SIGTERM: systemd's stop, every update's restart) is the builder's, never the tree's: the
-// build is recorded stopped, nothing stands failed, and the restarted builder builds it again rather than voiding every
-// future waiting on it for RetryAfter (review of tree-wiring, finding 1). Mutant: runBuildTree not telling a stop from a
-// failure.
-func TestAStopMidBuildIsNeverTheTreesFailure(t *testing.T) {
+// A release's restart mid-build (SIGTERM, #apsj7zp) never kills the build: the builder leaves its child running, its
+// running record standing with the child's pid, and the next builder adopts it, waiting for it and recording it built
+// from the store, never building the tree again, with the phases its summary line wrote to its log. Mutants: the
+// child killed on the builder's stop; the restarted builder building the tree again instead of adopting; the adopted
+// build's phases left off its record.
+func TestARestartMidBuildLeavesItRunningAndTheNextBuilderAdoptsIt(t *testing.T) {
 	key := strings.Repeat("a", 64)
 	parts, _ := json.Marshal(planner.KeyParts{Kind: "test", Package: "x", Tools: planner.Tools{Go: "go1.27.1"}})
 	source := listedTrees{{Future: strings.Repeat("f", 40), Attempt: 1, Units: []judge.PlannedUnitWire{{UnitKey: strings.Repeat("1", 64), KeyParts: parts, Decision: "run", Tree: key}}}}
@@ -148,15 +155,23 @@ func TestAStopMidBuildIsNeverTheTreesFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The child: two seconds of building, then its summary and its index is up.
+	index, log := filepath.Join(t.TempDir(), "index"), filepath.Join(t.TempDir(), "b.log")
+	child := filepath.Join(t.TempDir(), "build-tree")
+	os.WriteFile(child, []byte("#!/bin/bash\nsleep 2\necho '{\"phases\":{\"products\":1.5,\"total\":2}}'\ntouch '"+index+"'\n"), 0o755)
+	indexed := func(string) (bool, error) { _, err := os.Stat(index); return err == nil, nil }
+	alive := func(pid int, _ string) bool { return syscall.Kill(pid, 0) == nil }
 	runContext, stop := context.WithCancel(context.Background())
 	builds := 0
-	loop := &treebuilder.Builder{Source: source, Indexed: func(string) (bool, error) { return false, nil }, Floor: func() error { return nil },
-		Build: func(want treebuilder.Want) error {
+	loop := &treebuilder.Builder{Source: source, Indexed: indexed, Floor: func() error { return nil },
+		Build: func(want treebuilder.Want, running func(int) error) (*builder.TreePhases, error) {
 			builds++
-			time.AfterFunc(300*time.Millisecond, stop) // the SIGTERM
-			return runBuildTree(runContext, "/bin/sleep", []string{"30"}, filepath.Join(t.TempDir(), "b.log"), 2*time.Hour)
+			time.AfterFunc(300*time.Millisecond, stop) // the release's SIGTERM
+			return nil, runBuildTree(runContext, child, nil, log, 2*time.Hour, running)
 		},
-		Ledger: ledger, Now: time.Now, Log: io.Discard}
+		Phases: func(string) *builder.TreePhases { return readTreePhases(log) },
+		Alive:  alive, Kill: killGroup, Bound: 2 * time.Hour, Poll: 50 * time.Millisecond,
+		Stopping: func() bool { return runContext.Err() != nil }, Ledger: ledger, Now: time.Now, Log: io.Discard}
 	if _, err := loop.BuildOnce(); err != nil {
 		t.Fatal(err)
 	}
@@ -167,12 +182,22 @@ func TestAStopMidBuildIsNeverTheTreesFailure(t *testing.T) {
 	}
 	defer reopened.Close()
 	newest, _ := reopened.Newest(key)
-	if newest.Event != treebuilder.Stopped || newest.Standing(time.Now()) {
-		t.Fatalf("a stopped build is recorded %+v, standing %v", newest, newest.Standing(time.Now()))
+	if newest.Event != treebuilder.Running || newest.Pid <= 0 || !alive(newest.Pid, key) {
+		t.Fatalf("after the stop the build is recorded %+v, alive %v: it must still be running", newest, alive(newest.Pid, key))
 	}
-	loop.Ledger, loop.Build = reopened, func(treebuilder.Want) error { builds++; return nil }
-	if built, err := loop.BuildOnce(); err != nil || !built || builds != 2 {
-		t.Fatalf("after the restart: built %v (%v), %d builds; want it built again", built, err, builds)
+	loop.Ledger, loop.Stopping = reopened, func() bool { return false }
+	loop.Build = func(treebuilder.Want, func(int) error) (*builder.TreePhases, error) { builds++; return nil, nil }
+	if adopted, err := loop.BuildOnce(); err != nil || !adopted {
+		t.Fatalf("the restarted builder: adopted %v, %v", adopted, err)
+	}
+	if newest, _ = reopened.Newest(key); newest.Event != treebuilder.Built || !strings.Contains(newest.Cause, "adopted") || builds != 1 {
+		t.Fatalf("the adopted build is recorded %+v after %d builds; want it built once, adopted", newest, builds)
+	}
+	if newest.Phases == nil || newest.Phases.Products != 1.5 || newest.Phases.Total != 2 {
+		t.Fatalf("the adopted build's phases: %+v", newest.Phases)
+	}
+	if built, err := loop.BuildOnce(); err != nil || built || builds != 1 {
+		t.Fatalf("after adopting: built %v (%v), %d builds", built, err, builds)
 	}
 }
 
@@ -219,12 +244,40 @@ func TestACheckoutHiccupIsTransient(t *testing.T) {
 		return "", nil, errors.New("git fetch --quiet origin: The requested URL returned error: 502")
 	}
 	want := treebuilder.Want{Tree: strings.Repeat("b", 64), Future: strings.Repeat("2", 40), Go: "go1.27.1"}
-	if err := buildWant(context.Background(), failing, "/bin/true", settings, want); !errors.Is(err, treebuilder.ErrTransient) || !strings.Contains(err.Error(), "502") {
+	if _, err := buildWant(context.Background(), failing, "/bin/true", settings, want, nil, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrTransient) || !strings.Contains(err.Error(), "502") {
 		t.Fatalf("a checkout's 502: %v", err)
 	}
 	stopped, stop := context.WithCancel(context.Background())
 	stop()
-	if err := buildWant(stopped, failing, "/bin/true", settings, want); !errors.Is(err, treebuilder.ErrStopped) {
+	if _, err := buildWant(stopped, failing, "/bin/true", settings, want, nil, func(int) error { return nil }); !errors.Is(err, treebuilder.ErrStopped) {
 		t.Fatalf("a checkout the stop cut short: %v", err)
+	}
+}
+
+// A running record's pid is adopted only while it's still that tree's build-tree, read from /proc: another tree's, or
+// a pid gone or reused, is no build to wait for. Linux only, where Workshop's builder runs. Mutant: the tree not
+// compared.
+func TestOnlyThatTreesBuildIsAdopted(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+		t.Skip("no /proc here")
+	}
+	key := strings.Repeat("a", 64)
+	command := exec.Command("/bin/sh", "-c", "sleep 30; true", "build-tree", "--tree-key", key)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := command.Process.Pid
+	defer command.Process.Kill()
+	// The shell's own command line shows once it runs.
+	for deadline := time.Now().Add(2 * time.Second); !buildAlive(pid, key) && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	}
+	if !buildAlive(pid, key) || buildAlive(pid, strings.Repeat("b", 64)) {
+		content, _ := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+		t.Fatalf("pid %d (%q): alive for its tree %v, for another %v", pid, content, buildAlive(pid, key), buildAlive(pid, strings.Repeat("b", 64)))
+	}
+	command.Process.Kill()
+	command.Wait()
+	if buildAlive(pid, key) {
+		t.Fatal("a build that ended is still adopted")
 	}
 }

@@ -50,8 +50,6 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	local := flags.Int("local", 0, "rerun on this machine with this many slots instead of pools")
 	var pools poolSlotsFlag
 	flags.Var(&pools, "pool", "place reruns on a pool on the wire, <name>=<slots>; repeatable")
-	poolHas := poolHasFlag{}
-	flags.Var(poolHas, "pool-has", "the toolchains every worker of a pool has, <name>=<toolchain>,...; repeatable")
 	interval := flags.Duration("interval", 10*time.Second, "time between pulls")
 	once := flags.Bool("once", false, "pull once and exit")
 	dryRun := flags.Bool("dry-run", false, "judge and print each future's batch, posting nothing (before cutover, a posted green can land)")
@@ -77,7 +75,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 	if *queue == "" || *tokenFile == "" || (*local == 0 && len(pools) == 0 && *poolsPath == "") {
-		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--pool-has <name>=<toolchains>] [--wire <url>] [--r2 <key file>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]] [--void <tree>:<attempt> --cause <why>]; loom judge carried --tree <tree> --attempt <N> ...")
+		fmt.Fprintln(stderr, "usage: loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--wire <url>] [--r2 <key file>] [--interval 10s] [--once] [--dry-run [--post <tree> | --post-parity]] [--void <tree>:<attempt> --cause <why>]; loom judge carried --tree <tree> --attempt <N> ...")
 		return 2
 	}
 	token, err := os.ReadFile(*tokenFile)
@@ -123,9 +121,11 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "judge: --warm-runner needs --pools, whose cold pools are the only place its units count")
 		return 1
 	}
+	// startTable is the pool table as the judge starts: the toolchains each --pool has (its has), and a bad table stops the
+	// judge here; each rerun reads it again (readPools).
+	startTable := []judge.PoolEntry{}
 	if *poolsPath != "" {
-		// Read once here so a bad table stops the judge at start; each rerun reads it again (readPools).
-		if _, err := readPools(*poolsPath); err != nil {
+		if startTable, err = readPools(*poolsPath); err != nil {
 			fmt.Fprintln(stderr, "judge:", err)
 			return 1
 		}
@@ -137,7 +137,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		for _, wanted := range pools {
 			// RerunAlone lifts each pool to RerunPriority itself.
-			machine := &coordinator.PoolMachine{Pool: wanted.name, Has: poolHas[wanted.name], Wire: *wire, Secret: secret, Version: version, GoPlatform: poolPlatform, Log: stdout}
+			machine := &coordinator.PoolMachine{Pool: wanted.name, Has: poolHasIn(startTable, wanted.name), Wire: *wire, Secret: secret, Version: version, GoPlatform: poolPlatform, Log: stdout}
 			for range wanted.slots {
 				slots = append(slots, machine)
 			}
@@ -194,7 +194,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				}
 				unit.Resources = need
 				fit := judge.FitPools(table, parts.Kind, parts.Tools.Runner, need)
-				if parts.Kind == "test" && warmRunner[parts.Tools.Runner] {
+				if (parts.Kind == "test" || parts.Kind == "build") && warmRunner[parts.Tools.Runner] {
 					// A unit keyed on a warm runner reruns only where each unit starts on an empty Go cache.
 					fit = judge.ColdPools(fit)
 				}
@@ -204,7 +204,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 				}
 				rerunConfig.Slots = nil
 				for _, pool := range fit {
-					rerunConfig.Slots = append(rerunConfig.Slots, &coordinator.PoolMachine{Pool: pool.Name, Has: poolHas[pool.Name], Wire: *wire, Secret: secret,
+					rerunConfig.Slots = append(rerunConfig.Slots, &coordinator.PoolMachine{Pool: pool.Name, Has: pool.Has, Wire: *wire, Secret: secret,
 						Version: version, GoPlatform: poolPlatform, Log: stdout, MemoryMegabytes: pool.MemoryMegabytes, SilenceDrop: strictSilence})
 				}
 			}
@@ -855,4 +855,14 @@ func (index *placedIndex) placed(run string) (string, bool) {
 	}
 	at, found := index.at[run]
 	return at, found
+}
+
+// poolHasIn is the toolchains the pool table gives the pool named name (its has), none when it has no such pool.
+func poolHasIn(table []judge.PoolEntry, name string) []string {
+	for _, entry := range table {
+		if entry.Name == name {
+			return entry.Has
+		}
+	}
+	return nil
 }

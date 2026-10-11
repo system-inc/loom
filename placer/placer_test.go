@@ -28,8 +28,8 @@ func (futures listedFutures) Planned() ([]judge.PlannedFuture, error) { return f
 // fixturePools are Oct 10's two kinds of pool: a test pool with every toolchain, and the phase pool, phase only.
 func fixturePools() []Pool {
 	return []Pool{
-		{PoolEntry: judge.PoolEntry{Name: "codex-strict", Runner: testRunner, MemoryMegabytes: 16384, Cpus: 4, Cold: true}, Has: []string{"go", "clang", "node", "wasiSdk"}},
-		{PoolEntry: judge.PoolEntry{Name: "box-phase", Runner: phaseRunner, MemoryMegabytes: 65536, Cpus: 8, Kinds: []string{"phase"}}, Has: []string{"go", "clang", "node"}},
+		{PoolEntry: judge.PoolEntry{Name: "codex-strict", Runner: testRunner, MemoryMegabytes: 16384, Cpus: 4, Cold: true, Has: []string{"go", "clang", "node", "wasiSdk"}}},
+		{PoolEntry: judge.PoolEntry{Name: "box-phase", Runner: phaseRunner, MemoryMegabytes: 65536, Cpus: 8, Kinds: []string{"phase"}, Has: []string{"go", "clang", "node"}}},
 	}
 }
 
@@ -290,7 +290,7 @@ func TestARunHoldsNoPoolThatWouldTakeAUnitOnTheWrongRunner(t *testing.T) {
 	units := everyKind(t)[:2]
 	h := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: units}}, &MemoryLedger{})
 	h.placer.Pools = func() ([]Pool, error) {
-		stale := Pool{PoolEntry: judge.PoolEntry{Name: "stale-strict", Runner: strings.Repeat("0", 64), MemoryMegabytes: 16384, Cpus: 4}, Has: []string{"go", "clang", "node"}}
+		stale := Pool{PoolEntry: judge.PoolEntry{Name: "stale-strict", Runner: strings.Repeat("0", 64), MemoryMegabytes: 16384, Cpus: 4, Has: []string{"go", "clang", "node"}}}
 		return append(fixturePools(), stale), nil
 	}
 	h.placeOnce(t, 1)
@@ -319,5 +319,33 @@ func TestAUnitKeyedOnChangedPathsCarriesThemOnlyWhenTheyMatch(t *testing.T) {
 	other.placeOnce(t, 0)
 	if len(other.voids) != 1 || !strings.Contains(other.voids[0], "keyed on changed paths") {
 		t.Fatalf("voids %v, want the mismatch named", other.voids)
+	}
+}
+
+// A build unit (Kirk's build law, #8j1qygw) needs go on its workers whatever its key names, since its tests build: it
+// goes only to a pool that has go, as a build job on the tree, and with none it voids the attempt naming what's
+// missing. Mutant: the placer reading only the key's requirements.
+func TestABuildUnitGoesOnlyToAPoolWithGo(t *testing.T) {
+	buildKey := strings.Repeat("9", 64)
+	units := everyKind(t)[:1]
+	units = append(units, plannedUnit(t, buildKey, protocol.AdamicModule+"/internal/native", "run", planner.KeyParts{Kind: "build",
+		Package: protocol.AdamicModule + "/internal/native", Select: planner.Select{Run: "^(TestBuildsTheArchive)$"},
+		Tools: planner.Tools{Runner: testRunner}, Env: gateEnv(), GateInputs: strings.Repeat("f", 64)}))
+	h := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: units}}, &MemoryLedger{})
+	h.placeOnce(t, 1)
+	build, placed := unitOf(t, h.placements[0], buildKey)
+	if build.Kind != "build" || !build.Test.Build || build.TimeoutSeconds != protocol.KindCeilings["build"] || strings.Join(placed.Pools, ",") != "codex-strict" {
+		t.Fatalf("the build unit is %+v on %v", build, placed.Pools)
+	}
+	// The build unit alone, its key naming no toolchain, on a pool without go.
+	goless := newHarness(t, listedFutures{{Future: tree, Base: base, Attempt: 1, Units: units[1:]}}, &MemoryLedger{})
+	goless.placer.Pools = func() ([]Pool, error) {
+		pools := fixturePools()
+		pools[0].Has = []string{"clang", "node", "wasiSdk"}
+		return pools, nil
+	}
+	goless.placeOnce(t, 0)
+	if len(goless.voids) != 1 || !strings.Contains(goless.voids[0], "build unit") || !strings.Contains(goless.voids[0], "codex-strict lacks go") {
+		t.Fatalf("voids %v, want the build unit refused naming the missing go", goless.voids)
 	}
 }

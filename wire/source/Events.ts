@@ -108,6 +108,16 @@ function isTiming(value: unknown): boolean {
     });
 }
 
+// protocol.Toolchains: the names a unit may require and a machine may have.
+const toolchains = ['go', 'clang', 'node', 'wasiSdk'];
+
+// A finished event's missingTools: one or more of protocol.Toolchains, each named once.
+function isToolchainList(value: unknown): boolean {
+    return Array.isArray(value) && value.length > 0 && new Set(value).size === value.length && value.every(function (name) {
+        return typeof name === 'string' && toolchains.includes(name);
+    });
+}
+
 // Per type: each field it may carry, and whether it must be present.
 const typeFields: Record<string, Record<string, { check: FieldCheck; required: boolean }>> = {
     started: {
@@ -155,6 +165,8 @@ const typeFields: Record<string, Record<string, { check: FieldCheck; required: b
     },
     finished: {
         status: { check: isOneOf('passed', 'failed', 'broken'), required: true },
+        // The toolchains the unit requires that its runner found missing or broken, so it never ran (#vv28ewd).
+        missingTools: { check: isToolchainList, required: false },
     },
 };
 

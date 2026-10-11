@@ -40,7 +40,7 @@ type PlannedResult struct {
 // package's test binary from it, and a phase job, run on a checkout, takes only the tree's npm packages from it, since
 // no runner installs them (#v03v751).
 func ReadsTreeBuild(kind string) bool {
-	return kind == "test" || kind == "product" || kind == "phase"
+	return kind == "test" || kind == "build" || kind == "product" || kind == "phase"
 }
 
 // PlanTree plans every package with tests on a checked-out tree: one test unit per package, keyed by KeyFor and
@@ -240,6 +240,10 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 	if err != nil {
 		return nil, err
 	}
+	builds, err := buildDeclarations(tree)
+	if err != nil {
+		return nil, err
+	}
 	productKeys, err := TestProductKeys(tree, gateTools, tools)
 	if err != nil {
 		return nil, err
@@ -294,6 +298,10 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 			}
 		}
 	}
+	wasiSdk, err := TreeWasiSdk(tree)
+	if err != nil {
+		return nil, err
+	}
 	results := []PlannedResult{}
 	planned := []PlannedUnit{}
 	parts := map[string]KeyParts{}
@@ -303,7 +311,13 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 		for _, input := range declared[directory] {
 			compilers = append(compilers, module+"/"+input)
 		}
-		unit := Unit{Kind: "test", Package: listed.ImportPath, Directory: directory, Environment: GateEnvironment,
+		// A package adamic declares a build is a build unit (Kirk's build law, #8j1qygw): the kind is in its key, so
+		// declaring it or taking it back moves the key, and a verdict never crosses the line.
+		kind := "test"
+		if _, isBuild := builds[directory]; isBuild {
+			kind = "build"
+		}
+		unit := Unit{Kind: kind, Package: listed.ImportPath, Directory: directory, Environment: GateEnvironment,
 			Products: UnitProducts(productKeys, listed.ImportPath, compilers)}
 		if selection != nil && selection.inputs != nil {
 			unit.GateInputs, unit.Environment = selection.inputs.GateInputs, environment
@@ -319,7 +333,11 @@ func planTree(tree, gateTools string, tools Tools, index VerdictIndex, uncached 
 				return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
 			}
 		}
-		keyParts, err := keyFor(tree, gateTools, unit, tools, compilers)
+		packageTools, err := unitTools(tools, listed, wasiSdk)
+		if err != nil {
+			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
+		}
+		keyParts, err := keyFor(tree, gateTools, unit, packageTools, compilers)
 		if err != nil {
 			return nil, fmt.Errorf("unit %s: %w", listed.ImportPath, err)
 		}
@@ -409,6 +427,38 @@ func compilerDeclarations(tree string) (map[string][]string, error) {
 	}
 	if err := json.Unmarshal(content, &declarations); err != nil {
 		return nil, fmt.Errorf("compiler-dependencies.json: %w", err)
+	}
+	return declarations.Packages, nil
+}
+
+// BuildUnitsFile is where a tree declares which of its packages' tests are builds: they assert on what the toolchain or
+// adamic's compiler produces, so they compile, which only a build unit may (Kirk's build law, #8j1qygw).
+const BuildUnitsFile = "cloud/fast-gate/build-units.json"
+
+// buildDeclarations reads the tree's BuildUnitsFile: package directory to why its tests are builds. A tree without
+// one declares none. Its version is checked, since a shape this planner can't read would plan builds as tests.
+func buildDeclarations(tree string) (map[string]string, error) {
+	content, err := os.ReadFile(filepath.Join(tree, BuildUnitsFile))
+	if os.IsNotExist(err) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var declarations struct {
+		Version  int               `json:"version"`
+		Packages map[string]string `json:"packages"`
+	}
+	if err := json.Unmarshal(content, &declarations); err != nil {
+		return nil, fmt.Errorf("%s: %w", BuildUnitsFile, err)
+	}
+	if declarations.Version != 1 {
+		return nil, fmt.Errorf("%s is version %d, and this planner reads version 1", BuildUnitsFile, declarations.Version)
+	}
+	for directory, why := range declarations.Packages {
+		if strings.TrimSpace(why) == "" {
+			return nil, fmt.Errorf("%s declares %s a build without saying what it builds", BuildUnitsFile, directory)
+		}
 	}
 	return declarations.Packages, nil
 }

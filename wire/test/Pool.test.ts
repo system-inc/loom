@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
-import { PoolWaitMilliseconds, WorkerWindowMilliseconds, type PoolWorker } from '../source/Pool';
+import { MaximumLiveRows, PoolWaitMilliseconds, WorkerWindowMilliseconds, type PoolWorker } from '../source/Pool';
 import { boardToken, call, freshRun, token } from './Helpers';
 
 function freshPool(): string {
@@ -280,7 +280,7 @@ describe('a pool', function () {
         await waitOf(pool, 50);
         const coordinator = await token(freshRun(), 'coordinator');
         const member = await token(pool, 'pool');
-        expect(await poolState(pool, coordinator)).toEqual({ queued: 0, workers: [] });
+        expect(await poolState(pool, coordinator)).toEqual({ queued: 0, workers: [], live: [] });
         await postUnits(pool, coordinator, [poolUnit(freshRun(), 'a'), poolUnit(freshRun(), 'b')]);
         const before = Date.now();
         await (await next(pool, member, 'instance-1', 32)).body?.cancel();
@@ -372,5 +372,96 @@ describe('a pool', function () {
             expect((await call(`/pools/${pool}`, { bearer: bearer })).status).toBe(403);
         }
         expect((await poolState(pool, coordinator)).queued).toBe(0);
+    });
+
+    // A worker's live status (#yk0q0kj): the pool's own pool token posts it, the newest per worker replaces the last,
+    // and a board or coordinator token reads them beside the workers. Mutants: another pool's token or a board token
+    // posting; an unknown field or a negative count kept; the older status kept over the newer.
+    it("keeps each worker's newest live status from its own pool token, for the board to read", async function () {
+        const pool = freshPool();
+        const member = await token(pool, 'pool');
+        const status = (units: number) => ({
+            worker: 'Cloud-7b29b4',
+            release: 'v2026.10.10-1',
+            runner: 'a'.repeat(64),
+            startedAt: '2026-10-10T20:00:00.000Z',
+            units: Array.from({ length: units }, (_, index) => ({ run: 'future-f-1', unit: 'u' + index, package: 'bridge/tsgo', phase: 'testing',
+                startedAt: '2026-10-10T20:01:00.000Z', deadline: '2026-10-10T20:11:00.000Z', cpus: 8, memoryMegabytes: 16384 })),
+            slots: { units: 8, cpus: 64, memoryMegabytes: 115000, heldCpus: 8 * units, heldMemoryMegabytes: 16384 * units },
+            disk: { freeMegabytes: 300000, floorMegabytes: 1500 },
+            cache: { blobBytes: 1 << 30, blobLimitBytes: 4 << 30 },
+            totals: { units: 12, passed: 11, failed: 1, broken: 0 },
+        });
+        const post = (bearer: string, body: unknown) => call(`/pools/${pool}/live`, { method: 'POST', bearer: bearer, body: typeof body === 'string' ? body : JSON.stringify(body) });
+        await waitOf(pool, 1);
+        // A status is kept only for a worker that has asked this pool.
+        expect((await post(member, status(2))).status).toBe(403);
+        expect((await next(pool, member, 'Cloud-7b29b4')).status).toBe(204);
+        expect((await next(pool, member, 'Home-f3279c')).status).toBe(204);
+        expect((await post(member, status(2))).status).toBe(200);
+        expect((await post(member, status(3))).status).toBe(200);
+        expect((await post(member, { worker: 'Home-f3279c', startedAt: '2026-10-10T19:00:00.000Z' })).status).toBe(200);
+        for (const bearer of [await boardToken(), await token(freshRun(), 'coordinator')]) {
+            const state = (await (await call(`/pools/${pool}`, { bearer: bearer })).json()) as { live: { worker: string; at: string; status: { units: unknown[] } }[] };
+            expect(state.live.map((row) => row.worker)).toEqual(['Cloud-7b29b4', 'Home-f3279c']);
+            expect(state.live[0]!.status.units.length).toBe(3);
+            expect(Date.parse(state.live[0]!.at)).toBeGreaterThan(0);
+        }
+        for (const bearer of [await token(freshPool(), 'pool'), await boardToken(), await token(freshRun(), 'coordinator'), await token(freshRun(), 'runner')]) {
+            expect((await post(bearer, status(1))).status).toBe(403);
+        }
+        const broken: unknown[] = [
+            { ...status(1), surprise: true },
+            { ...status(1), worker: '' },
+            { ...status(1), startedAt: '2026-10-10 20:00' },
+            { release: 'x', startedAt: '2026-10-10T20:00:00.000Z' },
+            { ...status(1), runner: 'v0-dev' },
+            { ...status(1), slots: { units: -1 } },
+            { ...status(1), disk: { freeMegabytes: 1.5 } },
+            { ...status(1), cache: { blobBytes: 1, extra: 2 } },
+            { ...status(1), units: [{ run: 'future-f-1', unit: 'u', startedAt: '2026-10-10T20:01:00.000Z', surprise: 1 }] },
+            { ...status(1), units: [{ run: 'future-f-1', startedAt: '2026-10-10T20:01:00.000Z' }] },
+            { ...status(1), units: 'many' },
+            status(65),
+            'not json',
+        ];
+        for (const body of broken) {
+            const response = await post(member, body);
+            expect([400, 413], JSON.stringify(body).slice(0, 120)).toContain(response.status);
+        }
+        const state = (await (await call(`/pools/${pool}`, { bearer: await boardToken() })).json()) as { live: { status: { units: unknown[] } }[] };
+        expect(state.live[0]!.status.units.length).toBe(3);
+    });
+
+    // A pool token names its pool, not a worker (Loom's review): a status for a worker that never asked is refused, a
+    // retired worker's is refused and no longer read, and a flood of workers keeps only the newest MaximumLiveRows.
+    // Mutants: no asked check (the forged worker kept); no cap (every row kept); a retired worker's row still read.
+    it('keeps no status for a worker that never asked or is retired, and caps the rows', async function () {
+        const pool = freshPool();
+        const member = await token(pool, 'pool');
+        const coordinator = await token(freshRun(), 'coordinator');
+        await waitOf(pool, 1);
+        const post = (worker: string) =>
+            call(`/pools/${pool}/live`, { method: 'POST', bearer: member, body: JSON.stringify({ worker: worker, startedAt: '2026-10-10T20:00:00.000Z' }) });
+        const liveWorkers = async () =>
+            ((await (await call(`/pools/${pool}`, { bearer: await boardToken() })).json()) as { live: { worker: string }[] }).live.map((row) => row.worker);
+        expect((await post('forged-worker')).status).toBe(403);
+        expect((await next(pool, member, 'real-worker')).status).toBe(204);
+        expect((await post('real-worker')).status).toBe(200);
+        expect(await liveWorkers()).toEqual(['real-worker']);
+        const retire = await call(`/pools/${pool}/retire`, { method: 'POST', bearer: coordinator, body: JSON.stringify({ worker: 'real-worker', reason: 'a full disk' }) });
+        expect(retire.status).toBe(200);
+        expect(await liveWorkers()).toEqual([]);
+        expect((await next(pool, member, 'real-worker')).status).toBe(403);
+        expect((await post('real-worker')).status).toBe(403);
+        const flood = MaximumLiveRows + 20;
+        for (let index = 0; index < flood; index++) {
+            const worker = 'flood-' + String(index).padStart(4, '0');
+            expect((await next(pool, member, worker)).status).toBe(204);
+            expect((await post(worker)).status).toBe(200);
+        }
+        const kept = await liveWorkers();
+        expect(kept.length).toBe(MaximumLiveRows);
+        expect(kept).toContain('flood-' + String(flood - 1).padStart(4, '0'));
     });
 });

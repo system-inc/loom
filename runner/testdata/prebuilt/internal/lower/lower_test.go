@@ -144,3 +144,41 @@ func TestOutsideModule(t *testing.T) {
 		t.Fatalf("go list in a module outside the tree: %v: %s", err, output)
 	}
 }
+
+// TestWorkspace asks go for the workspace, as adamic's product keys do: go env GOWORK names the tree's own go.work, as
+// it did on Workshop, never the runner's copy; go work edit -json reads it; and the tree's go.work, handed back, lists.
+func TestWorkspace(t *testing.T) {
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree := filepath.Join(filepath.Dir(filepath.Dir(directory)), "go.work")
+	output, err := exec.Command("go", "env", "GOWORK").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != tree {
+		t.Fatalf("go env GOWORK: %v: %q, and the tree's is %q", err, output, tree)
+	}
+	output, err = exec.Command("go", "env", "-json", "GOWORK").CombinedOutput()
+	if err != nil || !strings.Contains(string(output), `"GOWORK": "`+tree+`"`) {
+		t.Fatalf("go env -json GOWORK: %v: %q", err, output)
+	}
+	output, err = exec.Command("go", "work", "edit", "-json").CombinedOutput()
+	if err != nil || !strings.Contains(string(output), `"DiskPath"`) {
+		t.Fatalf("go work edit -json: %v: %s", err, output)
+	}
+	output, err = exec.Command("go", "work", "edit", "-json", tree).CombinedOutput()
+	if err != nil || !strings.Contains(string(output), `"DiskPath"`) {
+		t.Fatalf("go work edit -json %s: %v: %s", tree, err, output)
+	}
+	command := exec.Command("go", "list", "-deps", "-f", "{{.ImportPath}}", "github.com/system-inc/adamic/internal/uses")
+	command.Env = append(os.Environ(), "GOWORK="+tree)
+	if output, err := command.CombinedOutput(); err != nil || !strings.Contains(string(output), "example.com/dep") {
+		t.Fatalf("go list -deps with the tree's go.work: %v: %s", err, output)
+	}
+}
+
+// TestWorkEdit edits the workspace, which writes it.
+func TestWorkEdit(t *testing.T) {
+	if output, err := exec.Command("go", "work", "edit", "-json", "-use=./elsewhere").CombinedOutput(); err != nil {
+		t.Fatalf("go work edit: %v: %s", err, output)
+	}
+}

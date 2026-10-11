@@ -1,0 +1,24 @@
+# Loom's judge on Workshop: `loom judge`'s pull loop. Every 10 s, each planned candidate whose run finished is decided,
+# failures rerun alone on the pools in pools.json serving the key's runner, and every batch posted live: whether a
+# verdict lands is the pusher's, whose timer Kirk switches on (docs/cutover.md). --require-runner voids a run whose
+# runner reports no sha256 (the fail-closed switch), and --tree-git is the tree builder's clone of Adamic, so a rerun on a
+# unit's base runs that commit's tree build rather than voiding. Token ~/.loom/judge-token (run "judge"), read once at
+# start; per-run tokens from ~/.loom/token-secret. The census rows are the planner's tools checkout's, read once at
+# start. Each pool's toolchains are its has in pools.json, as the placer reads them.
+# Installed from the release by `loom install-units` (package daemons), never by hand (Oct 10, #pzrz9r8).
+[Unit]
+Description=Loom judge: decides every planned candidate whose run finished, and posts each batch to Queue
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/loom-judge
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/touch %h/loom-judge/warm-attempts.txt
+ExecStart=%h/.loom/bin/loom judge --queue https://loom.system.inc --token-file %h/.loom/judge-token --wire https://runs.loom.system.inc --source %h/Projects/system/loom --pools %h/.loom/pools.json --needs-git %h/loom-judge/adamic.git --warm-attempts %h/loom-judge/warm-attempts.txt --census-rows %h/loom-planner/tools/internal/skipcensus/testdata/skips.json,%h/loom-planner/tools/cloud/fast-gate/census-extra.json --census-heavy %h/loom-planner/tools/cloud/fast-gate/heavy-units.tsv --census-git %h/loom-judge/adamic.git --r2 %h/.loom/r2-releases.conf --require-runner --interval 10s --tree-git %h/loom-trees/adamic
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

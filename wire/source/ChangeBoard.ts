@@ -12,9 +12,9 @@ import { jsonResponse, readBodyText } from './Http';
 export const ChangeBoardName = 'board';
 export const MaximumChangeSummaryBytes = 64 * 1024;
 export const FinishedChangeMilliseconds = 24 * 60 * 60 * 1000;
-export const ChangeStates = ['queued', 'building', 'testing', 'landed', 'red', 'parked', 'refused', 'witnessed'] as const;
+export const ChangeStates = ['queued', 'building', 'testing', 'landed', 'red', 'parked', 'refused', 'witnessed', 'withdrawn'] as const;
 export type ChangeState = (typeof ChangeStates)[number];
-const finishedStates: readonly ChangeState[] = ['landed', 'red', 'parked', 'refused', 'witnessed'];
+const finishedStates: readonly ChangeState[] = ['landed', 'red', 'parked', 'refused', 'witnessed', 'withdrawn'];
 
 export interface ChangeUnits {
     planned: number;

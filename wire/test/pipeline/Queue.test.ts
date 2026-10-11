@@ -881,6 +881,64 @@ describe('an empty plan', function () {
     });
 });
 
+describe('a withdrawn branch', function () {
+    // Mutants: the owner unchecked, a landing order unchecked, a landed branch withdrawn, the branch left in the line,
+    // its dependents left live.
+    it('leaves the line for good, by its owner only, logged with why, and never under a landing order or once landed', async function () {
+        const queue = await freshQueue();
+        const idOf = async function (seed: number, fields: Record<string, unknown> = {}): Promise<string> {
+            return ((await (await submit(queue, change(seed, fields))).json()) as { change: string }).change;
+        };
+        const withdraw = function (id: string, body: Record<string, unknown> = { owner: 'system_adamic_compiler', reason: 'superseded by another branch' }): Promise<Response> {
+            return queue.fetch(`https://queue/changes/${id}/withdraw`, { method: 'POST', body: JSON.stringify(body) });
+        };
+        // Queued, with a branch stacked on it: only its owner withdraws it, and only with a reason.
+        const superseded = await idOf(61);
+        const stacked = await idOf(62, { parent: superseded });
+        expect((await withdraw(superseded, { owner: 'system_adamic_other', reason: 'mine now' })).status).toBe(403);
+        expect((await withdraw(superseded, { owner: 'system_adamic_compiler', reason: ' ' })).status).toBe(400);
+        expect((await withdraw(superseded, { owner: 'system_adamic_compiler' })).status).toBe(400);
+        const answer = await withdraw(superseded);
+        expect(answer.status, await answer.clone().text()).toBe(200);
+        expect(await answer.json()).toEqual({ change: superseded, state: 'withdrawn' });
+        expect(await (await queue.fetch(`https://queue/changes/${superseded}`)).json()).toMatchObject({
+            state: 'withdrawn',
+            verdict: { withdrawn: 'superseded by another branch', by: 'system_adamic_compiler' },
+        });
+        // Its future leaves every listing, and the branch stacked on it parks.
+        for (const listing of ['unplanned', 'planned']) {
+            const futures = ((await (await queue.fetch(`https://queue/futures?state=${listing}`)).json()) as { futures: { future: string }[] }).futures;
+            expect(futures.map((future) => future.future)).not.toContain(sha(61));
+        }
+        expect(await (await queue.fetch(`https://queue/changes/${stacked}`)).json()).toMatchObject({ state: 'parked' });
+        // Once over, it's over: withdrawn again, refused.
+        expect((await withdraw(superseded)).status).toBe(409);
+        // A green branch with a landing order isn't withdrawn under the lander; once landed, never.
+        const green = await idOf(63);
+        expect((await postWhole(queue, green, sha(63), 'passed', null)).status).toBe(200);
+        expect((await landings(queue)).map((order) => order.change)).toContain(green);
+        const ordered = await withdraw(green);
+        expect(ordered.status).toBe(409);
+        expect(((await ordered.json()) as { reason: string }).reason).toContain('has a landing order');
+        expect((await report(queue, green, { main: sha(70), from: main, landed: sha(63) })).status).toBe(200);
+        expect((await withdraw(green)).status).toBe(409);
+        // A red branch is ended rather than left to resubmit.
+        const red = await idOf(64);
+        await postWhole(queue, red, sha(64), 'failed', 'change');
+        expect((await withdraw(red)).status).toBe(200);
+        // Logged with who and why; replay reaches the same state.
+        const logged = (await logOf(queue)).filter((event) => event.type === 'change.withdrawn');
+        expect(logged).toMatchObject([
+            { subject: { change: superseded }, data: { by: 'system_adamic_compiler', reason: 'superseded by another branch' } },
+            { subject: { change: red } },
+        ]);
+        const replayed = await replay(await logOf(queue));
+        expect([replayed.changes.get(superseded)?.state, replayed.changes.get(red)?.state, replayed.changes.get(stacked)?.state]).toEqual(['withdrawn', 'withdrawn', 'parked']);
+        expect(replayed.line).not.toContain(superseded);
+        expect(replayed.line).not.toContain(red);
+    });
+});
+
 describe('a resubmit', function () {
     it('moves a red or parked change to a new sha under the same id, rechecked by git, and never back to a tested sha', async function () {
         const queue = await freshQueue();
@@ -970,12 +1028,16 @@ describe("a plan's tree key", function () {
         expect((await postPlan(queue, sha(72), [{ ...units[0], tree: tree.slice(1) }, units[1]])).status).toBe(422);
         const phase = { kind: 'phase', package: 'github.com/system-inc/adamic', select: { run: 'vet', skip: '' }, gateTools: 'a'.repeat(40) };
         const phaseUnit = { name: 'phase:vet', unitKey: await unitKeyOf(phase), keyParts: phase, decision: 'run', reason: 'phase', tree: tree };
-        // A phase unit names its tree as a test unit does: its job takes the tree's npm packages from it (#v03v751).
-        expect((await postPlan(queue, sha(72), [{ ...units[0], tree: tree }, units[1], phaseUnit])).status).toBe(200);
+        // A phase unit names its tree as a test unit does: its job takes the tree's npm packages from it (#v03v751). A build
+        // unit does too, since its runner builds on the tree's source (#8j1qygw: the Queue refused every plan with one).
+        const build = { ...units[1]?.keyParts, kind: 'build', package: 'github.com/system-inc/adamic/cmd/adamic-gate' };
+        const buildUnit = { name: build.package, unitKey: await unitKeyOf(build), keyParts: build, decision: 'run', reason: 'build', tree: tree };
+        expect((await postPlan(queue, sha(72), [{ ...units[0], tree: tree }, units[1], phaseUnit, buildUnit])).status).toBe(200);
         const listed = (await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: { units: Record<string, unknown>[] }[] };
         expect(listed.futures[0]?.units[0]).toMatchObject({ unitKey: units[0]?.unitKey, tree: tree });
         expect(listed.futures[0]?.units[1]).not.toHaveProperty('tree');
         expect(listed.futures[0]?.units[2]).toMatchObject({ unitKey: phaseUnit.unitKey, tree: tree });
+        expect(listed.futures[0]?.units[3]).toMatchObject({ unitKey: buildUnit.unitKey, tree: tree });
         const log = await logOf(queue);
         const replayed = await replay(log);
         expect(replayed.head).toBe((await (await queue.fetch('https://queue/head')).json() as { head: string }).head);

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +62,12 @@ func TestUnitsReadsTheDaysRowsAndGroupsThemWithTheirPercentiles(t *testing.T) {
 	}
 	if boxes := groupUnitRows(rows, "box"); len(boxes) != 3 || boxes[0].key != "Cloud-7b29b4" || len(boxes[0].rows) != 2 {
 		t.Fatalf("by box %+v", boxes)
+	}
+	// A pass past the run budget is counted on its group's line, and --over-budget's filter keeps only those rows.
+	slow := row("d", "bridge/tsgo", "Cloud-7b29b4", "passed", 74, 70, 2048)
+	slow.OverBudget = true
+	if counted := groupUnitRows(append(slices.Clone(rows), slow), "name"); counted[0].overBudget != 1 {
+		t.Fatalf("over budget counted %d, want 1", counted[0].overBudget)
 	}
 	var out strings.Builder
 	writeUnitGroups(&out, groups)

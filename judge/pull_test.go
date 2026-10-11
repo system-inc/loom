@@ -643,6 +643,13 @@ func TestAnOverBudgetUnitIsVoidNeverRedFlakeOrGreen(t *testing.T) {
 		stream := finishedStream(unit, "failed")
 		return append(stream[:len(stream)-1], protocol.Event{Unit: unit, Type: "error", Phase: phase, Message: message}, stream[len(stream)-1])
 	}
+	// The runner's own deadline on the exit event, as run 4 of the verify of ebdb6c53 stopped seven units at 90 s.
+	exitWith := func(exit protocol.Event) []protocol.Event {
+		stream := finishedStream(unit, "failed")
+		exit.Unit, exit.Type, exit.Code = unit, "exit", code(1)
+		stream[1] = exit
+		return stream
+	}
 	for _, c := range []struct {
 		name   string
 		first  []protocol.Event
@@ -651,6 +658,8 @@ func TestAnOverBudgetUnitIsVoidNeverRedFlakeOrGreen(t *testing.T) {
 		infra  string
 		reruns int
 	}{
+		{"stopped at the runner's deadline", exitWith(protocol.Event{TimedOut: true, WallSeconds: 90.4}), finishedStream("job", "passed"), "void", InfraOverBudget, 0},
+		{"a signal from outside stays a kill, placed again", exitWith(protocol.Event{Signal: "killed"}), finishedStream("job", "passed"), "green", "", 1},
 		{"over its run budget", overBudget(protocol.PhaseRun, "overBudgetRun: 60 s"), finishedStream("job", "passed"), "void", InfraOverBudget, 0},
 		{"over its ready budget", overBudget(protocol.PhaseStart, "overBudgetReady: 30 s"), finishedStream("job", "passed"), "void", InfraOverBudget, 0},
 		{"the word in another phase", overBudget(protocol.PhaseUpload, "overBudgetRun"), finishedStream("job", "failed"), "red", "", 2},
@@ -745,5 +754,49 @@ func TestARerunWaitsOnItsBasesTree(t *testing.T) {
 	}
 	if strings.Join(reruns, ",") != "d,b" || len(queue.Posts[done]) != 1 || queue.Posts[done][0].Decision.Status != "red" {
 		t.Fatalf("reruns %v, posts %+v", reruns, queue.Posts[done])
+	}
+}
+
+// Two pools share a worker when a machine one lists the other names, by name or prefix, or when one prefix starts the
+// other; an empty prefix is refused, since it would name every worker (#54pcx41).
+func TestPoolsNameWorkersByMachineOrPrefix(t *testing.T) {
+	codex := PoolEntry{Name: "codex-strict", MachinePrefixes: []string{"codex-"}}
+	cases := []struct {
+		name   string
+		other  PoolEntry
+		shares bool
+	}{
+		{"a pool listing a Codex worker", PoolEntry{Machines: []string{"codex-cb2a"}}, true},
+		{"a pool listing another machine", PoolEntry{Machines: []string{"Cloud"}}, false},
+		{"a shorter prefix that starts it", PoolEntry{MachinePrefixes: []string{"codex"}}, true},
+		{"a longer prefix it starts", PoolEntry{MachinePrefixes: []string{"codex-west-"}}, true},
+		{"an unrelated prefix", PoolEntry{MachinePrefixes: []string{"box-"}}, false},
+	}
+	for _, c := range cases {
+		if codex.Shares(c.other) != c.shares || c.other.Shares(codex) != c.shares {
+			t.Errorf("%s: shares %v, want %v both ways", c.name, codex.Shares(c.other), c.shares)
+		}
+	}
+	if !codex.Names("codex-cb2a") || codex.Names("Cloud") || !codex.NamesAny() || (PoolEntry{}).NamesAny() {
+		t.Fatal("names by prefix")
+	}
+	if _, err := LoadPools([]byte(`{"pools":[{"name":"c","runner":"r","memoryMegabytes":1,"cpus":1,"machinePrefixes":[""]}]}`)); err == nil {
+		t.Fatal("an empty machine prefix was taken")
+	}
+	pools, err := LoadPools([]byte(`{"pools":[{"name":"c","runner":"r","memoryMegabytes":1,"cpus":1,"cold":true,"machinePrefixes":["codex-"]}]}`))
+	if err != nil || len(pools) != 1 || !pools[0].Names("codex-1") {
+		t.Fatalf("pools %+v %v", pools, err)
+	}
+}
+
+// A pool's toolchains are its has in pools.json (#pzrz9r8): read as given, none when absent, and a toolchain that
+// isn't one (a typo the placer would hold every unit on) refused. Mutant: the check dropped.
+func TestAPoolsToolchainsAreItsHas(t *testing.T) {
+	pools, err := LoadPools([]byte(`{"pools":[{"name":"box-strict","runner":"r","memoryMegabytes":1,"cpus":1,"has":["go","clang","node","wasiSdk"]},{"name":"box-phase","runner":"r","memoryMegabytes":1,"cpus":1}]}`))
+	if err != nil || len(pools) != 2 || strings.Join(pools[0].Has, ",") != "go,clang,node,wasiSdk" || len(pools[1].Has) != 0 {
+		t.Fatalf("pools %+v, %v", pools, err)
+	}
+	if _, err := LoadPools([]byte(`{"pools":[{"name":"codex-strict","runner":"r","memoryMegabytes":1,"cpus":1,"has":["go","wasiSDK"]}]}`)); err == nil || !strings.Contains(err.Error(), `"wasiSDK"`) {
+		t.Fatalf("a has naming no toolchain was taken (%v)", err)
 	}
 }

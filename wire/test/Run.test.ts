@@ -194,6 +194,10 @@ describe('events', function () {
             event(run, 'a', 0, 'timing', { timing: { queueSeconds: 3 } }),
             event(run, 'a', 0, 'timing', { timing: [1] }),
             event(run, 'a', 0, 'timing', { timing: { testSeconds: 4 }, status: 'passed' }),
+            event(run, 'a', 0, 'finished', { status: 'broken', missingTools: [] }),
+            event(run, 'a', 0, 'finished', { status: 'broken', missingTools: ['rust'] }),
+            event(run, 'a', 0, 'finished', { status: 'broken', missingTools: ['go', 'go'] }),
+            event(run, 'a', 0, 'finished', { status: 'broken', missingTools: 'wasiSdk' }),
         ];
         for (const line of broken) {
             const response = await postEvents(run, runner, [line]);

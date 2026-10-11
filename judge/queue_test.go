@@ -125,7 +125,11 @@ func TestStoreBlobsPutsTheListStraightIntoTheBucketOnce(t *testing.T) {
 	}
 }
 
-func TestHTTPReusedHoldsTheIndexToWhatQueueChecked(t *testing.T) {
+// The index keeps each key's newest verdict (#ybxadkf: ce0ef503 planned a reuse of the verify's run 4, then 3282cdde
+// decided the same key): a pass from a later run is the reuse, named by its run; a newest verdict that isn't a pass is
+// unbacked; a record without tests by reference is an error. Mutants: the plan's run required again (the later pass
+// errors); a failed newest verdict read as a pass; the run not carried.
+func TestHTTPReusedReadsTheKeysNewestVerdict(t *testing.T) {
 	sha := strings.Repeat("a", 64)
 	body := `{"status":"passed","run":"run-2","tests":{"failed":0,"inline":[],"passed":3,"sha256":"` + sha + `","skipped":0}}`
 	var path string
@@ -135,18 +139,20 @@ func TestHTTPReusedHoldsTheIndexToWhatQueueChecked(t *testing.T) {
 	}))
 	defer server.Close()
 	reused := HTTPReused{Base: server.URL, Token: "t"}
-	tests, err := reused.Tests("u", "run-2")
-	if err != nil || path != "/verdicts/u" || !strings.Contains(string(tests), `"passed":3`) {
-		t.Fatalf("%s (%v) from %s", tests, err, path)
-	}
-	for _, bad := range []string{
-		`{"status":"failed","run":"run-2","tests":{"sha256":"` + sha + `"}}`,
-		`{"status":"passed","run":"run-1","tests":{"sha256":"` + sha + `"}}`,
-		`{"status":"passed","run":"run-2","tests":[]}`,
-	} {
-		body = bad
-		if _, err := reused.Tests("u", "run-2"); err == nil {
-			t.Fatalf("read %s as the reused verdict", bad)
+	for _, planned := range []string{"run-2", "run-1", "reused"} {
+		verdict, err := reused.Tests("u", planned)
+		if err != nil || path != "/verdicts/u" || verdict.Run != "run-2" || verdict.Unbacked != "" || !strings.Contains(string(verdict.Tests), `"passed":3`) {
+			t.Fatalf("planned %s: %+v (%v) from %s", planned, verdict, err, path)
 		}
+	}
+	for _, status := range []string{"failed", "void"} {
+		body = `{"status":"` + status + `","run":"run-3","tests":{"sha256":"` + sha + `"}}`
+		if verdict, err := reused.Tests("u", "run-2"); err != nil || verdict.Unbacked == "" || verdict.Tests != nil {
+			t.Fatalf("a %s newest verdict: %+v (%v), want unbacked", status, verdict, err)
+		}
+	}
+	body = `{"status":"passed","run":"run-2","tests":[]}`
+	if _, err := reused.Tests("u", "run-2"); err == nil {
+		t.Fatal("read a pass with no tests by reference as the reused verdict")
 	}
 }

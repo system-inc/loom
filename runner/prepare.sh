@@ -8,6 +8,8 @@
 #	prepare.sh environment <tree> <gate inputs sha256 or ""> <environment file> <root>
 #	prepare.sh trim-only <root> <exclusive | shared>
 #	prepare.sh submodules <tree> <root>
+#	prepare.sh pin-url <url>
+#	prepare.sh pin-urls <tree>
 #
 # environment readies only what a prebuilt test job's binaries run with (prebuilt.go), over <tree>, the tree's source
 # the runner already unpacked from the action store, its npm packages among it: the instance's adamic toolchain
@@ -31,8 +33,55 @@
 #
 # submodules readies <tree>'s submodules alone, as a checkout does after its commit, and exits with the update's status:
 # it is for the runner's tests, which run it against local repositories, and the runner never passes it.
+#
+# pin-url prints the https url a submodule url is fetched from and exits 0, or prints why it can't be and exits 3: the
+# one rule for pin urls, which the queue bridge's PinUrl follows to the letter (queuebridge/pins_test.go runs both on one
+# table). pin-urls checks every url the .gitmodules of <tree> and of each submodule checked out under it names, at
+# every depth, and exits 3 naming the first it refuses.
 set -uo pipefail
 say() { echo "loom-runner prepare: $*"; }
+# pinUrl <url>: a repository on github.com over https, or git@github.com: read as https, owner/name and nothing else.
+# Any other host (a house address among them), protocol, credential in the url or relative path is refused.
+pinUrl() {
+	local LC_ALL=C
+	if [[ $1 =~ ^(https://github\.com/|git@github\.com:)([A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+)$ ]] && [[ ${BASH_REMATCH[2]} != *..* ]]; then
+		echo "https://github.com/${BASH_REMATCH[2]}"
+		return 0
+	fi
+	echo "it isn't a github.com repository over https (or git@github.com:, read as https), the only place a runner fetches a pin from"
+	return 3
+}
+# pinUrls <tree>: every submodule url at every depth under <tree> follows pinUrl, or the first that doesn't is named.
+pinUrls() {
+	local directory entry url why
+	# One directory a line, read whole, so a submodule path with a space is one directory, never two; and each url read
+	# from git's NUL-separated "key, newline, value" entries, so a submodule name with a space never shifts it.
+	while IFS= read -r directory; do
+		while IFS= read -r -d '' entry; do
+			url=${entry#*$'\n'}
+			why=$(pinUrl "${url}") || { say "refused: submodule ${url} in ${directory}: ${why}"; return 3; }
+		done < <(git -C "${directory}" config -z -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
+	done < <(printf '%s\n' "$1"; git -C "$1" submodule foreach --quiet --recursive 'printf "%s\n" "${toplevel}/${sm_path}"' 2> /dev/null)
+	return 0
+}
+if [ "${1:-}" = pin-url ]; then
+	pinUrl "${2:-}"
+	exit $?
+fi
+if [ "${1:-}" = pin-urls ]; then
+	pinUrls "${2:-}"
+	exit $?
+fi
+# toolchainFile prints the adamic toolchain's env.sh where adamic's own cloud/setup.sh puts it, as toolchains.Environment
+# looks: $ADAMIC_TOOLS/env.sh when the environment names one (a Codex instance's), else ~/adamic-tools, else
+# ~/.adamic-tools, else setup's default /opt/adamic-tools; it fails when there is none.
+toolchainFile() {
+	local candidate
+	for candidate in ${ADAMIC_TOOLS:+"${ADAMIC_TOOLS}/env.sh"} "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh" /opt/adamic-tools/env.sh; do
+		[ -f "${candidate}" ] && { echo "${candidate}"; return 0; }
+	done
+	return 1
+}
 # Disk: on an instance that runs one unit at a time, what earlier units left on its root is no one's, and on a machine
 # that is the runner's alone (exclusive), what they left in HOME's caches too. A shared machine's HOME is other work's.
 freeMegabytes() { df -Pm "${HOME}" "${root}" | awk 'NR > 1 {print $4}' | sort -n | head -1; }
@@ -174,35 +223,30 @@ if [ "${mode}" = checkout ]; then
 		say "refused: ${sha} doesn't descend from its base ${base}"
 		exit 3
 	fi
-	# Submodules: each must be on GitHub over HTTPS (after the ssh rewrite), public, fetched with no credentials.
-	while read -r _ url; do
-		case ${url} in
-			https://github.com/* | git@github.com:*) ;;
-			*) say "refused: submodule ${url} isn't on GitHub"; exit 3 ;;
-		esac
-	done < <(git -C "${tree}" config -f .gitmodules --get-regexp '^submodule\..*\.url$' 2> /dev/null)
+	# Submodules: each must be on GitHub over HTTPS (after the ssh rewrite), public, fetched with no credentials, by
+	# pinUrl's rule at every depth: the tree's own before anything is fetched, and the deeper ones once their parents are
+	# checked out (the queue bridge refused any branch that breaks it before a runner saw it, so this is the second line).
+	pinUrls "${tree}" || exit 3
 	makeSubmodules || { say "the submodules of ${sha} can't be fetched"; exit 2; }
+	pinUrls "${tree}" || exit 3
 
 	# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance, and only on a machine that is the
 	# runner's alone, since it installs into HOME. A shared machine's own toolchain serves, or the unit is unfit there.
 	if [ "${owner}" != exclusive ]; then
-		[ -f "${HOME}/adamic-tools/env.sh" ] || [ -f "${HOME}/.adamic-tools/env.sh" ] || {
-			say "unfit: this machine isn't the runner's alone, so it runs no cloud/setup.sh in its shared HOME, and it has no adamic toolchain (adamic-tools/env.sh)"
+		toolchainFile > /dev/null || {
+			say "unfit: this machine isn't the runner's alone, so it runs no cloud/setup.sh in its shared HOME, and it has no adamic toolchain (env.sh in \$ADAMIC_TOOLS, ~/adamic-tools, ~/.adamic-tools or /opt/adamic-tools)"
 			exit 2
 		}
 	elif [ ! -f "${root}/adamic-setup-done" ]; then
 		(cd "${tree}" && bash cloud/setup.sh --wasi-sdk > "${root}/adamic-setup.log" 2>&1) && touch "${root}/adamic-setup-done" || { say "cloud/setup.sh failed"; tail -20 "${root}/adamic-setup.log"; exit 2; }
 	fi
 fi
-toolchain=
-for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do
-	[ -f "${environment}" ] && { source "${environment}"; toolchain=${environment}; break; }
-done
+toolchain=$(toolchainFile) && source "${toolchain}"
 if [ "${mode}" = checkout ]; then
 	(cd / && go list fmt testing > /dev/null 2>&1) || { say "the Go toolchain lacks its standard library after setup"; rm -f "${root}/adamic-setup-done"; exit 2; }
 elif [ -z "${toolchain}" ]; then
 	# A prebuilt unit's tests still run clang and node; an instance without adamic's toolchain would fail them red.
-	say "the instance has no adamic toolchain (adamic-tools/env.sh): its tests' clang and node would be missing"
+	say "the instance has no adamic toolchain (env.sh in \$ADAMIC_TOOLS, ~/adamic-tools, ~/.adamic-tools or /opt/adamic-tools): its tests' clang and node would be missing"
 	exit 2
 fi
 mkdir -p -m 1777 "${TMPDIR:-${root}}"
@@ -230,15 +274,23 @@ fi
 # manifest by that name lists the chunks of a tar.gz of it, then "total <sha256> <bytes>" of the tar.gz and "tar <name>
 # <bytes>". Every chunk, the total and the tar itself are checked by sha256, the last against the job's name, so the
 # manifest needn't be trusted. Nothing is fetched until the root has room for the tar.gz and the unpacked inputs above
-# the 1500 MB floor. The marker naming what is unpacked goes first and comes back last, and the inputs are unpacked in
-# staging and moved into place whole, so a unit that fails anywhere between (a full disk, its deadline) leaves no marker
-# naming inputs that aren't there, and the next unit fetches them again. Staging goes when this ends, however it ends,
-# short of a kill, whose leavings the next trim takes. With LOOM_HOUSE_CACHE set (docs/house-cache.md), each chunk is
+# the 1500 MB floor. They are unpacked in staging and moved whole into adamic-tools/gate-inputs-<name>, which is never
+# changed after, so a unit that fails anywhere before the move (a full disk, its deadline) leaves nothing by that name,
+# and the next unit fetches them again. Staging goes when this ends, however it ends, short of a kill, whose leavings
+# the next trim takes. Units a box serve runs at once share the root (#ef2rgaq): one preparation fetches at a time,
+# under adamic-tools/gate-inputs.lock, and the rest wait and find what it unpacked. The runner holds its unit's
+# gate-inputs-<name>.lock shared while the unit runs (strict.go), and gate inputs of another name are removed only when
+# their lock can be taken exclusive at once, so no unit's inputs are removed or replaced under its tests. A machine
+# without flock runs one unit at a time and needs no lock. With LOOM_HOUSE_CACHE set (docs/house-cache.md), each chunk is
 # asked of the house cache first, within 2 s to connect and never under 64 KB a second for 10 s, the Go clients' floor
 # (a chunk is up to 90 MiB, so no total limit); the first chunk it doesn't give whole and hashing to its name is read
 # from the store, and so is every chunk after it. The manifest, whose name isn't its own hash, always comes from the store.
-tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs
-if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/null)" != "${gateInputs}" ]; then
+tools=${root}/adamic-tools inputs=${root}/adamic-tools/gate-inputs-${gateInputs}
+if [ -n "${gateInputs}" ]; then
+	mkdir -p "${tools}" && exec 9> "${tools}/gate-inputs.lock" || { say "the gate inputs' lock can't be opened"; exit 2; }
+	if command -v flock > /dev/null; then flock -x 9 || { say "the gate inputs' lock can't be held"; exit 2; }; fi
+fi
+if [ -n "${gateInputs}" ] && [ ! -d "${inputs}" ]; then
 	fetch() { curl -fsS --retry 3 -o "$2" "https://artifacts.loom.system.inc/gate-inputs/$1"; }
 	house=${LOOM_HOUSE_CACHE:-}
 	chunk() { # chunk <sha256> <path>: from the house cache while it gives each chunk whole, else from the store
@@ -252,7 +304,6 @@ if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/nu
 	}
 	staging=${tools}/staging-$$ archive=${tools}/staging-$$/gate-inputs.tar.gz
 	trap 'rm -rf "${staging}"' EXIT
-	rm -f "${tools}/gate-inputs.manifest"
 	mkdir -p "${staging}/unpacked" && fetch "${gateInputs}" "${staging}/manifest" || { say "gate inputs manifest ${gateInputs} unreadable"; exit 2; }
 	read -r _ total compressed < <(grep '^total ' "${staging}/manifest")
 	read -r _ name size < <(grep '^tar ' "${staging}/manifest")
@@ -269,10 +320,18 @@ if [ -n "${gateInputs}" ] && [ "$(cat "${tools}/gate-inputs.manifest" 2> /dev/nu
 	echo "${total}  ${archive}" | sha256sum -c --quiet || { say "gate inputs total hash differs"; exit 2; }
 	[ "$(gzip -dc "${archive}" | sha256sum | cut -c1-64)" = "${gateInputs}" ] || { say "gate inputs tar isn't ${gateInputs}"; exit 2; }
 	tar -C "${staging}/unpacked" -xzf "${archive}" && [ -d "${staging}/unpacked/gate-inputs" ] || { say "gate inputs unpack failed"; exit 2; }
-	{ [ ! -e "${inputs}" ] || mv "${inputs}" "${staging}/replaced"; } && mv "${staging}/unpacked/gate-inputs" "${inputs}" &&
-		echo "${gateInputs}" > "${tools}/gate-inputs.manifest" || { say "the gate inputs couldn't be moved into place"; exit 2; }
+	mv "${staging}/unpacked/gate-inputs" "${inputs}" || { say "the gate inputs couldn't be moved into place"; exit 2; }
 	rm -rf "${staging}"
 	trap - EXIT
+fi
+if [ -n "${gateInputs}" ]; then
+	# Gate inputs of another name go once no unit holds them. Their lock files stay: a unit waiting on one holds that
+	# file, so a lock file made again in its place would be one no one else is waiting on.
+	for old in "${tools}"/gate-inputs-*; do
+		[ -d "${old}" ] && [ "${old}" != "${inputs}" ] || continue
+		if command -v flock > /dev/null; then flock -n -x "${old}.lock" rm -rf "${old}" || true; else rm -rf "${old}"; fi
+	done
+	exec 9>&-
 fi
 if [ -n "${gateInputs}" ]; then
 	export ADAMIC_TYPESCRIPT_SOURCE=${inputs}/typescript ADAMIC_CYCLE_LEDGER_ROOT=${inputs}/cycle-ledger

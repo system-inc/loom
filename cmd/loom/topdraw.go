@@ -115,7 +115,7 @@ func drawTop(state topState, width, height int, color bool) string {
 	width, height = max(width, 40), max(height, 10)
 	sections := []topSection{machineSection(state, width), serveSection(state, width)}
 	if state.Tree != nil || len(state.Builds) > 0 {
-		sections = append(sections, treeSection(state))
+		sections = append(sections, treeSection(state, width))
 	}
 	sections = append(sections, poolsSection(state), queueSection(state))
 	shown := make([]int, len(sections))
@@ -399,7 +399,7 @@ func verdictMark(verdict string) (string, topStyle) {
 	}
 }
 
-func treeSection(state topState) topSection {
+func treeSection(state topState, width int) topSection {
 	section := topSection{heading: topLine{}.add(styleHeading, "tree builder")}
 	if tree := state.Tree; tree != nil && tree.Tree != nil {
 		build := tree.Tree
@@ -417,11 +417,13 @@ func treeSection(state topState) topSection {
 				products = products.add(styleDim, ", ").add(styleBusy, fmt.Sprintf("%d built", max(0, build.Products-build.ProductsHit))).add(styleDim, fmt.Sprintf(" of %d", build.Products))
 			}
 			section.always(products)
+			treePhaseRows(&section, build.Phases, width)
 		} else {
 			section.heading = section.heading.add(styleDim, " · idle")
 			glyph, style := verdictMark(build.Phase)
 			section.always(topLine{}.add(style, " "+glyph+" ").add(styleNone, "last "+shortHash(build.Key)).
 				add(styleDim, fmt.Sprintf(" %s %s ago", build.Phase, formatDuration(state.Now.Sub(tree.UpdatedAt)))))
+			treePhaseRows(&section, build.Phases, width)
 		}
 	}
 	for _, record := range state.Builds {
@@ -435,6 +437,44 @@ func treeSection(state topState) topSection {
 		section.optionalRows(line)
 	}
 	return section
+}
+
+// treePhaseRows are a tree build's ended phases, in order, as many to a row as width holds: the first row always
+// shown, the rest as the height allows. A phase that counts things says how many.
+func treePhaseRows(section *topSection, phases []livestatus.Phase, width int) {
+	if len(phases) == 0 {
+		return
+	}
+	label, indent := " phases     ", "            "
+	rows := []topLine{}
+	row := topLine{}.add(styleLabel, label)
+	for _, phase := range phases {
+		entry := topLine{}.add(styleNone, " ")
+		if phase.Count > 0 {
+			entry = entry.add(styleNone, fmt.Sprintf("%d ", phase.Count))
+		}
+		entry = entry.add(styleDim, phase.Name+" ").add(styleNone, formatPhaseSeconds(phase.Seconds))
+		switch {
+		case row.width() == len(label):
+		case row.width()+2+entry.width() > width:
+			rows, row = append(rows, row), topLine{}.add(styleLabel, indent)
+		default:
+			row = row.add(styleDim, " ·")
+		}
+		row = append(row, entry...)
+	}
+	rows = append(rows, row)
+	section.always(rows[0])
+	section.optionalRows(rows[1:]...)
+}
+
+// formatPhaseSeconds is a phase's seconds: tenths under ten seconds, where a phase's change shows, and formatDuration's
+// two units above.
+func formatPhaseSeconds(seconds float64) string {
+	if seconds < 10 {
+		return fmt.Sprintf("%.1fs", seconds)
+	}
+	return formatDuration(time.Duration(seconds * float64(time.Second)))
 }
 
 func poolsSection(state topState) topSection {

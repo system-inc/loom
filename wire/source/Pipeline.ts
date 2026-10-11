@@ -8,12 +8,15 @@ import { headlineOf } from './Headline';
 import { jsonResponse } from './Http';
 import { renderLoomLivePage } from './LoomLivePage';
 import { loomFavicon } from './LoomMark';
+import { performanceOf } from './Performance';
 import type { TokenScope } from './Token';
 import { authorize, pageResponse } from './Worker';
 
 export { ChangeBoard } from './ChangeBoard';
 
 export { Headline } from './Headline';
+
+export { Performance } from './Performance';
 
 export { Queue } from './Queue';
 
@@ -107,6 +110,19 @@ export default {
                 return claims;
             }
             return headlineOf(environment).fetch('https://headline/headline');
+        }
+        // Loom's performance (#system_adamic_loom_performance): a candidate's stage timeline by its tree, or a day's
+        // candidates (?day=YYYY-MM-DD, ?branch=chg_...), read with a board token, for the CLI and the board alike.
+        if (path === '/performance/candidates' || /^\/performance\/candidates\/[0-9a-f]{40}$/.test(path)) {
+            if (request.method !== 'GET') {
+                return jsonResponse(405, { error: 'use GET' }, { Allow: 'GET' });
+            }
+            const claims = await authorize(request, environment, ChangeBoardName, { scopes: ['board'], queryScopes: [] });
+            if (claims instanceof Response) {
+                return claims;
+            }
+            const url = new URL(request.url);
+            return performanceOf(environment).fetch(`https://performance${path.slice('/performance'.length)}${url.search}`);
         }
         if (path === '/favicon.svg') {
             return new Response(loomFavicon(), {

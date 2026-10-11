@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/toolchains"
 )
 
 const testPoolToken = "test-pool-token"
@@ -370,5 +371,79 @@ func testTheTrim(t *testing.T, exclusive bool) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("exclusive %v: trimmed %s, which isn't a leaving", exclusive, path)
 		}
+	}
+}
+
+// A box's claims (#qm8bchp): serve probes the toolchains it claims before it asks for anything. A claim that fails
+// leaves the box unfit, asking for nothing and probing again every ProbeEvery, each probe saying why; once a probe
+// passes it asks, and a box whose claims hold from the start asks at once. The mutant that asks while a claim fails
+// (the claims' unfit dropped) takes the unit here and fails.
+func TestServeAsksForNothingWhileAClaimedToolchainFails(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		// fixedAfter is how many probes fail before they pass; -1 never.
+		fixedAfter int
+		units      int
+		lines      []string
+	}{
+		{"a claim that never holds", -1, 0, []string{"unfit: claims wasiSdk, but wasm-ld: error: cannot open libclang_rt.builtins.a; asking for no unit, and probing again in 300ms"}},
+		{"a claim fixed while serving", 1, 1, []string{"unfit: claims wasiSdk, but", "every toolchain it claims works: go, wasiSdk"}},
+		{"claims that hold", 0, 1, []string{"every toolchain it claims works: go, wasiSdk"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pool := newTestPool(t)
+			pool.queue = []protocol.Unit{pool.unit("a", "true")}
+			var report lockedBuffer
+			options := pool.serveOptions(t, time.Now().Add(2*time.Second), 500*time.Millisecond, io.Discard)
+			options.Report, options.UnfitPause, options.ProbeEvery = &report, 20*time.Millisecond, 300*time.Millisecond
+			options.freeMegabytes = func(path string) (int64, error) { return 50000, nil }
+			options.Has = []string{"go", "wasiSdk"}
+			var mutex sync.Mutex
+			probes, asksWhileUnfit := 0, 0
+			options.checkToolchains = func(checkContext context.Context, claims []string) []toolchains.Failure {
+				mutex.Lock()
+				defer mutex.Unlock()
+				probes++
+				if !reflect.DeepEqual(claims, []string{"go", "wasiSdk"}) {
+					t.Errorf("probed %v", claims)
+				}
+				if test.fixedAfter >= 0 && probes > test.fixedAfter {
+					return nil
+				}
+				pool.mutex.Lock()
+				asksWhileUnfit = len(pool.askers)
+				pool.mutex.Unlock()
+				return []toolchains.Failure{{Toolchain: "wasiSdk", Why: "wasm-ld: error: cannot open libclang_rt.builtins.a"}}
+			}
+			summary, err := Serve(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutex.Lock()
+			defer mutex.Unlock()
+			if asksWhileUnfit != 0 {
+				t.Fatalf("asked the pool %d times while a claim failed", asksWhileUnfit)
+			}
+			if summary.Units != test.units {
+				t.Fatalf("summary %+v, want %d units", summary, test.units)
+			}
+			text := string(report.Bytes())
+			for _, line := range test.lines {
+				if !strings.Contains(text, line) {
+					t.Errorf("report %q lacks %q", text, line)
+				}
+			}
+			switch test.fixedAfter {
+			case -1:
+				// Probed at the start and again every ProbeEvery while unfit: about five times in 1.5 s.
+				if probes < 3 || strings.Count(text, "unfit: claims wasiSdk") != probes || !strings.Contains(summary.String(), "; unfit: claims wasiSdk, but ") {
+					t.Fatalf("%d probes, report %q, summary %q", probes, text, summary)
+				}
+			case 0:
+				if probes != 1 || strings.Contains(text, "unfit") {
+					t.Fatalf("%d probes of claims that hold, report %q", probes, text)
+				}
+			}
+		})
 	}
 }

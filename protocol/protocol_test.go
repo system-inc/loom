@@ -85,8 +85,11 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 		"self need":         func(j *Job) { j.Units[0].Needs = []string{"a"} },
 		"unknown toolchain": func(j *Job) { j.Units[0].Requires = []string{"wasi-sdk"} },
 		"unknown kind":      func(j *Job) { j.Units[0].Kind = "lint" },
-		"a test over 90 s": func(j *Job) {
-			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "test", 91
+		"a test over 15 minutes": func(j *Job) {
+			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "test", 901
+		},
+		"a build over 15 minutes": func(j *Job) {
+			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "build", 901
 		},
 		"a product over 600 s": func(j *Job) {
 			j.Units[0].Kind, j.Units[0].TimeoutSeconds = "product", 601
@@ -130,6 +133,10 @@ func TestExpandRefusesBrokenJobs(t *testing.T) {
 	phase.Units[0].Test = &TestJob{Repository: AdamicRepository, Sha: strings.Repeat("a", 40), Base: strings.Repeat("b", 40), Phase: "wasi fixture-07", Tools: strings.Repeat("e", 40)}
 	if _, err := Expand(phase); err != nil {
 		t.Fatalf("a phase job of kind phase is refused: %v", err)
+	}
+	// A test or build unit runs to the build law's 15 minutes, never killed at 90 s for being slow (Kirk, Oct 10).
+	if KindCeilings["test"] != 900 || KindCeilings["build"] != 900 {
+		t.Fatalf("a test unit's ceiling is %d s and a build's %d s, want the 900 s hang ceiling", KindCeilings["test"], KindCeilings["build"])
 	}
 	// Each kind at its ceiling exactly is taken; one second over is refused above.
 	for kind, ceiling := range KindCeilings {
@@ -356,6 +363,9 @@ func TestCheckUnitRefusesWhatARunnerCouldOnlyRunWrongly(t *testing.T) {
 	if err := CheckUnit(good()); err != nil {
 		t.Fatalf("the good unit is refused: %v", err)
 	}
+	if requiring := good(); func() error { requiring.Requires = []string{"go", "wasiSdk"}; return CheckUnit(requiring) }() != nil {
+		t.Fatal("a unit requiring go and wasiSdk is refused")
+	}
 	cases := map[string]func(*Unit){
 		"no run":            func(u *Unit) { u.Run = "" },
 		"run with a slash":  func(u *Unit) { u.Run = "a/b" },
@@ -374,6 +384,8 @@ func TestCheckUnitRefusesWhatARunnerCouldOnlyRunWrongly(t *testing.T) {
 		"output escapes":    func(u *Unit) { u.Outputs[0].Glob = "../x" },
 		"no store":          func(u *Unit) { u.Store = nil },
 		"store not http":    func(u *Unit) { u.Store = &Endpoint{Url: "file:///tmp"} },
+		"unknown toolchain": func(u *Unit) { u.Requires = []string{"go", "rust"} },
+		"toolchain twice":   func(u *Unit) { u.Requires = []string{"go", "go"} },
 	}
 	for name, breakIt := range cases {
 		unit := good()
@@ -472,6 +484,9 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 	add("tests[shard=0]", Event{Type: "finished", Status: StatusFailed})
 	add("cached", Event{Type: "cached", Key: strings.Repeat("c", 64), FromRun: "r-earlier", EventLog: strings.Repeat("d", 64)})
 	add("cached", Event{Type: "finished", Status: StatusPassed})
+	add("unfit", Event{Type: "started", Machine: "box", RunnerVersion: "v0-dev"})
+	add("unfit", Event{Type: "error", Phase: PhaseStart, Message: "the unit requires wasiSdk, which this machine lacks"})
+	add("unfit", Event{Type: "finished", Status: StatusBroken, MissingTools: []string{"wasiSdk"}})
 
 	var written strings.Builder
 	for _, event := range fixture {
@@ -495,7 +510,15 @@ func TestEventsFixtureIsWhatGoWrites(t *testing.T) {
 	if string(held) != written.String() {
 		t.Fatalf("%s no longer matches what Go writes; rerun with LOOM_WRITE_FIXTURES=1 if the change is meant:\n%s", path, written.String())
 	}
-	if verdict := Decide("r-fixture", []string{"a", "tests[shard=0]", "cached"}, fixture); verdict.Status != "red" || verdict.Failed[0] != "tests[shard=0]" || verdict.Cached[0] != "cached" {
+	// unfit is in the file for the wire's schema (a finished with missingTools); a broken unit voids a run, so the
+	// verdict is read without it.
+	decided := []Event{}
+	for _, event := range fixture {
+		if event.Unit != "unfit" {
+			decided = append(decided, event)
+		}
+	}
+	if verdict := Decide("r-fixture", []string{"a", "tests[shard=0]", "cached"}, decided); verdict.Status != "red" || verdict.Failed[0] != "tests[shard=0]" || verdict.Cached[0] != "cached" {
 		t.Fatalf("the fixture decides %+v", verdict)
 	}
 }

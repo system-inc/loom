@@ -126,8 +126,14 @@ func Unanswered(cache string) {
 // IdleBytes arrived: a house cache that stalls or trickles never holds a client longer than that. Closing it ends the
 // watch.
 func Watch(body io.ReadCloser, cancel context.CancelFunc) io.ReadCloser {
+	return watchIdle(body, cancel, IdleWindow, IdleBytes)
+}
+
+// watchIdle is Watch with its window and its least bytes given: the cache's own fetch from the store (Server.fetch)
+// is watched the same way.
+func watchIdle(body io.ReadCloser, cancel context.CancelFunc, window time.Duration, least int64) io.ReadCloser {
 	watched := &watchedBody{body: body, done: make(chan struct{})}
-	go watched.watch(cancel, IdleWindow, IdleBytes)
+	go watched.watch(cancel, window, least)
 	return watched
 }
 

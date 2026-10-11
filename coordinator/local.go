@@ -9,6 +9,7 @@ import (
 
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/runner"
+	"github.com/system-inc/loom/toolchains"
 )
 
 // LocalMachine runs units in this process with the runner package, for tests and for trying a job on the
@@ -23,6 +24,9 @@ type LocalMachine struct {
 	// GoPlatform names the platform this machine reports, for a test standing one machine in for another; empty is
 	// this computer's own.
 	GoPlatform string
+	// Probe checks the toolchains a unit requires before it runs (runner.Options.Probe); nil probes this computer's
+	// own. A test standing in a machine with Has plants one.
+	Probe func(checkContext context.Context, claims []string, environment string) []toolchains.Failure
 }
 
 func (machine LocalMachine) Toolchains() []string { return machine.Has }
@@ -51,6 +55,6 @@ func (machine LocalMachine) Platform() string {
 func (machine LocalMachine) Cores() int { return runtime.NumCPU() }
 
 func (machine LocalMachine) Run(runContext context.Context, unit protocol.Unit, events io.Writer) error {
-	runner.Run(runContext, unit, runner.Options{WorkspaceParent: machine.WorkspaceParent, Events: events})
+	runner.Run(runContext, unit, runner.Options{WorkspaceParent: machine.WorkspaceParent, Events: events, Probe: machine.Probe})
 	return nil
 }

@@ -8,23 +8,25 @@ import (
 )
 
 // A Config is ~/.loom/queue-bridge.conf, whose being there is what makes a machine the bridge: the queue it carries
-// git's facts to, the adamic clone it reads them from, its state directory (the lock) and the token secret it mints
-// from.
+// git's facts to, the adamic clone it reads them from, its state directory (the lock) and the coordinator token it
+// calls the queue with: one minted for it (`loom coordinator-token queue-bridge --days N`), never the wire's secret,
+// which can mint any token.
 type Config struct {
 	Queue      string
 	Repository string
 	State      string
-	Secret     string
+	Token      string
 }
 
 // DefaultConfig is Workshop's: loom.system.inc, ~/loom-queue-bridge/adamic.git (git clone --bare of the public
-// https://github.com/system-inc/adamic.git: the bridge holds no key), ~/loom-queue-bridge/state and ~/.loom/token-secret.
+// https://github.com/system-inc/adamic.git: the bridge holds no key), ~/loom-queue-bridge/state and
+// ~/.loom/queue-bridge.token.
 func DefaultConfig(home string) Config {
 	return Config{
 		Queue:      "https://loom.system.inc",
 		Repository: filepath.Join(home, "loom-queue-bridge", "adamic.git"),
 		State:      filepath.Join(home, "loom-queue-bridge", "state"),
-		Secret:     filepath.Join(home, ".loom", "token-secret"),
+		Token:      filepath.Join(home, ".loom", "queue-bridge.token"),
 	}
 }
 
@@ -55,13 +57,13 @@ func ReadConfig(content, home string) (Config, error) {
 				return Config{}, fmt.Errorf("queue-bridge.conf line %d: queue %q isn't an http(s) address", number+1, value)
 			}
 			config.Queue = value
-		case "repository", "state", "secret":
+		case "repository", "state", "token":
 			if !filepath.IsAbs(value) {
 				return Config{}, fmt.Errorf("queue-bridge.conf line %d: %s %q isn't an absolute path or ~/", number+1, key, value)
 			}
-			*map[string]*string{"repository": &config.Repository, "state": &config.State, "secret": &config.Secret}[key] = value
+			*map[string]*string{"repository": &config.Repository, "state": &config.State, "token": &config.Token}[key] = value
 		default:
-			return Config{}, fmt.Errorf("queue-bridge.conf line %d: no setting %q (queue, repository, state, secret)", number+1, key)
+			return Config{}, fmt.Errorf("queue-bridge.conf line %d: no setting %q (queue, repository, state, token)", number+1, key)
 		}
 	}
 	return config, nil

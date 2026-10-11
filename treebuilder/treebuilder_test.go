@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
 )
@@ -43,6 +44,7 @@ type harness struct {
 	builds  []Want
 	short   error
 	fail    error
+	phases  *builder.TreePhases
 	now     time.Time
 }
 
@@ -52,12 +54,15 @@ func newHarness(t *testing.T, source judge.FutureSource, ledger *Ledger) *harnes
 		Source:  source,
 		Indexed: func(tree string) (bool, error) { return h.indexed[tree], nil },
 		Floor:   func() error { return h.short },
-		Build: func(want Want) error {
+		Build: func(want Want, running func(pid int) error) (*builder.TreePhases, error) {
 			h.builds = append(h.builds, want)
+			if err := running(4242); err != nil {
+				return nil, err
+			}
 			if h.fail == nil {
 				h.indexed[want.Tree] = true
 			}
-			return h.fail
+			return h.phases, h.fail
 		},
 		Ledger: ledger,
 		Now:    func() time.Time { return h.now },
@@ -120,6 +125,19 @@ func TestOnlyMissingTreesAreBuiltOneAtATime(t *testing.T) {
 		t.Fatalf("a second builder took the ledger (%v)", err)
 	} else if second != nil {
 		t.Fatal("a refused ledger came back")
+	}
+}
+
+// A build's phases go on its ledger record, read back by anyone who reads the ledger after the builder is gone: the
+// record outlives the build, and so do its phases. Mutant: the phases Build returned left off the record.
+func TestABuildsPhasesOutliveIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "trees.jsonl")
+	h := newHarness(t, listedFutures{future("1", unit(t, "test", "run", keyA))}, openLedger(t, path, time.Now()))
+	h.phases = &builder.TreePhases{Checkout: 2.5, Warm: 95.8, ProductsBuilt: 12, Total: 768.4}
+	h.buildOnce(t, true)
+	newest, found, err := Newest(path, keyA)
+	if err != nil || !found || newest.Event != Built || newest.Phases == nil || *newest.Phases != *h.phases {
+		t.Fatalf("the ledger's record %+v (%v %v), want phases %+v", newest, found, err, *h.phases)
 	}
 }
 
@@ -206,10 +224,10 @@ func TestAFailedBuildStandsUntilItsRetry(t *testing.T) {
 		t.Fatal("a failure past RetryAfter still stands")
 	}
 	h.fail = errors.New("build-tree: exit status 1: 2 packages failed")
-	h.builder.Build = func(want Want) error {
+	h.builder.Build = func(want Want, _ func(int) error) (*builder.TreePhases, error) {
 		h.builds = append(h.builds, want)
 		h.indexed[want.Tree] = true
-		return h.fail
+		return nil, h.fail
 	}
 	h.buildOnce(t, true)
 	if newest, _ := ledger.Newest(keyB); len(h.builds) != 2 || newest.Event != Built || !strings.Contains(newest.Cause, "2 packages failed") {

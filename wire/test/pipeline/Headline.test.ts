@@ -6,7 +6,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { afterEach, describe, expect, it } from 'vitest';
 import { QueueName } from '../../source/Changes';
 import { headlineFact, type HeadlineReading } from '../../source/Headline';
-import type { QueueEvent } from '../../source/Queue';
+import { MaximumEventsPage, type QueueEvent } from '../../source/Queue';
 import { call, token } from '../Helpers';
 import { oldQueueLog } from './OldQueueLog';
 
@@ -39,7 +39,7 @@ afterEach(async function () {
         }
     });
     await runInDurableObject(headlines.get(headlines.idFromName('headline')), function (instance: unknown, state: DurableObjectState) {
-        state.storage.sql.exec('DELETE FROM cursor; DELETE FROM decisions; DELETE FROM mains;');
+        state.storage.sql.exec('DELETE FROM cursor; DELETE FROM decisions; DELETE FROM mains; DELETE FROM unreadable;');
         (instance as { lastReadAt: number }).lastReadAt = 0;
     });
 });
@@ -122,8 +122,58 @@ describe('the headline', function () {
         expect(response.status).toBe(200);
         const reading = (await response.json()) as HeadlineReading;
         expect(reading.seq).toBe(24);
-        expect(reading.unreadable).toEqual({ lines: 2, afterSeq: 21 });
+        expect(reading.unreadable).toEqual({ lines: 2, seqs: [22, 23] });
         expect(reading.testedLastHour).toBe(3);
         expect(reading.mainRed?.red).toBe(2);
+    });
+
+    it('reads a line whose subject or data is null without stopping', async function () {
+        const at = new Date().toISOString();
+        await seed([
+            ...recentLog(),
+            [22, JSON.stringify({ seq: 22, at: at, type: 'verdict.decided', subject: null, data: null })],
+            [23, JSON.stringify({ seq: 23, at: at, type: 'main.red', subject: { change: 'chg_x' }, data: null })],
+            { seq: 24, at: at, prev: '', type: 'main.red', subject: { change: 'chg_y' }, data: { main: 'd'.repeat(40), units: ['a'], witness: 'chg_y' } },
+        ]);
+        const response = await readHeadline(await token('board', 'board'));
+        expect(response.status).toBe(200);
+        const reading = (await response.json()) as HeadlineReading;
+        expect(reading.seq).toBe(24);
+        expect(reading.unreadable).toBeNull();
+        expect(reading.mainRed?.red).toBe(1);
+        expect(
+            reading.mainTrend.map(function (point) {
+                return point.red;
+            }),
+        ).toEqual([1, 0, 1]);
+    });
+
+    it('moves past an unreadable line at the tail and counts it once', async function () {
+        await seed([...recentLog(), [22, 'not a json line {']]);
+        const board = await token('board', 'board');
+        const first = (await (await readHeadline(board)).json()) as HeadlineReading;
+        expect(first.seq).toBe(22);
+        expect(first.unreadable).toEqual({ lines: 1, seqs: [22] });
+        await runInDurableObject(headlines.get(headlines.idFromName('headline')), function (instance: unknown) {
+            (instance as { lastReadAt: number }).lastReadAt = 0;
+        });
+        const again = (await (await readHeadline(board)).json()) as HeadlineReading;
+        expect(again.seq).toBe(22);
+        expect(again.unreadable).toEqual({ lines: 1, seqs: [22] });
+    });
+
+    it('moves past a whole page of unreadable lines', async function () {
+        const rows: [number, string][] = [];
+        for (let seq = 22; seq < 22 + MaximumEventsPage; seq++) {
+            rows.push([seq, 'unreadable ' + seq]);
+        }
+        const at = new Date().toISOString();
+        const after = 22 + MaximumEventsPage;
+        await seed([...recentLog(), ...rows, { seq: after, at: at, prev: '', type: 'main.red', subject: { change: 'chg_z' }, data: { main: 'e'.repeat(40), units: ['a', 'b', 'c'], witness: 'chg_z' } }]);
+        const reading = (await (await readHeadline(await token('board', 'board'))).json()) as HeadlineReading;
+        expect(reading.seq).toBe(after);
+        expect(reading.unreadable?.lines).toBe(MaximumEventsPage);
+        expect(reading.unreadable?.seqs).toEqual([after - 5, after - 4, after - 3, after - 2, after - 1]);
+        expect(reading.mainRed?.red).toBe(3);
     });
 });

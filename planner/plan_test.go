@@ -323,3 +323,40 @@ func TestPhaseUnitsNeedAPhasePool(t *testing.T) {
 		t.Fatal("phase units were keyed with no pool taking kind phase")
 	}
 }
+
+// A package the tree declares a build in build-units.json is planned as a build unit, its neighbour stays a test unit,
+// and the declaration moves the key, so a test verdict is never reused as a build's (its job is TestABuildUnitIsABuildJob's).
+func TestADeclaredBuildPackageIsABuildUnit(t *testing.T) {
+	t.Parallel()
+	tree, gateTools := planFixture(t)
+	before := planOf(t, tree, gateTools, MemoryIndex{})
+	writeFiles(t, tree, map[string]string{BuildUnitsFile: `{"version": 1, "packages": {"a": "its tests compile a program and read go's trace"}}`})
+	after := planOf(t, tree, gateTools, MemoryIndex{})
+	built, tested := after["example.com/plan/a"], after["example.com/plan/b"]
+	if built.KeyParts.Kind != "build" || tested.KeyParts.Kind != "test" {
+		t.Fatalf("a is declared a build and b isn't: a is %q, b is %q", built.KeyParts.Kind, tested.KeyParts.Kind)
+	}
+	if built.UnitKey == before["example.com/plan/a"].UnitKey {
+		t.Error("declaring a a build left its key where its test unit's was")
+	}
+	if tested.UnitKey != before["example.com/plan/b"].UnitKey {
+		t.Error("declaring a a build moved b's key")
+	}
+}
+
+// A declaration this planner can't read is refused, never planned as tests: another version, or a package declared a
+// build without saying what it builds.
+func TestABuildDeclarationItCantReadIsRefused(t *testing.T) {
+	t.Parallel()
+	for _, content := range []string{
+		`{"version": 2, "packages": {"a": "builds"}}`,
+		`{"version": 1, "packages": {"a": " "}}`,
+		`{"version": 1, "packages": ["a"]}`,
+	} {
+		tree, gateTools := planFixture(t)
+		writeFiles(t, tree, map[string]string{BuildUnitsFile: content})
+		if _, err := PlanTree(tree, gateTools, Tools{Runner: strings.Repeat("d", 64), Go: "go1.27.0"}, MemoryIndex{}, false); err == nil {
+			t.Errorf("the declaration %s was planned instead of refused", content)
+		}
+	}
+}

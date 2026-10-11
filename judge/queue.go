@@ -49,18 +49,20 @@ func (queue HTTPQueue) PostVerdicts(future string, post FuturePost) error {
 }
 
 // HTTPReused reads the verdict a reused unit reuses from Queue's index, `GET /verdicts/<unitKey>` with the coordinator
-// token, and holds it to what Queue checked when it took the plan: passed, and from the reused run when one is named.
+// token. The index keeps each key's newest verdict, so it answers for the key, not the run the plan named: when it's a
+// pass, from that run or a later one, it's the reuse (the same key is the same verdict); when it isn't, the reuse is
+// unbacked.
 type HTTPReused struct {
 	Base  string
 	Token string
 	HTTP  *http.Client
 }
 
-// Tests is that verdict's tests object, as it was posted.
-func (reused HTTPReused) Tests(unitKey, run string) (json.RawMessage, error) {
+// Tests is the index's newest verdict for the key: its tests object, as it was posted, and its run.
+func (reused HTTPReused) Tests(unitKey, run string) (ReusedVerdict, error) {
 	request, err := http.NewRequest("GET", strings.TrimSuffix(reused.Base, "/")+"/verdicts/"+url.PathEscape(unitKey), nil)
 	if err != nil {
-		return nil, err
+		return ReusedVerdict{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+reused.Token)
 	client := reused.HTTP
@@ -69,15 +71,15 @@ func (reused HTTPReused) Tests(unitKey, run string) (json.RawMessage, error) {
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, err
+		return ReusedVerdict{}, err
 	}
 	defer response.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return ReusedVerdict{}, err
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET /verdicts/%s: %s: %s", unitKey, response.Status, strings.TrimSpace(string(body)))
+		return ReusedVerdict{}, fmt.Errorf("GET /verdicts/%s: %s: %s", unitKey, response.Status, strings.TrimSpace(string(body)))
 	}
 	var record struct {
 		Status string          `json:"status"`
@@ -85,18 +87,16 @@ func (reused HTTPReused) Tests(unitKey, run string) (json.RawMessage, error) {
 		Tests  json.RawMessage `json:"tests"`
 	}
 	if err := json.Unmarshal(body, &record); err != nil {
-		return nil, fmt.Errorf("GET /verdicts/%s: %w", unitKey, err)
+		return ReusedVerdict{}, fmt.Errorf("GET /verdicts/%s: %w", unitKey, err)
+	}
+	if record.Status != Passed {
+		return ReusedVerdict{Unbacked: fmt.Sprintf("the index's newest verdict for %s is %s, from run %s", unitKey, record.Status, record.Run)}, nil
 	}
 	var ref TestsRef
-	switch {
-	case record.Status != Passed:
-		return nil, fmt.Errorf("the index's verdict for %s is %s, not passed", unitKey, record.Status)
-	case run != "reused" && record.Run != run:
-		return nil, fmt.Errorf("the index's verdict for %s is from run %s, not the reused %s", unitKey, record.Run, run)
-	case json.Unmarshal(record.Tests, &ref) != nil || !shaPattern64.MatchString(ref.Sha256):
-		return nil, fmt.Errorf("the index's verdict for %s carries no tests by reference: %s", unitKey, record.Tests)
+	if json.Unmarshal(record.Tests, &ref) != nil || !shaPattern64.MatchString(ref.Sha256) {
+		return ReusedVerdict{}, fmt.Errorf("the index's verdict for %s carries no tests by reference: %s", unitKey, record.Tests)
 	}
-	return record.Tests, nil
+	return ReusedVerdict{Tests: record.Tests, Run: record.Run}, nil
 }
 
 var shaPattern64 = regexp.MustCompile(`^[0-9a-f]{64}$`)

@@ -207,6 +207,36 @@ async function queueRequest(request: Request, claims: TokenClaims, operation: st
             body: canonicalJson(change),
         });
     }
+    // A withdrawal: the owner takes a branch out of the line for good, with why (Queue, #6hw5crw). The owner is the
+    // submit token's, never the body's.
+    const withdraw = /^(chg_[0-9a-hjkmnp-tv-z]{26})\/withdraw$/.exec(operation);
+    if (withdraw !== null) {
+        if (request.method !== 'POST') {
+            await request.body?.cancel();
+            return jsonResponse(405, { error: 'use POST' }, { Allow: 'POST' });
+        }
+        if (claims.scope !== 'submit') {
+            await request.body?.cancel();
+            return jsonResponse(403, { error: `a ${claims.scope} token can't withdraw a change` });
+        }
+        const body = await readBodyText(request, MaximumChangeBodyBytes);
+        let parsed: unknown = null;
+        try {
+            parsed = JSON.parse(body ?? '');
+        }
+        catch {
+            parsed = null;
+        }
+        const reason = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as { reason?: unknown }).reason : undefined;
+        if (typeof reason !== 'string' || reason.trim() === '' || reason.length > 500 || Object.keys(parsed as object).length !== 1) {
+            return jsonResponse(400, { error: 'the body is {reason}: why the branch is withdrawn, in at most 500 characters' });
+        }
+        return new Request(`https://queue/changes/${withdraw[1] ?? ''}/withdraw`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: canonicalJson({ owner: claims.run, reason: reason }),
+        });
+    }
     if (request.method !== 'GET') {
         await request.body?.cancel();
         return jsonResponse(405, { error: 'use GET' }, { Allow: 'GET' });

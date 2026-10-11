@@ -9,8 +9,10 @@
 // Workshop's is broken), failed (no index: Workshop's, void, named, and built again after a backoff, or never once it
 // has failed MaxFailures times; a checkout that hiccuped is transient, retried soon and never voided), refused (the
 // disk is under its floor: nothing is checked out or built until it isn't), or interrupted (the builder stopped
-// mid-build, a crash, and builds it again), or stopped (the builder was told to stop, a restart or a deploy, and the
-// next one builds it again).
+// mid-build, a crash, and builds it again), or stopped (the build ended under the builder's stop, or an adopted one
+// left no index this release reads, and the next pass builds it again). A build's child runs in a process group of its
+// own, recorded running with its pid: a builder told to stop (a release's restart, #apsj7zp) leaves it running, and the
+// next builder adopts it, waiting for it under the same bound, instead of building the tree again.
 package treebuilder
 
 import (
@@ -21,6 +23,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/jsonlines"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
@@ -30,6 +33,7 @@ import (
 // The events a Record holds.
 const (
 	Started     = "started"
+	Running     = "running"
 	Built       = "built"
 	Failed      = "failed"
 	Refused     = "refused"
@@ -37,9 +41,13 @@ const (
 	Stopped     = "stopped"
 )
 
-// ErrStopped is a build ended because the builder itself was told to stop (SIGTERM: systemd's stop, every update's
-// restart). The build isn't the tree's failure: it's recorded Stopped, and the next builder builds it again.
+// ErrStopped is a build ended because the builder itself was told to stop before its child ran (a checkout cut short).
+// The build isn't the tree's failure: it's recorded Stopped, and the next builder builds it again.
 var ErrStopped = errors.New("the builder was stopped mid-build")
+
+// ErrDetached is a builder told to stop (SIGTERM: systemd's stop, every release's restart) while its build's child
+// runs: the child is left running, its running record stands, and the next builder adopts it.
+var ErrDetached = errors.New("the builder stopped and left its build running, for the next builder to adopt")
 
 // ErrTransient is a build that failed before building anything for a reason that passes (review of tree-wiring,
 // finding 6): its checkout, against GitHub's 5xx or the network. It's retried after TransientRetry, doubling to
@@ -68,6 +76,11 @@ type Record struct {
 	Retry string `json:"retry,omitempty"`
 	// Transient marks a failure that passes (ErrTransient): retried soon, never standing.
 	Transient bool `json:"transient,omitempty"`
+	// Pid is a running build's child, the leader of its process group, which a later builder adopts.
+	Pid int `json:"pid,omitempty"`
+	// Phases are the build's seconds by phase, its checkout's and build-tree's own, so a tree's phases outlive its
+	// build (#s0cqqhk); none on a start, or when the build said none.
+	Phases *builder.TreePhases `json:"phases,omitempty"`
 }
 
 // at is when the record was written; an unreadable time is the zero time, as old as can be.
@@ -169,13 +182,13 @@ func (ledger *Ledger) failures(tree string) int {
 	return count
 }
 
-// transients counts the tree's transient failures since anything else but a start or a refusal.
+// transients counts the tree's transient failures since anything else but a start, a running child or a refusal.
 func (ledger *Ledger) transients(tree string) int {
 	count := 0
 	for index := len(ledger.order) - 1; index >= 0; index-- {
 		record := ledger.order[index]
 		switch {
-		case record.Tree != tree, record.Event == Started, record.Event == Refused:
+		case record.Tree != tree, record.Event == Started, record.Event == Running, record.Event == Refused:
 		case record.Event == Failed && record.Transient:
 			count++
 		default:
@@ -183,6 +196,17 @@ func (ledger *Ledger) transients(tree string) int {
 		}
 	}
 	return count
+}
+
+// running is every tree's newest record that says its build is running, in the order they were written.
+func (ledger *Ledger) running() []Record {
+	running := []Record{}
+	for _, record := range ledger.order {
+		if newest := ledger.newest[record.Tree]; newest == record && record.Event == Running {
+			running = append(running, record)
+		}
+	}
+	return running
 }
 
 // Newest is the tree's newest record.
@@ -318,10 +342,25 @@ type Builder struct {
 	// and the clone's): nothing is checked out or built until it has room.
 	Floor func() error
 	// Build checks the future's commit out keyless in the builder's clone and runs `loom build-tree` on it with the
-	// plan's tree key, which refuses a tree keying otherwise. Its error is why the build ended badly; whether the tree
-	// was built is read from the store after it, never from its exit.
-	Build  func(want Want) error
-	Ledger *Ledger
+	// plan's tree key, which refuses a tree keying otherwise, calling running with the child's pid once it runs, and
+	// returns the build's phases, nil when it has none. Its error is why the build ended badly, or ErrDetached when the
+	// builder stopped and left the child running; whether the tree was built is read from the store after it, never
+	// from its exit.
+	Build func(want Want, running func(pid int) error) (*builder.TreePhases, error)
+	// Phases reads a tree's phases from its build's log once an adopted build ends, which returned none to this
+	// builder (nil: an adopted build's record holds none).
+	Phases func(tree string) *builder.TreePhases
+	// Alive says whether pid is still the build of tree a builder started; Kill kills its process group. Bound is the
+	// longest a build runs, an adopted one counted from its running record; Poll how often an adopted one is looked at
+	// (zero: AdoptPoll), Sleep how it waits (nil: time.Sleep), and Stopping whether this builder was told to stop, when
+	// it leaves an adopted build running for the next.
+	Alive    func(pid int, tree string) bool
+	Kill     func(pid int)
+	Bound    time.Duration
+	Poll     time.Duration
+	Sleep    func(time.Duration)
+	Stopping func() bool
+	Ledger   *Ledger
 	// Keep is how long a record is kept; zero keeps every one.
 	Keep        time.Duration
 	Now         func() time.Time
@@ -343,6 +382,10 @@ func (builder *Builder) note(line string) {
 // BuildOnce builds the first tree the store lacks whose last build doesn't stand failed, Judge's requests ahead of the
 // listing's, and says whether it ran a build (well or badly). A tree another build put up meanwhile is left; one refused under the floor waits.
 func (builder *Builder) BuildOnce() (bool, error) {
+	// A build a stopped builder left running is this one's first, before any checkout moves the clone under it.
+	if adopted, err := builder.adopt(); adopted || err != nil {
+		return adopted, err
+	}
 	futures, err := builder.Source.Planned()
 	if err != nil {
 		return false, err
@@ -409,9 +452,16 @@ func (builder *Builder) build(want Want) error {
 	}
 	fmt.Fprintf(builder.Log, "tree %s of %s: building\n", want.Tree, want.Future)
 	started := builder.Now()
-	buildErr := builder.Build(want)
+	phases, buildErr := builder.Build(want, func(pid int) error {
+		return builder.Ledger.Append(Record{Tree: want.Tree, Future: want.Future, At: builder.Now().UTC().Format(time.RFC3339), Event: Running, Pid: pid})
+	})
+	if errors.Is(buildErr, ErrDetached) {
+		// Its running record stands, for the next builder to adopt.
+		fmt.Fprintf(builder.Log, "tree %s of %s: left running for the next builder: %v\n", want.Tree, want.Future, buildErr)
+		return nil
+	}
 	indexed, indexErr := builder.Indexed(want.Tree)
-	record.At, record.Seconds = builder.Now().UTC().Format(time.RFC3339), builder.Now().Sub(started).Seconds()
+	record.At, record.Seconds, record.Phases = builder.Now().UTC().Format(time.RFC3339), builder.Now().Sub(started).Seconds(), phases
 	switch {
 	case errors.Is(buildErr, ErrStopped) && !(indexErr == nil && indexed):
 		// A stop is the builder's, never the tree's: nothing stands failed, and the next builder builds it again.
@@ -434,6 +484,73 @@ func (builder *Builder) build(want Want) error {
 	}
 	fmt.Fprintf(builder.Log, "tree %s of %s: %s\n", want.Tree, want.Future, record)
 	return builder.Ledger.Append(record)
+}
+
+// AdoptPoll is how often an adopted build is looked at.
+const AdoptPoll = 5 * time.Second
+
+// adopt waits for each build a stopped builder left running (its newest record Running), in the ledger's order, and
+// records how it ended, by the store: built when its index is up; failed, backed off, when it ran past Bound and was
+// killed; and otherwise stopped, built again at once, since an adopted child's exit isn't this builder's to read (an
+// older release's build may leave an index this one doesn't). One whose process is gone is decided the same way. It
+// says whether it adopted one, and leaves the build running when this builder is told to stop meanwhile.
+func (builder *Builder) adopt() (bool, error) {
+	adopted := false
+	for _, held := range builder.Ledger.running() {
+		fmt.Fprintf(builder.Log, "tree %s of %s: adopting its build, pid %d, running since %s\n", held.Tree, held.Future, held.Pid, held.At)
+		deadline, killed := held.at().Add(builder.Bound), false
+		for builder.Alive != nil && builder.Alive(held.Pid, held.Tree) {
+			if builder.Stopping != nil && builder.Stopping() {
+				return adopted, nil
+			}
+			if !builder.Now().Before(deadline) {
+				builder.Kill(held.Pid)
+				killed = true
+				break
+			}
+			builder.sleep(builder.poll())
+		}
+		adopted = true
+		indexed, indexErr := builder.Indexed(held.Tree)
+		record := Record{Tree: held.Tree, Future: held.Future, At: builder.Now().UTC().Format(time.RFC3339), Seconds: builder.Now().Sub(held.at()).Seconds()}
+		if builder.Phases != nil {
+			// build-tree's own phases, from its summary line; the checkout was the last builder's, and went with it.
+			record.Phases = builder.Phases(held.Tree)
+		}
+		switch {
+		case indexErr == nil && indexed:
+			record.Event, record.Cause = Built, fmt.Sprintf("adopted, pid %d", held.Pid)
+		case indexErr != nil:
+			record.Event, record.Cause = Failed, fmt.Sprintf("reading the store for its index after the adopted build: %v", indexErr)
+		case killed:
+			record.Event, record.Cause = Failed, fmt.Sprintf("the adopted build, pid %d, ran past its %v bound and was killed", held.Pid, builder.Bound)
+		default:
+			record.Event, record.Cause = Stopped, fmt.Sprintf("the adopted build, pid %d, ended and trees/%s.json isn't in the store as this release reads it: built again", held.Pid, held.Tree)
+		}
+		if record.Event == Failed {
+			builder.backOff(&record, false)
+		}
+		fmt.Fprintf(builder.Log, "tree %s of %s: %s\n", record.Tree, record.Future, record)
+		if err := builder.Ledger.Append(record); err != nil {
+			return adopted, err
+		}
+	}
+	return adopted, nil
+}
+
+func (builder *Builder) poll() time.Duration {
+	if builder.Poll > 0 {
+		return builder.Poll
+	}
+	return AdoptPoll
+}
+
+func (builder *Builder) sleep(duration time.Duration) {
+	if builder.Sleep != nil {
+		builder.Sleep(duration)
+		return
+	}
+	time.Sleep(duration)
 }
 
 // backOff sets a failed record's retry: a transient failure's after TransientRetry, doubling with each in a row to
