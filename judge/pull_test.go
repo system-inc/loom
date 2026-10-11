@@ -788,3 +788,15 @@ func TestPoolsNameWorkersByMachineOrPrefix(t *testing.T) {
 		t.Fatalf("pools %+v %v", pools, err)
 	}
 }
+
+// A pool's toolchains are its has in pools.json (#pzrz9r8): read as given, none when absent, and a toolchain that
+// isn't one (a typo the placer would hold every unit on) refused. Mutant: the check dropped.
+func TestAPoolsToolchainsAreItsHas(t *testing.T) {
+	pools, err := LoadPools([]byte(`{"pools":[{"name":"box-strict","runner":"r","memoryMegabytes":1,"cpus":1,"has":["go","clang","node","wasiSdk"]},{"name":"box-phase","runner":"r","memoryMegabytes":1,"cpus":1}]}`))
+	if err != nil || len(pools) != 2 || strings.Join(pools[0].Has, ",") != "go,clang,node,wasiSdk" || len(pools[1].Has) != 0 {
+		t.Fatalf("pools %+v, %v", pools, err)
+	}
+	if _, err := LoadPools([]byte(`{"pools":[{"name":"codex-strict","runner":"r","memoryMegabytes":1,"cpus":1,"has":["go","wasiSDK"]}]}`)); err == nil || !strings.Contains(err.Error(), `"wasiSDK"`) {
+		t.Fatalf("a has naming no toolchain was taken (%v)", err)
+	}
+}

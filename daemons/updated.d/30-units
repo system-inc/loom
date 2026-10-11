@@ -1,0 +1,11 @@
+#!/bin/sh
+# The updater's hook for Workshop's daemons' units (package daemons), written by `loom install-units`: after every
+# release it writes that release's units for the daemons this machine holds tokens for, and tells systemd. It never
+# enables, starts, stops or restarts anything, and never touches the pusher's timer. A release from before
+# install-units (a rollback past it) has nothing to install, so the units are left as they are and the hook passes.
+loom=${LOOM_UPDATE_BIN:-${HOME}/.loom/bin}/loom
+if ! "${loom}" 2>&1 | grep -q '^  loom install-units$'; then
+	echo "30-units: ${loom} has no install-units (a release from before it?); the daemons' units are left as they are"
+	exit 0
+fi
+exec "${loom}" install-units

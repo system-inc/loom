@@ -62,7 +62,7 @@ const usage = `usage:
   loom submit-token [--days N] <owner>
   loom coordinator-token <service> [--days N]
   loom judge --queue <url> --token-file <path> (--pool <name>=<slots>... | --local N) [--once] [--dry-run]
-  loom place --queue <url> --token-file <path> --pool-has <name>=<toolchains>... [--pools <file>] [--once] [--dry-run]
+  loom place --queue <url> --token-file <path> [--pools <file>] [--once] [--dry-run]
   loom unit-needs --gate-tools <dir> --package <directory> [--run <pattern>]
   loom reads-check --tree <dir> --gate-tools <dir> --package <import path> --trace <file> [--unit-key <key>] [--key-parts <file> [--read-sets <dir>] [--no-reuse <file>]]
   loom build-actions --tree <dir> --gate-tools <dir> [--r2 <key file>] [--packages a,b] [--list]
@@ -79,6 +79,7 @@ const usage = `usage:
   loom queue-bridge [--config <queue-bridge.conf>]
   loom queue-bridge install
   loom queue-bridge pins [--repository <clone>] <sha>
+  loom install-units
   loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--tailnet] [--public]
   loom house-cache install
   loom release watch [--config <file>] [--wire <url>]
@@ -163,6 +164,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "queue-bridge" {
 		return queueBridge(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "install-units" {
+		return installUnits(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "house-cache" {
 		return houseCache(arguments[1:], stdout, stderr)

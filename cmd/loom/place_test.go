@@ -22,7 +22,7 @@ import (
 // kinds, cpus and memory the placer chose it by, so the coordinator's own fit can't move a unit off its pool.
 func TestAPlacementRunsOnItsPoolsUnderTheFuturesRunId(t *testing.T) {
 	tree := strings.Repeat("a", 40)
-	phase := placer.RunPool{Pool: placer.Pool{PoolEntry: judge.PoolEntry{Name: "box-phase", MemoryMegabytes: 65536, Cpus: 8, Kinds: []string{"phase"}}, Has: []string{"go", "clang"}}, Slots: 1}
+	phase := placer.RunPool{Pool: placer.Pool{PoolEntry: judge.PoolEntry{Name: "box-phase", MemoryMegabytes: 65536, Cpus: 8, Kinds: []string{"phase"}, Has: []string{"go", "clang"}}}, Slots: 1}
 	codex := placer.RunPool{Pool: placer.Pool{PoolEntry: judge.PoolEntry{Name: "codex-strict", MemoryMegabytes: 16384, Cpus: 4}}, Slots: 3}
 	arguments := strings.Join(runArguments(placer.Placement{Run: "future-" + tree + "-2", Pools: []placer.RunPool{phase, codex}},
 		runOptions{runs: "/runs", wire: "https://wire", source: "/loom", priority: 40}), " ")
@@ -38,40 +38,47 @@ func TestAPlacementRunsOnItsPoolsUnderTheFuturesRunId(t *testing.T) {
 	}
 }
 
-// --pool-has naming a pool the table doesn't hold stops the placer at start; once running, a pool taken out of the
-// table only warns, once, and every other pool is still read. Mutant: the reader refusing it after start too.
-func TestAPoolLeavingTheTableWarnsAndPlacementGoesOn(t *testing.T) {
+// Each pool's toolchains are its has in the pool table, read every pass (#pzrz9r8): a Codex switch is one edit to
+// pools.json, which the next pass reads with no restart, and a has naming no toolchain stops the placer at start.
+// Mutant: placerPools dropping each pool's has.
+func TestThePlacerReadsEachPoolsToolchainsFromThePoolTable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pools.json")
 	runner := strings.Repeat("d", 64)
-	write := func(names ...string) {
+	write := func(rows ...string) {
 		pools := []string{}
-		for _, name := range names {
-			pools = append(pools, fmt.Sprintf(`{"name": %q, "tier": "t", "runner": %q, "memoryMegabytes": 1024, "cpus": 2}`, name, runner))
+		for _, row := range rows {
+			name, has, _ := strings.Cut(row, "=")
+			pools = append(pools, fmt.Sprintf(`{"name": %q, "tier": "t", "runner": %q, "memoryMegabytes": 1024, "cpus": 2, "has": [%s]}`, name, runner, has))
 		}
 		os.WriteFile(path, []byte(`{"pools": [`+strings.Join(pools, ",")+`]}`), 0o644)
 	}
-	has := poolHasFlag{}
-	has.Set("codex-strict=go,wasiSdk")
-	has.Set("box-phase=go")
-	write("codex-strict")
-	var warned bytes.Buffer
-	if _, err := poolReader(path, has, &warned); err == nil || !strings.Contains(err.Error(), "box-phase") {
-		t.Fatalf("a --pool-has naming no pool was taken at start (%v)", err)
+	write(`box-strict="go","wasiSdk"`, `codex-strict="go","rust"`)
+	if _, err := poolReader(path); err == nil || !strings.Contains(err.Error(), `pool codex-strict has "rust"`) {
+		t.Fatalf("a has naming no toolchain was taken at start (%v)", err)
 	}
-	write("codex-strict", "box-phase")
-	read, err := poolReader(path, has, &warned)
+	write(`box-strict="go","wasiSdk"`, `codex-strict="go","clang","node"`)
+	read, err := poolReader(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	write("codex-strict")
-	for range 2 {
+	has := func() string {
 		pools, err := read()
-		if err != nil || len(pools) != 1 || strings.Join(pools[0].Has, ",") != "go,wasiSdk" {
-			t.Fatalf("pools %+v (%v)", pools, err)
+		if err != nil {
+			t.Fatal(err)
 		}
+		parts := []string{}
+		for _, pool := range pools {
+			parts = append(parts, pool.Name+"="+strings.Join(pool.Has, ","))
+		}
+		return strings.Join(parts, " ")
 	}
-	if strings.Count(warned.String(), "pool box-phase left the pool table") != 1 {
-		t.Fatalf("warned %q, want once", warned.String())
+	if got := has(); got != "box-strict=go,wasiSdk codex-strict=go,clang,node" {
+		t.Fatalf("read %q", got)
+	}
+	// Fabric turns Codex off: its row loses its toolchains, and the next pass has it so.
+	write(`box-strict="go","wasiSdk"`, `codex-strict=`)
+	if got := has(); got != "box-strict=go,wasiSdk codex-strict=" {
+		t.Fatalf("after the edit, read %q", got)
 	}
 }
 
@@ -93,12 +100,12 @@ func TestTheShippedUnitKeepsItsRunsAcrossARestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loom place %v: %v", arguments, err)
 	}
-	if len(settings.poolHas["box-phase"]) == 0 || *settings.ledgerPath != "/home/loom/loom-placer/placed.jsonl" || *settings.once || *settings.dryRun {
+	if *settings.ledgerPath != "/home/loom/loom-placer/placed.jsonl" || *settings.once || *settings.dryRun {
 		t.Fatalf("the unit's placer is %v", arguments)
 	}
-	// Workshop's builds stay off until the fleet decodes a test job's tree; the tree builder's ledger is the one its
-	// unit writes. Mutant: --trees shipped on.
-	if *settings.trees || *settings.treesLedger != "/home/loom/loom-trees/trees.jsonl" || *settings.treeWait != placer.TreeWaitBound {
+	// Workshop's builds are on (#w7agfa9): the placer sets each unit's tree from the tree builder's ledger, the one its
+	// unit writes, as Workshop ran by a drop-in until its units came from the release (#pzrz9r8). Mutant: --trees dropped.
+	if !*settings.trees || *settings.treesLedger != "/home/loom/loom-trees/trees.jsonl" || *settings.treeWait != placer.TreeWaitBound {
 		t.Fatalf("the unit's placer names trees %v from %s, waiting %v", *settings.trees, *settings.treesLedger, *settings.treeWait)
 	}
 	// The wait stays under the judge's backstop, so a tree that never comes is voided named. Mutant: no check.
@@ -224,5 +231,16 @@ func TestThePlacerReadsATreesBuildFromTheBucketAndTheBuildersLedger(t *testing.T
 	bucket.Put("trees/"+key+".json", index, r2.PutOptions{ContentType: "application/json"})
 	if state, err = read(key); err != nil || !state.Indexed {
 		t.Fatalf("a tree whose index is up: %+v %v", state, err)
+	}
+}
+
+// The judge's own reruns ask each --pool for the toolchains its row has. Mutant: poolHasIn giving none.
+func TestTheJudgeGivesEachPoolItsHas(t *testing.T) {
+	table := []judge.PoolEntry{{Name: "box-strict", Has: []string{"go", "wasiSdk"}}, {Name: "box-phase"}}
+	if got := strings.Join(poolHasIn(table, "box-strict"), ","); got != "go,wasiSdk" {
+		t.Fatalf("box-strict has %q", got)
+	}
+	if poolHasIn(table, "box-phase") != nil || poolHasIn(table, "gone") != nil {
+		t.Fatal("a pool with no has, or no row, has toolchains")
 	}
 }

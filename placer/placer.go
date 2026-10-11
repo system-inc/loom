@@ -40,11 +40,10 @@ import (
 	"github.com/system-inc/loom/treebuilder"
 )
 
-// A Pool is one pool of the pool table (judge.PoolEntry, workshop's ~/.loom/pools.json) with the toolchains every
-// worker of it has, which the table doesn't hold: the judge's --pool-has, given to the placer the same way.
+// A Pool is one pool of the pool table (judge.PoolEntry, Workshop's ~/.loom/pools.json), the toolchains every worker of
+// it has among its fields (its has).
 type Pool struct {
 	judge.PoolEntry
-	Has []string
 }
 
 // A RunPool is a pool a placement's run uses, with how many of its units may be queued there at once.
