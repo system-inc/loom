@@ -622,6 +622,8 @@ func (standIn StandIn) Refused() []string {
 // none that builds, none that asks a proxy) goes to the runner's go under delegatedEnvironment; anything else, a build
 // among it, is refused. go list's -buildmode only says which packages a build in that mode would compile (a c-archive's
 // runtime/cgo): adamic's GoInputs lists the checker archive's with -buildmode=c-archive to key it (#nee3cfe).
+// go list's -test adds each package's test variants to the listing and compiles nothing: bridge/tsgo keys its products
+// on go list -deps -test -json (#nm31pcn, the key check on walk-1's tree).
 const standInScript = `#!/bin/sh
 # loom-runner's stand-in go (prebuilt.go): the runner never builds.
 allowed=no
@@ -634,7 +636,7 @@ env)
 	for argument in "$@"; do case "$argument" in -json | -changed) ;; -*) allowed=no ;; esac; done ;;
 list)
 	allowed=yes
-	for argument in "$@"; do case "$argument" in -deps | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=* | -buildmode=*) ;; -*) allowed=no ;; esac; done ;;
+	for argument in "$@"; do case "$argument" in -deps | -test | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=* | -buildmode=*) ;; -*) allowed=no ;; esac; done ;;
 work)
 	# go work edit -json prints a go.work as go reads it and writes nothing: adamic keys a workspace by it.
 	if [ "$2" = edit ] && [ "$3" = -json ] && [ $# -le 4 ]; then

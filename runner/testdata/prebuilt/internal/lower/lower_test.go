@@ -182,3 +182,11 @@ func TestWorkEdit(t *testing.T) {
 		t.Fatalf("go work edit: %v: %s", err, output)
 	}
 }
+
+// TestListTests lists a package with its test variants, as bridge/tsgo keys its products.
+func TestListTests(t *testing.T) {
+	output, err := exec.Command("go", "list", "-deps", "-test", "-json", "github.com/system-inc/adamic/internal/uses").CombinedOutput()
+	if err != nil || !strings.Contains(string(output), `"ImportPath": "example.com/dep"`) {
+		t.Fatalf("go list -deps -test -json: %v: %s", err, output)
+	}
+}
