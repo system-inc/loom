@@ -1,0 +1,54 @@
+#!/bin/sh
+# The updater's hook for a box's clock (docs/serving.md), written by `loom-runner install-serve`. On WSL two time
+# authorities fight: Hyper-V's host time sync steps the wall clock to the Windows host's time, and systemd-timesyncd,
+# finding the clock off NTP, slows the kernel clock as far as it goes (its tick down to 9000 of 10000), which
+# CLOCK_MONOTONIC takes. Every box's monotonic clock ran 6 to 9% slow, so every budget and deadline on it ran that much
+# long (Oct 10, #nmx30ay; microsoft/WSL #12583). Hyper-V's sync is kept as the one authority: timesyncd is stopped and
+# masked, and the kernel's tick and frequency put back to their defaults. A WSL start begins with the default tick and
+# the mask holds, so this only has to happen once a box; the hook checks every release. Anywhere but WSL with
+# Hyper-V's clock (/dev/ptp_hyperv) it changes nothing, since there timesyncd may be the only time sync.
+release=${LOOM_CLOCK_RELEASE:-/proc/sys/kernel/osrelease}
+hyperv=${LOOM_CLOCK_HYPERV:-/dev/ptp_hyperv}
+case $(cat "${release}" 2> /dev/null) in
+	*microsoft*) ;;
+	*)
+		echo "10-clock: not WSL; the clock's time sync is left as it is"
+		exit 0
+		;;
+esac
+if [ ! -e "${hyperv}" ]; then
+	echo "10-clock: no Hyper-V clock at ${hyperv}; the clock's time sync is left as it is"
+	exit 0
+fi
+if [ "$(systemctl is-enabled systemd-timesyncd 2> /dev/null)" != masked ]; then
+	if ! sudo -n systemctl stop systemd-timesyncd || ! sudo -n systemctl mask systemd-timesyncd; then
+		echo "10-clock: couldn't stop and mask systemd-timesyncd (sudo -n); it still fights Hyper-V's time sync"
+		exit 1
+	fi
+	echo "10-clock: systemd-timesyncd stopped and masked; Hyper-V's host time sync keeps the clock"
+fi
+# adjtimex(2) through ctypes: with no argument it prints "<tick> <frequency>"; with a tick it sets that tick and a
+# frequency of 0.
+adjtimex='
+import ctypes, ctypes.util, sys
+class Timex(ctypes.Structure):
+    _fields_ = [("modes", ctypes.c_uint)] + [(name, ctypes.c_long) for name in ("offset", "freq", "maxerror", "esterror")] + [("status", ctypes.c_int)] + [(name, ctypes.c_long) for name in ("constant", "precision", "tolerance", "sec", "usec", "tick", "ppsfreq", "jitter")] + [("shift", ctypes.c_int)] + [(name, ctypes.c_long) for name in ("stabil", "jitcnt", "calcnt", "errcnt", "stbcnt")] + [("tai", ctypes.c_int), ("padding", ctypes.c_int * 11)]
+timex = Timex()
+if len(sys.argv) > 1:
+    timex.modes, timex.tick, timex.freq = 0x4000 | 0x0002, int(sys.argv[1]), 0
+if ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True).adjtimex(ctypes.byref(timex)) < 0:
+    sys.exit("adjtimex: errno %d" % ctypes.get_errno())
+print(timex.tick, timex.freq)
+'
+read -r tick frequency << EOF
+$(python3 -c "${adjtimex}")
+EOF
+# The frequency is in 1/65536 ppm; under 1 ppm (65536) is noise, never timesyncd's work.
+if [ "${tick}" != 10000 ] || [ "${frequency#-}" -gt 65536 ]; then
+	if ! sudo -n python3 -c "${adjtimex}" 10000 > /dev/null; then
+		echo "10-clock: couldn't put the kernel's tick back to 10000 from ${tick} (sudo -n)"
+		exit 1
+	fi
+	echo "10-clock: the kernel's tick ${tick} and frequency ${frequency} put back to 10000 and 0"
+fi
+echo "10-clock: Hyper-V's time sync alone keeps the clock, tick 10000"

@@ -20,13 +20,19 @@
             // The queue: one object, idFromName('main'), the single writer of main's future and the only writer of main.
             { "name": "Queue", "class_name": "Queue" },
             // The page's headline (#lmboard): one object, idFromName('headline'), following the Queue's log.
-            { "name": "Headline", "class_name": "Headline" }
+            { "name": "Headline", "class_name": "Headline" },
+            // Loom's performance (#system_adamic_loom_performance): one object, idFromName('performance'), following the
+            // Queue's log and each run's events into every candidate's stage timeline.
+            { "name": "Performance", "class_name": "Performance" }
         ]
     },
+    // The runs Worker, read by Performance for each run's events with a token it mints for that run; never written.
+    "services": [{ "binding": "LoomRuns", "service": "loom-runs" }],
     "migrations": [
         { "tag": "changeboard-v1", "new_sqlite_classes": ["ChangeBoard"] },
         { "tag": "queue-v1", "new_sqlite_classes": ["Queue"] },
-        { "tag": "headline-v1", "new_sqlite_classes": ["Headline"] }
+        { "tag": "headline-v1", "new_sqlite_classes": ["Headline"] },
+        { "tag": "performance-v1", "new_sqlite_classes": ["Performance"] }
     ]
     // GITHUB_TOKEN reads git facts at submit; GITHUB_LANDER_TOKEN moves main, minted by Kirk at cutover.
 }

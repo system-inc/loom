@@ -269,3 +269,29 @@ func TestReadIsTolerant(t *testing.T) {
 		t.Fatal("Alive")
 	}
 }
+
+// A tree's phases are bounded with the rest: at most PhasesKept, each name cut to MaximumText; and a copy of the
+// status shares none of them, so changing a copy's phase changes nothing the writer holds. Mutants: the phases never
+// cut; copyStatus sharing the phases' array.
+func TestATreesPhasesAreBoundedAndCopied(t *testing.T) {
+	long := strings.Repeat("p", 10_000)
+	status := Status{Kind: KindTree, Tree: &Tree{Phase: "uploading"}}
+	for index := range 500 {
+		status.Tree.Phases = append(status.Tree.Phases, Phase{Name: long, Seconds: float64(index), Count: index})
+	}
+	path := TreePath(t.TempDir())
+	if err := Write(path, status); err != nil {
+		t.Fatalf("a tree with many phases wasn't written: %v", err)
+	}
+	read, err := Read(path)
+	if err != nil || len(read.Tree.Phases) != PhasesKept || len([]rune(read.Tree.Phases[0].Name)) != MaximumText || read.Tree.Phases[1].Seconds != 1 {
+		t.Fatalf("%v: %d phases", err, len(read.Tree.Phases))
+	}
+	writer := newWriter(path, Status{Kind: KindTree, Tree: &Tree{Phases: []Phase{{Name: "readying", Seconds: 1}}}}, func(string, Status) error { return nil }, time.Hour, time.Second)
+	defer writer.Close()
+	copied := writer.Status()
+	copied.Tree.Phases[0].Name = "changed"
+	if held := writer.Status(); held.Tree.Phases[0].Name != "readying" {
+		t.Fatalf("a copy's change reached the writer: %+v", held.Tree.Phases)
+	}
+}

@@ -409,7 +409,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             return 'judged ' + finishedUnits(change.units) + ' of ' + change.units.planned;
         }
         if (change.state === 'red') { return 'red, ' + change.units.failed + ' of ' + change.units.planned + ' failed'; }
-        return { parked: 'parked', landed: 'landed', witnessed: 'verified, main green', refused: 'refused' }[change.state] || change.state;
+        return { parked: 'parked', landed: 'landed', witnessed: 'verified, main green', refused: 'refused', withdrawn: 'withdrawn by its owner' }[change.state] || change.state;
     }
 
     function lineCard(change, place) {

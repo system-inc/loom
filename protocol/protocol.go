@@ -55,7 +55,7 @@ type JobUnit struct {
 	// never green without it (Oct 9: a wasi shard on a runner without the WASI SDK skips every test and passes).
 	// Placement only: the runner never sees it, and it isn't part of the cache key.
 	Requires []string `json:"requires,omitempty"`
-	// Kind is the unit's kind from the unit key's (contract 2): test, product or phase. A unit of a kind runs under
+	// Kind is the unit's kind from the unit key's (contract 2): test, build, product or phase. A unit of a kind runs under
 	// that kind's hard ceiling, its timeout no longer than KindCeilings says, so the runner kills it there at the
 	// latest, and a kill is infra, never the change's red. Empty: no kind, no ceiling, as before.
 	Kind string `json:"kind,omitempty"`
@@ -65,10 +65,16 @@ type JobUnit struct {
 	Portable bool `json:"portable,omitempty"`
 }
 
-// KindCeilings is each kind's hard ceiling in seconds, the longest timeout a unit of it may carry (Loom, contracts
-// v1.1: a test unit is 60 s by design and killed at 90 s; a product gets 600 s). A phase gets the hour every phase
-// unit carries today, until a ruling names its own.
-var KindCeilings = map[string]int{"test": 90, "product": 600, "phase": 3600}
+// HangCeilingSeconds is the build law's hard ceiling for a test or build unit (Kirk, Oct 10): every unit is meant to
+// finish in 60 s, but one past it is slow, green with a warning (the judge's) and never killed for it. Only a hang
+// reaches these 15 minutes, and a hang is void, never red.
+const HangCeilingSeconds = 900
+
+// KindCeilings is each kind's hard ceiling in seconds, the longest timeout a unit of it may carry, which the planner
+// gives every job of the kind and the runner kills at. A test or build unit's is HangCeilingSeconds (until Oct 10 a
+// test unit was killed at 90 s, and the verify's slow passing packages read as hangs); a product gets 600 s; a phase
+// gets the hour every phase unit carries today, until a ruling names its own.
+var KindCeilings = map[string]int{"test": HangCeilingSeconds, "build": HangCeilingSeconds, "product": 600, "phase": 3600}
 
 // Toolchains are the names a unit may require and a machine may have, the unit key's tools (contract v1).
 var Toolchains = []string{"go", "clang", "node", "wasiSdk"}
@@ -120,6 +126,10 @@ type Unit struct {
 	// SequenceStart is the sequence the runner's first event takes: 0 for a first attempt. A pool unit placed
 	// again continues its stream on the wire from where the record stands, since its runner posts there itself.
 	SequenceStart int `json:"sequenceStart,omitempty"`
+	// Requires is the toolchains the unit's key names (JobUnit's): the runner checks each works before it runs the unit,
+	// and a unit it finds one missing or broken for finishes broken with missingTools, void (#vv28ewd). A runner takes it
+	// a release before anything sends it, since a runner's decode refuses a field it doesn't know.
+	Requires []string `json:"requires,omitempty"`
 }
 
 type Endpoint struct {
@@ -175,6 +185,10 @@ type Event struct {
 	Timing *Timing `json:"timing,omitempty"`
 	// finished
 	Status string `json:"status,omitempty"`
+	// MissingTools names, by Toolchains' names, each toolchain the unit requires that its runner found missing or
+	// broken before running it (#vv28ewd): the unit finished broken without running, and the judge reads it void, never
+	// red, since tests run without their toolchain skip into passes that prove nothing.
+	MissingTools []string `json:"missingTools,omitempty"`
 }
 
 // A Timing is what only the runner knows of a unit's time and size, as fields: one timing event, just before finished
@@ -294,7 +308,7 @@ func Expand(job Job) ([]PlannedUnit, error) {
 			ceiling, known := KindCeilings[unit.Kind]
 			switch {
 			case !known:
-				return nil, fmt.Errorf("unit %s's kind %q isn't test, product or phase", unit.Id, unit.Kind)
+				return nil, fmt.Errorf("unit %s's kind %q isn't test, build, product or phase", unit.Id, unit.Kind)
 			case unit.TimeoutSeconds > ceiling:
 				return nil, fmt.Errorf("unit %s is a %s with a %d s timeout, over its kind's ceiling of %d s", unit.Id, unit.Kind, unit.TimeoutSeconds, ceiling)
 			case unit.Test != nil && unit.Kind == "phase" && unit.Test.Phase == "":

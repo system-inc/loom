@@ -137,8 +137,11 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		},
 		Indexed: store.TreeIndexed,
 		Floor:   func() error { return builder.CheckFloor(watched, nil) },
-		Build: func(want treebuilder.Want, running func(pid int) error) error {
+		Build: func(want treebuilder.Want, running func(pid int) error) (*builder.TreePhases, error) {
 			return buildWant(runContext, checkout, binary, settings, want, warm, running)
+		},
+		Phases: func(tree string) *builder.TreePhases {
+			return readTreePhases(filepath.Join(*settings.logs, tree+".log"))
 		},
 		Alive:    buildAlive,
 		Kill:     killGroup,
@@ -179,21 +182,26 @@ func buildTrees(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
-// buildWant checks the wanted future out and runs build-tree on it. A checkout that fails is transient (GitHub's 5xx,
-// the network), retried soon and never the tree's failure; one the builder's stop cut short is a stop. With a resident
-// (warm), the tree is keyed against the nearest warm tree and its keys go to build-tree in a file beside its log; a
-// resident that can't key it is said in the log and the tree builds cold, as it would without one.
-func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want, warm *resident.Resident, running func(pid int) error) error {
+// buildWant checks the wanted future out and runs build-tree on it, and returns the build's phases: the checkout's
+// seconds, the resident's keying's, and build-tree's own from its summary line when it printed one. A checkout that
+// fails is transient (GitHub's 5xx, the network), retried soon and never the tree's failure; one the builder's stop cut
+// short is a stop. With a resident (warm), the tree is keyed against the nearest warm tree and its keys go to
+// build-tree in a file beside its log; a resident that can't key it is said in the log and the tree builds cold, as it
+// would without one.
+func buildWant(runContext context.Context, checkout planner.Checkout, binary string, settings buildTreesSettings, want treebuilder.Want, warm *resident.Resident, running func(pid int) error) (*builder.TreePhases, error) {
+	started := time.Now()
 	tree, cleanup, err := checkout(want.Future)
+	phases := &builder.TreePhases{Checkout: time.Since(started).Seconds()}
 	if err != nil && runContext.Err() != nil {
-		return fmt.Errorf("%w: checking %s out: %v", treebuilder.ErrStopped, want.Future, err)
+		return phases, fmt.Errorf("%w: checking %s out: %v", treebuilder.ErrStopped, want.Future, err)
 	}
 	if err != nil {
-		return fmt.Errorf("%w: checking %s out keyless: %v", treebuilder.ErrTransient, want.Future, err)
+		return phases, fmt.Errorf("%w: checking %s out keyless: %v", treebuilder.ErrTransient, want.Future, err)
 	}
 	defer cleanup()
 	arguments := buildTreeArguments(settings, tree, want)
 	if warm != nil {
+		keyingStarted := time.Now()
 		keysFile := filepath.Join(*settings.logs, want.Tree+".keys.json")
 		keyed, err := warm.Key(tree, want.Future)
 		if err == nil {
@@ -206,8 +214,14 @@ func buildWant(runContext context.Context, checkout planner.Checkout, binary str
 				want.Tree, want.Future, keyed.Seconds, len(keyed.Changed), keyed.From, len(keyed.Relisted))
 			arguments = append(arguments, "--keys", keysFile)
 		}
+		phases.Keying = time.Since(keyingStarted).Seconds()
 	}
-	return runBuildTree(runContext, binary, arguments, filepath.Join(*settings.logs, want.Tree+".log"), *settings.bound, running)
+	log := filepath.Join(*settings.logs, want.Tree+".log")
+	err = runBuildTree(runContext, binary, arguments, log, *settings.bound, running)
+	if built := readTreePhases(log); built != nil {
+		built.Checkout, built.Keying, phases = phases.Checkout, phases.Keying, built
+	}
+	return phases, err
 }
 
 // readyClone makes the builder's clone when it's missing, an empty repository whose origin is the public adamic

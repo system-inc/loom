@@ -27,8 +27,8 @@ func (runs stubRuns) Finished(run, unitKey string) (Finished, bool, error) {
 // stubReused answers every reused unit with one tests object, naming the run it reuses.
 type stubReused struct{}
 
-func (stubReused) Tests(unitKey, reused string) (json.RawMessage, error) {
-	return json.RawMessage(`{"failed":0,"inline":[],"passed":7,"sha256":"` + strings.Repeat("7", 64) + `","skipped":0}`), nil
+func (stubReused) Tests(unitKey, reused string) (ReusedVerdict, error) {
+	return ReusedVerdict{Tests: json.RawMessage(`{"failed":0,"inline":[],"passed":7,"sha256":"` + strings.Repeat("7", 64) + `","skipped":0}`), Run: reused}, nil
 }
 
 type stubMain map[string][]TestOutcome
@@ -654,6 +654,11 @@ var warmRunnerPools = []PoolEntry{
 	{Name: "box-strict-8a70", Runner: "8a70", MemoryMegabytes: 16384, Cpus: 4, Cold: true, Machines: []string{"Cloud"}, ColdSince: "2026-10-10T02:44:10Z"},
 }
 
+// codexPools is the Codex fleet's pool, its workers named by prefix and cold since 23:00Z.
+var codexPools = []PoolEntry{
+	{Name: "codex-strict", Runner: "8a70", MemoryMegabytes: 16384, Cpus: 4, Cold: true, MachinePrefixes: []string{"codex-"}, ColdSince: "2026-10-10T23:00:00Z"},
+}
+
 func TestAWarmAttemptIsReadFromThePoolTable(t *testing.T) {
 	at := func(machine, started string) Attempt { return Attempt{Machine: machine, StartedAt: started} }
 	for _, c := range []struct {
@@ -668,6 +673,11 @@ func TestAWarmAttemptIsReadFromThePoolTable(t *testing.T) {
 		{"a machine a pool not marked cold names", append([]PoolEntry{{Name: "w", Machines: []string{"Cloud"}, ColdSince: "2026-10-10T02:00:00Z"}}, warmRunnerPools...), at("Cloud", "2026-10-10T02:50:00Z"), true},
 		{"a cold pool with no coldSince", []PoolEntry{{Name: "c", Cold: true, Machines: []string{"Cloud"}}}, at("Cloud", "2026-10-10T02:50:00Z"), true},
 		{"an unreadable started time", warmRunnerPools, at("Cloud", ""), true},
+		// Codex workers are codex-<hostname>, named by the pool's prefix, not listed (#54pcx41).
+		{"a Codex worker a cold pool names by prefix", codexPools, at("codex-cb2a541fac2d", "2026-10-10T23:30:00Z"), false},
+		{"a Codex worker before its pool ran cold", codexPools, at("codex-cb2a541fac2d", "2026-10-10T22:00:00Z"), true},
+		{"a worker the prefix doesn't start", codexPools, at("cb2a541fac2d-codex-", "2026-10-10T23:30:00Z"), true},
+		{"a Codex worker an unmarked pool also names by prefix", append([]PoolEntry{{Name: "w", MachinePrefixes: []string{"codex"}}}, codexPools...), at("codex-cb2a541fac2d", "2026-10-10T23:30:00Z"), true},
 	} {
 		if why := WarmAttempt(c.pools, c.attempt); (why != "") != c.warm {
 			t.Errorf("%s: warm %q, want warm %v", c.name, why, c.warm)
@@ -727,5 +737,102 @@ func TestAWarmPassNeverDecidesEvenCarried(t *testing.T) {
 				t.Fatalf("placements %v, run %s: the warm pass decided", h.fabric.Asked, post.Decision.Status)
 			}
 		})
+	}
+}
+
+func slowPassed(wall float64) Finished {
+	finished := passed()
+	finished.Attempt.WallSeconds = wall
+	return finished
+}
+
+// Through the loop (#ccewvra): a slow pass's record carries its warning, a branch that made it slow is red with both
+// walls in its kick, a verify's slow pass reruns nothing, and a fast pass's record has no warnings field at all.
+func TestASlowPassThroughTheLoop(t *testing.T) {
+	cases := []struct {
+		name   string
+		base   string
+		alone  map[string]Finished // by tree
+		run    string
+		asked  int
+		record string // must be in the unit's record
+	}{
+		{"a branch that made it slow is red", baseTree, map[string]Finished{futureTree: slowPassed(80), baseTree: slowPassed(30)}, "red", 2,
+			`"warnings":[{"baseWallSeconds":30,"budgetSeconds":60,"kind":"overBudget","wallSeconds":74}]`},
+		{"a branch that didn't is green with a warning", baseTree, map[string]Finished{futureTree: slowPassed(80), baseTree: slowPassed(75)}, "green", 2,
+			`"warnings":[{"baseWallSeconds":75,"budgetSeconds":60,"kind":"overBudget","wallSeconds":74}]`},
+		{"a verify's slow pass is green with a warning, nothing rerun", futureTree, nil, "green", 0,
+			`"warnings":[{"budgetSeconds":60,"kind":"overBudget","wallSeconds":74}]`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness()
+			h.runs["u"] = slowPassed(74)
+			for tree, finished := range c.alone {
+				h.script("u", tree, finished)
+			}
+			loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 10, 22, 0, 0, 0, time.UTC) }}
+			post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: c.base, Owner: "system_adamic_library"}, Change: "chg_A",
+				Future: futureTree, Base: c.base, Run: "run-1", Plan: []PlanUnit{{UnitKey: "u", Kind: KindTest}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if post.Decision.Status != c.run || len(h.fabric.Asked) != c.asked {
+				t.Fatalf("run %s with placements %v, want %s and %d", post.Decision.Status, h.fabric.Asked, c.run, c.asked)
+			}
+			if !strings.Contains(string(post.Verdicts[0]), c.record) {
+				t.Fatalf("record %s lacks %s", post.Verdicts[0], c.record)
+			}
+			kick, kicked := post.Decision.Kicks["u"]
+			if kicked != (c.run == "red") || (kicked && !strings.Contains(kick.Why, "80.0 s on the candidate and 30.0 s on main's base")) {
+				t.Fatalf("kicks %+v", post.Decision.Kicks)
+			}
+		})
+	}
+	// Only a test unit is held to the run budget: a product that builds for minutes is no warning and reruns nothing.
+	h := newHarness()
+	h.runs["u"] = slowPassed(300)
+	if post := h.judge(t, PlanUnit{UnitKey: "u", Kind: "product"}); strings.Contains(string(post.Verdicts[0]), "warnings") || len(h.fabric.Asked) != 0 {
+		t.Fatalf("a slow product's record %s, placements %v: want no warning and nothing rerun", post.Verdicts[0], h.fabric.Asked)
+	}
+	h = newHarness()
+	h.runs["u"] = slowPassed(12)
+	post := h.judge(t, PlanUnit{UnitKey: "u", Kind: KindTest})
+	if strings.Contains(string(post.Verdicts[0]), "warnings") || len(h.fabric.Asked) != 0 {
+		t.Fatalf("a fast pass's record %s, placements %v: want no warnings field and nothing rerun", post.Verdicts[0], h.fabric.Asked)
+	}
+}
+
+// stubIndex answers each reused key with one ReusedVerdict.
+type stubIndex map[string]ReusedVerdict
+
+func (index stubIndex) Tests(unitKey, reused string) (ReusedVerdict, error) {
+	return index[unitKey], nil
+}
+
+// A reused unit's record names the run its tests came from, the key's newest pass even when the plan named an earlier
+// one; a key whose newest verdict isn't a pass makes the unit void and the run void, posted, never a stuck future.
+func TestAReuseFollowsItsKeysNewestPassAndAnUnbackedOneIsVoid(t *testing.T) {
+	tests := json.RawMessage(`{"failed":0,"inline":[],"passed":4,"sha256":"` + strings.Repeat("4", 64) + `","skipped":0}`)
+	h := newHarness()
+	h.runs["v"] = passed()
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 10, 23, 20, 0, 0, time.UTC) },
+		Reused: stubIndex{"later": {Tests: tests, Run: "future-3282-1"}, "gone": {Unbacked: "the index's newest verdict for gone is failed, from run future-3282-1"}}}
+	post, err := loop.JudgeFuture(Job{Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1",
+		Plan: []PlanUnit{{UnitKey: "later", Reused: "future-ebdb-4"}, {UnitKey: "v"}}})
+	if err != nil || post.Decision.Status != "green" {
+		t.Fatalf("post %+v %v, want green", post.Decision, err)
+	}
+	if record := string(post.Verdicts[0]); !strings.Contains(record, `"rule":"judge-v1 reused future-3282-1"`) || !strings.Contains(record, `"passed":4`) {
+		t.Fatalf("the reused record %s, want the newest pass's run and tests", record)
+	}
+	h = newHarness()
+	loop.Queue = h.queue
+	post, err = loop.JudgeFuture(Job{Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1", Plan: []PlanUnit{{UnitKey: "gone", Reused: "future-ebdb-4"}}})
+	if err != nil || post.Decision.Status != "void" || len(h.queue.Posts[futureTree]) != 1 {
+		t.Fatalf("post %+v %v, want posted void", post.Decision, err)
+	}
+	if record := recordOf(t, post, "gone"); record.Status != Void || record.Infra != InfraRefused {
+		t.Fatalf("the unbacked record %+v, want void refused", record)
 	}
 }

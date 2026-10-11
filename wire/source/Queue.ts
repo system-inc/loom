@@ -48,6 +48,8 @@ export type EventType =
     | 'change.red'
     | 'change.kicked'
     | 'change.restacked'
+    // The owner withdrew a branch they no longer want landed (#6hw5crw): it leaves the line for good.
+    | 'change.withdrawn'
     | 'change.parked'
     // A witness of main decided green (#6gj7n9p): it never lands, so this is where it finishes.
     | 'change.witnessed'
@@ -57,7 +59,7 @@ export type EventType =
     | 'main.red'
     | 'main.green';
 
-export type ChangeState = 'queued' | 'building' | 'testing' | 'landed' | 'red' | 'parked' | 'refused' | 'witnessed';
+export type ChangeState = 'queued' | 'building' | 'testing' | 'landed' | 'red' | 'parked' | 'refused' | 'witnessed' | 'withdrawn';
 
 export interface ChangeRecord {
     change: string;
@@ -332,12 +334,15 @@ export interface QueueState {
 
 const shaPattern = /^[0-9a-f]{40}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
+
+// The unit kinds whose job reads its tree's build, as planner.ReadsTreeBuild says, so a plan's unit of one may name its tree.
+const treeReadingKinds = ['test', 'build', 'product', 'phase'];
 const changePattern = /^chg_[0-9a-z]{26}$/;
 const base32 = '0123456789abcdefghjkmnpqrstvwxyz';
 const statuses: readonly string[] = ['passed', 'failed', 'void'];
 const causes: readonly string[] = ['change', 'mainRed', 'flake', 'infra'];
 // A change in one of these is finished: nothing more is planned, decided or landed for it.
-const finishedStates: readonly ChangeState[] = ['landed', 'red', 'parked', 'refused', 'witnessed'];
+const finishedStates: readonly ChangeState[] = ['landed', 'red', 'parked', 'refused', 'witnessed', 'withdrawn'];
 
 // Canonical JSON: sorted keys, no insignificant whitespace (contracts v1, the preamble).
 export function canonical(value: unknown): string {
@@ -618,6 +623,38 @@ export function judgeGreen(plan: readonly string[], verdicts: readonly UnitVerdi
     }
     decision.status = decision.red.length > 0 ? 'red' : decision.problems.length > 0 ? 'void' : 'green';
     return decision;
+}
+
+// The landing orders: every live change whose future may land, in line order, as the pusher pulls them. Withdraw reads
+// them too, so a branch the pusher may be landing is never withdrawn under it.
+export function landingOrders(state: QueueState): { change: string; future: string; base: string; owner: string; run: string }[] {
+    const orders = state.line.flatMap(function (change) {
+        const entry = state.changes.get(change);
+        if (entry === undefined || !isLive(entry) || entry.future === null || !futureLandable(state.futures.get(entry.future))) {
+            return [];
+        }
+        if (entry.record.parent !== null && state.changes.get(entry.record.parent)?.state !== 'landed') {
+            return [];
+        }
+        // A parity run is tested, never landed: no landing order is ever written for one.
+        if (entry.record.parity === true) {
+            return [];
+        }
+        // While main is red, only a fix-forward naming that red main or a revert lands; the rest wait, green.
+        if (state.mainRed !== null && entry.record.fixesRed !== state.mainRed.main && entry.revertOf === null) {
+            return [];
+        }
+        // In a block, only the decided block's longest green prefix lands, once, carrying every change ahead of it.
+        if (entry.block !== null) {
+            const block = state.blocks.get(entry.block);
+            if (block === undefined || !block.resolved || block.landing !== change) {
+                return [];
+            }
+        }
+        const future = state.futures.get(entry.future);
+        return [{ change: change, future: entry.future, base: future?.base ?? entry.record.base, owner: entry.record.owner, run: future?.decided?.run ?? '' }];
+    });
+    return orders;
 }
 
 // Whether a future may land: decided green, and its verdicts at this exact tree still say so by the judge's rule,
@@ -903,6 +940,14 @@ export function apply(state: QueueState, event: QueueEvent, hash: string): void 
     else if (event.type === 'change.parked' && entry !== undefined) {
         entry.state = 'parked';
     }
+    else if (event.type === 'change.withdrawn' && entry !== undefined) {
+        // The owner took it out: it leaves the line, and its future with it, since a future lists only live changes.
+        entry.state = 'withdrawn';
+        entry.verdict = { withdrawn: event.data.reason, by: event.data.by };
+        state.line = state.line.filter(function (id) {
+            return id !== entry.record.change;
+        });
+    }
     else if (event.type === 'change.witnessed' && entry !== undefined) {
         entry.state = 'witnessed';
         entry.verdict = (event.data.decision ?? null) as Record<string, unknown> | null;
@@ -1114,9 +1159,11 @@ export async function checkPlan(body: string): Promise<PlannedUnit[] | { reason:
         if (item.tree !== undefined && item.tree !== null && (typeof item.tree !== 'string' || !hashPattern.test(item.tree))) {
             return `unit ${item.name}'s tree is a tree key, 64 lowercase hex digits`;
         }
-        // A phase unit names its tree too: its job takes the tree's npm packages from Workshop's build (#v03v751).
-        if (typeof item.tree === 'string' && item.keyParts.kind !== 'test' && item.keyParts.kind !== 'product' && item.keyParts.kind !== 'phase') {
-            return `unit ${item.name} is a ${String(item.keyParts.kind)} unit, and only a test, product or phase unit runs its tree's build`;
+        // A phase unit names its tree too: its job takes the tree's npm packages from Workshop's build (#v03v751). A build
+        // unit does as well: its runner builds on that tree's source and refuses a build job that names none (#8j1qygw).
+        // planner.ReadsTreeBuild is the same list.
+        if (typeof item.tree === 'string' && !treeReadingKinds.includes(String(item.keyParts.kind))) {
+            return `unit ${item.name} is a ${String(item.keyParts.kind)} unit, and only a test, build, product or phase unit runs its tree's build`;
         }
         if (names.has(item.name) || keys.has(item.unitKey)) {
             return `unit ${item.name} is planned twice`;
@@ -1322,6 +1369,10 @@ export class Queue extends DurableObject<Env> {
         const resubmitMatch = /^\/changes\/(chg_[0-9a-z]{26})\/sha$/.exec(path);
         if (resubmitMatch !== null && method === 'POST') {
             return this.resubmit(request, resubmitMatch[1] ?? '');
+        }
+        const withdrawMatch = /^\/changes\/(chg_[0-9a-z]{26})\/withdraw$/.exec(path);
+        if (withdrawMatch !== null && method === 'POST') {
+            return this.withdraw(request, withdrawMatch[1] ?? '');
         }
         const changeMatch = /^\/changes\/(chg_[0-9a-z]{26})$/.exec(path);
         if (changeMatch !== null && method === 'GET') {
@@ -2157,34 +2208,45 @@ export class Queue extends DurableObject<Env> {
     // The landing orders the pusher pulls: every change whose future may land, in line order. A change that stacks on
     // another lands only after its base has.
     private async landings(): Promise<Response> {
-        const state = await this.current();
-        const orders = state.line.flatMap(function (change) {
+        return jsonResponse(200, { landings: landingOrders(await this.current()) });
+    }
+
+    // The owner withdraws a branch (#6hw5crw): {owner, reason} from the front door, the owner the submit token names.
+    // Only its owner's, and only while it's still the queue's to end: never once landed or already over (refused,
+    // witnessed, withdrawn), never while a landing order stands for it (the lander may be pushing it; it lands, or parks
+    // when main moves, first), and never while it's in a block in flight, whose chain it's built into. A red or parked
+    // branch may be withdrawn, so it's ended rather than left to resubmit. A branch stacked on it parks.
+    private async withdraw(request: Request, change: string): Promise<Response> {
+        const body = await readBodyText(request, MaximumChangeBodyBytes);
+        const parsed = parseJson(body ?? '');
+        if (!isPlainObject(parsed) || typeof parsed.owner !== 'string' || parsed.owner === '' || typeof parsed.reason !== 'string' || parsed.reason.trim() === '' || parsed.reason.length > 500) {
+            return jsonResponse(400, { reason: 'the body is {owner, reason}: who withdraws the branch and why, in at most 500 characters' });
+        }
+        const owner = parsed.owner;
+        const reason = parsed.reason.trim();
+        return this.ctx.blockConcurrencyWhile(async () => {
+            const state = await this.current();
             const entry = state.changes.get(change);
-            if (entry === undefined || !isLive(entry) || entry.future === null || !futureLandable(state.futures.get(entry.future))) {
-                return [];
+            if (entry === undefined) {
+                return jsonResponse(404, { reason: `no change ${change}` });
             }
-            if (entry.record.parent !== null && state.changes.get(entry.record.parent)?.state !== 'landed') {
-                return [];
+            if (entry.record.owner !== owner) {
+                return jsonResponse(403, { reason: `change ${change} is ${entry.record.owner}'s` });
             }
-            // A parity run is tested, never landed: no landing order is ever written for one.
-            if (entry.record.parity === true) {
-                return [];
+            if (entry.state === 'landed' || entry.state === 'refused' || entry.state === 'witnessed' || entry.state === 'withdrawn') {
+                return jsonResponse(409, { reason: `change ${change} is ${entry.state}; only a branch still on its way, or red or parked, is withdrawn` });
             }
-            // While main is red, only a fix-forward naming that red main or a revert lands; the rest wait, green.
-            if (state.mainRed !== null && entry.record.fixesRed !== state.mainRed.main && entry.revertOf === null) {
-                return [];
+            if (landingOrders(state).some((order) => order.change === change)) {
+                return jsonResponse(409, { reason: `change ${change} has a landing order; it lands, or parks when main moves, before it can be withdrawn` });
             }
-            // In a block, only the decided block's longest green prefix lands, once, carrying every change ahead of it.
-            if (entry.block !== null) {
-                const block = state.blocks.get(entry.block);
-                if (block === undefined || !block.resolved || block.landing !== change) {
-                    return [];
-                }
+            const block = entry.block === null ? undefined : state.blocks.get(entry.block);
+            if (block !== undefined && !block.resolved) {
+                return jsonResponse(409, { reason: `change ${change} is in block ${entry.block} in flight; withdraw it once the block is decided` });
             }
-            const future = state.futures.get(entry.future);
-            return [{ change: change, future: entry.future, base: future?.base ?? entry.record.base, owner: entry.record.owner, run: future?.decided?.run ?? '' }];
+            await this.append('change.withdrawn', { change: change, future: entry.future ?? undefined }, { by: owner, reason: reason });
+            await this.parkDependents(change);
+            return jsonResponse(200, { change: change, state: 'withdrawn' });
         });
-        return jsonResponse(200, { landings: orders });
     }
 
     // What the pusher did with a landing order: {main, from, landed} when it moved main from `from` to `main` and the

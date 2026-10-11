@@ -2,6 +2,7 @@ package builder
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -152,6 +153,8 @@ type TreeBuild struct {
 	// watches nothing. Free reads a filesystem (nil means Free).
 	Watched map[string]Watch
 	Free    func(path string) (uint64, error)
+	// Phases, when set, takes Warm's two steps' seconds (WarmTests, WarmMains).
+	Phases *TreePhases
 }
 
 func (build TreeBuild) busy() float64 {
@@ -168,12 +171,12 @@ func (build TreeBuild) gauge() Gauge {
 	return ProcGauge
 }
 
-// shared is the environment for a later phase's go processes: GOFLAGS carries each one's share of the compile limit
+// shared is the environment for a later phase's go processes: GOMAXPROCS carries each one's share of the compile limit
 // into the go builds its tests run themselves (a product test's go build -buildmode=c-archive, Oct 10), which
-// otherwise compile as many packages at once as the machine has threads.
+// otherwise compile as many packages at once as the machine has threads; go's -p defaults to GOMAXPROCS. Never
+// GOFLAGS: adamic's product keys read it, and a runner asks for each product under the unit's own (#nm31pcn).
 func (build TreeBuild) shared(extra ...string) []string {
-	flags := strings.TrimSpace(os.Getenv("GOFLAGS") + " -p=" + build.perJob())
-	return build.environment(append([]string{"GOFLAGS=" + flags}, extra...)...)
+	return build.environment(append([]string{"GOMAXPROCS=" + build.perJob()}, extra...)...)
 }
 
 // compile is Compile, or every thread but four, so the machine can always answer.
@@ -251,12 +254,19 @@ func (build TreeBuild) mainPackages() ([]string, error) {
 // Warm compiles every package's tests once, in one go process, compile at a time, running none: each dependency
 // compiles once for the whole tree, and the products and binaries after it start from a warm build cache instead
 // of each compiling the tree's dependencies again at once. Then it compiles every main package with
-// ProductBuildFlags, as a product's go build will, so a product test's own build compiles nothing either.
+// ProductBuildFlags, as a product's go build will, so a product test's own build compiles nothing either. Each step's
+// seconds go to Phases, when set.
 func (build TreeBuild) Warm(packages []planner.ProductTest) error {
-	if err := build.warmTests(packages); err != nil {
+	phases, started := cmp.Or(build.Phases, &TreePhases{}), time.Now()
+	err := build.warmTests(packages)
+	phases.WarmTests = time.Since(started).Seconds()
+	if err != nil {
 		return err
 	}
-	return build.warmProducts()
+	started = time.Now()
+	err = build.warmProducts()
+	phases.WarmMains = time.Since(started).Seconds()
+	return err
 }
 
 // warmProducts compiles every main package with ProductBuildFlags, compile at a time, linking nothing.
@@ -400,13 +410,15 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 	return byPackage, failed
 }
 
-// TreeIndexFormat is the shape of tree index this release writes and reads (TreeIndex.Format): 3, whose source holds
-// its npm projects' packages, each named in Node (2's held none, so its runners ran npm; 2 and 1 had chunks, and 1,
-// and no format at all, named one whole archive). A change to what an index holds or how a runner reads it is a new
-// format: indexes in the old one stay at their keys, read as missing (ParseTree reads an index for its format first,
-// so one of another shape is ErrIndexFormat, never misread), so the tree builder builds them again and the placer
-// releases no unit to a runner that would refuse them.
-const TreeIndexFormat = 3
+// TreeIndexFormat is the shape of tree index this release writes and reads (TreeIndex.Format): 4, whose products were
+// built under planner.UnitEnvironment, the environment a runner's unit asks for them under (3's were built under
+// GOFLAGS=-p=<share> and GOTOOLCHAIN=local and asked for under the box's, so a unit missed them, #nm31pcn); 3 and 4
+// hold their npm projects' packages in the source, each named in Node (2's held none, so its runners ran npm; 2 and 1
+// had chunks, and 1, and no format at all, named one whole archive). A change to what an index holds or how a runner
+// reads it is a new format: indexes in the old one stay at their keys, read as missing (ParseTree reads an index for
+// its format first, so one of another shape is ErrIndexFormat, never misread), so the tree builder builds them again
+// and the placer releases no unit to a runner that would refuse them.
+const TreeIndexFormat = 4
 
 // A TreeIndex is trees/<treeKey>.json, a tree's build: the source's chunks, each product's archive by its key, and
 // each package with its binary's blob and the products its tests read.
@@ -610,6 +622,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 	if err := CheckChunks(source.Chunks); err != nil {
 		return "", false, fmt.Errorf("the source: %w", err)
 	}
+	phases, lap := cmp.Or(store.Phases, &TreePhases{}), time.Now()
 	var sent, sentBytes atomic.Int64
 	err := each(len(source.Chunks), publishJobs, func(index int) error {
 		chunk := source.Chunks[index]
@@ -627,6 +640,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 		return "", false, err
 	}
 	source.Sent, source.SentBytes = int(sent.Load()), sentBytes.Load()
+	phases.UploadChunks, lap = time.Since(lap).Seconds(), time.Now()
 	treeIndex.Format, treeIndex.Source = TreeIndexFormat, source.Chunks
 	names := make([]string, 0, len(treeIndex.Packages))
 	read := map[string]bool{}
@@ -665,6 +679,7 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 	if err != nil {
 		return "", false, err
 	}
+	phases.UploadProducts, lap = time.Since(lap).Seconds(), time.Now()
 	treeIndex.Products = map[string]string{}
 	conflicted := map[string]error{}
 	for index, product := range products {
@@ -714,7 +729,9 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 	for index, name := range names {
 		treeIndex.Packages[name] = packages[index]
 	}
+	phases.UploadBinaries, lap = time.Since(lap).Seconds(), time.Now()
 	written, err := store.writeIndex(treeKey, treeIndex)
+	phases.UploadIndex = time.Since(lap).Seconds()
 	if err != nil {
 		return "", false, fmt.Errorf("the tree's index: %w", err)
 	}
@@ -819,7 +836,7 @@ func (index TreeIndex) blobs() []string {
 }
 
 // keep keeps a held index runnable when a worse build declines to replace it, rather than letting what it names
-// expire under its runners near day 7: every blob it names that was uploaded more than FreshFor ago is read, checked
+// expire under its runners near day 30: every blob it names that was uploaded more than FreshFor ago is read, checked
 // and refreshed in the bucket, and so is the index itself, over the ETag read (r2.ErrChanged when another build wrote it
 // meanwhile, for the caller to read it again). Refreshing beats calling an old index replaceable: that would hand
 // runners the worse build, failed packages and all, when the better one only needed its blobs kept. An index naming a

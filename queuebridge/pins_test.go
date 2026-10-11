@@ -13,23 +13,32 @@ import (
 	"testing"
 )
 
-// The pins fact against a real smart-HTTP git server (git http-backend), standing in for GitHub: cohere and TypeScript
-// as bare repositories it serves keyless, and a private one that answers 401 without a key. Each mutant below must make
-// a test here fail:
+// The pins fact against a real smart-HTTP git server (git http-backend), standing in for GitHub: cohere, TypeScript and
+// a private repository it serves, the last answering 401 without a key. Pins name github.com urls, as adamic's do, and
+// the clone's mirror fetches them from the stand-in. Each mutant below must make a test here fail:
 //
 //	pins not followed into a pin (cohere's TypeScript): TestEveryPinIsFoundRecursivelyAndProvenFetchable
 //	a pin to a commit never pushed counted fetchable: TestAPinToACommitThatExistsOnlyLocallyIsUnfetchableAndNamed
-//	an ssh url fetched with whatever key the machine holds, or counted fetchable: TestAnSshPinIsUnfetchableForAKeylessMachine
-//	the fetch run with the machine's credentials (a helper, ~/.netrc): TestAPinBehindAKeyIsUnfetchableEvenWhenThisMachineHoldsOne
-//	a remote that's down read as unfetchable (refused on a guess): TestARemoteThatIsDownSaysNothingAndTheFactsWait
+//	a url off github.com, or an ssh one, fetched or counted fetchable: TestOnlyGithubComOverHttpsIsEverFetched
+//	PinUrl and prepare.sh's pinUrl disagreeing on any url: TestTheBridgeAndPrepareShReadEveryPinUrlAlike
+//	the fetch run with the machine's credentials (a helper, ~/.netrc, inherited GIT_CONFIG_*), the environment added to the
+//	process's, or credential.helper not emptied: TestAPinBehindAKeyIsUnfetchableEvenWhenThisMachineHoldsOne
+//	GitHub down or throttling (403, 429) read as unfetchable: TestARemoteThatIsDownOrThrottlingSaysNothingAndTheFactsWait
+//	pins past PinDepth fetched, or passed unproven: TestAPinNestedPastTheDepthIsRefusedByName
 
-// A server is GitHub as the pins see it: bare repositories under root, served over HTTP.
+// A server is GitHub as the pins see it: bare repositories under root, served over HTTP, or answering every request
+// with status when it isn't 0.
 type server struct {
 	root, url string
-	down      bool
+	status    int
 }
 
 func newServer(t *testing.T) *server {
+	return newServerOver(t, false)
+}
+
+// newServerOver is a server over TLS when secure, with a certificate no client trusts unless told not to verify it.
+func newServerOver(t *testing.T, secure bool) *server {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
 		t.Skip("no git")
@@ -37,9 +46,9 @@ func newServer(t *testing.T) *server {
 	made := &server{root: t.TempDir()}
 	backend := &cgi.Handler{Path: gitPath, Args: []string{"http-backend"}, Env: []string{"GIT_PROJECT_ROOT=" + made.root, "GIT_HTTP_EXPORT_ALL=1"},
 		InheritEnv: []string{"PATH"}}
-	listener := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if made.down {
-			http.Error(writer, "GitHub is having a moment", http.StatusServiceUnavailable)
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if made.status != 0 {
+			http.Error(writer, "GitHub is having a moment", made.status)
 			return
 		}
 		// The private repository answers only a caller with a key.
@@ -49,10 +58,29 @@ func newServer(t *testing.T) *server {
 			return
 		}
 		backend.ServeHTTP(writer, request)
-	}))
+	})
+	listener := httptest.NewUnstartedServer(handler)
+	if secure {
+		listener.StartTLS()
+	} else {
+		listener.Start()
+	}
 	t.Cleanup(listener.Close)
 	made.url = listener.URL
 	return made
+}
+
+// github is a repository's url as .gitmodules names it; mirrored, the clone fetches it from the stand-in.
+func github(name string) string {
+	return "https://github.com/system-inc/" + name + ".git"
+}
+
+// mirrored is clone fetching every github.com url from made instead.
+func (made *server) mirrored(clone Clone) Clone {
+	clone.mirror = func(address string) string {
+		return strings.Replace(address, "https://github.com/system-inc", made.url, 1)
+	}
+	return clone
 }
 
 // repository makes a bare repository the server serves, as GitHub serves one: a commit is fetchable by its sha only
@@ -104,15 +132,20 @@ func pinned(t *testing.T, clone Clone, files map[string]string, links map[string
 }
 
 func TestEveryPinIsFoundRecursivelyAndProvenFetchable(t *testing.T) {
+	// The scratch stores go under a temporary directory of this test's own, so another process's (this test run
+	// elsewhere at once) is never counted as left behind.
+	scratch := t.TempDir()
+	t.Setenv("TMPDIR", scratch)
 	served := newServer(t)
 	typeScript := commitIn(t, map[string]string{"src/a.ts": "let a = 1\n"}, nil, served.repository(t, "TypeScript"))
-	cohere := commitIn(t, map[string]string{".gitmodules": gitmodules([2]string{"TypeScript", served.url + "/TypeScript.git"}), "a.go": "package cohere\n"},
+	cohere := commitIn(t, map[string]string{".gitmodules": gitmodules([2]string{"TypeScript", github("TypeScript")}), "a.go": "package cohere\n"},
 		map[string]string{"TypeScript": typeScript}, served.repository(t, "cohere"))
-	clone := newWorld(t).clone
-	sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", served.url + "/cohere.git"})}, map[string]string{"cohere": cohere})
+	clone := served.mirrored(newWorld(t).clone)
+	// git@github.com: is read as https, as prepare.sh reads it.
+	sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", "git@github.com:system-inc/cohere.git"})}, map[string]string{"cohere": cohere})
 	pins, err := clone.PinsOf(sha)
-	want := []Pin{{Path: "cohere", Url: served.url + "/cohere.git", Sha: cohere, Fetchable: true},
-		{Path: "cohere/TypeScript", Url: served.url + "/TypeScript.git", Sha: typeScript, Fetchable: true}}
+	want := []Pin{{Path: "cohere", Url: github("cohere"), Sha: cohere, Fetchable: true},
+		{Path: "cohere/TypeScript", Url: github("TypeScript"), Sha: typeScript, Fetchable: true}}
 	if err != nil || !reflect.DeepEqual(pins, want) {
 		t.Fatalf("pins %+v, %v", pins, err)
 	}
@@ -121,7 +154,7 @@ func TestEveryPinIsFoundRecursivelyAndProvenFetchable(t *testing.T) {
 		t.Fatalf("no gitlinks: %+v, %v", pins, err)
 	}
 	// The scratch stores are gone.
-	if left, _ := filepath.Glob(filepath.Join(os.TempDir(), "loom-pins-*")); len(left) != 0 {
+	if left, _ := filepath.Glob(filepath.Join(scratch, "loom-pins-*")); len(left) != 0 {
 		t.Fatalf("scratch left behind: %q", left)
 	}
 }
@@ -130,73 +163,195 @@ func TestAPinToACommitThatExistsOnlyLocallyIsUnfetchableAndNamed(t *testing.T) {
 	served := newServer(t)
 	commitIn(t, map[string]string{"a.go": "package cohere\n"}, nil, served.repository(t, "cohere"))
 	unpushed := commitIn(t, map[string]string{"b.go": "package cohere\n"}, nil, "")
-	clone := newWorld(t).clone
-	sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", served.url + "/cohere.git"})}, map[string]string{"cohere": unpushed})
+	clone := served.mirrored(newWorld(t).clone)
+	sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", github("cohere")})}, map[string]string{"cohere": unpushed})
 	pins, err := clone.PinsOf(sha)
-	if err != nil || len(pins) != 1 || pins[0].Fetchable || pins[0].Sha != unpushed || !strings.Contains(pins[0].Reason, "not our ref") {
+	want := github("cohere") + " doesn't give " + unpushed[:12] + " to a fetch with no key: the commit isn't pushed there"
+	if err != nil || len(pins) != 1 || pins[0].Fetchable || pins[0].Reason != want {
 		t.Fatalf("pins %+v, %v", pins, err)
 	}
 }
 
-func TestAnSshPinIsUnfetchableForAKeylessMachine(t *testing.T) {
+// A url off github.com (a house address, another host, ssh to anywhere, a relative path) is refused by name, and nothing
+// is fetched from it: the stand-in serves cohere, and none of these reach it.
+func TestOnlyGithubComOverHttpsIsEverFetched(t *testing.T) {
+	served := newServer(t)
+	cohere := commitIn(t, map[string]string{"a.go": "package cohere\n"}, nil, served.repository(t, "cohere"))
 	clone := newWorld(t).clone
-	for _, address := range []string{"git@github.com:system-inc/cohere.git", "ssh://git@github.com/system-inc/cohere.git", "git@github-lander:system-inc/cohere.git"} {
-		sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", address})}, map[string]string{"cohere": strings.Repeat("7", 40)})
+	fetched := 0
+	clone.mirror = func(address string) string {
+		fetched++
+		return served.url + "/cohere.git"
+	}
+	for _, address := range []string{served.url + "/cohere.git", "http://10.101.1.1/cohere.git", "https://gitlab.com/system-inc/cohere.git",
+		"ssh://git@github.com/system-inc/cohere.git", "git@github-lander:system-inc/cohere.git", "../cohere.git", ""} {
+		sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", address})}, map[string]string{"cohere": cohere})
 		pins, err := clone.PinsOf(sha)
-		if err != nil || len(pins) != 1 || pins[0].Fetchable || !strings.Contains(pins[0].Reason, "ssh") {
-			t.Errorf("%s: pins %+v, %v", address, pins, err)
+		if err != nil || len(pins) != 1 || pins[0].Fetchable || !strings.Contains(pins[0].Reason, "isn't a github.com repository over https") {
+			t.Errorf("%q: pins %+v, %v", address, pins, err)
 		}
 	}
-	// A pin .gitmodules doesn't name has no url to fetch from.
-	sha := pinned(t, clone, map[string]string{"a.go": "package a\n"}, map[string]string{"cohere": strings.Repeat("7", 40)})
-	if pins, err := clone.PinsOf(sha); err != nil || len(pins) != 1 || pins[0].Fetchable || !strings.Contains(pins[0].Reason, "names no url") {
-		t.Fatalf("no .gitmodules: pins %+v, %v", pins, err)
+	if fetched != 0 {
+		t.Fatalf("fetched %d times from urls off github.com", fetched)
 	}
 }
 
-// This machine holds a key (a credential helper in its git settings, a ~/.netrc), and a runner wouldn't: the private pin
-// is unfetchable all the same.
+// The one rule for pin urls, run through the bridge's PinUrl and the runner's prepare.sh on the same table: both take
+// the same urls, as the same https url, and refuse the same ones with the same words.
+func TestTheBridgeAndPrepareShReadEveryPinUrlAlike(t *testing.T) {
+	table := map[string]string{
+		"https://github.com/system-inc/cohere.git":          "https://github.com/system-inc/cohere.git",
+		"https://github.com/system-inc/TypeScript":          "https://github.com/system-inc/TypeScript",
+		"git@github.com:system-inc/cohere.git":              "https://github.com/system-inc/cohere.git",
+		"https://github.com/system-inc/a_b.c-d":             "https://github.com/system-inc/a_b.c-d",
+		"http://github.com/system-inc/cohere.git":           "",
+		"https://github.com/system-inc/cohere.git/":         "",
+		"https://github.com/system-inc":                     "",
+		"https://github.com/system-inc/../x.git":            "",
+		"https://github.com/a/b/c.git":                      "",
+		"https://kirk@github.com/system-inc/x.git":          "",
+		"https://github.com.evil/system-inc/x.git":          "",
+		"https://GitHub.com/system-inc/x.git":               "",
+		"ssh://git@github.com/system-inc/x.git":             "",
+		"git@github-lander:system-inc/x.git":                "",
+		"git@gitlab.com:system-inc/x.git":                   "",
+		"http://10.101.1.1/cohere.git":                      "",
+		"file:///tmp/cohere.git":                            "",
+		"/tmp/cohere.git":                                   "",
+		"../cohere.git":                                     "",
+		"":                                                  "",
+		"https://github.com/system-inc/x.git\nhttps://evil": "",
+		"https://github.com/system-inc/x y":                 "",
+	}
+	prepare, err := filepath.Abs(filepath.Join("..", "runner", "prepare.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for written, want := range table {
+		address, refused := PinUrl(written)
+		if address != want || (want == "") != (refused != "") {
+			t.Errorf("PinUrl(%q) = %q, %q; want %q", written, address, refused, want)
+		}
+		command := exec.Command("bash", prepare, "pin-url", written)
+		command.Env = []string{"PATH=/usr/bin:/bin"}
+		output, _ := command.Output()
+		said := strings.TrimSuffix(string(output), "\n")
+		code := command.ProcessState.ExitCode()
+		switch {
+		case want != "" && (code != 0 || said != want):
+			t.Errorf("prepare.sh pin-url %q: exit %d, %q; want %q", written, code, said, want)
+		case want == "" && (code != 3 || said != refused):
+			t.Errorf("prepare.sh pin-url %q: exit %d, %q; want exit 3, %q", written, code, said, refused)
+		}
+	}
+}
+
+// This machine holds a key (a credential helper in its git settings and in an inherited GIT_CONFIG_COUNT, a ~/.netrc),
+// and a runner wouldn't: the private pin is unfetchable all the same.
 func TestAPinBehindAKeyIsUnfetchableEvenWhenThisMachineHoldsOne(t *testing.T) {
 	served := newServer(t)
 	private := commitIn(t, map[string]string{"a.go": "package cohere\n"}, nil, served.repository(t, "private"))
 	home := t.TempDir()
 	settings := filepath.Join(home, "gitconfig")
-	os.WriteFile(settings, []byte("[credential]\n\thelper = \"!f() { echo username=kirk; echo password=key; }; f\"\n"), 0o644)
+	helper := "!f() { echo username=kirk; echo password=key; }; f"
+	os.WriteFile(settings, []byte("[credential]\n\thelper = \""+helper+"\"\n"), 0o644)
 	os.WriteFile(filepath.Join(home, ".netrc"), []byte("machine 127.0.0.1 login kirk password key\n"), 0o600)
 	t.Setenv("HOME", home)
 	t.Setenv("GIT_CONFIG_GLOBAL", settings)
+	// An inherited header carries the key past any credential helper: only an environment made from nothing drops it.
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "credential.helper")
+	t.Setenv("GIT_CONFIG_VALUE_0", helper)
+	t.Setenv("GIT_CONFIG_KEY_1", "http.extraHeader")
+	t.Setenv("GIT_CONFIG_VALUE_1", "Authorization: Basic a2lyazprZXk=")
+	t.Setenv("GIT_CONFIG_PARAMETERS", "'credential.helper'='"+helper+"'")
 	// The machine's own fetch, with its key, gets it: the key is real.
 	holder := t.TempDir()
 	gitIn(t, holder, "init", "-q", "--bare")
 	gitIn(t, holder, "fetch", "-q", served.url+"/private.git", private)
-	clone := newWorld(t).clone
-	sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", served.url + "/private.git"})}, map[string]string{"cohere": private})
+	clone := served.mirrored(newWorld(t).clone)
+	sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", github("private")})}, map[string]string{"cohere": private})
 	pins, err := clone.PinsOf(sha)
-	if err != nil || len(pins) != 1 || pins[0].Fetchable {
+	if err != nil || len(pins) != 1 || pins[0].Fetchable || pins[0].Reason != github("private")+" isn't a public repository: a fetch with no key can't read it" {
 		t.Fatalf("pins %+v, %v", pins, err)
+	}
+	// The clone's own configuration, which no environment drops, holds no key either: a credential helper there is never
+	// asked, and an Authorization header there is never sent, since every git the bridge runs empties both first. Each
+	// alone, so neither setting covers for the other.
+	for name, setting := range map[string][2]string{"a credential helper": {"credential.helper", helper}, "an extra header": {"http.extraHeader", "Authorization: Basic a2lyazprZXk="}} {
+		gitIn(t, clone.Repository, "config", setting[0], setting[1])
+		if _, err := clone.git([]string{"fetch", "-q", served.url + "/private.git", private}); err == nil {
+			t.Errorf("%s in the clone's own configuration fetched the private repository", name)
+		}
+		gitIn(t, clone.Repository, "config", "--unset", setting[0])
 	}
 }
 
-func TestARemoteThatIsDownSaysNothingAndTheFactsWait(t *testing.T) {
+// A server whose certificate nothing trusts (a stand-in for a man in the middle) is never read, even when the clone's
+// own configuration says not to verify it. Mutant: http.sslVerify not forced on.
+func TestTheClonesOwnConfigurationNeverTurnsOffCertificateChecks(t *testing.T) {
+	served := newServerOver(t, true)
+	public := commitIn(t, map[string]string{"a.go": "package cohere\n"}, nil, served.repository(t, "cohere"))
+	clone := newWorld(t).clone
+	gitIn(t, clone.Repository, "config", "http.sslVerify", "false")
+	// Told not to verify, git reads it: the stand-in serves.
+	holder := t.TempDir()
+	gitIn(t, holder, "init", "-q", "--bare")
+	gitIn(t, holder, "-c", "http.sslVerify=false", "fetch", "-q", served.url+"/cohere.git", public)
+	if _, err := clone.git([]string{"fetch", "-q", served.url + "/cohere.git", public}); err == nil {
+		t.Fatal("the clone's http.sslVerify=false fetched from a server whose certificate nothing trusts")
+	}
+}
+
+func TestARemoteThatIsDownOrThrottlingSaysNothingAndTheFactsWait(t *testing.T) {
 	served := newServer(t)
 	cohere := commitIn(t, map[string]string{"a.go": "package cohere\n"}, nil, served.repository(t, "cohere"))
 	made := newWorld(t)
-	sha := pinned(t, made.clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", served.url + "/cohere.git"})}, map[string]string{"cohere": cohere})
-	served.down = true
+	clone := served.mirrored(made.clone)
+	sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"cohere", github("cohere")})}, map[string]string{"cohere": cohere})
 	var gitError *GitError
-	if pins, err := made.clone.PinsOf(sha); !errors.As(err, &gitError) {
-		t.Fatalf("with GitHub down: pins %+v, %v", pins, err)
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusForbidden, http.StatusTooManyRequests, http.StatusBadGateway} {
+		served.status = status
+		if pins, err := clone.PinsOf(sha); !errors.As(err, &gitError) {
+			t.Errorf("GitHub answering %d: pins %+v, %v", status, pins, err)
+		}
 	}
 	// Through the pass: no facts are posted, so the change stays unchecked and is read again next tick.
+	served.status = http.StatusTooManyRequests
 	gitIn(t, made.work, "push", "-q", "origin", sha+":refs/heads/change")
 	queue := &fakeQueue{unchecked: []map[string]any{{"change": change, "sha": sha, "base": made.base, "paths": []string{}}}}
-	tick(queue, made.clone)
+	tick(queue, clone)
 	if posts := queue.posts(); len(posts) != 0 {
 		t.Fatalf("posted %+v", posts)
 	}
-	served.down = false
-	tick(queue, made.clone)
+	served.status = 0
+	tick(queue, clone)
 	if posts := queue.posts(); len(posts) != 1 || len(posts[0].Body["pins"].([]any)) != 1 {
 		t.Fatalf("once GitHub is back: posted %+v", posts)
+	}
+}
+
+// A chain of pins one deeper than PinDepth: the four within it are proven, and the fifth is refused by name, unfetched.
+func TestAPinNestedPastTheDepthIsRefusedByName(t *testing.T) {
+	served := newServer(t)
+	names := []string{"one", "two", "three", "four", "five"}
+	below := commitIn(t, map[string]string{"a.go": "package five\n"}, nil, served.repository(t, names[4]))
+	for level := len(names) - 2; level >= 0; level-- {
+		below = commitIn(t, map[string]string{".gitmodules": gitmodules([2]string{names[level+1], github(names[level+1])})},
+			map[string]string{names[level+1]: below}, served.repository(t, names[level]))
+	}
+	clone := served.mirrored(newWorld(t).clone)
+	sha := pinned(t, clone, map[string]string{".gitmodules": gitmodules([2]string{"one", github("one")})}, map[string]string{"one": below})
+	pins, err := clone.PinsOf(sha)
+	if err != nil || len(pins) != 5 {
+		t.Fatalf("pins %+v, %v", pins, err)
+	}
+	for index, pin := range pins[:4] {
+		if !pin.Fetchable {
+			t.Errorf("pin %d, %s: %+v", index+1, pin.Path, pin)
+		}
+	}
+	if deepest := pins[4]; deepest.Path != "one/two/three/four/five" || deepest.Fetchable || deepest.Reason != "it is nested 5 submodules deep, past the 4 the bridge proves" {
+		t.Fatalf("the fifth: %+v", deepest)
 	}
 }

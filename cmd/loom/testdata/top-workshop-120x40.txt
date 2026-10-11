@@ -10,6 +10,7 @@
 ── tree builder · building ab12ab12ab12 ────────────────────────────────────────────────────────────────────────────────
  phase       products 4m12s · future 9f8e9f8e9f8e · 312 packages, 52 product tests
  products    40 hit in the store
+ phases      readying 1.4s · npm install 0.0s · listing 3.8s · warm tests 1m14s · warm mains 21s
  ✓ built       cd34cd34cd34 future 123412341234   6m02s  15:55:05
  ✕ failed      ef56ef56ef56 future 567856785678   1m35s  15:33:05  package stage2/x didn't compile
  ✓ built       0a0b0a0b0a0b future 9abc9abc9abc   6m41s  15:09:05
@@ -27,7 +28,6 @@
  ▶ building 2b2b2b2b2b2b loom         4m00s  units 0/0 0✕ 0 void  chg_01k7building00000000000000
  · queued   3c3c3c3c3c3c fabric       2m00s  units 0/0 0✕ 0 void  chg_01k7queued0000000000000000
  ✓ landed   4d4d4d4d4d4d release     14m00s  units 120/120 0✕ 0 void  chg_01k7landed0000000000000000
-
 
 
 

@@ -456,13 +456,26 @@ func TestProcGaugeReadsTheMachine(t *testing.T) {
 	}
 }
 
-// The tests' own go builds get the build's share of the compile limit through GOFLAGS.
+// The tests' own go builds get the build's share of the compile limit through GOMAXPROCS, go's default -p, and GOFLAGS
+// stays the unit's, empty, whatever Workshop's own is: adamic's product keys read GOFLAGS, and a runner asks for each
+// product under the unit's (#nm31pcn; verify run 4 keyed them under -p=7 here and missed every one there).
 func TestATestsOwnGoBuildsGetTheirShareOfTheCompileLimit(t *testing.T) {
-	environment := TreeBuild{Compile: 60, Jobs: 8}.shared()
-	if !slices.ContainsFunc(environment, func(entry string) bool {
-		return strings.HasPrefix(entry, "GOFLAGS=") && strings.HasSuffix(entry, "-p=7")
-	}) {
-		t.Fatal("no GOFLAGS -p=7 in a later phase's environment")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	environment := TreeBuild{Compile: 60, Jobs: 8, Environment: planner.UnitEnvironment(planner.RunnersGoos, planner.RunnersGoarch)}.shared()
+	// exec runs a process under the last value of each name.
+	last := map[string]string{}
+	for _, entry := range environment {
+		name, value, _ := strings.Cut(entry, "=")
+		last[name] = value
+	}
+	if last["GOMAXPROCS"] != "7" {
+		t.Fatalf("a later phase's GOMAXPROCS is %q, want the share, 7", last["GOMAXPROCS"])
+	}
+	for _, variable := range planner.UnitEnvironment(planner.RunnersGoos, planner.RunnersGoarch) {
+		name, value, _ := strings.Cut(variable, "=")
+		if last[name] != value {
+			t.Errorf("a later phase's %s is %q, and a unit's is %q: every product key reading it moves between Workshop and a runner", name, last[name], value)
+		}
 	}
 }
 

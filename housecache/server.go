@@ -45,8 +45,13 @@ type Server struct {
 	Client *http.Client
 	// Report gets one line per miss, refusal, removal and eviction; nil discards them.
 	Report io.Writer
-	// Stall is how long a fetch from Upstream may go without a byte before it is abandoned. Zero means a minute.
-	Stall time.Duration
+	// IdleWindow and IdleBytes watch a fetch's body as a client watches the cache's answer (Watch): once a window
+	// passes in which fewer than IdleBytes arrived, the fetch is abandoned, its clients read the store, and the next ask
+	// fetches again on a new connection. Zero means the clients' own, IdleWindow and IdleBytes. Oct 10: the big house's
+	// downloads go over its cellular line, where a connection stalls mid-body when the line drops, and a fetch that
+	// waited on it held its blob's flight for up to FetchBound.
+	IdleWindow time.Duration
+	IdleBytes  int64
 	// Now is the clock a served blob's use is stamped with; nil means time.Now.
 	Now func() time.Time
 	// Sync makes a fetched blob durable before it takes its name; nil means its file's Sync. Tests plant a slow disk.
@@ -57,7 +62,7 @@ type Server struct {
 
 	mutex sync.Mutex
 	// flights are the fetches in progress by path, never by sha256 alone: blobs/X and releases/blobs/X are two objects
-	// of the store, and one may be gone (the action store's 7 days) while the other stays.
+	// of the store, and one may be gone (the action store's 30 days) while the other stays.
 	flights map[string]*flight
 	// room is held while room is made; reserved, under it, is the length each fetch in flight said its blob has, by
 	// its partial's name, so two fetches at once never count on the same free bytes.
@@ -423,13 +428,15 @@ func (server *Server) fetch(fetching *flight, path, sum string) {
 	defer server.release(name)
 	fetching.length, fetching.partial = response.ContentLength, partial.Name()
 	start()
-	stall := server.Stall
-	if stall == 0 {
-		stall = time.Minute
+	window, least := server.IdleWindow, server.IdleBytes
+	if window == 0 {
+		window = IdleWindow
 	}
-	watched := &progress{reader: response.Body}
-	watched.last.Store(time.Now().UnixNano())
-	go watched.watch(fetchContext, cancel, stall)
+	if least == 0 {
+		least = IdleBytes
+	}
+	watched := watchIdle(response.Body, cancel, window, least)
+	defer watched.Close()
 	hash := sha256.New()
 	buffer := make([]byte, 256<<10)
 	size := int64(0)
@@ -484,37 +491,6 @@ func (server *Server) fetch(fetching *flight, path, sum string) {
 	server.release(name)
 	if err = server.makeRoom(sum, "", 0); err != nil {
 		server.say("after fetching %s: %v", path, err)
-	}
-}
-
-// progress is a fetch's body, noting when it last gave a byte, so a stalled store is abandoned rather than waited on.
-type progress struct {
-	reader io.Reader
-	last   atomic.Int64
-}
-
-func (watched *progress) Read(buffer []byte) (int, error) {
-	count, err := watched.reader.Read(buffer)
-	if count > 0 {
-		watched.last.Store(time.Now().UnixNano())
-	}
-	return count, err
-}
-
-// watch cancels the fetch once it has gone stall without a byte, and returns when the fetch ends.
-func (watched *progress) watch(fetchContext context.Context, cancel context.CancelFunc, stall time.Duration) {
-	ticker := time.NewTicker(max(stall/4, 10*time.Millisecond))
-	defer ticker.Stop()
-	for {
-		select {
-		case <-fetchContext.Done():
-			return
-		case <-ticker.C:
-			if time.Since(time.Unix(0, watched.last.Load())) > stall {
-				cancel()
-				return
-			}
-		}
 	}
 }
 

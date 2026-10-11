@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/protocol"
 	"github.com/system-inc/loom/treebuilder"
@@ -67,7 +68,9 @@ func workshopState() topState {
 		{Name: "loom-build-trees", Active: "active", Sub: "running", Since: ago(5 * time.Hour)}, {Name: "loom-judge", Active: "failed", Sub: "failed"},
 		{Name: "loom-pusher.timer", Active: "active", Sub: "waiting", Since: ago(2 * 24 * time.Hour)}, {Name: "loom-update.timer", Active: "active", Sub: "waiting", Since: ago(26 * time.Hour)}}
 	state.Tree = &livestatus.Status{Kind: livestatus.KindTree, Pid: 777, UpdatedAt: ago(time.Second), Tree: &livestatus.Tree{Key: strings.Repeat("ab12", 16),
-		Future: strings.Repeat("9f8e", 10), Phase: "products", StartedAt: ago(4*time.Minute + 12*time.Second), Packages: 312, ProductTests: 52, ProductsHit: 40}}
+		Future: strings.Repeat("9f8e", 10), Phase: "products", StartedAt: ago(4*time.Minute + 12*time.Second), Packages: 312, ProductTests: 52, ProductsHit: 40,
+		Phases: []livestatus.Phase{{Name: "readying", Seconds: 1.42}, {Name: "npm install", Seconds: 0.03}, {Name: "listing", Seconds: 3.8},
+			{Name: "warm tests", Seconds: 74.2}, {Name: "warm mains", Seconds: 21.6}}}}
 	state.TreeAlive = true
 	state.Builds = []treebuilder.Record{
 		{Tree: strings.Repeat("cd34", 16), Future: strings.Repeat("1234", 10), At: ago(9 * time.Minute).Format(time.RFC3339), Event: treebuilder.Built, Seconds: 362},
@@ -129,13 +132,34 @@ func TestTopDrawsABoxAtEightyByTwentyFour(t *testing.T) {
 	golden(t, "top-box-132x40.txt", drawTop(boxState(), 132, 40, false), 132, 40)
 }
 
-// Workshop shows the tree it builds (phase, products hit and built) and the ones before, the daemons, every pool, and
+// Workshop shows the tree it builds (phase, products hit and built, the phases it has ended) and the ones before, the daemons, every pool, and
 // Queue's line, the changes on their way first; a pool that can't be read says why in its row, and a row too long for
 // the terminal ends in an ellipsis at its edge. Mutants: the finished changes before the live ones; a failed unit drawn
-// as running; a row not cut to the width.
+// as running; a row not cut to the width; a building tree's phases left out.
 func TestTopDrawsWorkshop(t *testing.T) {
 	golden(t, "top-workshop-80x24.txt", drawTop(workshopState(), 80, 24, false), 80, 24)
 	golden(t, "top-workshop-120x40.txt", drawTop(workshopState(), 120, 40, false), 120, 40)
+}
+
+// Once a tree is built, top keeps its phases under the last build, every one in the order it ran, wrapped to the
+// width, a product split with its count, and total last: the number every lever of #s0cqqhk is held to. Mutants: the
+// last build's phases left out (treePhaseRows in the idle branch); a counted phase drawn without its count; the rows
+// past the first dropped.
+func TestTopKeepsALastTreesPhases(t *testing.T) {
+	state := workshopState()
+	state.Tree.Tree.Phase, state.TreeAlive = "built", false
+	state.Tree.Tree.Phases = treePhaseList(builder.TreePhases{Readying: 1.4, NpmInstall: 0.1, Listing: 3.8, Warm: 95.8, WarmTests: 74.2, WarmMains: 21.6,
+		Products: 412.5, ProductsFetched: 40, ProductsFetchedSeconds: 3.1, ProductsBuilt: 12, ProductsBuiltSeconds: 1890.4, Binaries: 133, SourceChunks: 9.2,
+		ModuleCache: 4.4, Upload: 41.7, UploadModules: 0.8, UploadChunks: 30.1, UploadProducts: 6.2, UploadBinaries: 4.1, UploadIndex: 0.5, Total: 768.4})
+	frame := drawTop(state, 80, 60, false)
+	for _, want := range []string{" phases      readying 1.4s · npm install 0.1s", "40 fetched 3.1s", "12 built 31m30s", "upload index 0.5s", "total 12m48s"} {
+		if !strings.Contains(frame, want) {
+			t.Fatalf("the last build's phases lack %q:\n%s", want, frame)
+		}
+	}
+	if strings.Index(frame, "readying") > strings.Index(frame, "total") || strings.Index(frame, "warm tests") > strings.Index(frame, "binaries") {
+		t.Fatalf("the phases out of order:\n%s", frame)
+	}
 }
 
 var escapes = regexp.MustCompile("\033\\[[0-9;]*m")

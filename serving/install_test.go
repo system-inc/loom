@@ -12,23 +12,32 @@ import (
 )
 
 func TestServeConfReadsAPoolAndRefusesAnythingElse(t *testing.T) {
-	config, err := ReadConfig("# Cloud\npool = box-strict\n\n  phase-jobs=yes  \n")
-	if err != nil || config != (Config{Pool: "box-strict", PhaseJobs: true}) {
+	config, err := ReadConfig("# Cloud\npool = box-strict\n\n  phase-jobs=yes  \nhas = go, clang,node,wasiSdk\n")
+	if err != nil || !reflect.DeepEqual(config, Config{Pool: "box-strict", PhaseJobs: true, Has: []string{"go", "clang", "node", "wasiSdk"}, Units: 1}) {
 		t.Fatalf("read %+v, %v", config, err)
 	}
 	if config, err := ReadConfig("pool=box-phase\nphase-jobs = no\n"); err != nil || config.PhaseJobs {
 		t.Fatalf("phase-jobs = no read %+v, %v", config, err)
 	}
+	if config, err := ReadConfig("pool = box-strict\nunits = 8\n"); err != nil || config.Units != 8 {
+		t.Fatalf("units = 8 read %+v, %v", config, err)
+	}
 	for name, content := range map[string]string{
-		"no pool":               "phase-jobs = yes\n",
-		"an empty pool":         "pool =\n",
-		"a pool with a space":   "pool = box strict\n",
-		"a specifier":           "pool = box%h\n",
-		"a path":                "pool = ../board\n",
-		"a pool named twice":    "pool = box-strict\npool = box-phase\n",
-		"phase-jobs as true":    "pool = box-phase\nphase-jobs = true\n",
-		"a setting it lacks":    "pool = box-strict\nworker = cloud\n",
-		"a line with no equals": "pool = box-strict\nbox-phase\n",
+		"no pool":                     "phase-jobs = yes\n",
+		"an empty pool":               "pool =\n",
+		"a pool with a space":         "pool = box strict\n",
+		"a specifier":                 "pool = box%h\n",
+		"a path":                      "pool = ../board\n",
+		"a pool named twice":          "pool = box-strict\npool = box-phase\n",
+		"phase-jobs as true":          "pool = box-phase\nphase-jobs = true\n",
+		"a setting it lacks":          "pool = box-strict\nworker = cloud\n",
+		"a line with no equals":       "pool = box-strict\nbox-phase\n",
+		"a toolchain no probe checks": "pool = box-strict\nhas = go,rust\n",
+		"a toolchain claimed twice":   "pool = box-strict\nhas = go,go\n",
+		"no units":                    "pool = box-strict\nunits = 0\n",
+		"too many units":              "pool = box-strict\nunits = 65\n",
+		"units as a word":             "pool = box-strict\nunits = eight\n",
+		"units with a sign":           "pool = box-strict\nunits = +8\n",
 	} {
 		if config, err := ReadConfig(content); err == nil {
 			t.Errorf("%s: read %+v", name, config)
@@ -74,11 +83,22 @@ func TestTheUnitServesTheConfiguredPoolStrictAndDrainsOnReload(t *testing.T) {
 	if phase := Unit(Config{Pool: "box-phase", PhaseJobs: true}, "cloud-4f1d2c", ""); !strings.Contains(phase, "serve --strict --phase-jobs --pool https://runs.loom.system.inc/pools/box-phase ") {
 		t.Fatalf("a phase box's unit:\n%s", phase)
 	}
+	if claims := Unit(Config{Pool: "box-strict", Has: []string{"go", "wasiSdk"}}, "cloud-4f1d2c", ""); !strings.Contains(claims, "serve --strict --has go,wasiSdk --pool https://runs.loom.system.inc/pools/box-strict ") {
+		t.Fatalf("a box claiming toolchains:\n%s", claims)
+	}
+	if several := Unit(Config{Pool: "box-strict", Units: 8}, "cloud-4f1d2c", ""); !strings.Contains(several, "serve --strict --units 8 --pool ") {
+		t.Fatalf("a box running eight units at once:\n%s", several)
+	}
+	if strings.Contains(Unit(Config{Pool: "box-strict", Units: 1}, "cloud-4f1d2c", ""), "--units") {
+		t.Fatal("a box running one unit at a time passes --units")
+	}
 	for _, line := range []string{
 		"ExecStartPre=/usr/bin/install -m 600 %h/.loom/serve-token %t/loom-serve/pool-token",
 		"RuntimeDirectoryMode=0700",
 		"ExecReload=/bin/kill -HUP $MAINPID",
 		"KillMode=mixed",
+		"Delegate=yes",
+		"DelegateSubgroup=serve",
 		"Restart=always",
 		"WantedBy=default.target",
 	} {
@@ -298,5 +318,128 @@ func TestTheHookRunsInstallServeOrPassesOnARollback(t *testing.T) {
 	rollback := "#!/bin/sh\nif [ $# = 0 ]; then printf 'usage:\\n  loom-runner version\\n' >&2; exit 2; fi\necho \"ran $*\"; exit 7\n"
 	if code, output := run(rollback); code != 0 || strings.Contains(output, "ran ") || !strings.Contains(output, "has no install-serve") {
 		t.Fatalf("on a rollback: exit %d, %s", code, output)
+	}
+}
+
+// A box serves a further pool beside serve.conf's from serve-<name>.conf and serve-token-<name> (Oct 10: Home and Cloud
+// took box-phase while Chonchon was down): its own unit, token, runtime directory, root, workspace and worker, sharing
+// nothing a unit writes with serve.conf's, whose unit stays exactly a single pool's. Each is started, and the health
+// probe watches both. Mutants: the extras never read; the root left shared; the token left shared.
+func TestABoxServesAnExtraPoolBesideItsOwn(t *testing.T) {
+	served := newBox(t, "pool = box-strict\n", 0o600)
+	extraConfig := filepath.Join(filepath.Dir(served.paths.Config), "serve-phase.conf")
+	extraToken := filepath.Join(filepath.Dir(served.paths.Token), "serve-token-phase")
+	os.WriteFile(extraConfig, []byte("pool = box-phase\nphase-jobs = yes\n"), 0o644)
+	os.WriteFile(extraToken, []byte("phase-token\n"), 0o600)
+	phaseName := ExtraUnitName("phase")
+	if err := served.install(); err != nil || !reflect.DeepEqual(served.calls, [][]string{reloadCall, enableCall, showCall, startCall,
+		{"enable", phaseName}, {"show", "--property=MainPID", "--value", phaseName}, {"start", phaseName}}) {
+		t.Fatalf("install with an extra pool: %q, %v", served.calls, err)
+	}
+	if served.unit(t) != Unit(Config{Pool: "box-strict"}, "cloud-4f1d2c", "") {
+		t.Fatalf("serve.conf's unit changed beside an extra:\n%s", served.unit(t))
+	}
+	content, err := os.ReadFile(filepath.Join(served.paths.Units, phaseName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	phase := string(content)
+	for _, line := range []string{
+		"RuntimeDirectory=loom-serve-phase",
+		"ExecStartPre=/usr/bin/install -m 600 %h/.loom/serve-token-phase %t/loom-serve-phase/pool-token",
+		"ExecStart=%h/.loom/bin/loom-runner serve --strict --phase-jobs --pool https://runs.loom.system.inc/pools/box-phase --token-file %t/loom-serve-phase/pool-token --worker cloud-4f1d2c-phase --until 1h --root %h/loom-serve-phase/root --workspace %h/loom-serve-phase/units",
+	} {
+		if !strings.Contains(phase, "\n"+line+"\n") {
+			t.Errorf("the extra's unit has no %q:\n%s", line, phase)
+		}
+	}
+	for _, line := range strings.Split(phase, "\n") {
+		if !strings.HasPrefix(line, "#") && (strings.Contains(line, "loom-serve/") || strings.Contains(line, "serve-token ") || strings.HasSuffix(line, "=loom-serve")) {
+			t.Errorf("the extra shares serve.conf's %q", line)
+		}
+	}
+	probe, err := os.ReadFile(served.paths.Probe)
+	if err != nil || !strings.Contains(string(probe), `units="`+UnitName+" "+phaseName+`"`) {
+		t.Errorf("the health probe doesn't watch both serves: %v", err)
+	}
+	// Anything wrong with an extra refuses the whole install before systemd is touched, as serve.conf's own would.
+	for name, breakIt := range map[string]func(){
+		"a token others can read": func() { os.Chmod(extraToken, 0o644) },
+		"no token":                func() { os.Remove(extraToken) },
+		"a name it can't have": func() {
+			os.WriteFile(filepath.Join(filepath.Dir(served.paths.Config), "serve-Phase_2.conf"), []byte("pool = box-phase\n"), 0o644)
+		},
+		"a setting it lacks": func() { os.WriteFile(extraConfig, []byte("pool = box-phase\nworker = home\n"), 0o644) },
+	} {
+		os.WriteFile(extraConfig, []byte("pool = box-phase\nphase-jobs = yes\n"), 0o644)
+		os.WriteFile(extraToken, []byte("phase-token\n"), 0o600)
+		os.Chmod(extraToken, 0o600)
+		os.Remove(filepath.Join(filepath.Dir(served.paths.Config), "serve-Phase_2.conf"))
+		breakIt()
+		if err := served.install(); err == nil || len(served.calls) != 0 {
+			t.Errorf("%s: installed (%v), systemctl %q", name, err, served.calls)
+		}
+	}
+}
+
+// The clock hook (#nmx30ay), run against stubs that record every call: a WSL box with Hyper-V's clock, timesyncd
+// enabled and its tick turned down, gets timesyncd stopped and masked and the tick put back; one already fixed (noise
+// in the frequency) is left alone; anywhere but WSL with Hyper-V's clock nothing is touched, since there timesyncd may
+// be the only time sync; a refused sudo fails the hook, named. Each mutant below fails a case here: the WSL guard
+// dropped (the plain Linux box), the Hyper-V guard dropped, the mask dropped, the tick reset dropped, the 1 ppm
+// tolerance dropped (the fixed box).
+func TestTheClockHookKeepsHyperVsTimeSyncAlone(t *testing.T) {
+	served := newBox(t, "pool = box-strict\n", 0o600)
+	if err := served.install(); err != nil {
+		t.Fatal(err)
+	}
+	if hook, err := os.Stat(served.paths.ClockHook); err != nil || hook.Mode().Perm() != 0o755 {
+		t.Fatalf("the clock hook: %v, %v", hook, err)
+	}
+	for _, test := range []struct {
+		name, release, timesyncd, adjtimex, sudo string
+		hyperv                                   bool
+		code                                     int
+		calls                                    string
+		says                                     string
+	}{
+		{"a plain Linux box", "6.8.0-45-generic", "enabled", "9000 0", "ok", true, 0, "", "not WSL"},
+		{"WSL without Hyper-V's clock", "6.18.40.1-microsoft-standard-WSL2", "enabled", "9000 0", "ok", false, 0, "", "no Hyper-V clock"},
+		{"the boxes on Oct 10", "6.18.40.1-microsoft-standard-WSL2", "enabled", "9162 -2832001", "ok", true, 0,
+			"sudo systemctl stop systemd-timesyncd|sudo systemctl mask systemd-timesyncd|sudo python3 set 10000|", "put back to 10000 and 0"},
+		{"a box already fixed", "6.18.40.1-microsoft-standard-WSL2", "masked", "10000 41", "ok", true, 0, "", "alone keeps the clock"},
+		{"sudo refused", "6.18.40.1-microsoft-standard-WSL2", "enabled", "9000 0", "refused", true, 1, "", "couldn't stop and mask"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			bin := filepath.Join(directory, "bin")
+			os.MkdirAll(bin, 0o755)
+			calls := filepath.Join(directory, "calls")
+			release := filepath.Join(directory, "osrelease")
+			os.WriteFile(release, []byte(test.release+"\n"), 0o644)
+			hyperv := filepath.Join(directory, "ptp_hyperv")
+			if test.hyperv {
+				os.WriteFile(hyperv, nil, 0o644)
+			}
+			stubs := map[string]string{
+				"systemctl": `[ "$1" = is-enabled ] && { echo ` + test.timesyncd + `; exit 0; }; echo "systemctl $*" >> ` + calls + `; exit 0`,
+				"sudo":      `[ "` + test.sudo + `" = ok ] || exit 1; [ "$1" = -n ] && shift; printf 'sudo ' >> ` + calls + `; exec "$@"`,
+				"python3":   `if [ $# -gt 2 ]; then echo "python3 set $3" >> ` + calls + `; echo 10000 0; else echo ` + test.adjtimex + `; fi`,
+			}
+			for name, script := range stubs {
+				os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"+script+"\n"), 0o755)
+			}
+			command := exec.Command(served.paths.ClockHook)
+			command.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "LOOM_CLOCK_RELEASE=" + release, "LOOM_CLOCK_HYPERV=" + hyperv}
+			output, _ := command.CombinedOutput()
+			recorded, _ := os.ReadFile(calls)
+			got := strings.ReplaceAll(strings.TrimSpace(string(recorded)), "\n", "|")
+			if got != "" {
+				got += "|"
+			}
+			if command.ProcessState.ExitCode() != test.code || got != test.calls || !strings.Contains(string(output), test.says) {
+				t.Fatalf("exit %d, calls %q, said %q; want exit %d, calls %q, saying %q", command.ProcessState.ExitCode(), got, output, test.code, test.calls, test.says)
+			}
+		})
 	}
 }

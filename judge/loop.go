@@ -6,6 +6,7 @@ package judge
 // collaborator is an interface, so a named stub stands in until the real part lands (StubFabric, StubQueue below).
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -344,7 +345,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		// A unit that never reported is placed again like any infra.
 		first = Finished{Attempt: Attempt{Status: Broken}, Infra: InfraSilent}
 	}
-	evidence := loop.evidenceOf(first, unit)
+	evidence := loop.evidenceOf(job, first, unit)
 	if found && loop.Warm != nil {
 		run := job.Run
 		if carried != "" {
@@ -384,7 +385,7 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 				verdict.Attempts = append(verdict.Attempts, again.Attempt)
 				verdict.Tests, verdict.Outputs = nonNil(again.Tests), nonNilStrings(again.Outputs)
 				source = again
-				evidence = loop.evidenceOf(again, unit)
+				evidence = loop.evidenceOf(job, again, unit)
 			} else {
 				// An alone rerun broke: run both again.
 				evidence.Candidate, evidence.Main = nil, nil
@@ -411,6 +412,11 @@ func (loop Loop) judgeUnit(job Job, unit PlanUnit) (Verdict, []TestOutcome, erro
 		}
 	}
 	verdict.Status, verdict.Cause, verdict.Infra = decision.Status, decision.Cause, decision.Infra
+	verdict.Warnings = decision.Warnings
+	if decision.Status == Failed && len(decision.Warnings) > 0 {
+		// The branch made it slow: the kick says so, with both walls, since no test failed.
+		verdict.slowdown = decision.Why
+	}
 	if unit.Kind == KindPhase {
 		// A phase has no tests: zerorun and the census are the test units' rules.
 		if verdict.RuleId == Rule {
@@ -471,9 +477,10 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 		return err
 	}
 	verdict.Attempts = append(verdict.Attempts, candidate.Attempt, main.Attempt)
-	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256, OverBudget: candidate.OverBudget}
-	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256, OverBudget: main.OverBudget}
-	evidence.SameTree = job.Future == job.Base
+	evidence.Candidate = &Rerun{Status: candidate.Attempt.Status, Infra: candidate.Infra, Tests: candidate.Tests, RunnerSha256: candidate.Attempt.RunnerSha256,
+		OverBudget: candidate.OverBudget, WallSeconds: candidate.Attempt.WallSeconds}
+	evidence.Main = &Rerun{Status: main.Attempt.Status, Infra: main.Infra, Tests: main.Tests, RunnerSha256: main.Attempt.RunnerSha256,
+		OverBudget: main.OverBudget, WallSeconds: main.Attempt.WallSeconds}
 	evidence.MainRecorded = nil
 	if found {
 		evidence.MainRecorded = recorded
@@ -481,13 +488,16 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 	return nil
 }
 
-func (loop Loop) evidenceOf(finished Finished, unit PlanUnit) Evidence {
+func (loop Loop) evidenceOf(job Job, finished Finished, unit PlanUnit) Evidence {
 	return Evidence{First: finished.Attempt, FirstInfra: finished.Infra, FirstTests: finished.Tests, MissingTools: finished.MissingTools, FirstOverBudget: finished.OverBudget,
-		Phase: unit.Kind == KindPhase, KeyRunner: unit.Runner, RequireRunner: loop.RequireRunner}
+		Phase: unit.Kind == KindPhase, Budgeted: unit.Kind == KindTest, SameTree: job.Future == job.Base, KeyRunner: unit.Runner, RequireRunner: loop.RequireRunner}
 }
 
 // KindPhase is a unit key's kind for one of the box fast gate's non-test stages.
 const KindPhase = "phase"
+
+// KindTest is a unit key's kind for a package's tests, the kind the run budget holds.
+const KindTest = "test"
 
 func nonNil(outcomes []TestOutcome) []TestOutcome {
 	if outcomes == nil {
@@ -556,20 +566,35 @@ func unrun(named []string, tests []TestOutcome) []string {
 
 // reuse makes a reused unit's record: passed, naming the verdict it reuses, and carrying that verdict's tests object
 // whole (Loom, Oct 10 01:19Z): the same key is the same verdict, so parity on a reused unit still compares its tests.
+// The record names the run its tests came from, which is the index's newest pass for the key: once another candidate
+// decided the same key after the plan was taken, that's no longer the run the plan named (#ybxadkf, ce0ef503 at 23:12Z).
+// A key whose newest verdict isn't a pass backs no reuse any more: the unit is void, and the run with it, never stuck.
 func (loop Loop) reuse(verdict *Verdict, unit PlanUnit) error {
 	if loop.Reused == nil {
 		return fmt.Errorf("unit %s is reused, and nothing reads the verdict it reuses", unit.UnitKey)
 	}
-	tests, err := loop.Reused.Tests(unit.UnitKey, unit.Reused)
+	reused, err := loop.Reused.Tests(unit.UnitKey, unit.Reused)
 	if err != nil {
 		return fmt.Errorf("unit %s reuses %s: %w", unit.UnitKey, unit.Reused, err)
 	}
-	verdict.Status, verdict.RuleId, verdict.reusedTests = Passed, Rule+" reused "+unit.Reused, tests
+	if reused.Unbacked != "" {
+		verdict.Status, verdict.Cause, verdict.Infra, verdict.RuleId = Void, CauseInfra, InfraRefused, Rule+" reused "+unit.Reused+" unbacked"
+		return nil
+	}
+	verdict.Status, verdict.RuleId, verdict.reusedTests = Passed, Rule+" reused "+cmp.Or(reused.Run, unit.Reused), reused.Tests
 	return nil
 }
 
-// ReusedRecords reads the tests object of the verdict a reused unit reuses: the index's passed verdict for its key, from
-// run reused (PlanUnit.Reused; "reused" when the listing named no run).
+// ReusedRecords reads the verdict a reused unit reuses: the index's newest verdict for its key (PlanUnit.Reused names
+// the run the plan named; "reused" when the listing named none).
 type ReusedRecords interface {
-	Tests(unitKey, reused string) (json.RawMessage, error)
+	Tests(unitKey, reused string) (ReusedVerdict, error)
+}
+
+// A ReusedVerdict is the index's newest pass for a reused unit's key: its tests object and the run that posted it. Unbacked
+// says why there is none to reuse (the key's newest verdict failed or is void), and then Tests and Run are empty.
+type ReusedVerdict struct {
+	Tests    json.RawMessage
+	Run      string
+	Unbacked string
 }

@@ -319,8 +319,10 @@ func TestAnIndexOfAnotherFormatIsUnfitAndOverlappingChunksPoisoned(t *testing.T)
 		"the whole archive's": `{"tree":"t","source":"` + sum + `","packages":{}}`,
 		"another format's":    `{"format":1,"tree":"t","source":[{"blob":"` + sum + `","first":"a","last":"b","files":1,"bytes":1}],"packages":{}}`,
 		// Format 2's runners ran npm themselves, so its source holds no npm packages.
-		"format 2's":       `{"format":2,"tree":"t","source":[{"blob":"` + sum + `","first":"a","last":"b","files":1,"bytes":1}],"packages":{}}`,
-		"a later format's": `{"format":4,"tree":"t","source":[],"packages":{}}`,
+		"format 2's": `{"format":2,"tree":"t","source":[{"blob":"` + sum + `","first":"a","last":"b","files":1,"bytes":1}],"packages":{}}`,
+		// Format 3's products were keyed under Workshop's GOFLAGS -p share, so a runner's unit missed them (#nm31pcn).
+		"format 3's":       `{"format":3,"tree":"t","source":[{"blob":"` + sum + `","first":"a","last":"b","files":1,"bytes":1}],"packages":{}}`,
+		"a later format's": `{"format":5,"tree":"t","source":[],"packages":{}}`,
 	} {
 		if _, err := ParseTree("k", []byte(content)); !errors.Is(err, ErrIndexFormat) || strings.Contains(err.Error(), "poisoned") {
 			t.Errorf("%s index: %v", name, err)

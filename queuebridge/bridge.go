@@ -18,8 +18,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/system-inc/loom/protocol"
 )
 
 // A Queue is the Queue's coordinator seam as the bridge calls it (wire/source/Queue.ts): a method, a path and a body
@@ -28,19 +26,16 @@ type Queue interface {
 	Call(method, path string, body any) (int, []byte, error)
 }
 
-// HTTPQueue calls the Queue at Base with a coordinator token minted from Secret for each call, good for ten minutes,
-// the way the wire verifies it (wire/source/Token.ts).
+// HTTPQueue calls the Queue at Base with Token, a coordinator token minted for the bridge. The bridge holds no secret it
+// could mint another from; the wire has no scope narrower than coordinator yet for what it calls (GET
+// /submissions?state=unchecked, GET /head, POST /submissions/<change>/facts).
 type HTTPQueue struct {
-	Base   string
-	Secret []byte
-	HTTP   *http.Client
+	Base  string
+	Token string
+	HTTP  *http.Client
 }
 
 func (queue HTTPQueue) Call(method, path string, body any) (int, []byte, error) {
-	token, err := protocol.MintToken(queue.Secret, protocol.TokenClaims{Run: "queue-bridge", Scope: protocol.ScopeCoordinator, Expires: time.Now().Add(10 * time.Minute).Unix()})
-	if err != nil {
-		return 0, nil, err
-	}
 	var reader io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -53,7 +48,7 @@ func (queue HTTPQueue) Call(method, path string, body any) (int, []byte, error) 
 	if err != nil {
 		return 0, nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Authorization", "Bearer "+queue.Token)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("User-Agent", "loom-queue-bridge")
 	client := queue.HTTP

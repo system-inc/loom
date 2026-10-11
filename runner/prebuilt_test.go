@@ -871,14 +871,24 @@ func TestPrepareEnvironmentNeedsNoGitAndNoGo(t *testing.T) {
 	script := filepath.Join(directory, "prepare.sh")
 	os.WriteFile(script, prepareScript, 0o700)
 	environment := filepath.Join(directory, "environment")
-	prepare := func() (int, string) {
+	prepare := func(extra ...string) (int, string) {
 		command := exec.Command(filepath.Join(bin, "bash"), script, "environment", tree, "", environment, filepath.Join(directory, "root"))
-		command.Env = []string{"PATH=" + bin, "HOME=" + home}
+		command.Env = append([]string{"PATH=" + bin, "HOME=" + home}, extra...)
 		output, _ := command.CombinedOutput()
 		return command.ProcessState.ExitCode(), string(output)
 	}
 	if code, output := prepare(); code != 2 || !strings.Contains(output, "no adamic toolchain") {
 		t.Fatalf("an instance without adamic's toolchain: exit %d: %s", code, output)
+	}
+	// A Codex instance's toolchain is where its environment's ADAMIC_TOOLS says, never in home (Oct 11): found there.
+	tools := filepath.Join(directory, "workspace", "adamic-tools")
+	os.MkdirAll(tools, 0o755)
+	os.WriteFile(filepath.Join(tools, "env.sh"), []byte("export ADAMIC_TOOLCHAIN_FROM=tools\n"), 0o644)
+	if code, output := prepare("ADAMIC_TOOLS=" + tools); code != 0 {
+		t.Fatalf("a toolchain ADAMIC_TOOLS names: exit %d: %s", code, output)
+	}
+	if content, _ := os.ReadFile(environment); !bytes.Contains(content, []byte("ADAMIC_TOOLCHAIN_FROM=tools\x00")) {
+		t.Fatalf("the environment lacks the toolchain ADAMIC_TOOLS names: %q", content)
 	}
 	os.MkdirAll(filepath.Join(home, "adamic-tools"), 0o755)
 	os.WriteFile(filepath.Join(home, "adamic-tools", "env.sh"), []byte("export ADAMIC_TOOLCHAIN_LOADED=1\n"), 0o644)
@@ -1062,6 +1072,29 @@ func TestABuildIsRefusedWithAGoHere(t *testing.T) {
 	result, events, _ := runUnit(t, fixture.unit("^TestProduct$"), fixture.options(t))
 	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), `a test ran go for more than a read-only query (1 go commands, the first "go build -o `) {
 		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+}
+
+// A build job's tests build (Kirk's build law, #8j1qygw): the go build a test job's stand-in refuses goes through to the
+// real go, of the tree's release, and what it makes is the test's: here the fixture's tree holds no source for the tool,
+// so the build fails, and the build job is the change's red, never Loom's broken. Mutants: the build flag ignored by the
+// stand-in (refused, broken); settleGo turning a build job's failed go command into Loom's broken.
+func TestABuildJobsTestsBuildWithTheRealGo(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	built := fixture.tree.index.Packages[lowerPackage]
+	built.Products = []string{}
+	fixture.tree.index.Packages[lowerPackage] = built
+	fixture.tree.publish(t)
+	unit := fixture.unit("^TestProduct$")
+	unit.Test.Build = true
+	result, events, _ := runUnit(t, unit, fixture.options(t))
+	runner := strings.Join(outputLines(events, "runner"), "\n")
+	if !strings.Contains(runner, "answered for the tests, 1 times: go build -o ") || strings.Contains(runner, "never builds or downloads") {
+		t.Fatalf("the build job's go build wasn't let through:\n%s", runner)
+	}
+	if result.Status != protocol.StatusFailed || strings.Contains(errorPhases(events), "Loom's") || !strings.Contains(testLog(t, result), "building the product") {
+		t.Fatalf("a build job whose build fails: %s; errors %q", result.Status, errorPhases(events))
 	}
 }
 
@@ -1535,5 +1568,31 @@ func TestAModuleOutsideTheTreeIsntForcedIntoItsWorkspace(t *testing.T) {
 	result, events, _ := runUnit(t, fixture.unit("^TestOutsideModule$"), fixture.options(t))
 	if result.Status != protocol.StatusPassed {
 		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+}
+
+// A test sees the tree's own workspace, as it did on Workshop where adamic keyed its products on go env GOWORK and go
+// work edit -json (#nm31pcn): the stand-in answers with the tree's go.work, never its copy, reads the tree's handed
+// back as the copy, so go writes no go.work.sum into the source every unit shares.
+func TestATestSeesTheTreesOwnWorkspace(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestWorkspace$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+	source := filepath.Join(fixture.directory, "root", sourceDirectoryName, fixture.tree.source, sourceTreeName)
+	if _, err := os.Stat(filepath.Join(source, "go.work.sum")); err == nil {
+		t.Error("go wrote go.work.sum into the tree's source")
+	}
+}
+
+// go work edit that edits writes the workspace, so it is refused, and the red it makes is Loom's.
+func TestAWorkspaceEditIsRefused(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestWorkEdit$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "go work edit -json -use=./elsewhere") {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
 	}
 }

@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// A bridge machine: its queue-bridge.conf, token secret and state, and a stand-in queue that records every request.
+// A bridge machine: its queue-bridge.conf, its token and state, and a stand-in queue that records every request.
 type bridgeFixture struct {
 	config, state string
 	mutex         sync.Mutex
@@ -26,16 +26,17 @@ func newBridgeFixture(t *testing.T) *bridgeFixture {
 		made.mutex.Lock()
 		made.requests = append(made.requests, request.Method+" "+request.URL.RequestURI())
 		made.mutex.Unlock()
-		if !strings.HasPrefix(request.Header.Get("Authorization"), "Bearer ") {
+		// The bridge's own token, as minted for it: never one it minted from a secret.
+		if request.Header.Get("Authorization") != "Bearer the-bridges-token" {
 			writer.WriteHeader(401)
 			return
 		}
 		writer.Write([]byte(`{"changes":[],"futures":[]}`))
 	}))
 	t.Cleanup(server.Close)
-	secret := filepath.Join(root, "token-secret")
-	os.WriteFile(secret, []byte(strings.Repeat("s", 64)+"\n"), 0o600)
-	os.WriteFile(made.config, []byte("queue = "+server.URL+"\nstate = "+made.state+"\nsecret = "+secret+"\nrepository = "+root+"\n"), 0o644)
+	token := filepath.Join(root, "queue-bridge.token")
+	os.WriteFile(token, []byte("the-bridges-token\n"), 0o600)
+	os.WriteFile(made.config, []byte("queue = "+server.URL+"\nstate = "+made.state+"\ntoken = "+token+"\nrepository = "+root+"\n"), 0o644)
 	return made
 }
 

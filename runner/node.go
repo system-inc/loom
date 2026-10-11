@@ -48,7 +48,7 @@ func (run *unitRun) placeNodePackages(placeContext context.Context, treeKey, roo
 		started := time.Now()
 		file, fetch, err := cache.open(placeContext, project.Chunk)
 		if errors.Is(err, builder.ErrNotStored) {
-			err = fmt.Errorf("blob %s isn't in the store (never uploaded, or past its 7 days)", project.Chunk)
+			err = fmt.Errorf("blob %s isn't in the store (never uploaded, or past its 30 days)", project.Chunk)
 		}
 		if err != nil {
 			return fmt.Errorf("%s's npm packages: %w", project.Directory, err)

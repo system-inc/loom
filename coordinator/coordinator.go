@@ -720,6 +720,8 @@ func (coordinator *coordinator) unitFor(planned protocol.PlannedUnit) protocol.U
 		Run: coordinator.run, Unit: planned.Id, Argv: planned.Unit.Argv, Test: planned.Unit.Test, BrokenExit: planned.Unit.BrokenExit, Environment: planned.Unit.Environment,
 		Directory: planned.Unit.Directory, Inputs: planned.Unit.Inputs, Outputs: planned.Unit.Outputs, Products: planned.Unit.Products, ProductStore: planned.Unit.ProductStore,
 		TimeoutSeconds: planned.Unit.TimeoutSeconds, Resources: planned.Unit.Resources, Token: coordinator.runnerToken,
+		// The runner probes each before it runs the unit, and says on finished which it found missing (#vv28ewd).
+		Requires: planned.Unit.Requires,
 	}
 	if len(unit.Inputs) > 0 || len(unit.Outputs) > 0 {
 		unit.Store = &protocol.Endpoint{Url: strings.TrimSuffix(coordinator.config.Wire, "/") + "/runs/" + coordinator.run + "/blobs"}

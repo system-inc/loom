@@ -123,8 +123,9 @@ func (cache runnerCache) run(runContext context.Context, unit protocol.Unit, opt
 		bound = quarter
 	}
 	fetchContext, cancel := context.WithTimeout(runContext, bound)
-	beating := make(chan struct{})
+	beating, beaten := make(chan struct{}), make(chan struct{})
 	go func() {
+		defer close(beaten)
 		started := time.Now()
 		ticker := time.NewTicker(run.options.Heartbeat / 4)
 		defer ticker.Stop()
@@ -133,14 +134,15 @@ func (cache runnerCache) run(runContext context.Context, unit protocol.Unit, opt
 			case <-beating:
 				return
 			case <-ticker.C:
-				if run.emitter.silentFor() >= run.options.Heartbeat {
-					run.say(fmt.Sprintf("still fetching runner %.12s after %.0f s", named, time.Since(started).Seconds()))
-				}
+				run.emitter.beat(run.options.Heartbeat, fmt.Sprintf("loom-runner: still fetching runner %.12s after %.0f s", named, time.Since(started).Seconds()))
 			}
 		}
 	}()
 	binary, err := cache.path(fetchContext, named)
+	// The beat has stopped before anything after it: the named runner continues the stream from this one's next
+	// sequence, so a late beat here would take a sequence it uses.
 	close(beating)
+	<-beaten
 	cancel()
 	if err != nil {
 		return broken(protocol.PhaseFetch, fmt.Errorf("the runner %.12s the unit's key names can't be had within %v: %w: Loom's, never the change's", named, bound, err))

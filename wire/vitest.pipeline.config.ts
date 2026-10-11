@@ -9,6 +9,12 @@ export default defineConfig({
             miniflare: {
                 // The pinned vector's secret from docs/protocol.md; the real one never leaves the deployed Workers.
                 bindings: { LOOM_TOKEN_SECRET: 'loom-test-secret' },
+                // The runs Worker isn't in this runtime: Performance's tests put their own in its place.
+                serviceBindings: {
+                    LoomRuns: function () {
+                        return new Response('no runs Worker in the tests', { status: 503 });
+                    },
+                },
             },
         }),
     ],

@@ -23,6 +23,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/system-inc/loom/builder"
 	"github.com/system-inc/loom/jsonlines"
 	"github.com/system-inc/loom/judge"
 	"github.com/system-inc/loom/planner"
@@ -77,6 +78,9 @@ type Record struct {
 	Transient bool `json:"transient,omitempty"`
 	// Pid is a running build's child, the leader of its process group, which a later builder adopts.
 	Pid int `json:"pid,omitempty"`
+	// Phases are the build's seconds by phase, its checkout's and build-tree's own, so a tree's phases outlive its
+	// build (#s0cqqhk); none on a start, or when the build said none.
+	Phases *builder.TreePhases `json:"phases,omitempty"`
 }
 
 // at is when the record was written; an unreadable time is the zero time, as old as can be.
@@ -338,10 +342,14 @@ type Builder struct {
 	// and the clone's): nothing is checked out or built until it has room.
 	Floor func() error
 	// Build checks the future's commit out keyless in the builder's clone and runs `loom build-tree` on it with the
-	// plan's tree key, which refuses a tree keying otherwise, calling running with the child's pid once it runs. Its
-	// error is why the build ended badly, or ErrDetached when the builder stopped and left the child running; whether
-	// the tree was built is read from the store after it, never from its exit.
-	Build func(want Want, running func(pid int) error) error
+	// plan's tree key, which refuses a tree keying otherwise, calling running with the child's pid once it runs, and
+	// returns the build's phases, nil when it has none. Its error is why the build ended badly, or ErrDetached when the
+	// builder stopped and left the child running; whether the tree was built is read from the store after it, never
+	// from its exit.
+	Build func(want Want, running func(pid int) error) (*builder.TreePhases, error)
+	// Phases reads a tree's phases from its build's log once an adopted build ends, which returned none to this
+	// builder (nil: an adopted build's record holds none).
+	Phases func(tree string) *builder.TreePhases
 	// Alive says whether pid is still the build of tree a builder started; Kill kills its process group. Bound is the
 	// longest a build runs, an adopted one counted from its running record; Poll how often an adopted one is looked at
 	// (zero: AdoptPoll), Sleep how it waits (nil: time.Sleep), and Stopping whether this builder was told to stop, when
@@ -444,7 +452,7 @@ func (builder *Builder) build(want Want) error {
 	}
 	fmt.Fprintf(builder.Log, "tree %s of %s: building\n", want.Tree, want.Future)
 	started := builder.Now()
-	buildErr := builder.Build(want, func(pid int) error {
+	phases, buildErr := builder.Build(want, func(pid int) error {
 		return builder.Ledger.Append(Record{Tree: want.Tree, Future: want.Future, At: builder.Now().UTC().Format(time.RFC3339), Event: Running, Pid: pid})
 	})
 	if errors.Is(buildErr, ErrDetached) {
@@ -453,7 +461,7 @@ func (builder *Builder) build(want Want) error {
 		return nil
 	}
 	indexed, indexErr := builder.Indexed(want.Tree)
-	record.At, record.Seconds = builder.Now().UTC().Format(time.RFC3339), builder.Now().Sub(started).Seconds()
+	record.At, record.Seconds, record.Phases = builder.Now().UTC().Format(time.RFC3339), builder.Now().Sub(started).Seconds(), phases
 	switch {
 	case errors.Is(buildErr, ErrStopped) && !(indexErr == nil && indexed):
 		// A stop is the builder's, never the tree's: nothing stands failed, and the next builder builds it again.
@@ -505,6 +513,10 @@ func (builder *Builder) adopt() (bool, error) {
 		adopted = true
 		indexed, indexErr := builder.Indexed(held.Tree)
 		record := Record{Tree: held.Tree, Future: held.Future, At: builder.Now().UTC().Format(time.RFC3339), Seconds: builder.Now().Sub(held.at()).Seconds()}
+		if builder.Phases != nil {
+			// build-tree's own phases, from its summary line; the checkout was the last builder's, and went with it.
+			record.Phases = builder.Phases(held.Tree)
+		}
 		switch {
 		case indexErr == nil && indexed:
 			record.Event, record.Cause = Built, fmt.Sprintf("adopted, pid %d", held.Pid)

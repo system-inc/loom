@@ -649,3 +649,18 @@ func TestASilentGoTestStillHeartbeats(t *testing.T) {
 		t.Fatalf("a go test silent for 1 s past a 200 ms heartbeat sent no heartbeat: %q", outputLines(events, "runner"))
 	}
 }
+
+// A build job runs only on its tree's build (#8j1qygw): one naming no tree is refused before anything is prepared, never
+// run on a checkout where every test may build. Mutant: the refusal dropped (the checkout is prepared).
+func TestABuildJobWithNoTreeIsRefused(t *testing.T) {
+	fixture := newStrictFixture(t, 0)
+	job := goodTestJob()
+	job.Build = true
+	result, events, _ := runUnit(t, testJobUnit(job), fixture.options(t))
+	if result.Status != protocol.StatusBroken || !strings.Contains(errorPhases(events), "a build job names no tree build") {
+		t.Fatalf("%s; errors %q", result.Status, errorPhases(events))
+	}
+	if _, err := os.Stat(filepath.Join(fixture.directory, "prepared")); err == nil {
+		t.Fatal("a build job with no tree was prepared on a checkout")
+	}
+}

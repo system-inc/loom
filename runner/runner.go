@@ -20,6 +20,7 @@ import (
 	"github.com/system-inc/loom/livestatus"
 	"github.com/system-inc/loom/poster"
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/toolchains"
 )
 
 // Version is what started events report as runnerVersion. A release build sets it with
@@ -91,6 +92,15 @@ type Options struct {
 	LiveStatus string
 	// free reads a filesystem's free bytes; nil means builder.Free. Tests plant a full disk through it.
 	free func(path string) (uint64, error)
+	// Probe checks the toolchains a unit requires in an environment, as toolchains.Check does; nil means
+	// toolchains.Check, each pass trusted across the process for ToolchainsTrusted. A planted one is asked at every unit:
+	// a coordinator's tests stand a machine with the toolchains its Has claims in for one without them.
+	Probe func(checkContext context.Context, claims []string, environment string) []toolchains.Failure
+	// toolchainChecks remembers the passes; nil means the process's own (sharedToolchainChecks). Tests plant one.
+	toolchainChecks *toolchainChecks
+	// share is the unit's part of the machine when serve runs several units at once (slots.go): its commands start in
+	// its cgroup, its packages run on its CPUs, and its started event says its share. Nil means the whole machine.
+	share *share
 }
 
 func (options Options) withDefaults() Options {
@@ -198,6 +208,8 @@ type unitRun struct {
 	workspace string // where the inputs land and the command runs
 	staging   string // fetched blobs wait here, verified, until they are placed
 	live      *livestatus.Writer
+	// missingTools is each toolchain the unit requires that this machine was found to lack, said on finished.
+	missingTools []string
 }
 
 // Run runs one unit and streams its events to options.Events. Every path through it ends with exactly one
@@ -206,7 +218,7 @@ type unitRun struct {
 func Run(runContext context.Context, unit protocol.Unit, options Options) Result {
 	run := begin(unit, options)
 	stopBeating := run.beat()
-	status := run.execute(runContext)
+	status := run.settleMemory(run.execute(runContext))
 	stopBeating()
 	if run.directory != "" && !run.options.Keep {
 		if err := removeDirectory(run.directory); err != nil {
@@ -232,9 +244,7 @@ func (run *unitRun) beat() (stop func()) {
 			case <-quiet:
 				return
 			case <-ticker.C:
-				if run.emitter.silentFor() >= run.options.Heartbeat {
-					run.emitter.emit(protocol.Event{Type: "output", Stream: "runner", Text: fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds())})
-				}
+				run.emitter.beat(run.options.Heartbeat, fmt.Sprintf("loom-runner: still running after %.0f s", time.Since(started).Seconds()))
 			}
 		}
 	}()
@@ -262,6 +272,10 @@ func begin(unit protocol.Unit, options Options) *unitRun {
 	}
 
 	machine := describeMachine()
+	if options.share != nil {
+		// The unit's share is what it can use, and what a started event says.
+		machine.cpus, machine.memoryMegabytes = options.share.cpus, options.share.memoryMegabytes
+	}
 	inputHashes := map[string]string{}
 	for _, input := range unit.Inputs {
 		inputHashes[input.Path] = input.Sha256
@@ -300,6 +314,9 @@ func (run *unitRun) execute(runContext context.Context) string {
 			own = "unreadable"
 		}
 		run.fail(protocol.PhaseStart, fmt.Errorf("refused as unfit: the job's key names runner %.12s, and this runner is %.12s: Loom's, never the change's", job.Runner, own))
+		return protocol.StatusBroken
+	}
+	if !run.checkToolchains(runContext) {
 		return protocol.StatusBroken
 	}
 	if err := run.makeWorkspace(); err != nil {
@@ -342,6 +359,21 @@ func (run *unitRun) execute(runContext context.Context) string {
 	return worse(status, run.uploadOutputs(runContext))
 }
 
+// settleMemory makes a unit broken when the kernel killed any of its processes for passing its memory share: its
+// machine couldn't run it within what it declared, Loom's to place again, never the change's red.
+func (run *unitRun) settleMemory(status string) string {
+	if run.options.share == nil {
+		return status
+	}
+	kills := run.options.share.cgroup.oomKills()
+	if kills == 0 {
+		return status
+	}
+	run.fail(protocol.PhaseRun, fmt.Errorf("the kernel killed %d of the unit's processes for passing its memory share of %d MB: Loom's, never the change's",
+		kills, run.options.share.memoryMegabytes))
+	return protocol.StatusBroken
+}
+
 // worse returns the status that says less was proved: broken over failed over passed.
 func worse(first, second string) string {
 	rank := map[string]int{protocol.StatusPassed: 0, protocol.StatusFailed: 1, protocol.StatusBroken: 2}
@@ -363,17 +395,17 @@ func (run *unitRun) finish(status string) {
 	defer run.live.Close()
 	wire := run.emitter.wire
 	if wire == nil {
-		run.emitter.emit(protocol.Event{Type: "finished", Status: status})
+		run.emitter.emit(protocol.Event{Type: "finished", Status: status, MissingTools: run.missingTools})
 		return
 	}
 	deadline := time.Now().Add(run.options.WireDrainTimeout)
 	if err := wire.Drain(deadline); err != nil {
 		wire.Abandon()
 		run.fail(protocol.PhaseWire, fmt.Errorf("the wire didn't take every event; stdout holds the whole stream: %w", err))
-		run.emitter.emit(protocol.Event{Type: "finished", Status: status})
+		run.emitter.emit(protocol.Event{Type: "finished", Status: status, MissingTools: run.missingTools})
 		return
 	}
-	run.emitter.emit(protocol.Event{Type: "finished", Status: status})
+	run.emitter.emit(protocol.Event{Type: "finished", Status: status, MissingTools: run.missingTools})
 	if err := wire.Drain(deadline.Add(5 * time.Second)); err != nil {
 		fmt.Fprintf(run.options.Diagnostics, "loom-runner: the wire missed the finished event (stdout has it): %v\n", err)
 	}

@@ -52,6 +52,8 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 2
 	}
 	started := time.Now()
+	// Every phase is timed, into the summary line and the live status (#s0cqqhk).
+	clock := newTreeClock(started)
 	// The build's live status, for `loom top`: its tree, its phase, its products built and hit.
 	var live *livestatus.Writer
 	defer func() { live.Close() }()
@@ -75,6 +77,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	live = livestatus.NewWriter(livestatus.TreePath(*cache), livestatus.Status{Kind: livestatus.KindTree, StartedAt: started,
 		Tree: &livestatus.Tree{Key: identity.Key(), Future: *future, Phase: "readying", StartedAt: started}})
+	clock.live = live
 	if err = checkTreeKey(identity, *wantKey, *wantGo, runtime.GOOS+"/"+runtime.GOARCH); err != nil {
 		return fail(err)
 	}
@@ -92,6 +95,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	store.Phases = &clock.phases
 	if err = os.MkdirAll(*cache, 0o755); err != nil {
 		return fail(err)
 	}
@@ -133,19 +137,21 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return fail(err)
 	}
 	defer treeLock.Close()
-	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: append(planner.GateEnvironmentList(), planner.TreeBuildEnvironment()...),
-		Jobs: *jobs, Compile: *compile, Watched: watched}
+	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: planner.UnitEnvironment(planner.RunnersGoos, planner.RunnersGoarch),
+		Jobs: *jobs, Compile: *compile, Watched: watched, Phases: &clock.phases}
 	for _, path := range []string{build.Cache, build.Out, filepath.Join(directory, "logs")} {
 		if err = os.MkdirAll(path, 0o755); err != nil {
 			return fail(err)
 		}
 	}
+	clock.lap(&clock.phases.Readying)
 	// The tree's npm packages, installed here once per lockfile and shipped in its source, so no runner runs npm: first,
 	// so an install that fails fails the build before its products and binaries, not after (Workshop, Oct 10).
 	installs, err := builder.InstallNodePackages(*tree, *nodeCache)
 	if err != nil {
 		return fail(fmt.Errorf("the tree's npm packages: %w", err))
 	}
+	clock.lap(&clock.phases.NpmInstall)
 	packages, err := testPackages(*tree, keys)
 	if err != nil {
 		return fail(err)
@@ -154,13 +160,13 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	warmStarted := time.Now()
+	clock.lap(&clock.phases.Listing)
 	phase("warming", func(tree *livestatus.Tree) { tree.Packages, tree.ProductTests = len(packages), len(productTests) })
 	if err = build.Warm(packages); err != nil {
 		// A package that doesn't compile is named again by its own binary below; the rest are warm.
 		fmt.Fprintf(stderr, "loom: warming the tree: %v\n", err)
 	}
-	warmSeconds := time.Since(warmStarted).Seconds()
+	clock.lap(&clock.phases.Warm)
 	// The store's products are offered to buildcache before it builds one, so only what the store lacks is built.
 	scratch, err := os.MkdirTemp(directory, "held-")
 	if err != nil {
@@ -171,7 +177,6 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return fail(err)
 	}
 	build.Held = held.Address
-	productsStarted := time.Now()
 	phase("products", nil)
 	// The products the store held count as they are taken, once a second.
 	counted := make(chan struct{})
@@ -190,8 +195,9 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}()
 	products, productFailures := build.Products(productTests, filepath.Join(directory, "logs"))
 	close(counted)
-	productSeconds := time.Since(productsStarted).Seconds()
 	held.Close()
+	clock.phases.ProductsFetched, clock.phases.ProductsFetchedSeconds, clock.phases.ProductsBuilt, clock.phases.ProductsBuiltSeconds = builder.ProductCensus(filepath.Join(directory, "logs"))
+	clock.lap(&clock.phases.Products)
 	distinct := map[string]bool{}
 	for _, keys := range products {
 		for _, key := range keys {
@@ -206,7 +212,6 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return fail(fmt.Errorf("the store held products it couldn't give whole: %w", err))
 	}
 	build.Held = ""
-	binariesStarted := time.Now()
 	// Only the binaries the store lacks are compiled: each package's is keyed on its closure and asked for first.
 	inputs, err := build.BinaryInputs(identity.Go, identity.Goos, identity.Goarch)
 	if err != nil {
@@ -216,7 +221,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	for _, note := range reuse.Notes {
 		fmt.Fprintln(stderr, "build-tree:", note)
 	}
-	binarySeconds := time.Since(binariesStarted).Seconds()
+	clock.lap(&clock.phases.Binaries)
 	phase("source and modules", nil)
 	source, err := builder.SourceChunks(*tree, installs)
 	if err != nil {
@@ -226,6 +231,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
+	clock.lap(&clock.phases.SourceChunks)
 	// The tree's modules, after its source is chunked (go may write go.sum), from Workshop's own module cache first.
 	proxy, err := exec.Command("go", "env", "GOMODCACHE", "GOPROXY").Output()
 	if err != nil {
@@ -250,37 +256,48 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		treeIndex.Packages[result.Package] = result
 	}
-	uploadStarted := time.Now()
+	clock.lap(&clock.phases.ModuleCache)
 	phase("uploading", nil)
 	treeIndex.Seconds = time.Since(started).Seconds()
 	// The module cache goes up before the index that names it, as every other blob does.
+	modulesStarted := time.Now()
 	if treeIndex.Modules, err = store.PutBlob(modules); err != nil {
 		return fail(fmt.Errorf("the tree's modules: %w", err))
 	}
+	clock.phases.UploadModules = time.Since(modulesStarted).Seconds()
 	treeKey, indexWritten, err := builder.PublishTree(store, &treeIndex, build.Out, build.Cache, &source, held.Held())
 	if err != nil {
 		return fail(err)
 	}
+	clock.lap(&clock.phases.Upload)
 	// A package fails here when it didn't build, or when a product it reads conflicts with the store's ref.
 	failed := 0
-	encoder := json.NewEncoder(stdout)
 	for _, result := range built {
 		if treeIndex.Packages[result.Package].Error != "" {
 			failed++
 		}
+	}
+	// The tree's directory goes before the summary, so its removal is a phase like the rest (Workshop, Oct 10: 46 s of
+	// a 599 s build came after the summary, and nothing named them).
+	exit := finishTree(stderr, *cache, directory, treeKey, failed, indexWritten, treeLock)
+	clock.lap(&clock.phases.Removal)
+	clock.finish()
+	encoder := json.NewEncoder(stdout)
+	for _, result := range built {
 		encoder.Encode(treeIndex.Packages[result.Package])
 	}
 	encoder.Encode(map[string]any{
 		"tree": identity.Tree, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json", "indexWritten": indexWritten,
 		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products), "productsFetched": len(held.Held()),
-		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
+		"warmSeconds": clock.phases.Warm, "productSeconds": clock.phases.Products, "binarySeconds": clock.phases.Binaries, "uploadSeconds": clock.phases.Upload,
 		"binariesKeyed": reuse.Keyed, "binariesHeld": reuse.Held, "binariesCompiled": reuse.Compiled, "binaryKeySeconds": reuse.KeySeconds, "binaryLookupSeconds": reuse.LookupSeconds,
-		"seconds": time.Since(started).Seconds(), "sourceChunks": len(source.Chunks), "sourceBytes": source.Bytes(),
+		"seconds": clock.phases.Total, "phases": clock.phases, "sourceChunks": len(source.Chunks), "sourceBytes": source.Bytes(),
 		"sourceChunksSent": source.Sent, "sourceBytesSent": source.SentBytes, "node": treeIndex.Node,
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})
+	writePhaseTable(stderr, clock.phases)
 	phase("built", func(tree *livestatus.Tree) { tree.Failed = failed })
-	return finishTree(stderr, *cache, directory, treeKey, failed, indexWritten, treeLock)
+	return exit
 }
 
 // testPackages are the tree's test packages: the resident's, when its keys came with the build, else go's.

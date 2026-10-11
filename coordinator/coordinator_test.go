@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/system-inc/loom/protocol"
+	"github.com/system-inc/loom/toolchains"
 )
 
 var testSecret = []byte("loom-test-secret")
@@ -916,7 +917,7 @@ func TestAUnitThatRequiresAToolchainRunsOnlyWhereItIs(t *testing.T) {
 	wire := newFakeWire(t)
 	without, with := t.TempDir(), t.TempDir()
 	slots := []Machine{LocalMachine{Label: "box-a", WorkspaceParent: without}, LocalMachine{Label: "box-a", WorkspaceParent: without},
-		LocalMachine{Label: "box-b", WorkspaceParent: with, Has: []string{"clang", "wasiSdk"}}}
+		LocalMachine{Label: "box-b", WorkspaceParent: with, Has: []string{"clang", "wasiSdk"}, Probe: probeFailing()}}
 	var units []protocol.JobUnit
 	for _, id := range []string{"wasi-0", "wasi-1", "wasi-2"} {
 		unit := shell(id, "pwd")
@@ -938,6 +939,43 @@ func TestAUnitThatRequiresAToolchainRunsOnlyWhereItIs(t *testing.T) {
 		resolved, _ := filepath.EvalSymlinks(with)
 		if !strings.Contains(said, with) && !strings.Contains(said, resolved) {
 			t.Fatalf("%s ran in %q, not on box-b (%s), the only machine with wasiSdk", id, strings.TrimSpace(said), with)
+		}
+	}
+}
+
+// probeFailing stands in for toolchains.Check on a machine whose named toolchains fail and every other works.
+func probeFailing(broken ...string) func(context.Context, []string, string) []toolchains.Failure {
+	return func(_ context.Context, claims []string, _ string) []toolchains.Failure {
+		failures := []toolchains.Failure{}
+		for _, claim := range claims {
+			if slices.Contains(broken, claim) {
+				failures = append(failures, toolchains.Failure{Toolchain: claim, Why: "wasm-ld can't link"})
+			}
+		}
+		return failures
+	}
+}
+
+// A machine that claims a toolchain its runner then finds broken (Oct 10: box-strict claimed wasiSdk, and Cloud's
+// wasm-ld couldn't link): the coordinator sends the unit's requires, the runner never runs it and says which on
+// finished, and the run is void, never green (#vv28ewd). Mutant: requires left off the unit the runner receives.
+func TestAClaimedToolchainTheRunnerFindsBrokenVoidsTheUnit(t *testing.T) {
+	wire := newFakeWire(t)
+	machine := LocalMachine{Label: "box-b", WorkspaceParent: t.TempDir(), Has: []string{"wasiSdk"}, Probe: probeFailing("wasiSdk")}
+	wasi := shell("wasi-0", "echo ran")
+	wasi.Requires = []string{"wasiSdk"}
+	result := run(t, config(wire, machine), wasi)
+	if result.Verdict.Status != "void" {
+		t.Fatalf("verdict %+v, want void", result.Verdict)
+	}
+	events := unitEventsOf(result.Events, "wasi-0")
+	last := events[len(events)-1]
+	if last.Type != "finished" || strings.Join(last.MissingTools, ",") != "wasiSdk" {
+		t.Fatalf("wasi-0 finished %+v, want broken naming wasiSdk", last)
+	}
+	for _, event := range events {
+		if event.Type == "output" && strings.Contains(event.Text, "ran") {
+			t.Fatal("wasi-0 ran on a machine whose wasiSdk is broken")
 		}
 	}
 }

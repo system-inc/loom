@@ -75,6 +75,23 @@ describe('submitting a change', function () {
         expect(new URL(queue.received[0]?.url ?? '').pathname).toBe(`/changes/${id}/sha`);
     });
 
+    it("passes an owner's withdrawal on to the queue, from a submit token only, as that token's owner", async function () {
+        const queue = new MemoryQueue();
+        const id = 'chg_' + '0'.repeat(26);
+        const withdraw = function (scope: TokenScope, text: string, method = 'POST'): Promise<Response> {
+            return handleChanges(new Request(`https://pipeline.test/changes/${id}/withdraw`, { method: method, body: method === 'POST' ? text : undefined }), claimsOf(scope), `${id}/withdraw`, queue);
+        };
+        expect((await withdraw('coordinator', JSON.stringify({ reason: 'superseded' }))).status).toBe(403);
+        expect((await withdraw('submit', '', 'GET')).status).toBe(405);
+        for (const text of ['', '{}', JSON.stringify({ reason: ' ' }), JSON.stringify({ reason: 'x'.repeat(501) }), JSON.stringify({ reason: 'superseded', owner: 'someone_else' })]) {
+            expect((await withdraw('submit', text)).status, text).toBe(400);
+        }
+        expect(queue.received).toHaveLength(0);
+        await withdraw('submit', JSON.stringify({ reason: 'superseded by walk-6f' }));
+        expect(new URL(queue.received[0]?.url ?? '').pathname).toBe(`/changes/${id}/withdraw`);
+        expect(JSON.parse((await queue.received[0]?.text()) ?? '')).toEqual({ owner: claimsOf('submit').run, reason: 'superseded by walk-6f' });
+    });
+
     it("passes a witness of main on to the queue: base the sha itself, no paths", async function () {
         const queue = new MemoryQueue();
         const witness = { sha: sha, base: sha, owner: owner, paths: [], parity: true, witness: true };

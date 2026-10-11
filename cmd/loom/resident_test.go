@@ -17,7 +17,8 @@ import (
 
 // With a resident, the tree builder keys each checked-out tree before its build and hands build-tree the keys in a
 // file beside the build's log, for that tree; a tree the resident can't key builds cold, with no keys, rather than
-// failing. Mutant: the keys left off the child's command line.
+// failing; the keying's seconds are the build's keying phase. Mutants: the keys left off the child's command line; the
+// keying's seconds never recorded.
 func TestABuildWithAResidentHandsTheChildItsTreesKeys(t *testing.T) {
 	repository := t.TempDir()
 	for name, text := range map[string]string{
@@ -60,8 +61,9 @@ func TestABuildWithAResidentHandsTheChildItsTreesKeys(t *testing.T) {
 	}
 	want := treebuilder.Want{Tree: strings.Repeat("c", 64), Future: commit, Go: "go1.27.1"}
 	checkout := func(string) (string, func(), error) { return repository, func() {}, nil }
-	if err := buildWant(context.Background(), checkout, child, settings, want, resident.New(), func(int) error { return nil }); err != nil {
-		t.Fatal(err)
+	phases, err := buildWant(context.Background(), checkout, child, settings, want, resident.New(), func(int) error { return nil })
+	if err != nil || phases == nil || phases.Keying <= 0 {
+		t.Fatalf("a keyed build: phases %+v, %v", phases, err)
 	}
 	arguments, err := os.ReadFile(recorded)
 	if err != nil {
@@ -81,7 +83,7 @@ func TestABuildWithAResidentHandsTheChildItsTreesKeys(t *testing.T) {
 	}
 	// A commit the checkout isn't at can't be keyed: the build goes on cold, without keys.
 	want.Future = strings.Repeat("3", 40)
-	if err := buildWant(context.Background(), checkout, child, settings, want, resident.New(), func(int) error { return nil }); err != nil {
+	if _, err := buildWant(context.Background(), checkout, child, settings, want, resident.New(), func(int) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if arguments, err = os.ReadFile(recorded); err != nil || slices.Contains(strings.Split(string(arguments), "\n"), "--keys") {

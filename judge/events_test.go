@@ -1,6 +1,7 @@
 package judge
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/system-inc/loom/protocol"
@@ -59,6 +60,26 @@ func TestEventsReadAsTheirStructureSays(t *testing.T) {
 	}
 }
 
+// A runner that found a required toolchain missing or broken says so on its finished event (#vv28ewd): the judge reads
+// it from there, so Decide voids the unit, never red, and an earlier attempt's missing toolchain doesn't follow the unit
+// onto a fit runner. Mutants: missingTools left unread; read across every attempt.
+func TestAFinishedEventsMissingToolsVoidTheUnit(t *testing.T) {
+	unfit := []protocol.Event{started(), {Type: "error", Phase: protocol.PhaseStart, Message: "wasm-ld can't link"},
+		{Type: "finished", Status: "broken", MissingTools: []string{"wasiSdk"}}}
+	finished, found := FinishedFromEvents(unfit)
+	if !found || strings.Join(finished.MissingTools, ",") != "wasiSdk" {
+		t.Fatalf("missing tools %q, want wasiSdk", finished.MissingTools)
+	}
+	decision, err := Decide(Evidence{First: finished.Attempt, FirstInfra: finished.Infra, MissingTools: finished.MissingTools})
+	if err != nil || decision.Status != Void || decision.Cause != CauseInfra || !strings.Contains(decision.Why, "wasiSdk") {
+		t.Fatalf("decided %+v (%v), want void infra naming wasiSdk", decision, err)
+	}
+	refit := append(unfit, started(), protocol.Event{Type: "exit", Code: code(0)}, protocol.Event{Type: "finished", Status: "passed"})
+	if finished, _ := FinishedFromEvents(refit); len(finished.MissingTools) != 0 || finished.Attempt.Status != Passed {
+		t.Fatalf("the fit attempt reads missing %q, status %q", finished.MissingTools, finished.Attempt.Status)
+	}
+}
+
 func TestTestsComeFromTest2jsonLinesAndAnUnfinishedTestStaysUnfinished(t *testing.T) {
 	events := []protocol.Event{started(),
 		{Type: "output", Text: testLine("run", "TestA") + "\n" + testLine("pass", "TestA") + "\nplain text\n" + testLine("run", "TestB")},
@@ -81,7 +102,7 @@ func TestTestsComeFromTest2jsonLinesAndAnUnfinishedTestStaysUnfinished(t *testin
 		t.Fatalf("attempt %+v", attempt)
 	}
 	// Decide reads the unfinished TestB as red, through the failure path.
-	decision, err := Decide(Loop{}.evidenceOf(finished, PlanUnit{}))
+	decision, err := Decide(Loop{}.evidenceOf(Job{}, finished, PlanUnit{}))
 	if err != nil || decision.Next != "rerunAlone" {
 		t.Fatalf("decision %+v %v", decision, err)
 	}
