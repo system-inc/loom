@@ -280,3 +280,34 @@ func TestUnplanAsksQueueByTheFuturesRouteAndReportsARefusal(t *testing.T) {
 		t.Fatalf("a refusal: %v", err)
 	}
 }
+
+// ChangeState reads a change's state and its future from Queue's record of it; a change Queue doesn't know, or an
+// answer with no state, is an error, never read as gone (#drrnnkh).
+func TestChangeStateReadsTheStateAndFutureAndNeverGuesses(t *testing.T) {
+	t.Parallel()
+	queue := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/changes/withdrawn":
+			writer.Write([]byte(`{"state":"withdrawn","future":"aaaa","record":{}}`))
+		case "/changes/unchecked":
+			writer.Write([]byte(`{"state":"queued","future":null}`))
+		case "/changes/blank":
+			writer.Write([]byte(`{"future":"aaaa"}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer queue.Close()
+	client := QueueClient{Base: queue.URL, Token: "t"}
+	if state, future, err := client.ChangeState("withdrawn"); err != nil || state != "withdrawn" || future != "aaaa" {
+		t.Fatalf("withdrawn: %q %q %v", state, future, err)
+	}
+	if state, future, err := client.ChangeState("unchecked"); err != nil || state != "queued" || future != "" {
+		t.Fatalf("unchecked: %q %q %v", state, future, err)
+	}
+	for _, change := range []string{"blank", "unknown"} {
+		if state, _, err := client.ChangeState(change); err == nil {
+			t.Errorf("%s: read as %q", change, state)
+		}
+	}
+}

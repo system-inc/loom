@@ -138,6 +138,34 @@ func (client QueueClient) ChangePaths(future Future) ([]string, error) {
 	return paths, nil
 }
 
+// ChangeState is a change's state and the future it's tested in now (GET /changes/<change>): the placer asks it of a
+// run whose future Queue stopped listing (#drrnnkh). A change Queue doesn't know is an error, never read as gone.
+func (client QueueClient) ChangeState(change string) (string, string, error) {
+	response, err := client.do("GET", "/changes/"+url.PathEscape(change), nil)
+	if err != nil {
+		return "", "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("GET /changes/%s: %s", change, response.Status)
+	}
+	var read struct {
+		State  string  `json:"state"`
+		Future *string `json:"future"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&read); err != nil {
+		return "", "", fmt.Errorf("GET /changes/%s: %w", change, err)
+	}
+	if read.State == "" {
+		return "", "", fmt.Errorf("GET /changes/%s: no state", change)
+	}
+	future := ""
+	if read.Future != nil {
+		future = *read.Future
+	}
+	return read.State, future, nil
+}
+
 // PostEmpty tells Queue a future moves no unit's key, so it has nothing to run (Queue, Oct 10 01:31Z). Queue takes it
 // only when every path of the future's changes ends in .md, as a second lock beside the planner's own.
 func (client QueueClient) PostEmpty(future, reason string) error {

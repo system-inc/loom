@@ -100,6 +100,11 @@ type Record struct {
 	Held string `json:"held,omitempty"`
 	// Replan is why the placer asked Queue to plan the future again after this attempt's void: its plan was stale.
 	Replan string `json:"replan,omitempty"`
+	// Change is the future's newest change when it was placed, the one asked whether the run is still wanted.
+	Change string `json:"change,omitempty"`
+	// Stopped is why the placer stopped the run: no live change lists its future any more (withdrawn, red, parked,
+	// landed, or moved to a new sha), so its units only hold pool slots others wait for.
+	Stopped string `json:"stopped,omitempty"`
 }
 
 // placed says the attempt is the placer's no more: started, voided, or with nothing to run.
@@ -136,6 +141,8 @@ type Ledger interface {
 	Find(future string, attempt int) (Record, bool)
 	// LastVoid is the newest record of the future that posted a void, any attempt.
 	LastVoid(future string) (Record, bool)
+	// Running are the attempts whose run started and wasn't seen to end or stopped.
+	Running() []Record
 	Append(record Record) error
 	// Compact keeps only the attempts keep says to.
 	Compact(keep func(Record) bool) error
@@ -166,6 +173,11 @@ type Placer struct {
 	RunStarted func(run string) (bool, error)
 	// Void posts the listed attempt void as Loom's, neverPlaced, with the cause (judge.Puller.VoidListed).
 	Void func(future judge.PlannedFuture, attempt int, cause string) error
+	// ChangeOf is a change's state and the future it's tested in now, as Queue holds them (GET /changes/<change>).
+	ChangeOf func(change string) (state string, future string, err error)
+	// Stop ends a run the placer started, by its run id: the coordinator drops its queued units as it goes. A run
+	// already ended is no error.
+	Stop func(run string) error
 	// Unplan asks Queue to withdraw the future's plan so the planner plans it again (POST /futures/<tree>/unplan, by
 	// the placer, with reason), which Queue takes only after a void and while no green or red stands (#0zndrgw). Nil
 	// never asks.
@@ -253,6 +265,10 @@ func (placer *Placer) PlaceOnce() (int, error) {
 	started, listed := 0, map[string]bool{}
 	for _, future := range futures {
 		listed[future.Future] = true
+	}
+	// Runs no live change wants any more end first, so their units free the pools before anything new is placed.
+	failures = append(failures, placer.stopUnwanted(listed)...)
+	for _, future := range futures {
 		if failure := placer.failing[future.Future]; failure != nil && placer.Now().Before(failure.next) {
 			continue
 		}
@@ -284,6 +300,54 @@ func (placer *Placer) PlaceOnce() (int, error) {
 		return started, fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 	return started, nil
+}
+
+// liveStates are the change states Queue still tests a change in; any other (landed, red, parked, refused, witnessed,
+// withdrawn) has no use for a run.
+var liveStates = []string{"queued", "building", "testing"}
+
+// stopUnwanted stops each run the placer started whose future Queue no longer lists, once its change is no longer live
+// or is tested in another future now (#drrnnkh: a withdrawn branch's run held about 100 units ahead of walk-6f). A future
+// listed is still wanted, and one unlisted while its change is live and still tested there (decided green, waiting to
+// land) keeps its run. A change Queue can't say anything about is asked again next pass; a run that can't be stopped
+// is tried again too. Nothing is placed for an unlisted future, so a stopped run's future is never placed again.
+func (placer *Placer) stopUnwanted(listed map[string]bool) []string {
+	if placer.ChangeOf == nil || placer.Stop == nil {
+		return nil
+	}
+	failures := []string{}
+	for _, record := range placer.Ledger.Running() {
+		if listed[record.Future] {
+			continue
+		}
+		if record.Change == "" {
+			placer.note(record.Run+" stop", fmt.Sprintf("%s: placed before runs named their change, so it runs to its end", record.Run))
+			continue
+		}
+		state, now, err := placer.ChangeOf(record.Change)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("run %s: asking for change %s: %v", record.Run, record.Change, err))
+			continue
+		}
+		if slices.Contains(liveStates, state) && now == record.Future {
+			continue
+		}
+		why := fmt.Sprintf("change %s is %s", record.Change, state)
+		if slices.Contains(liveStates, state) {
+			why = fmt.Sprintf("change %s is tested in %.12s now", record.Change, now)
+		}
+		if err := placer.Stop(record.Run); err != nil {
+			failures = append(failures, fmt.Sprintf("stopping run %s (%s): %v", record.Run, why, err))
+			continue
+		}
+		record.Stopped, record.At = why+": no live change lists its future", placer.Now().UTC().Format(time.RFC3339)
+		if err := placer.Ledger.Append(record); err != nil {
+			failures = append(failures, err.Error())
+			continue
+		}
+		fmt.Fprintf(placer.Log, "stopped %s: %s\n", record.Run, record.Stopped)
+	}
+	return failures
 }
 
 // drainExits takes every run ending waiting on Exits into exited, for recordExits.
@@ -434,7 +498,7 @@ func (pass *pass) placeOne(future judge.PlannedFuture) (bool, error) {
 	for _, unit := range carriedUnits {
 		carried[unit.UnitKey] = true
 	}
-	record := Record{Future: future.Future, Attempt: attempt, Run: run, PlanHash: PlanHash(future.Units)}
+	record := Record{Future: future.Future, Attempt: attempt, Run: run, PlanHash: PlanHash(future.Units), Change: future.Change.Change}
 	// stale are the unplaced causes a new plan fixes: a key naming a runner no pool serves, a unit with no tree key.
 	stale := []string{}
 	candidates := []candidate{}
