@@ -556,6 +556,22 @@ func delegatedEnvironment(proxy, moduleCache string) []string {
 	return []string{"GOENV=off", "GOPROXY=" + proxy, "GOSUMDB=off", "GOMODCACHE=" + moduleCache}
 }
 
+// queryEnvironment says what decides how a test's go query resolves modules, once a unit: the test's own GOWORK,
+// GOFLAGS, GOENV and GOTOOLCHAIN, and the proxy, module cache and workspace the stand-in puts above them (Oct 11: a
+// workspace dropped on Codex alone was found only from a test's log).
+func queryEnvironment(environment map[string]string, delegated []string) string {
+	values := map[string]string{}
+	for _, name := range []string{"GOWORK", "GOFLAGS", "GOENV", "GOTOOLCHAIN"} {
+		values[name] = environment[name]
+	}
+	for _, variable := range delegated {
+		name, value, _ := strings.Cut(variable, "=")
+		values[name] = value
+	}
+	return fmt.Sprintf("the tests' go queries run with GOWORK=%q (the tree's copy for a query in the tree), GOFLAGS=%q, GOENV=%q, GOTOOLCHAIN=%q, GOPROXY=%q, GOMODCACHE=%q",
+		environment["GOWORK"], values["GOFLAGS"], values["GOENV"], values["GOTOOLCHAIN"], values["GOPROXY"], values["GOMODCACHE"])
+}
+
 // runnersGo is what the runner's own go commands (the release check, filling the module cache, reading go.work) add
 // above delegatedEnvironment: the runner's go as itself, and no test's flags.
 var runnersGo = []string{"GOTOOLCHAIN=local", "GOFLAGS="}
@@ -635,6 +651,8 @@ func workspaceCopy(copyContext context.Context, real string, environment []strin
 // each build it refused, each read-only query the runner's go answered (with its exit), each one no go here could.
 type StandIn struct {
 	refused, answered, unanswered string
+	// stderrs holds go's last stderr line for each query it answered with a failure, "<exit> go <query>\t<line>".
+	stderrs string
 	// build is a build job's: every go command its tests run goes through, and a failed one is theirs (protocol.TestJob.Build).
 	build bool
 }
@@ -723,8 +741,19 @@ if [ -n "$copy" ] && { [ "$1" = env ] || [ "$1" = work ]; }; then
 	done
 	printf '%s' "$answer$output"
 else
-	"$real" "$@"
+	# go's stderr reaches the test as it would, after go ends, and a failure's last line is kept for the runner to say.
+	# Builtins only, as above: the file is this process's, beside STDERRS, and goes with the unit's directory.
+	errors=STDERRS.$$
+	"$real" "$@" 2> "$errors"
 	status=$?
+	last=
+	while IFS= read -r line || [ -n "$line" ]; do
+		printf '%s\n' "$line" >&2
+		[ -n "$line" ] && last=$line
+	done < "$errors"
+	if [ "$status" != 0 ]; then
+		printf '%s go %s\t%s\n' "$status" "$*" "$last" >> STDERRS
+	fi
 fi
 printf '%s go %s\n' "$status" "$*" >> ANSWERED
 exit "$status"
@@ -791,13 +820,14 @@ func StandInGo(checkContext context.Context, directory, source, release, proxy, 
 			say(fmt.Sprintf("the tree's modules are in %s in %.1f s", moduleCache, time.Since(started).Seconds()))
 		}
 		say("go at " + real + " answers the tests' read-only go queries as " + release + ", from the tree's module cache; no test builds or downloads here")
+		say(queryEnvironment(environment, delegated))
 	}
 	bin := filepath.Join(directory, "stand-in")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		return StandIn{}, err
 	}
 	standIn := StandIn{refused: filepath.Join(directory, "go-refused"), answered: filepath.Join(directory, "go-answered"),
-		unanswered: filepath.Join(directory, "go-unanswered"), build: build}
+		unanswered: filepath.Join(directory, "go-unanswered"), stderrs: filepath.Join(directory, "go-stderrs"), build: build}
 	exports := ""
 	for _, variable := range delegated {
 		name, value, _ := strings.Cut(variable, "=")
@@ -826,7 +856,7 @@ func StandInGo(checkContext context.Context, directory, source, release, proxy, 
 		}
 	}
 	script := strings.NewReplacer("WORKCOPY", shellQuote(workCopy), "WORKTREE", shellQuote(workTree), "REFUSED", shellQuote(standIn.refused),
-		"UNANSWERED", shellQuote(standIn.unanswered), "ANSWERED", shellQuote(standIn.answered), "REAL", shellQuote(real), "RELEASE", shellQuote(release),
+		"UNANSWERED", shellQuote(standIn.unanswered), "ANSWERED", shellQuote(standIn.answered), "STDERRS", shellQuote(standIn.stderrs), "REAL", shellQuote(real), "RELEASE", shellQuote(release),
 		"BUILD", strconv.FormatBool(build), "ENVIRONMENT\n", exports).Replace(standInScript)
 	if err := os.WriteFile(filepath.Join(bin, "go"), []byte(script), 0o755); err != nil {
 		return StandIn{}, err
@@ -886,7 +916,13 @@ func (run *unitRun) settleGo(standIn StandIn, status string) string {
 		return protocol.StatusBroken
 	}
 	if len(failed) > 0 {
-		run.fail(protocol.PhaseRun, fmt.Errorf("a read-only go query failed here (%s): Loom's, never the change's", failed[0]))
+		said := ""
+		if lines := fileLines(standIn.stderrs); len(lines) > 0 {
+			if _, line, found := strings.Cut(lines[0], "\t"); found && line != "" {
+				said = ", go said: " + line
+			}
+		}
+		run.fail(protocol.PhaseRun, fmt.Errorf("a read-only go query failed here (%s%s): Loom's, never the change's", failed[0], said))
 		return protocol.StatusBroken
 	}
 	return status

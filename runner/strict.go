@@ -586,6 +586,14 @@ func (run *unitRun) testEnvironment(environmentFile string, job *protocol.TestJo
 			environment[name] = value
 		}
 	}
+	// env.sh gives the toolchain's paths and nothing of how go resolves modules: a machine's own env.sh keeps lines other
+	// steps wrote (a Codex instance's, /workspace/adamic-tools/env.sh), and a GOWORK there made every query in cohere
+	// skip cohere's workspace and ask its proxy for modules the tree's cache doesn't hold (Oct 11, landable-8: "reading
+	// file:///…/golang.org/x/sys/@v/v0.33.0.mod: no such file", on Codex alone). The runner sets these itself: GOENV and
+	// GOFLAGS just below, GOPROXY and the workspace in the stand-in (delegatedEnvironment, standInScript).
+	for _, name := range []string{"GOWORK", "GOPROXY", "GOENV", "GOFLAGS"} {
+		delete(environment, name)
+	}
 	// The gate's switches, and the toolchain and flags Workshop ran the tree's product tests under, so a test asks for
 	// each product by the key Workshop built it under (planner.UnitEnvironment, #nm31pcn).
 	for _, variable := range planner.UnitEnvironment(runtime.GOOS, runtime.GOARCH) {
