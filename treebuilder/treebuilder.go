@@ -10,7 +10,8 @@
 // has failed MaxFailures times; a checkout that hiccuped is transient, retried soon and never voided), refused (the
 // disk is under its floor: nothing is checked out or built until it isn't), or interrupted (the builder stopped
 // mid-build, a crash, and builds it again), or stopped (the build ended under the builder's stop, or an adopted one
-// left no index this release reads, and the next pass builds it again). A build's child runs in a process group of its
+// left no index this release reads, and the next pass builds it again; or nothing wants its tree any more, a withdrawn
+// branch's, and no pass builds it unless a listing wants it again: unwanted.go). A build's child runs in a process group of its
 // own, recorded running with its pid: a builder told to stop (a release's restart, #apsj7zp) leaves it running, and the
 // next builder adopts it, waiting for it under the same bound, instead of building the tree again.
 package treebuilder
@@ -360,6 +361,9 @@ type Builder struct {
 	Poll     time.Duration
 	Sleep    func(time.Duration)
 	Stopping func() bool
+	// WantPoll is how often a running build's tree is asked about, stopped once nothing wants it (unwanted.go; zero:
+	// WantPoll).
+	WantPoll time.Duration
 	Ledger   *Ledger
 	// Keep is how long a record is kept; zero keeps every one.
 	Keep        time.Duration
@@ -452,9 +456,15 @@ func (builder *Builder) build(want Want) error {
 	}
 	fmt.Fprintf(builder.Log, "tree %s of %s: building\n", want.Tree, want.Future)
 	started := builder.Now()
+	var watch *stopWatch
 	phases, buildErr := builder.Build(want, func(pid int) error {
-		return builder.Ledger.Append(Record{Tree: want.Tree, Future: want.Future, At: builder.Now().UTC().Format(time.RFC3339), Event: Running, Pid: pid})
+		if err := builder.Ledger.Append(Record{Tree: want.Tree, Future: want.Future, At: builder.Now().UTC().Format(time.RFC3339), Event: Running, Pid: pid}); err != nil {
+			return err
+		}
+		watch = builder.watch(want.Tree, pid)
+		return nil
 	})
+	unwanted := watch.end()
 	if errors.Is(buildErr, ErrDetached) {
 		// Its running record stands, for the next builder to adopt.
 		fmt.Fprintf(builder.Log, "tree %s of %s: left running for the next builder: %v\n", want.Tree, want.Future, buildErr)
@@ -463,6 +473,9 @@ func (builder *Builder) build(want Want) error {
 	indexed, indexErr := builder.Indexed(want.Tree)
 	record.At, record.Seconds, record.Phases = builder.Now().UTC().Format(time.RFC3339), builder.Now().Sub(started).Seconds(), phases
 	switch {
+	case unwanted != "" && !(indexErr == nil && indexed):
+		// Nothing wants the tree: never the tree's failure, and no listing builds it again unless one wants it.
+		record.Event, record.Cause = Stopped, "stopped mid-build: "+unwanted
 	case errors.Is(buildErr, ErrStopped) && !(indexErr == nil && indexed):
 		// A stop is the builder's, never the tree's: nothing stands failed, and the next builder builds it again.
 		record.Event, record.Cause = Stopped, buildErr.Error()
@@ -498,7 +511,7 @@ func (builder *Builder) adopt() (bool, error) {
 	adopted := false
 	for _, held := range builder.Ledger.running() {
 		fmt.Fprintf(builder.Log, "tree %s of %s: adopting its build, pid %d, running since %s\n", held.Tree, held.Future, held.Pid, held.At)
-		deadline, killed := held.at().Add(builder.Bound), false
+		deadline, killed, unwanted, asked := held.at().Add(builder.Bound), false, "", builder.Now()
 		for builder.Alive != nil && builder.Alive(held.Pid, held.Tree) {
 			if builder.Stopping != nil && builder.Stopping() {
 				return adopted, nil
@@ -507,6 +520,13 @@ func (builder *Builder) adopt() (bool, error) {
 				builder.Kill(held.Pid)
 				killed = true
 				break
+			}
+			if builder.Now().Sub(asked) >= builder.wantPoll() {
+				asked = builder.Now()
+				if unwanted = builder.unwanted(held.Tree); unwanted != "" {
+					builder.Kill(held.Pid)
+					break
+				}
 			}
 			builder.sleep(builder.poll())
 		}
@@ -520,6 +540,8 @@ func (builder *Builder) adopt() (bool, error) {
 		switch {
 		case indexErr == nil && indexed:
 			record.Event, record.Cause = Built, fmt.Sprintf("adopted, pid %d", held.Pid)
+		case unwanted != "":
+			record.Event, record.Cause = Stopped, fmt.Sprintf("the adopted build, pid %d, stopped mid-build: %s", held.Pid, unwanted)
 		case indexErr != nil:
 			record.Event, record.Cause = Failed, fmt.Sprintf("reading the store for its index after the adopted build: %v", indexErr)
 		case killed:

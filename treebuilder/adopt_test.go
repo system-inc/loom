@@ -39,6 +39,8 @@ func TestAnAdoptedBuildIsBoundedAndDecidedByTheStore(t *testing.T) {
 	t.Run("past its bound", func(t *testing.T) {
 		h, ledger, killed := setup(t)
 		running(t, h, ledger, h.now.Add(-time.Hour))
+		// Still wanted, so only the bound decides (unwanted_test.go covers a tree nothing wants).
+		h.builder.Source = listedFutures{future("1", unit(t, "test", "run", keyA))}
 		h.builder.Alive = func(pid int, tree string) bool { return len(*killed) == 0 }
 		h.buildOnce(t, true)
 		newest, _ := ledger.Newest(keyA)
