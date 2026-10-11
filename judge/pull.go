@@ -480,6 +480,43 @@ type PoolEntry struct {
 	Cold      bool     `json:"cold,omitempty"`
 	Machines  []string `json:"machines,omitempty"`
 	ColdSince string   `json:"coldSince,omitempty"`
+	// MachinePrefixes name the workers of a pool whose instances come and go (Codex's, codex-<hostname>, #54pcx41): a
+	// worker whose machine name starts with one is the pool's, as one its Machines list names.
+	MachinePrefixes []string `json:"machinePrefixes,omitempty"`
+}
+
+// Names says whether a worker reporting machine in its started events is one of the pool's: Machines names it, or it
+// starts with one of MachinePrefixes.
+func (pool PoolEntry) Names(machine string) bool {
+	return slices.Contains(pool.Machines, machine) || slices.ContainsFunc(pool.MachinePrefixes, func(prefix string) bool { return strings.HasPrefix(machine, prefix) })
+}
+
+// NamesAny says whether the pool names any machine at all, by name or by prefix.
+func (pool PoolEntry) NamesAny() bool {
+	return len(pool.Machines) > 0 || len(pool.MachinePrefixes) > 0
+}
+
+// Shares says whether two pools may name one worker: a machine one names the other names too, or two prefixes where one
+// starts with the other (a worker named after the longer is named by both).
+func (pool PoolEntry) Shares(other PoolEntry) bool {
+	for _, machine := range pool.Machines {
+		if other.Names(machine) {
+			return true
+		}
+	}
+	for _, machine := range other.Machines {
+		if pool.Names(machine) {
+			return true
+		}
+	}
+	for _, prefix := range pool.MachinePrefixes {
+		for _, otherPrefix := range other.MachinePrefixes {
+			if strings.HasPrefix(prefix, otherPrefix) || strings.HasPrefix(otherPrefix, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // WarmUnit says why a unit's attempt counts as warm, empty when it counts: only a test unit keyed on one of
@@ -508,7 +545,7 @@ func WarmAttempt(pools []PoolEntry, attempt Attempt) string {
 	named := false
 	var since time.Time
 	for _, pool := range pools {
-		if !slices.Contains(pool.Machines, attempt.Machine) {
+		if !pool.Names(attempt.Machine) {
 			continue
 		}
 		if !pool.Cold {
@@ -566,6 +603,10 @@ func LoadPools(content []byte) ([]PoolEntry, error) {
 	for _, pool := range table.Pools {
 		if pool.Name == "" || pool.Runner == "" || pool.MemoryMegabytes <= 0 || pool.Cpus <= 0 {
 			return nil, fmt.Errorf("pools.json: pool %+v needs a name, a runner and positive memoryMegabytes and cpus", pool)
+		}
+		if slices.Contains(pool.MachinePrefixes, "") {
+			// An empty prefix would name every worker the pool's.
+			return nil, fmt.Errorf("pools.json: pool %s has an empty machine prefix", pool.Name)
 		}
 	}
 	return table.Pools, nil
