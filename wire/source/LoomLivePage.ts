@@ -61,6 +61,12 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
 .label { font: 600 11px/1 system-ui, -apple-system, "Segoe UI", sans-serif; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .note { font-size: 12px; color: var(--muted); }
+.gate { background: var(--panel); border: 1px solid var(--violet-deep); border-radius: 14px; padding: 28px 28px 30px; display: flex; flex-direction: column; gap: 12px; max-width: 760px; }
+.gate[hidden] { display: none; }
+.gate h1 { margin: 0; font-size: 26px; line-height: 1.2; }
+.gate p { margin: 0; font-size: 15px; color: var(--soft); }
+.gate .mono { color: var(--text); overflow-wrap: anywhere; }
+body[data-gate] main > :not(header):not(.gate) { display: none; }
 .pulse { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; }
 .pulse .panel { gap: 10px; }
 .pulse .figure { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 16px; min-width: 0; }
@@ -191,6 +197,12 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         <button type="button" class="toggle" id="hear">Hear a landing</button>
     </div>
 </header>
+<section class="gate" id="gate" role="alert" hidden>
+    <h1 id="gate-title">This board needs its board token</h1>
+    <p id="gate-why">Nothing is shown without one, so an empty board never passes for a quiet one.</p>
+    <p>Open the page once as <span class="mono">loom.system.inc/#&lt;board token&gt;</span>. This browser keeps the token and takes it out of the address bar, and a token after the # never reaches a server.</p>
+    <p class="note">With ahra, <span class="mono">ahra loom board</span> opens this page with a fresh token, and <span class="mono">ahra loom board --copy-url</span> puts the address on the clipboard for a phone. On Workshop, <span class="mono">~/.loom/bin/loom board --wire https://loom.system.inc</span> prints it.</p>
+</section>
 <section class="pulse" aria-label="The headline">
     <article class="panel">
         <span class="label">Builds tested, last hour</span>
@@ -673,9 +685,26 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         node.textContent = text;
     }
 
+    // In place of the board when there is no token, or the board refused the one this browser kept.
+    function showGate(refused) {
+        document.body.dataset.gate = refused ? 'refused' : 'missing';
+        document.getElementById('gate').hidden = false;
+        document.getElementById('gate-title').textContent = refused ? 'The board refused this browser\u2019s token' : 'This board needs its board token';
+        document.getElementById('gate-why').textContent = refused
+            ? 'It has expired, or it was signed with an old key. It is forgotten here; open the page with a fresh one.'
+            : 'Nothing is shown without one, so an empty board never passes for a quiet one.';
+        setConnection('reconnecting', refused ? 'token refused' : 'no board token');
+    }
+
+    function refuse() {
+        token = '';
+        try { localStorage.removeItem('loom.boardToken'); } catch (error) { /* nothing kept */ }
+        showGate(true);
+    }
+
     function connect() {
         if (!token) {
-            setConnection('reconnecting', 'open this page once with its board token after the #');
+            showGate(false);
             return;
         }
         var opened = false;
@@ -714,7 +743,7 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
             fetch('/board/changes', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
                 .then(function (response) {
                     if (response.status === 401 || response.status === 403) {
-                        try { localStorage.removeItem('loom.boardToken'); } catch (error) { /* nothing kept */ }
+                        refuse();
                         return Promise.reject(new Error('the board refused this token; open the page with a fresh one after the #'));
                     }
                     return response.ok ? response.json() : Promise.reject(new Error('the board answered ' + response.status));
@@ -726,8 +755,9 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
                     setTimeout(once, 2000);
                 })
                 .catch(function (error) {
+                    if (!token) { return; }
                     setConnection('reconnecting', error.message);
-                    if (token && error.message.indexOf('refused this token') < 0) { setTimeout(once, 2000); }
+                    setTimeout(once, 2000);
                 });
         }
         once();
@@ -787,11 +817,12 @@ header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
         if (!token) { return; }
         fetch('/ui/headline', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
             .then(function (response) {
+                if (response.status === 401 || response.status === 403) { refuse(); }
                 return response.ok ? response.json() : Promise.reject(new Error('the headline answered ' + response.status));
             })
             .then(function (reading) { renderPulse(reading); tick(); })
             .catch(function (error) { document.getElementById('tested-source').textContent = error.message; })
-            .finally(function () { setTimeout(readPulse, 10000); });
+            .finally(function () { if (token) { setTimeout(readPulse, 10000); } });
     }
 
     setInterval(tick, 1000);
