@@ -72,8 +72,9 @@ git -C "${repository}" worktree add -q --detach "${source}" "${commit}" || exit 
 built=${work}/built
 : > "${built}"
 failed=0
-# A Go main the list doesn't name would never reach a machine: refused, so a new command can't be left behind.
-for directory in $(grep -rl --include='*.go' '^package main$' "${source}" 2> /dev/null | sed "s#^${source}/##" | xargs -n1 dirname | sort -u); do
+# A Go main the list doesn't name would never reach a machine: refused, so a new command can't be left behind. A
+# directory go itself never builds (testdata, or a name starting with . or _) holds no command: a test's fixture.
+for directory in $(grep -rl --include='*.go' '^package main$' "${source}" 2> /dev/null | sed "s#^${source}/##" | xargs -n1 dirname | grep -Ev '(^|/)(testdata|[._][^/]*)(/|$)' | sort -u); do
 	case " ${binaries} " in *":./${directory} "*) ;; *)
 		echo "publish: ${directory} is a Go main publish.sh doesn't ship; add it to binaries" >&2
 		failed=1
