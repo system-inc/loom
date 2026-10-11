@@ -871,14 +871,24 @@ func TestPrepareEnvironmentNeedsNoGitAndNoGo(t *testing.T) {
 	script := filepath.Join(directory, "prepare.sh")
 	os.WriteFile(script, prepareScript, 0o700)
 	environment := filepath.Join(directory, "environment")
-	prepare := func() (int, string) {
+	prepare := func(extra ...string) (int, string) {
 		command := exec.Command(filepath.Join(bin, "bash"), script, "environment", tree, "", environment, filepath.Join(directory, "root"))
-		command.Env = []string{"PATH=" + bin, "HOME=" + home}
+		command.Env = append([]string{"PATH=" + bin, "HOME=" + home}, extra...)
 		output, _ := command.CombinedOutput()
 		return command.ProcessState.ExitCode(), string(output)
 	}
 	if code, output := prepare(); code != 2 || !strings.Contains(output, "no adamic toolchain") {
 		t.Fatalf("an instance without adamic's toolchain: exit %d: %s", code, output)
+	}
+	// A Codex instance's toolchain is where its environment's ADAMIC_TOOLS says, never in home (Oct 11): found there.
+	tools := filepath.Join(directory, "workspace", "adamic-tools")
+	os.MkdirAll(tools, 0o755)
+	os.WriteFile(filepath.Join(tools, "env.sh"), []byte("export ADAMIC_TOOLCHAIN_FROM=tools\n"), 0o644)
+	if code, output := prepare("ADAMIC_TOOLS=" + tools); code != 0 {
+		t.Fatalf("a toolchain ADAMIC_TOOLS names: exit %d: %s", code, output)
+	}
+	if content, _ := os.ReadFile(environment); !bytes.Contains(content, []byte("ADAMIC_TOOLCHAIN_FROM=tools\x00")) {
+		t.Fatalf("the environment lacks the toolchain ADAMIC_TOOLS names: %q", content)
 	}
 	os.MkdirAll(filepath.Join(home, "adamic-tools"), 0o755)
 	os.WriteFile(filepath.Join(home, "adamic-tools", "env.sh"), []byte("export ADAMIC_TOOLCHAIN_LOADED=1\n"), 0o644)

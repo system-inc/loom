@@ -23,6 +23,8 @@ import (
 // slot script): which of the box's slots the unit holds and its CPUs, so a unit may use that slot's own warm
 // checkout. A unit that reads them depends on its machine, so it isn't cacheable.
 var baseEnvironment = []string{"PATH", "HOME", "TMPDIR", "LANG", "LOOM_SLOT", "LOOM_SLOT_CPUS",
+	// Where adamic's setup put the toolchain, when the machine's environment says (a Codex instance's does).
+	"ADAMIC_TOOLS",
 	// How the machine reaches the network: a Codex instance goes through a proxy with its own CA, and a unit
 	// that can't reach github or a package registry proves nothing.
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "no_proxy", "all_proxy",

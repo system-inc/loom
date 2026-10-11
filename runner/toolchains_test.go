@@ -110,3 +110,13 @@ func TestAWASISpecRequiresTheWASISDK(t *testing.T) {
 		t.Fatalf("a whole package whose key names nothing requires %q", got)
 	}
 }
+
+// A unit's preparation sees where the machine's environment says adamic's toolchain is (ADAMIC_TOOLS, a Codex
+// instance's), as the probe does. Mutant: ADAMIC_TOOLS left out of the unit's environment. Not parallel: it sets it.
+func TestPreparationSeesADAMICTOOLS(t *testing.T) {
+	t.Setenv("ADAMIC_TOOLS", "/workspace/adamic-tools")
+	run := &unitRun{unit: protocol.Unit{}}
+	if !slices.Contains(run.prepareEnvironment(), "ADAMIC_TOOLS=/workspace/adamic-tools") {
+		t.Fatalf("preparation's environment lacks ADAMIC_TOOLS: %q", run.prepareEnvironment())
+	}
+}

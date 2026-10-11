@@ -72,6 +72,16 @@ if [ "${1:-}" = pin-urls ]; then
 	pinUrls "${2:-}"
 	exit $?
 fi
+# toolchainFile prints the adamic toolchain's env.sh where adamic's own cloud/setup.sh puts it, as toolchains.Environment
+# looks: $ADAMIC_TOOLS/env.sh when the environment names one (a Codex instance's), else ~/adamic-tools, else
+# ~/.adamic-tools, else setup's default /opt/adamic-tools; it fails when there is none.
+toolchainFile() {
+	local candidate
+	for candidate in ${ADAMIC_TOOLS:+"${ADAMIC_TOOLS}/env.sh"} "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh" /opt/adamic-tools/env.sh; do
+		[ -f "${candidate}" ] && { echo "${candidate}"; return 0; }
+	done
+	return 1
+}
 # Disk: on an instance that runs one unit at a time, what earlier units left on its root is no one's, and on a machine
 # that is the runner's alone (exclusive), what they left in HOME's caches too. A shared machine's HOME is other work's.
 freeMegabytes() { df -Pm "${HOME}" "${root}" | awk 'NR > 1 {print $4}' | sort -n | head -1; }
@@ -223,23 +233,20 @@ if [ "${mode}" = checkout ]; then
 	# The toolchain: adamic's own cloud/setup.sh at this commit, once per instance, and only on a machine that is the
 	# runner's alone, since it installs into HOME. A shared machine's own toolchain serves, or the unit is unfit there.
 	if [ "${owner}" != exclusive ]; then
-		[ -f "${HOME}/adamic-tools/env.sh" ] || [ -f "${HOME}/.adamic-tools/env.sh" ] || {
-			say "unfit: this machine isn't the runner's alone, so it runs no cloud/setup.sh in its shared HOME, and it has no adamic toolchain (adamic-tools/env.sh)"
+		toolchainFile > /dev/null || {
+			say "unfit: this machine isn't the runner's alone, so it runs no cloud/setup.sh in its shared HOME, and it has no adamic toolchain (env.sh in \$ADAMIC_TOOLS, ~/adamic-tools, ~/.adamic-tools or /opt/adamic-tools)"
 			exit 2
 		}
 	elif [ ! -f "${root}/adamic-setup-done" ]; then
 		(cd "${tree}" && bash cloud/setup.sh --wasi-sdk > "${root}/adamic-setup.log" 2>&1) && touch "${root}/adamic-setup-done" || { say "cloud/setup.sh failed"; tail -20 "${root}/adamic-setup.log"; exit 2; }
 	fi
 fi
-toolchain=
-for environment in "${HOME}/adamic-tools/env.sh" "${HOME}/.adamic-tools/env.sh"; do
-	[ -f "${environment}" ] && { source "${environment}"; toolchain=${environment}; break; }
-done
+toolchain=$(toolchainFile) && source "${toolchain}"
 if [ "${mode}" = checkout ]; then
 	(cd / && go list fmt testing > /dev/null 2>&1) || { say "the Go toolchain lacks its standard library after setup"; rm -f "${root}/adamic-setup-done"; exit 2; }
 elif [ -z "${toolchain}" ]; then
 	# A prebuilt unit's tests still run clang and node; an instance without adamic's toolchain would fail them red.
-	say "the instance has no adamic toolchain (adamic-tools/env.sh): its tests' clang and node would be missing"
+	say "the instance has no adamic toolchain (env.sh in \$ADAMIC_TOOLS, ~/adamic-tools, ~/.adamic-tools or /opt/adamic-tools): its tests' clang and node would be missing"
 	exit 2
 fi
 mkdir -p -m 1777 "${TMPDIR:-${root}}"
