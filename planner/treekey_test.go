@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -141,5 +142,59 @@ func TestACommitIsKeyedAsItsCheckoutIs(t *testing.T) {
 	commit(repository, map[string]string{"go.mod": "module m\n"})
 	if _, err := ReadCommitIdentity(repository, strings.Repeat("d", 40)); err == nil || !strings.Contains(err.Error(), "isn't in "+repository) {
 		t.Errorf("a commit the repository doesn't hold: %v", err)
+	}
+}
+
+// A main package compiled under the unit environment is the same at every commit: go stamps the commit into a main
+// package's build unless -buildvcs=false, so a product holding one (internal/ir's export data of four test mains,
+// landable-8) made other bytes under an unmoved key. Here a test main's export data, compiled at two commits that
+// change nothing it compiles, carries one build id. Mutant: GOFLAGS= (empty) in UnitEnvironment.
+func TestTheUnitEnvironmentStampsNoCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	tree := filepath.Join(t.TempDir(), "tree")
+	writeFiles(t, tree, map[string]string{
+		"go.mod":       "module example.com/stamped\n\ngo 1.22\n",
+		"main.go":      "package main\n\nfunc main() {}\n",
+		"main_test.go": "package main\n\nimport \"testing\"\n\nfunc TestNothing(t *testing.T) {}\n",
+		"notes.txt":    "one\n",
+	})
+	git := func(arguments ...string) {
+		t.Helper()
+		if output, err := exec.Command("git", append([]string{"-C", tree, "-c", "user.name=t", "-c", "user.email=t@t"}, arguments...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", arguments, err, output)
+		}
+	}
+	git("init", "-q")
+	git("add", ".")
+	git("commit", "-q", "-m", "one")
+	environment := append(os.Environ(), "GOCACHE="+t.TempDir())
+	for _, variable := range UnitEnvironment(runtime.GOOS, runtime.GOARCH) {
+		if !strings.HasPrefix(variable, "ADAMIC_") {
+			environment = append(environment, variable)
+		}
+	}
+	buildID := func() string {
+		t.Helper()
+		list := exec.Command("go", "list", "-export", "-test", "-trimpath", "-f", "{{if eq .ImportPath \"example.com/stamped.test\"}}{{.Export}}{{end}}", ".")
+		list.Dir, list.Env = tree, environment
+		output, err := list.Output()
+		if err != nil {
+			t.Fatalf("go list -export: %v", err)
+		}
+		id := exec.Command("go", "tool", "buildid", strings.TrimSpace(string(output)))
+		id.Env = environment
+		value, err := id.Output()
+		if err != nil {
+			t.Fatalf("go tool buildid: %v", err)
+		}
+		return strings.TrimSpace(string(value))
+	}
+	first := buildID()
+	writeFiles(t, tree, map[string]string{"notes.txt": "two\n"})
+	git("commit", "-q", "-am", "two")
+	if second := buildID(); second != first {
+		t.Fatalf("a test main compiled under the unit environment names its commit: build id %s, then %s", first, second)
 	}
 }

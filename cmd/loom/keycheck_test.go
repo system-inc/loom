@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/system-inc/loom/builder"
+	"github.com/system-inc/loom/planner"
 )
 
 // The check samples: a new signature is checked, then the keyCheckEvery-th tree after it; always and never decide alone.
@@ -123,9 +124,21 @@ func keyCheckFixture(t *testing.T, workshopFlags string) (builder.TreeBuild, bui
 	return build, source, built, map[string][]string{"example.com/keys/p": {key}}, strings.TrimSpace(string(release))
 }
 
+// unitFlags is GOFLAGS as the unit environment sets it, on Workshop and on a runner alike.
+func unitFlags(t *testing.T) string {
+	t.Helper()
+	for _, variable := range planner.UnitEnvironment(planner.RunnersGoos, planner.RunnersGoarch) {
+		if value, found := strings.CutPrefix(variable, "GOFLAGS="); found {
+			return value
+		}
+	}
+	t.Fatal("the unit environment sets no GOFLAGS")
+	return ""
+}
+
 // A product Workshop built under the unit environment is a hit when a runner asks for it: nothing moved.
 func TestTheKeyCheckFindsAProductBuiltUnderTheUnitEnvironment(t *testing.T) {
-	build, source, built, products, release := keyCheckFixture(t, "")
+	build, source, built, products, release := keyCheckFixture(t, unitFlags(t))
 	checked, err := checkKeys(context.Background(), build, t.TempDir(), built, products, source, release, 2)
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +158,7 @@ func TestTheKeyCheckNamesAKeyThatMovesBetweenWorkshopAndARunner(t *testing.T) {
 	}
 	moved := strings.Join(checked.Moved["example.com/keys/p"], "\n")
 	// Workshop's key beside the runner's: the pair says which side drifted.
-	want := "thing workshop " + productKeyUnder("-p=3")[:12] + " runner " + productKeyUnder("")[:12] + " miss"
+	want := "thing workshop " + productKeyUnder("-p=3")[:12] + " runner " + productKeyUnder(unitFlags(t))[:12] + " miss"
 	if !strings.Contains(moved, want) || !strings.Contains(moved, "a test ran go build") {
 		t.Fatalf("moved %q, failed %v", moved, checked.Failed)
 	}

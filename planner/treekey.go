@@ -76,10 +76,13 @@ func toolchainEnvironment(goos, goarch string) []string {
 // goos/goarch, so a product's buildcache key is one key on both (#nm31pcn): adamic's recipes key on what they read of
 // it, GOFLAGS, GOTOOLCHAIN, GOENV, GOOS and GOARCH among them, and verify run 4 (Oct 10) built them on Workshop under
 // GOFLAGS=-p=7 GOTOOLCHAIN=local and asked for them under GOFLAGS= GOTOOLCHAIN=auto, so every unit that read one missed
-// it and built it. GOFLAGS is empty on both: a build's share of the machine is GOMAXPROCS, which no key reads. GOENV is
-// off on both, as a runner's go has always run (delegatedEnvironment): no go env file decides a build.
+// it and built it. GOFLAGS is -buildvcs=false on both, and nothing else: a build's share of the machine is GOMAXPROCS,
+// which no key reads, and go stamps the commit into every main package it compiles unless told not to, so a product
+// that compiles one (a test main's export data, a c-archive, an oracle binary) made other bytes at every commit under a
+// key that hadn't moved (landable-8's tree, 9da3fa1c: 135 refs/action conflicts in 16 packages against the tree before
+// it). GOENV is off on both, as a runner's go has always run (delegatedEnvironment): no go env file decides a build.
 func UnitEnvironment(goos, goarch string) []string {
-	return append(append(GateEnvironmentList(), "GOENV=off", "GOFLAGS="), toolchainEnvironment(goos, goarch)...)
+	return append(append(GateEnvironmentList(), "GOENV=off", "GOFLAGS=-buildvcs=false"), toolchainEnvironment(goos, goarch)...)
 }
 
 // ReadTreeIdentity reads a checked-out tree's identity: its git tree hash (TreeHash), and go env GOVERSION, GOOS and
