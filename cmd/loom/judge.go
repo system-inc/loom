@@ -378,7 +378,10 @@ func censusConfig(paths []string, heavyPath, repository string) (*judge.CensusCo
 // Answers are kept for the process's life, so a branch read on main is never asked again.
 func landedOnMain(repository string) judge.Landed {
 	answers := map[string]bool{}
+	var mutex sync.Mutex // the loop holds many units to the census at once
 	return func(branch string) (bool, error) {
+		mutex.Lock()
+		defer mutex.Unlock()
 		if answer, ok := answers[branch]; ok {
 			return answer, nil
 		}
@@ -693,7 +696,13 @@ func readPools(path string) ([]judge.PoolEntry, error) {
 
 // loadNeeds reads unit-needs.json from origin's loom/planner-reads tip through the judge's own clone, fetched fresh
 // into a ref of its own, so a declared need lands in the next rerun. No clone means no needs beyond the listing's.
+// needsMutex keeps one loadNeeds at a time: each fetches into the clone's one ref, and the loop asks for many units at
+// once, where two fetches would race for that ref's lock.
+var needsMutex sync.Mutex
+
 func loadNeeds(repository string) (planner.UnitNeeds, error) {
+	needsMutex.Lock()
+	defer needsMutex.Unlock()
 	if repository == "" {
 		return planner.UnitNeeds{}, nil
 	}
@@ -726,6 +735,7 @@ func loadNeeds(repository string) (planner.UnitNeeds, error) {
 // that base waits, nothing rerun, until the index is up; it's void, named, never red and never built on a runner, when
 // the base can't be keyed, the builder's build of it stands failed, or the index isn't up within wait of the request.
 type baseTrees struct {
+	mutex    sync.Mutex // the loop asks for many units' bases at once
 	git      string
 	indexed  func(tree string) (bool, error)
 	requests *treebuilder.Requests                               // nil: the judge asks the builder for nothing
@@ -740,6 +750,8 @@ const baseTreeKeep = 24 * time.Hour
 
 // state is base's tree and whether a rerun on it waits, or why it's void.
 func (trees *baseTrees) state(base string) (tree, void string, waiting bool, err error) {
+	trees.mutex.Lock()
+	defer trees.mutex.Unlock()
 	if trees.git == "" {
 		return "", "base tree not built: the judge has no --tree-git to key base " + base + "'s tree", false, nil
 	}

@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -229,8 +231,9 @@ func TestTheReranRedRunsOnTheCandidateAndOnMain(t *testing.T) {
 	h.script("u", futureTree, failedWith("TestB"))
 	h.script("u", baseTree, passed())
 	h.judge(t, PlanUnit{UnitKey: "u"})
-	if strings.Join(h.fabric.Asked, ",") != "u "+futureTree+",u "+baseTree {
-		t.Fatalf("placements %v, want the candidate's tree then main's base", h.fabric.Asked)
+	// The two go at once, so their order is the scheduler's.
+	if asked := slices.Sorted(slices.Values(h.fabric.Asked)); strings.Join(asked, ",") != "u "+baseTree+",u "+futureTree {
+		t.Fatalf("placements %v, want the candidate's tree and main's base", h.fabric.Asked)
 	}
 }
 
@@ -834,5 +837,69 @@ func TestAReuseFollowsItsKeysNewestPassAndAnUnbackedOneIsVoid(t *testing.T) {
 	}
 	if record := recordOf(t, post, "gone"); record.Status != Void || record.Infra != InfraRefused {
 		t.Fatalf("the unbacked record %+v, want void refused", record)
+	}
+}
+
+// barrierFabric answers every rerun only once want of them are in flight at the same moment, or after a deadline, and
+// keeps the most it ever held at once.
+type barrierFabric struct {
+	mutex    sync.Mutex
+	want     int
+	inFlight int
+	most     int
+	release  chan struct{}
+	answers  map[string]Finished // keyed by unitKey + " " + tree
+}
+
+func (fabric *barrierFabric) RerunAlone(unitKey, tree string) (Finished, error) {
+	fabric.mutex.Lock()
+	fabric.inFlight++
+	fabric.most = max(fabric.most, fabric.inFlight)
+	if fabric.inFlight == fabric.want {
+		close(fabric.release)
+	}
+	answer := fabric.answers[unitKey+" "+tree]
+	fabric.mutex.Unlock()
+	select {
+	case <-fabric.release:
+	case <-time.After(2 * time.Second):
+	}
+	fabric.mutex.Lock()
+	fabric.inFlight--
+	fabric.mutex.Unlock()
+	return answer, nil
+}
+
+// A candidate's alone reruns go at once (Loom, Oct 11 03:48Z: landable-7's verdict waited ~15 min on reruns run one
+// after another): two failing units' four reruns, each unit's on the candidate and on main's base, are all in flight
+// together, and the verdicts are the ones the rule gives run in turn. Mutants: a rerun started only after the last one
+// finished (the units in turn, or a unit's two reruns in turn).
+func TestACandidatesRerunsGoAtOnceAndTheRuleIsUnchanged(t *testing.T) {
+	h := newHarness()
+	h.runs["u"], h.runs["v"], h.runs["w"] = failedWith("TestB"), failedWith("TestC"), passed()
+	fabric := &barrierFabric{want: 4, release: make(chan struct{}), answers: map[string]Finished{
+		"u " + futureTree: failedWith("TestB"), "u " + baseTree: passed(), // the change's red
+		"v " + futureTree: passed(), "v " + baseTree: passed(), // a flake
+	}}
+	loop := Loop{Runs: h.runs, Fabric: fabric, Main: h.main, Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 11, 4, 0, 0, 0, time.UTC) }}
+	started := time.Now()
+	post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_A", Sha: futureTree, Base: baseTree}, Change: "chg_A", Future: futureTree, Base: baseTree, Run: "run-1",
+		Plan: []PlanUnit{{UnitKey: "u"}, {UnitKey: "v"}, {UnitKey: "w"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fabric.most != 4 || time.Since(started) > time.Second {
+		t.Fatalf("at most %d reruns in flight at once, in %v: want all 4 together", fabric.most, time.Since(started))
+	}
+	if strings.Join(post.Plan, ",") != "u,v,w" {
+		t.Fatalf("plan %v, want the plan's order", post.Plan)
+	}
+	for _, want := range []struct{ unit, status, cause string }{{"u", Failed, CauseChange}, {"v", Passed, CauseFlake}, {"w", Passed, ""}} {
+		if record := recordOf(t, post, want.unit); record.Status != want.status || record.Cause != want.cause {
+			t.Fatalf("unit %s: %+v, want %s %s", want.unit, record, want.status, want.cause)
+		}
+	}
+	if post.Decision.Status != "red" || strings.Join(post.Decision.Red, ",") != "u" || len(post.Quarantine) != 1 || post.Quarantine[0].Test != "TestC" {
+		t.Fatalf("decision %+v, quarantine %v", post.Decision, post.Quarantine)
 	}
 }

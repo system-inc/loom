@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,10 @@ import (
 type listedFutures []PlannedFuture
 
 func (futures listedFutures) Planned() ([]PlannedFuture, error) { return futures, nil }
+
+// stubMutex guards what the stubs' Rerun closures write: the loop judges a candidate's units, and each unit's two reruns,
+// at once.
+var stubMutex sync.Mutex
 
 func finishedStream(unit, status string) []protocol.Event {
 	return []protocol.Event{{Unit: unit, Type: "started"}, {Unit: unit, Type: "exit", Code: code(map[string]int{"passed": 0, "failed": 1}[status])},
@@ -37,6 +43,8 @@ func TestThePullerJudgesOnlyFinishedFuturesAndRerunsByKeyParts(t *testing.T) {
 		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 		Read:   func(run string) ([]protocol.Event, error) { return streams[run], nil },
 		Rerun: func(keyParts json.RawMessage, _ protocol.Resources, sha, tree string) ([]protocol.Event, error) {
+			stubMutex.Lock()
+			defer stubMutex.Unlock()
 			reruns = append(reruns, string(keyParts)+"@"+sha[:1]+" tree "+tree[:min(len(tree), 1)])
 			if sha == baseTree {
 				return finishedStream("job-on-base", "passed"), nil
@@ -59,8 +67,8 @@ func TestThePullerJudgesOnlyFinishedFuturesAndRerunsByKeyParts(t *testing.T) {
 		t.Fatalf("post %+v", post.Decision)
 	}
 	// The candidate's rerun runs its plan's build; the base's tree is the caller's to key (#v03v751).
-	if strings.Join(reruns, ",") != `{"package":"p"}@d tree 7,{"package":"p"}@b tree ` {
-		t.Fatalf("reruns %v, want the unit's keyParts on the candidate's planned tree, then on main's base with none", reruns)
+	if slices.Sort(reruns); strings.Join(reruns, ",") != `{"package":"p"}@b tree ,{"package":"p"}@d tree 7` {
+		t.Fatalf("reruns %v, want the unit's keyParts on the candidate's planned tree and on main's base with none", reruns)
 	}
 }
 
@@ -81,6 +89,8 @@ func TestVoidOnePostsTheListedAttemptOnlyAndNeverReruns(t *testing.T) {
 		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 		Read:   func(run string) ([]protocol.Event, error) { return finishedStream(unit, "passed"), nil },
 		Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) {
+			stubMutex.Lock()
+			defer stubMutex.Unlock()
 			t.Fatal("a void reran a unit")
 			return nil, nil
 		},
@@ -130,6 +140,8 @@ func TestTheBackstopVoidsOnlyARunQuietForFortyFiveMinutes(t *testing.T) {
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-1" },
 				Read:   func(string) ([]protocol.Event, error) { return c.events, nil },
 				Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) {
+					stubMutex.Lock()
+					defer stubMutex.Unlock()
 					t.Fatal("the backstop placed a unit")
 					return nil, nil
 				},
@@ -200,6 +212,8 @@ func TestAnEarlierAttemptsPassIsCarriedOnlyWithinTheSameFuture(t *testing.T) {
 	pullerFor := func(source listedFutures, queue *StubQueue) Puller {
 		return NewPuller(Puller{Source: source, RunOf: runOf, Read: func(run string) ([]protocol.Event, error) { return streams[run], nil },
 			Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) {
+				stubMutex.Lock()
+				defer stubMutex.Unlock()
 				t.Fatal("placed a unit")
 				return nil, nil
 			},
@@ -469,6 +483,8 @@ func TestAFailureWhoseNeedGrewIsVoidNeverAFlake(t *testing.T) {
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 				Read:   func(string) ([]protocol.Event, error) { return finishedStream(unit, "failed"), nil },
 				Rerun: func(json.RawMessage, protocol.Resources, string, string) ([]protocol.Event, error) {
+					stubMutex.Lock()
+					defer stubMutex.Unlock()
 					reruns++
 					return finishedStream("job", "passed"), nil
 				},
@@ -547,6 +563,8 @@ func TestAFailureThatRanBelowItsNeedIsVoidNeverARed(t *testing.T) {
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 				Read:   func(string) ([]protocol.Event, error) { return stream, nil },
 				Rerun: func(_ json.RawMessage, _ protocol.Resources, sha, _ string) ([]protocol.Event, error) {
+					stubMutex.Lock()
+					defer stubMutex.Unlock()
 					reruns++
 					if sha == baseTree {
 						return finishedStream("job", "passed"), nil
@@ -676,6 +694,8 @@ func TestAnOverBudgetUnitIsVoidNeverRedFlakeOrGreen(t *testing.T) {
 				RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 				Read:   func(string) ([]protocol.Event, error) { return c.first, nil },
 				Rerun: func(_ json.RawMessage, _ protocol.Resources, sha, _ string) ([]protocol.Event, error) {
+					stubMutex.Lock()
+					defer stubMutex.Unlock()
 					reruns++
 					if sha == baseTree {
 						return finishedStream("job", "passed"), nil
@@ -723,6 +743,8 @@ func TestARerunWaitsOnItsBasesTree(t *testing.T) {
 		RunOf:  func(tree string, attempt int) string { return "future-" + tree + "-" + string(rune('0'+attempt)) },
 		Read:   func(run string) ([]protocol.Event, error) { return finishedStream(unit, "failed"), nil },
 		Rerun: func(_ json.RawMessage, _ protocol.Resources, sha, _ string) ([]protocol.Event, error) {
+			stubMutex.Lock()
+			defer stubMutex.Unlock()
 			reruns = append(reruns, sha[:1])
 			if sha == baseTree {
 				return finishedStream("job-on-base", "passed"), nil
@@ -752,7 +774,7 @@ func TestARerunWaitsOnItsBasesTree(t *testing.T) {
 	if judged, err := puller.PullOnce(); judged != 1 || err != nil {
 		t.Fatalf("once its base's tree is up: judged %d, %v", judged, err)
 	}
-	if strings.Join(reruns, ",") != "d,b" || len(queue.Posts[done]) != 1 || queue.Posts[done][0].Decision.Status != "red" {
+	if slices.Sort(reruns); strings.Join(reruns, ",") != "b,d" || len(queue.Posts[done]) != 1 || queue.Posts[done][0].Decision.Status != "red" {
 		t.Fatalf("reruns %v, posts %+v", reruns, queue.Posts[done])
 	}
 }

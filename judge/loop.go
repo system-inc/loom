@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/system-inc/loom/builder"
@@ -224,10 +225,29 @@ const RuleZeroRun = Rule + " zerorun"
 // JudgeFuture decides every planned unit of one future, posts the result to Queue, and returns what it posted.
 func (loop Loop) JudgeFuture(job Job) (FuturePost, error) {
 	post := FuturePost{Change: job.Change, Run: job.Run, Rule: Rule, Plan: []string{}, Verdicts: []json.RawMessage{}, Quarantine: []TestOutcome{}}
+	// Every unit is judged at once (Loom, Oct 11 03:48Z: landable-7 waited ~15 min on alone reruns run one after
+	// another): each still runs alone on its slot, and only the waiting goes. The records, the decision and the error
+	// a pass returns are the plan's order's, as when they ran in turn.
+	type judged struct {
+		verdict Verdict
+		flaky   []TestOutcome
+		err     error
+	}
+	results := make([]judged, len(job.Plan))
+	var group sync.WaitGroup
+	for index, unit := range job.Plan {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			verdict, flaky, err := loop.judgeUnit(job, unit)
+			results[index] = judged{verdict: verdict, flaky: flaky, err: err}
+		}()
+	}
+	group.Wait()
 	verdicts := []Verdict{}
-	for _, unit := range job.Plan {
+	for index, unit := range job.Plan {
 		post.Plan = append(post.Plan, unit.UnitKey)
-		verdict, flaky, err := loop.judgeUnit(job, unit)
+		verdict, flaky, err := results[index].verdict, results[index].flaky, results[index].err
 		if err != nil {
 			return FuturePost{}, fmt.Errorf("unit %s: %w", unit.UnitKey, err)
 		}
@@ -466,12 +486,21 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 			return err
 		}
 	}
-	candidate, err := loop.Fabric.RerunAlone(unit.UnitKey, job.Future)
-	if err != nil {
-		return err
-	}
-	main, err := loop.Fabric.RerunAlone(unit.UnitKey, job.Base)
-	if err != nil {
+	// The two reruns go at once, each alone on its own slot: neither reads the other.
+	var candidate, main Finished
+	var candidateError, mainError error
+	var group sync.WaitGroup
+	group.Add(2)
+	go func() {
+		defer group.Done()
+		candidate, candidateError = loop.Fabric.RerunAlone(unit.UnitKey, job.Future)
+	}()
+	go func() {
+		defer group.Done()
+		main, mainError = loop.Fabric.RerunAlone(unit.UnitKey, job.Base)
+	}()
+	group.Wait()
+	if err := cmp.Or(candidateError, mainError); err != nil {
 		return err
 	}
 	recorded, found, err := loop.Main.Latest(job.Base, unit)
@@ -520,10 +549,13 @@ func nonNilStrings(values []string) []string {
 type StubFabric struct {
 	Script map[string][]Finished // keyed by unitKey + " " + tree
 	Asked  []string
+	mutex  sync.Mutex // the loop asks from many units at once
 }
 
 // RerunAlone answers from the script.
 func (stub *StubFabric) RerunAlone(unitKey, tree string) (Finished, error) {
+	stub.mutex.Lock()
+	defer stub.mutex.Unlock()
 	key := unitKey + " " + tree
 	stub.Asked = append(stub.Asked, key)
 	queue := stub.Script[key]
