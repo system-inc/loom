@@ -212,7 +212,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if err != nil {
 		return fail(fmt.Errorf("the test binaries' inputs: %w", err))
 	}
-	built, reuse := build.KeyedBinaries(store, packages, inputs, nil)
+	built, reuse := build.KeyedBinaries(store, packages, inputs, binaryClosures(keys))
 	for _, note := range reuse.Notes {
 		fmt.Fprintln(stderr, "build-tree:", note)
 	}
