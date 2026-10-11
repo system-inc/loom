@@ -654,6 +654,11 @@ var warmRunnerPools = []PoolEntry{
 	{Name: "box-strict-8a70", Runner: "8a70", MemoryMegabytes: 16384, Cpus: 4, Cold: true, Machines: []string{"Cloud"}, ColdSince: "2026-10-10T02:44:10Z"},
 }
 
+// codexPools is the Codex fleet's pool, its workers named by prefix and cold since 23:00Z.
+var codexPools = []PoolEntry{
+	{Name: "codex-strict", Runner: "8a70", MemoryMegabytes: 16384, Cpus: 4, Cold: true, MachinePrefixes: []string{"codex-"}, ColdSince: "2026-10-10T23:00:00Z"},
+}
+
 func TestAWarmAttemptIsReadFromThePoolTable(t *testing.T) {
 	at := func(machine, started string) Attempt { return Attempt{Machine: machine, StartedAt: started} }
 	for _, c := range []struct {
@@ -668,6 +673,11 @@ func TestAWarmAttemptIsReadFromThePoolTable(t *testing.T) {
 		{"a machine a pool not marked cold names", append([]PoolEntry{{Name: "w", Machines: []string{"Cloud"}, ColdSince: "2026-10-10T02:00:00Z"}}, warmRunnerPools...), at("Cloud", "2026-10-10T02:50:00Z"), true},
 		{"a cold pool with no coldSince", []PoolEntry{{Name: "c", Cold: true, Machines: []string{"Cloud"}}}, at("Cloud", "2026-10-10T02:50:00Z"), true},
 		{"an unreadable started time", warmRunnerPools, at("Cloud", ""), true},
+		// Codex workers are codex-<hostname>, named by the pool's prefix, not listed (#54pcx41).
+		{"a Codex worker a cold pool names by prefix", codexPools, at("codex-cb2a541fac2d", "2026-10-10T23:30:00Z"), false},
+		{"a Codex worker before its pool ran cold", codexPools, at("codex-cb2a541fac2d", "2026-10-10T22:00:00Z"), true},
+		{"a worker the prefix doesn't start", codexPools, at("cb2a541fac2d-codex-", "2026-10-10T23:30:00Z"), true},
+		{"a Codex worker an unmarked pool also names by prefix", append([]PoolEntry{{Name: "w", MachinePrefixes: []string{"codex"}}}, codexPools...), at("codex-cb2a541fac2d", "2026-10-10T23:30:00Z"), true},
 	} {
 		if why := WarmAttempt(c.pools, c.attempt); (why != "") != c.warm {
 			t.Errorf("%s: warm %q, want warm %v", c.name, why, c.warm)

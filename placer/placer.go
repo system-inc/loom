@@ -712,14 +712,14 @@ func (pass *pass) fit(parts planner.KeyParts, job protocol.JobUnit) ([]string, s
 }
 
 // coldPool says whether every worker of the pool would read as cold to judge.WarmAttempt for a unit starting now: the
-// pool is marked cold, names its machines, and has a readable coldSince already past, and no pool naming one of its
+// pool is marked cold, names its machines (by name or by prefix), and has a readable coldSince already past, and no pool naming one of its
 // machines is unmarked or cold since later than now. Only a unit's own start, unknown here, is left to the judge.
 func coldPool(pool Pool, pools []Pool, now time.Time) bool {
-	if !pool.Cold || len(pool.Machines) == 0 {
+	if !pool.Cold || !pool.NamesAny() {
 		return false
 	}
 	for _, other := range pools {
-		if other.Name != pool.Name && !slices.ContainsFunc(other.Machines, func(machine string) bool { return slices.Contains(pool.Machines, machine) }) {
+		if other.Name != pool.Name && !other.Shares(pool.PoolEntry) {
 			continue
 		}
 		since, err := time.Parse(time.RFC3339, other.ColdSince)

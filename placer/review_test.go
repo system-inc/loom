@@ -151,6 +151,16 @@ func TestAWarmRunnersTestGoesOnlyWhereTheJudgeReadsCold(t *testing.T) {
 			pools[1].Machines = []string{"cloud-box-2"}
 			return pools
 		}, false},
+		// The Codex fleet's workers come and go as codex-<hostname>: its pool names them by prefix (#54pcx41).
+		{"naming its workers by prefix only", func(pools []Pool) []Pool {
+			pools[0].Machines, pools[0].MachinePrefixes = nil, []string{"codex-"}
+			return pools
+		}, true},
+		{"its prefix is also an unmarked pool's", func(pools []Pool) []Pool {
+			pools[0].Machines, pools[0].MachinePrefixes = nil, []string{"codex-"}
+			pools[1].MachinePrefixes = []string{"codex-"}
+			return pools
+		}, false},
 	}
 	for _, c := range cases {
 		pools := fixturePools()

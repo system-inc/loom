@@ -756,3 +756,35 @@ func TestARerunWaitsOnItsBasesTree(t *testing.T) {
 		t.Fatalf("reruns %v, posts %+v", reruns, queue.Posts[done])
 	}
 }
+
+// Two pools share a worker when a machine one lists the other names, by name or prefix, or when one prefix starts the
+// other; an empty prefix is refused, since it would name every worker (#54pcx41).
+func TestPoolsNameWorkersByMachineOrPrefix(t *testing.T) {
+	codex := PoolEntry{Name: "codex-strict", MachinePrefixes: []string{"codex-"}}
+	cases := []struct {
+		name   string
+		other  PoolEntry
+		shares bool
+	}{
+		{"a pool listing a Codex worker", PoolEntry{Machines: []string{"codex-cb2a"}}, true},
+		{"a pool listing another machine", PoolEntry{Machines: []string{"Cloud"}}, false},
+		{"a shorter prefix that starts it", PoolEntry{MachinePrefixes: []string{"codex"}}, true},
+		{"a longer prefix it starts", PoolEntry{MachinePrefixes: []string{"codex-west-"}}, true},
+		{"an unrelated prefix", PoolEntry{MachinePrefixes: []string{"box-"}}, false},
+	}
+	for _, c := range cases {
+		if codex.Shares(c.other) != c.shares || c.other.Shares(codex) != c.shares {
+			t.Errorf("%s: shares %v, want %v both ways", c.name, codex.Shares(c.other), c.shares)
+		}
+	}
+	if !codex.Names("codex-cb2a") || codex.Names("Cloud") || !codex.NamesAny() || (PoolEntry{}).NamesAny() {
+		t.Fatal("names by prefix")
+	}
+	if _, err := LoadPools([]byte(`{"pools":[{"name":"c","runner":"r","memoryMegabytes":1,"cpus":1,"machinePrefixes":[""]}]}`)); err == nil {
+		t.Fatal("an empty machine prefix was taken")
+	}
+	pools, err := LoadPools([]byte(`{"pools":[{"name":"c","runner":"r","memoryMegabytes":1,"cpus":1,"cold":true,"machinePrefixes":["codex-"]}]}`))
+	if err != nil || len(pools) != 1 || !pools[0].Names("codex-1") {
+		t.Fatalf("pools %+v %v", pools, err)
+	}
+}
