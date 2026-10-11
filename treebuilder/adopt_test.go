@@ -9,8 +9,9 @@ import (
 
 // An adopted build is waited for under the same bound as one this builder started, and decided by the store: past the
 // bound its group is killed and it's failed, backed off; gone with no index this release reads it's stopped and built
-// again at once; and a builder told to stop while it waits leaves it running for the next. Mutants: no bound on an
-// adopted build; an adopted build gone with no index taken for built; the wait kept through a stop.
+// again at once; and a builder told to stop while it waits leaves it running for the next and starts no other build.
+// Mutants: no bound on an adopted build; an adopted build gone with no index taken for built; the wait kept through a
+// stop; a new build started after a stop.
 func TestAnAdoptedBuildIsBoundedAndDecidedByTheStore(t *testing.T) {
 	running := func(t *testing.T, h *harness, ledger *Ledger, at time.Time) {
 		t.Helper()
@@ -39,6 +40,8 @@ func TestAnAdoptedBuildIsBoundedAndDecidedByTheStore(t *testing.T) {
 	t.Run("past its bound", func(t *testing.T) {
 		h, ledger, killed := setup(t)
 		running(t, h, ledger, h.now.Add(-time.Hour))
+		// Still wanted, so only the bound decides (unwanted_test.go covers a tree nothing wants).
+		h.builder.Source = listedFutures{future("1", unit(t, "test", "run", keyA))}
 		h.builder.Alive = func(pid int, tree string) bool { return len(*killed) == 0 }
 		h.buildOnce(t, true)
 		newest, _ := ledger.Newest(keyA)
@@ -69,6 +72,8 @@ func TestAnAdoptedBuildIsBoundedAndDecidedByTheStore(t *testing.T) {
 		waits := 0
 		h.builder.Alive = func(int, string) bool { return true }
 		h.builder.Stopping = func() bool { waits++; return waits > 3 }
+		// Another tree is wanted and missing: a stopping builder starts it all the same unless it checks.
+		h.builder.Source = listedFutures{future("2", unit(t, "test", "run", keyB))}
 		h.buildOnce(t, false)
 		if newest, _ := ledger.Newest(keyA); newest.Event != Running || newest.Pid != 777 || len(*killed) != 0 || len(h.builds) != 0 {
 			t.Fatalf("newest %+v, killed %v, builds %v: the build must be left running", newest, *killed, h.builds)
