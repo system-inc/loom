@@ -435,6 +435,13 @@ func Decide(evidence Evidence) (Decision, error) {
 		return Decision{Decided: true, Status: Passed, Cause: CauseFlake, Flaky: failing(evidence.FirstTests),
 			Why: "failed once, passes alone on the candidate and on main: a flake, quarantined and counted"}, nil
 	}
+	if evidence.SameTree {
+		// A verify is main: its red is main's red, named in main.red, never excused against main's own earlier record
+		// (#x3vaz9k, the fresh verify of ebdb6c53 at seq 2247 excused flow, load, selector and yaml against the verify
+		// before it, so main.red named only scanner; had every failure matched, it would have read green on a red main).
+		return Decision{Decided: true, Status: Failed, Cause: CauseChange,
+			Why: "a verify's one tree fails alone twice: main's red, recorded as the verify's, never excused against main's earlier record"}, nil
+	}
 	// Main fails alone too. It's main's red only on main's record, and only if it's the unit's one failing test.
 	if excused(evidence) {
 		return Decision{Decided: true, Status: Failed, Cause: CauseMainRed, Why: "main's recorded verdict fails the same test, the unit's only failure"}, nil

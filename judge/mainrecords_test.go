@@ -139,3 +139,27 @@ func TestAListedUnitCarriesItsNameToMainsRecords(t *testing.T) {
 		t.Fatalf("planned unit %+v", unit)
 	}
 }
+
+// A verify is main: a failure its earlier verify recorded the same way is still red, named in main.red, never mainRed
+// (the fresh verify of ebdb6c53, seq 2247, excused four of its five reds against the verify before it). Mutant: a
+// verify excused like a branch (its run reads green while main is red).
+func TestAVerifyIsNeverExcusedAgainstMainsEarlierRecord(t *testing.T) {
+	main := strings.Repeat("e", 40)
+	log := &stubLog{events: []LogEvent{planned(1, main, "mainflow", flowPackage), decided(2, main, "mainflow", Failed, flowFailing("a.a"))}}
+	failedFlow := Finished{Attempt: Attempt{Status: Failed, Exit: 1}, Tests: flowFailing("a.a")}
+	h := newHarness()
+	h.runs["u"] = failedFlow
+	h.script("u", main, failedFlow, failedFlow)
+	loop := Loop{Runs: h.runs, Fabric: h.fabric, Main: NewLogMainRecords(log), Queue: h.queue, Blobs: h.blobs, Now: func() time.Time { return time.Date(2026, 10, 11, 4, 30, 0, 0, time.UTC) }}
+	post, err := loop.JudgeFuture(Job{Record: ChangeRecord{Change: "chg_cefjz33b", Sha: main, Base: main, Owner: "system_adamic_loom"}, Change: "chg_cefjz33b",
+		Future: main, Base: main, Run: "future-" + main + "-9", Plan: []PlanUnit{{UnitKey: "u", Name: flowPackage, Kind: KindTest}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record := recordOf(t, post, "u"); record.Status != Failed || record.Cause != CauseChange {
+		t.Fatalf("the verify's flow: %+v, want failed, red", record)
+	}
+	if post.Decision.Status != "red" || len(post.Decision.Red) != 1 || len(post.Decision.Excused) != 0 {
+		t.Fatalf("the verify's decision %+v, want red naming flow", post.Decision)
+	}
+}
