@@ -130,3 +130,24 @@ func TestTheRealToolchainsOnThisBox(t *testing.T) {
 		t.Errorf("%s", failure)
 	}
 }
+
+// The toolchain is found where adamic's setup puts it: $ADAMIC_TOOLS/env.sh first when the environment names one (a
+// Codex instance's, Oct 11), else home's, as before. Mutant: ADAMIC_TOOLS left unread. Not parallel: it sets the
+// environment.
+func TestTheToolchainIsWhereADAMICTOOLSSays(t *testing.T) {
+	home, tools := t.TempDir(), t.TempDir()
+	os.MkdirAll(filepath.Join(home, "adamic-tools"), 0o755)
+	os.WriteFile(filepath.Join(home, "adamic-tools", "env.sh"), []byte("\n"), 0o644)
+	os.WriteFile(filepath.Join(tools, "env.sh"), []byte("\n"), 0o644)
+	t.Setenv("ADAMIC_TOOLS", "")
+	if found := Environment(home); found != filepath.Join(home, "adamic-tools", "env.sh") {
+		t.Fatalf("with no ADAMIC_TOOLS: %q, want home's", found)
+	}
+	t.Setenv("ADAMIC_TOOLS", tools)
+	if found := Environment(home); found != filepath.Join(tools, "env.sh") {
+		t.Fatalf("with ADAMIC_TOOLS: %q, want its env.sh", found)
+	}
+	if found := Environment(t.TempDir()); found != filepath.Join(tools, "env.sh") {
+		t.Fatalf("an empty home with ADAMIC_TOOLS: %q", found)
+	}
+}

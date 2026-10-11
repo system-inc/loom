@@ -52,17 +52,26 @@ func (failure Failure) String() string {
 	return fmt.Sprintf("claims %s, but %s", failure.Toolchain, failure.Why)
 }
 
-// Environment is the adamic toolchain a box's units run with: home's adamic-tools/env.sh, else .adamic-tools/env.sh,
-// as prepare.sh looks; empty when there is neither.
+// Environment is the adamic toolchain a box's units run with, where adamic's own cloud/setup.sh puts it, as prepare.sh
+// looks: $ADAMIC_TOOLS/env.sh when the environment names one (a Codex instance's is /workspace/adamic-tools, set by its
+// environment's setup), else home's adamic-tools/env.sh, else .adamic-tools/env.sh, else setup's default,
+// /opt/adamic-tools/env.sh; empty when there is none. Oct 11: a Codex instance's toolchain was there all along, and a
+// probe that looked only in home refused its every unit as unfit.
 func Environment(home string) string {
-	for _, name := range []string{"adamic-tools", ".adamic-tools"} {
-		path := filepath.Join(home, name, "env.sh")
+	candidates := []string{filepath.Join(home, "adamic-tools", "env.sh"), filepath.Join(home, ".adamic-tools", "env.sh"), DefaultTools + "/env.sh"}
+	if tools := os.Getenv("ADAMIC_TOOLS"); tools != "" {
+		candidates = append([]string{filepath.Join(tools, "env.sh")}, candidates...)
+	}
+	for _, path := range candidates {
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 			return path
 		}
 	}
 	return ""
 }
+
+// DefaultTools is where adamic's cloud/setup.sh installs when ADAMIC_TOOLS names nowhere else.
+const DefaultTools = "/opt/adamic-tools"
 
 // Check probes every claimed toolchain with environment sourced and returns the ones that fail, in the order claimed:
 // none means every claim holds. A claim with no probe, or no environment to probe it in, fails as such.
@@ -115,7 +124,7 @@ func probe(checkContext context.Context, toolchain, environment string) string {
 		return fmt.Sprintf("no probe exists for %q (known: %s)", toolchain, strings.Join(Known(), ", "))
 	}
 	if environment == "" {
-		return "the box has no adamic toolchain (adamic-tools/env.sh)"
+		return "the box has no adamic toolchain (env.sh in $ADAMIC_TOOLS, ~/adamic-tools, ~/.adamic-tools or /opt/adamic-tools)"
 	}
 	directory, err := os.MkdirTemp("", "loom-toolchain-"+toolchain+"-")
 	if err != nil {
