@@ -1094,6 +1094,21 @@ func TestARedBesideAReadOnlyGoQueryStaysRed(t *testing.T) {
 	}
 }
 
+// A read-only query go answers with a failure breaks a failing unit, and the error says go's own last stderr line, so the
+// cause is on the record without a test's log (Oct 11: landable-8's Codex failures were found only in one). The test
+// still sees go's stderr. Mutant: the line not kept.
+func TestAFailedQuerySaysWhatGoSaid(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'go: reading file:///modules/golang.org/x/sys/@v/v0.33.0.mod: no such file or directory' >&2; exit 1; fi\nexec "+shellQuote(fixtureBinary.goBinary)+" \"$@\"\n")
+	result, events, _ := runUnit(t, fixture.unit("^(TestToolKey|TestFail)$"), fixture.options(t))
+	if result.Status != protocol.StatusBroken {
+		t.Fatalf("a red beside a failed read-only query read as %s; errors %q", result.Status, errorPhases(events))
+	}
+	if !strings.Contains(errorPhases(events), "go said: go: reading file:///modules/golang.org/x/sys/@v/v0.33.0.mod: no such file or directory") {
+		t.Errorf("the error doesn't say what go said: %q", errorPhases(events))
+	}
+}
+
 // With no go here, a query goes unanswered, and the unit is unfit, whatever its tests said.
 func TestAGoQueryWithNoGoHereIsUnfit(t *testing.T) {
 	fixture := newPrebuiltFixture(t)
@@ -1430,6 +1445,28 @@ func TestAQueryInsideANestedWorkspaceFindsIt(t *testing.T) {
 	result, events, _ := runUnit(t, fixture.unit("^TestNestedWorkspace$"), fixture.options(t))
 	if result.Status != protocol.StatusPassed {
 		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+}
+
+// A machine's env.sh that says GOWORK=off, or another proxy, never reaches a test's go queries: the runner sets how go
+// resolves modules itself, so a query inside a nested workspace still finds it (Oct 11, landable-8: on Codex alone,
+// every query in cohere asked the proxy for a module only cohere's workspace makes unneeded). Mutant: env.sh's GOWORK
+// and GOPROXY kept.
+func TestAMachinesEnvShNeverSetsHowGoResolvesModules(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	prepareScript = bytes.Replace(prepareScript, []byte(`printf 'PATH=%s\0HOME=%s\0'`),
+		[]byte(`printf 'GOWORK=off\0GOPROXY=https://proxy.invalid\0GOFLAGS=-mod=mod\0PATH=%s\0HOME=%s\0'`), 1)
+	if !bytes.Contains(prepareScript, []byte("GOWORK=off")) {
+		t.Fatal("the fixture's prepare script didn't take the env.sh lines")
+	}
+	result, events, _ := runUnit(t, fixture.unit("^TestNestedWorkspace$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("with env.sh's GOWORK=off: %s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+	runner := strings.Join(outputLines(events, "runner"), "\n")
+	if !strings.Contains(runner, `the tests' go queries run with GOWORK=""`) || !strings.Contains(runner, `GOENV="off"`) {
+		t.Errorf("the unit didn't say its go environment, or said env.sh's:\n%s", runner)
 	}
 }
 
