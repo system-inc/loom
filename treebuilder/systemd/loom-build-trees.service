@@ -13,6 +13,11 @@
 # and the next builder adopts it, waiting for it under the same --bound, rather than building the tree again. A build
 # is still killed at its bound, and none runs twice at once: a builder adopts before it checks anything out.
 #
+# --jobs 24 (Loom, 19:4xZ Oct 10): with the default 8 a tree's products phase ran 6 to 8 product tests at once at load ~10
+# of 64 threads (landable-4's tree, ed2f4e04), each mostly a store round trip, since build-tree's busy gauge holds only
+# at 80%. A job's share of the compile limit is GOMAXPROCS, which no product key reads (#nm31pcn), so the job count
+# moves no key. Admission by load (#b0yn1pw) is the real fix; this is the ceiling until it lands.
+#
 # Its environment is adamic's toolchain (~/adamic-tools/env.sh: its Go, clang, node and WASI SDK) under
 # GOTOOLCHAIN=local, as build-tree ran by hand on Workshop. A tree's key names the Go release go reports inside the
 # tree under it, so loom-plan (planner/systemd/loom-plan.service) runs under exactly the same, and the two keys meet in
@@ -32,7 +37,7 @@ Type=simple
 WorkingDirectory=%h/loom-trees
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=GOTOOLCHAIN=local
-ExecStart=/bin/bash -c '. %h/adamic-tools/env.sh && exec %h/.loom/bin/loom build-trees --queue https://loom.system.inc --token-file %h/.loom/build-trees-token --clone %h/loom-trees/adamic --ledger %h/loom-trees/trees.jsonl --logs %h/loom-trees/logs --r2 %h/.loom/r2-releases.conf --cache %h/loom-builder/trees --interval 10s'
+ExecStart=/bin/bash -c '. %h/adamic-tools/env.sh && exec %h/.loom/bin/loom build-trees --queue https://loom.system.inc --token-file %h/.loom/build-trees-token --clone %h/loom-trees/adamic --ledger %h/loom-trees/trees.jsonl --logs %h/loom-trees/logs --r2 %h/.loom/r2-releases.conf --cache %h/loom-builder/trees --jobs 24 --interval 10s'
 Nice=10
 IOSchedulingClass=idle
 KillMode=process
