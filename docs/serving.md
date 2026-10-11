@@ -57,7 +57,7 @@ A box's 64 threads and 125 GB held one unit at a time mostly idle (#ef2rgaq). Wi
 
 ## Installing
 
-Beyond Ubuntu's own git, curl and python3 and the adamic-tools serve's units use, a box needs one package, installed once as the sudoer:
+Beyond Ubuntu's own git, curl and python3, and the adamic-tools that serve's units use, a box needs one package, installed once as the sudoer:
 
 ```bash
 sudo apt-get install -y strace
