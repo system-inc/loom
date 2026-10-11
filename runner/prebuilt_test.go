@@ -487,6 +487,59 @@ func TestAPrebuiltUnitRunsGreenWithNoGo(t *testing.T) {
 	}
 }
 
+// A tree whose products are in adamic's local layout (landable-4) reaches the unit's cache as buildcache reads it: the
+// product at local/<key> with its .inputs, and the tree's pointers, local/<name key>.json, beside it, so a name another
+// product's bytes carry finds it (adamic's Absolute reads the pointer). A pointer blob holding anything but pointers
+// breaks the unit, Loom's, never red.
+//
+// Mutants: prebuiltPackages not fetching the pointers, or unpackPrebuilt not unpacking them (the pointer is missing);
+// unpackPrebuilt unpacking them with the product's own entries allowed, or with nothing refused (the poisoned blob is
+// unpacked).
+func TestAUnitsCacheHoldsTheLocalLayoutAndTheTreesPointers(t *testing.T) {
+	nameKey := strings.Repeat("9", 64)
+	local := func(t *testing.T, pointers []tarEntry) *prebuiltFixture {
+		fixture := newPrebuiltFixture(t)
+		fixture.tree.index.Products[fixtureProductKey] = fixture.store.putBlob(makeTar(t, []tarEntry{
+			{name: "local/" + fixtureProductKey + ".inputs", kind: tar.TypeReg, content: "name tool\n"},
+			{name: "local/" + fixtureProductKey + "/tool", kind: tar.TypeReg, content: "the product\n", mode: 0o755},
+		}, true))
+		fixture.tree.index.LocalPointers = fixture.store.putBlob(makeTar(t, pointers, true))
+		fixture.tree.publish(t)
+		return fixture
+	}
+	fixture := local(t, []tarEntry{{name: "local/" + nameKey + ".json", kind: tar.TypeReg, content: `{"Name":"tool"}`}})
+	result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+	runner := strings.Join(outputLines(events, "runner"), "\n")
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), runner)
+	}
+	if !strings.Contains(runner, "fetched the tree's local pointers, blob "+fixture.tree.index.LocalPointers) {
+		t.Errorf("the pointers' fetch isn't on the record:\n%s", runner)
+	}
+	cache := filepath.Join(result.Workspace, "..", "adamic-build")
+	for name, want := range map[string]string{
+		"local/" + fixtureProductKey + "/tool": "the product\n", "local/" + fixtureProductKey + ".inputs": "name tool\n", "local/" + nameKey + ".json": `{"Name":"tool"}`,
+	} {
+		if content, err := os.ReadFile(filepath.Join(cache, filepath.FromSlash(name))); err != nil || string(content) != want {
+			t.Errorf("the unit's cache holds %s as %q: %v", name, content, err)
+		}
+	}
+
+	for name, entry := range map[string]tarEntry{
+		"a pointer at the top":       {name: nameKey + ".json", kind: tar.TypeReg, content: "{}"},
+		"a product's file":           {name: "local/" + strings.Repeat("8", 64) + "/tool", kind: tar.TypeReg, content: "not a pointer"},
+		"a file beside the pointers": {name: "local/.pointer-1", kind: tar.TypeReg, content: "{}"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := local(t, []tarEntry{entry})
+			result, events, _ := runUnit(t, fixture.unit("^TestA$"), fixture.options(t))
+			if errors := errorPhases(events); result.Status != protocol.StatusBroken || !strings.Contains(errors, "the tree's local pointers") || !strings.Contains(errors, "the instance's, never the change's") {
+				t.Fatalf("%s; errors %q", result.Status, errors)
+			}
+		})
+	}
+}
+
 func TestAPrebuiltUnitsFailingTestIsRed(t *testing.T) {
 	fixture := newPrebuiltFixture(t)
 	result, events, _ := runUnit(t, fixture.unit("^(TestA|TestFail)$"), fixture.options(t))

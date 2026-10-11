@@ -333,7 +333,7 @@ func (run *unitRun) treeIndex(runContext context.Context, treeKey string) (build
 }
 
 // prebuiltPackages finds each of the job's packages in the tree's build and lists every blob its packages read, once
-// each: each package's binary, and each product its tests read.
+// each: each package's binary, each product its tests read, and the tree's local pointers when they read any product.
 func prebuiltPackages(job *protocol.TestJob, index builder.TreeIndex) ([]prebuiltPackage, []neededBlob, error) {
 	packages := make([]prebuiltPackage, len(job.Packages))
 	needed := []neededBlob{}
@@ -360,6 +360,10 @@ func prebuiltPackages(job *protocol.TestJob, index builder.TreeIndex) ([]prebuil
 		add(built.Binary, testPackage.Package+"'s test binary", "binaries")
 		for _, product := range built.Products {
 			add(index.Products[product], "product "+product+", which "+testPackage.Package+"'s tests read", "products")
+		}
+		// A product may name another only by its name key, which adamic finds through the tree's pointers.
+		if len(built.Products) > 0 && index.LocalPointers != "" {
+			add(index.LocalPointers, "the tree's local pointers", "products")
 		}
 	}
 	return packages, needed, nil
@@ -474,7 +478,8 @@ func (run *unitRun) fetchBlobs(fetchContext context.Context, cache blobCache, ne
 }
 
 // unpackPrebuilt unpacks each package's products into products (the unit's ADAMIC_BUILD_CACHE_DIR), each holding
-// only its own entries, and each package's binary, gunzipped, into binaries as <index>.test. Both are the unit's own
+// only its own entries, where buildcache made it (at the top or in builder.LocalDirectory), then the tree's local
+// pointers beside them when they were fetched, holding nothing but pointers, and each package's binary, gunzipped, into binaries as <index>.test. Both are the unit's own
 // directory, so a runner killed partway leaves nothing a later unit reads. unpackContext bounds it.
 func unpackPrebuilt(unpackContext context.Context, index builder.TreeIndex, packages []prebuiltPackage, files map[string]*os.File, products, binaries string) error {
 	unpacked := map[string]bool{}
@@ -494,6 +499,14 @@ func unpackPrebuilt(unpackContext context.Context, index builder.TreeIndex, pack
 			if err := builder.Unpack(contextReader{unpackContext, file}, products, builder.ProductEntries(product)); err != nil {
 				return fmt.Errorf("product %s: %w", product, err)
 			}
+		}
+	}
+	if file, fetched := files[index.LocalPointers]; index.LocalPointers != "" && fetched {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if err := builder.Unpack(contextReader{unpackContext, file}, products, builder.LocalPointerEntry); err != nil {
+			return fmt.Errorf("the tree's local pointers: %w", err)
 		}
 	}
 	if err := os.MkdirAll(products, 0o755); err != nil {

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -497,7 +498,7 @@ func (store Store) Stored(key string) (string, bool, error) {
 
 // FetchProduct writes a product's files under directory (a runner's ADAMIC_BUILD_CACHE_DIR): its ref, then its
 // archive, checked against its hash and unpacked into a scratch directory, where every entry must be a buildcache
-// path (<key>/<file> or <key>.inputs). Only when the whole archive checks is each product renamed into place whole,
+// path (<key>/<file> or <key>.inputs, at the top or in LocalDirectory). Only when the whole archive checks is each product renamed into place whole,
 // as buildcache itself publishes one, so a poisoned store leaves nothing behind. A product already in the cache is
 // left as it is, since its key says what it holds.
 func (store Store) FetchProduct(fetchContext context.Context, key, directory string) error {
@@ -524,38 +525,52 @@ func (store Store) FetchProduct(fetchContext context.Context, key, directory str
 }
 
 // place renames each product unpacked in scratch into directory, leaving out one already there and, with SkipNative,
-// one clang built.
+// one clang built. A product in LocalDirectory, and each pointer there, is placed into directory's own LocalDirectory
+// one by one, so what a unit's cache already holds there stays and the rest joins it.
 func (store Store) place(scratch, directory string) error {
-	entries, err := os.ReadDir(scratch)
-	if err != nil {
-		return err
-	}
-	skipped := map[string]bool{}
-	if store.SkipNative {
+	for _, place := range productPlaces {
+		from, to := filepath.Join(scratch, filepath.FromSlash(place)), filepath.Join(directory, filepath.FromSlash(place))
+		entries, err := os.ReadDir(from)
+		if place != "" && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		skipped := map[string]bool{}
+		if store.SkipNative {
+			for _, entry := range entries {
+				product, isInputs := strings.CutSuffix(entry.Name(), ".inputs")
+				if !isInputs {
+					continue
+				}
+				content, err := os.ReadFile(filepath.Join(from, entry.Name()))
+				if err != nil {
+					return err
+				}
+				if native(content) {
+					skipped[product] = true
+				}
+			}
+		}
+		if err = os.MkdirAll(to, 0o755); err != nil {
+			return err
+		}
 		for _, entry := range entries {
-			product, isInputs := strings.CutSuffix(entry.Name(), ".inputs")
-			if !isInputs {
+			if place == "" && entry.Name() == LocalDirectory {
+				// Its entries are placed by the next place, each on its own.
 				continue
 			}
-			content, err := os.ReadFile(filepath.Join(scratch, entry.Name()))
-			if err != nil {
+			if skipped[strings.TrimSuffix(entry.Name(), ".inputs")] {
+				continue
+			}
+			target := filepath.Join(to, entry.Name())
+			if _, err := os.Lstat(target); err == nil {
+				continue
+			}
+			if err = os.Rename(filepath.Join(from, entry.Name()), target); err != nil {
 				return err
 			}
-			if native(content) {
-				skipped[product] = true
-			}
-		}
-	}
-	for _, entry := range entries {
-		if skipped[strings.TrimSuffix(entry.Name(), ".inputs")] {
-			continue
-		}
-		target := filepath.Join(directory, entry.Name())
-		if _, err := os.Lstat(target); err == nil {
-			continue
-		}
-		if err = os.Rename(filepath.Join(scratch, entry.Name()), target); err != nil {
-			return err
 		}
 	}
 	return nil

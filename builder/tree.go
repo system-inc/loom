@@ -436,10 +436,16 @@ type TreeIndex struct {
 	Node []NodeProject `json:"node"`
 	// Modules is the blob of the tree's module download cache (ModuleCacheArchive): the only place a runner's go
 	// reads a module from. Empty: none published.
-	Modules  string                 `json:"modules,omitempty"`
-	Seconds  float64                `json:"seconds"`
-	Products map[string]string      `json:"products"`
-	Packages map[string]TreePackage `json:"packages"`
+	Modules string `json:"modules,omitempty"`
+	// LocalPointers is the blob of every pointer the tree's build left in its cache's LocalDirectory,
+	// local/<name key>.json (LocalPointersArchive): how adamic finds a product another product's bytes name only by its
+	// name key. A runner unpacks it into the unit's cache beside the products. Empty: the build left none. An index
+	// without it reads as one whose products need none, which is what an older builder's index is: it failed every
+	// package whose products were in LocalDirectory (Touched looked only at the top), so it never named one.
+	LocalPointers string                 `json:"localPointers,omitempty"`
+	Seconds       float64                `json:"seconds"`
+	Products      map[string]string      `json:"products"`
+	Packages      map[string]TreePackage `json:"packages"`
 }
 
 func (index TreeIndex) encode() ([]byte, error) {
@@ -611,8 +617,8 @@ func each(count, jobs int, work func(index int) error) error {
 // last, so no index names what the store lacks. A product whose ref names another archive (a
 // ConflictError) fails every package that reads it, named in each one's error, and the rest of the tree still goes
 // up. A product in held (HeldProducts.Held) came from the store this build, its blob already fresh, so it is named
-// in the index and nothing more. It fills in treeIndex's blobs as it goes, and reports whether it wrote the index
-// (writeIndex keeps one with fewer failed packages).
+// in the index and nothing more. The cache's local pointers go up as one blob, LocalPointers. It fills in treeIndex's
+// blobs as it goes, and reports whether it wrote the index (writeIndex keeps one with fewer failed packages).
 func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, source *Source, held map[string]string) (string, bool, error) {
 	treeKey := planner.TreeKey(treeIndex.Tree, treeIndex.Go, treeIndex.Goos, treeIndex.Goarch)
 	if err := CheckChunks(source.Chunks); err != nil {
@@ -674,6 +680,17 @@ func PublishTree(store Store, treeIndex *TreeIndex, binaries, cache string, sour
 	})
 	if err != nil {
 		return "", false, err
+	}
+	// The cache's pointers go up with the products they find, before the index that names them.
+	pointers, count, err := LocalPointersArchive(cache)
+	if err != nil {
+		return "", false, fmt.Errorf("the local pointers: %w", err)
+	}
+	treeIndex.LocalPointers = ""
+	if count > 0 {
+		if treeIndex.LocalPointers, err = store.PutBlob(pointers); err != nil {
+			return "", false, fmt.Errorf("the local pointers: %w", err)
+		}
 	}
 	phases.UploadProducts, lap = time.Since(lap).Seconds(), time.Now()
 	treeIndex.Products = map[string]string{}
@@ -802,9 +819,10 @@ func (store Store) writeIndex(treeKey string, treeIndex *TreeIndex) (bool, error
 	return false, fmt.Errorf("%s kept changing while it was written", key)
 }
 
-// blobs are every blob the index names: the source's chunks, each product's archive, each built package's binary.
+// blobs are every blob the index names: the source's chunks, each product's archive, the local pointers, each built
+// package's binary.
 func (index TreeIndex) blobs() []string {
-	named := map[string]bool{index.Modules: true}
+	named := map[string]bool{index.Modules: true, index.LocalPointers: true}
 	for _, chunk := range index.Source {
 		named[chunk.Blob] = true
 	}
@@ -902,6 +920,9 @@ func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 	if index.Modules != "" && !productKeyPattern.MatchString(index.Modules) {
 		return poisoned("its module cache is %q", index.Modules)
 	}
+	if index.LocalPointers != "" && !productKeyPattern.MatchString(index.LocalPointers) {
+		return poisoned("its local pointers are %q", index.LocalPointers)
+	}
 	for product, sum := range index.Products {
 		if !productKeyPattern.MatchString(product) || !productKeyPattern.MatchString(sum) {
 			return poisoned("product %q is %q", product, sum)
@@ -928,7 +949,7 @@ func ParseTree(treeKey string, content []byte) (TreeIndex, error) {
 
 // FetchPackage readies one package of a tree's build under directory, which must not hold it yet: test, its binary;
 // source/, the tree's files, every chunk of them; and cache/, a buildcache directory (ADAMIC_BUILD_CACHE_DIR) holding
-// each product its tests read. It reads the tree's index, then only those blobs, each checked against its hash (and
+// each product its tests read, where buildcache made it, with the tree's local pointers when it reads any product. It reads the tree's index, then only those blobs, each checked against its hash (and
 // kept in Blobs when set), unpacked into a scratch directory, refusing any entry that would land outside it, a
 // chunk's entry outside its range, and a product's entry that isn't that product's. Only when all of it checks does
 // any of it move into place; a product already in cache/ is left as it is.
@@ -982,6 +1003,14 @@ func (store Store) FetchPackage(fetchContext context.Context, treeKey, importPat
 		}
 		if err = Unpack(bytes.NewReader(blob), filepath.Join(scratch, "cache"), ProductEntries(product)); err != nil {
 			return TreePackage{}, fmt.Errorf("product %s: %w: the store is poisoned", product, err)
+		}
+	}
+	if len(built.Products) > 0 && index.LocalPointers != "" {
+		if blob, err = store.blob(fetchContext, index.LocalPointers); err != nil {
+			return TreePackage{}, fmt.Errorf("the local pointers: %w", err)
+		}
+		if err = Unpack(bytes.NewReader(blob), filepath.Join(scratch, "cache"), LocalPointerEntry); err != nil {
+			return TreePackage{}, fmt.Errorf("the local pointers: %w: the store is poisoned", err)
 		}
 	}
 	if err = os.MkdirAll(filepath.Join(scratch, "cache"), 0o755); err != nil {

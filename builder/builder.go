@@ -12,6 +12,7 @@
 package builder
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -55,11 +56,29 @@ func native(inputs []byte) bool {
 	return false
 }
 
-// productKeyPattern is a buildcache key, the first part of every output path, and a sha256 anywhere in the store.
+// productKeyPattern is a buildcache key, the name of every product's directory, and a sha256 anywhere in the store.
 var productKeyPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// buildcachePath is a product's file under its buildcache key, <key>/<file>, or its description beside it, <key>.inputs.
+// LocalDirectory is where adamic's buildcache keeps what it builds untraced, for one machine alone (adamic 6972ea7c97,
+// internal/buildcache: buildcache.go's get, relative.go's pointLocal), which is every product a tree's build makes:
+// local/<key>, the product's files, keyed by its declared inputs on the tree; local/<key>.inputs, its description; and
+// local/<name key>.json, a pointer holding the inputs that key it, by which adamic finds a product named only by its name
+// key (Absolute, reading <build cache>/<name key> in another product's bytes). A settled product, as the action store's
+// held products are fetched, is at the top instead: <key> and <key>.inputs.
+const LocalDirectory = "local"
+
+// productPlaces are the directories under a buildcache directory a product may be in, by its path's prefix: the top,
+// and LocalDirectory.
+var productPlaces = []string{"", LocalDirectory + "/"}
+
+// localPointerPattern is a pointer's file name in LocalDirectory: a name key and .json. buildcache's own temporary
+// files beside them (.pointer-*) and every dot file are no pointer.
+var localPointerPattern = regexp.MustCompile(`^[0-9a-f]{64}\.json$`)
+
+// buildcachePath is a product's file under its buildcache key, <key>/<file>, or its description beside it,
+// <key>.inputs, at the top or in LocalDirectory.
 func buildcachePath(path string) bool {
+	path = strings.TrimPrefix(path, LocalDirectory+"/")
 	first, rest, nested := strings.Cut(path, "/")
 	if nested {
 		return productKeyPattern.MatchString(first) && rest != ""
@@ -68,11 +87,70 @@ func buildcachePath(path string) bool {
 }
 
 // ProductEntries is what one product's archive may hold, for Unpack: that product's files, <key>/<file>, and its
-// description, <key>.inputs, and nothing of any other product's.
+// description, <key>.inputs, at the top or in LocalDirectory as buildcache made it, and nothing of any other product's.
 func ProductEntries(key string) func(name string) bool {
 	return func(name string) bool {
-		return name == key+".inputs" || (strings.HasPrefix(name, key+"/") && len(name) > len(key)+1)
+		for _, place := range productPlaces {
+			product := place + key
+			if name == product+".inputs" || (strings.HasPrefix(name, product+"/") && len(name) > len(product)+1) {
+				return true
+			}
+		}
+		return false
 	}
+}
+
+// LocalPointerEntry is what a tree's pointer archive (TreeIndex.LocalPointers) may hold, for Unpack: a pointer,
+// local/<name key>.json, and nothing else.
+func LocalPointerEntry(name string) bool {
+	file, local := strings.CutPrefix(name, LocalDirectory+"/")
+	return local && localPointerPattern.MatchString(file)
+}
+
+// productPaths are the paths under cache, slash-separated, where a directory named key is: <key> at the top and
+// local/<key>, as many as there are.
+func productPaths(cache, key string) []string {
+	found := []string{}
+	for _, place := range productPlaces {
+		if info, err := os.Lstat(filepath.Join(cache, filepath.FromSlash(place+key))); err == nil && info.IsDir() {
+			found = append(found, place+key)
+		}
+	}
+	return found
+}
+
+// ProductPath is where product key is under cache, slash-separated: <key> or local/<key>. A key with no directory, or
+// one at both, is an error, never a guess.
+func ProductPath(cache, key string) (string, error) {
+	found := productPaths(cache, key)
+	if len(found) != 1 {
+		return "", fmt.Errorf("product %s: the cache %s holds %d directories of it (%s), and a product is in one place", key, cache, len(found), strings.Join(found, ", "))
+	}
+	return found[0], nil
+}
+
+// LocalPointers lists every pointer in cache's LocalDirectory, local/<name key>.json, slash-separated and sorted: none
+// when there is no LocalDirectory. A pointer that isn't a regular file is an error.
+func LocalPointers(cache string) ([]string, error) {
+	entries, err := os.ReadDir(filepath.Join(cache, LocalDirectory))
+	if errors.Is(err, fs.ErrNotExist) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	pointers := []string{}
+	for _, entry := range entries {
+		if !localPointerPattern.MatchString(entry.Name()) {
+			continue
+		}
+		if !entry.Type().IsRegular() {
+			return nil, fmt.Errorf("%s/%s isn't a regular file; a pointer is", LocalDirectory, entry.Name())
+		}
+		pointers = append(pointers, LocalDirectory+"/"+entry.Name())
+	}
+	sort.Strings(pointers)
+	return pointers, nil
 }
 
 // Outputs lists every file under directory (a fresh ADAMIC_BUILD_CACHE_DIR after one product test) as the action's
@@ -180,8 +258,8 @@ func (builder Builder) Build(actions []Action) []Result {
 var buildLinePattern = regexp.MustCompile(`^build \S+ ([0-9a-f]{12}) (hit|miss|fetched|audited) `)
 
 // Touched reads one action's build log and names every buildcache product it used, by its full key, resolved from
-// the 12-character prefix the log carries against the product directories in cache. A prefix that names no product
-// or two is an error, never a guess.
+// the 12-character prefix the log carries against the product directories in cache, at its top and in
+// LocalDirectory. A prefix that names no product or two is an error, never a guess.
 func Touched(log, cache string) ([]string, error) {
 	content, err := os.ReadFile(log)
 	if os.IsNotExist(err) {
@@ -190,14 +268,20 @@ func Touched(log, cache string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(cache)
-	if err != nil {
-		return nil, err
-	}
+	// Each product directory, by its key: a key at the top and in LocalDirectory is two products with that prefix.
 	products := []string{}
-	for _, entry := range entries {
-		if entry.IsDir() && len(entry.Name()) == 64 && !strings.HasPrefix(entry.Name(), ".") {
-			products = append(products, entry.Name())
+	for _, place := range productPlaces {
+		entries, err := os.ReadDir(filepath.Join(cache, filepath.FromSlash(place)))
+		if place != "" && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() && productKeyPattern.MatchString(entry.Name()) {
+				products = append(products, entry.Name())
+			}
 		}
 	}
 	keys := map[string]bool{}
@@ -225,25 +309,31 @@ func Touched(log, cache string) ([]string, error) {
 	return touched, nil
 }
 
-// OutputsOf lists the files of the named buildcache products in cache, each directory's files under its key and
-// its .inputs file beside it, as one action's outputs.
+// OutputsOf lists the files of the named buildcache products in cache, each directory's files under its path and its
+// .inputs file beside it, as one action's outputs: <key>/<file> and <key>.inputs for a product at the top,
+// local/<key>/<file> and local/<key>.inputs for one in LocalDirectory, so unpacking them into another buildcache
+// directory puts each where buildcache looks for it.
 func OutputsOf(cache string, products []string) ([]Output, map[string]string, error) {
 	outputs := []Output{}
 	files := map[string]string{}
 	for _, product := range products {
-		listed, listedFiles, err := Outputs(filepath.Join(cache, product))
+		place, err := ProductPath(cache, product)
+		if err != nil {
+			return nil, nil, err
+		}
+		listed, listedFiles, err := Outputs(filepath.Join(cache, filepath.FromSlash(place)))
 		if err != nil {
 			return nil, nil, err
 		}
 		for _, output := range listed {
-			files[product+"/"+output.Path] = listedFiles[output.Path]
-			output.Path = product + "/" + output.Path
+			files[place+"/"+output.Path] = listedFiles[output.Path]
+			output.Path = place + "/" + output.Path
 			outputs = append(outputs, output)
 		}
-		inputs := filepath.Join(cache, product+".inputs")
+		inputs := filepath.Join(cache, filepath.FromSlash(place)+".inputs")
 		if info, err := os.Stat(inputs); err == nil {
-			outputs = append(outputs, Output{Path: product + ".inputs", Bytes: info.Size()})
-			files[product+".inputs"] = inputs
+			outputs = append(outputs, Output{Path: place + ".inputs", Bytes: info.Size()})
+			files[place+".inputs"] = inputs
 		}
 	}
 	sort.Slice(outputs, func(left, right int) bool { return outputs[left].Path < outputs[right].Path })

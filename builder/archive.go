@@ -112,8 +112,8 @@ func gunzipped(blob []byte) ([]byte, error) {
 }
 
 // ProductArchive is the archive of the named buildcache products in cache: each product's files under its key,
-// <key>/<file>, and its description beside it, <key>.inputs, as buildcache lays them out. It returns the archive
-// and how many files it holds.
+// <key>/<file>, and its description beside it, <key>.inputs, at the top or in LocalDirectory, wherever buildcache put
+// it (OutputsOf). It returns the archive and how many files it holds.
 func ProductArchive(cache string, products []string) ([]byte, int, error) {
 	outputs, files, err := OutputsOf(cache, products)
 	if err != nil {
@@ -122,6 +122,23 @@ func ProductArchive(cache string, products []string) ([]byte, int, error) {
 	entries := make([]archiveEntry, len(outputs))
 	for index, output := range outputs {
 		entries[index] = archiveEntry{Name: output.Path, File: files[output.Path], Executable: output.Executable}
+	}
+	archive, err := writeArchive(entries)
+	return archive, len(entries), err
+}
+
+// LocalPointersArchive is the archive of every pointer in cache's LocalDirectory, local/<name key>.json
+// (LocalPointers), and how many it holds: none, and no archive, when there are none. A pointer is named by a name key,
+// which only adamic's Key maps to the product it finds, on the tree at hand, so pointers go up per tree, all of them,
+// rather than each with a product.
+func LocalPointersArchive(cache string) ([]byte, int, error) {
+	pointers, err := LocalPointers(cache)
+	if err != nil || len(pointers) == 0 {
+		return nil, 0, err
+	}
+	entries := make([]archiveEntry, len(pointers))
+	for index, pointer := range pointers {
+		entries[index] = archiveEntry{Name: pointer, File: filepath.Join(cache, filepath.FromSlash(pointer))}
 	}
 	archive, err := writeArchive(entries)
 	return archive, len(entries), err

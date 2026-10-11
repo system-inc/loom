@@ -105,7 +105,9 @@ Workshop built and builds nothing (`runner/prebuilt.go`, #pcn6prz). In place of 
 4. readies the environment with `prepare.sh environment` (the instance's adamic toolchain, which must already be set
    up, and the gate inputs; no git, no setup, no npm, no Go: stage3/api's npm packages came in the tree's source,
    installed on Workshop), with the products in the unit's own
-   `ADAMIC_BUILD_CACHE_DIR`;
+   `ADAMIC_BUILD_CACHE_DIR`, each where adamic's buildcache made it (`local/<key>` and `local/<key>.inputs` for what it
+   builds untraced, which is every product of a tree's build), and the tree's pointers, `local/<name key>.json`, beside
+   them, so a product another product names only by its name key is found there;
 5. runs each binary as `go test -json` would, in the package's directory of the source:
    `<binary> -test.paniconexit0 -test.timeout=3h0m0s -test.count=1 -test.v=test2json -test.run=<pattern>
    [-test.skip=<pattern>]`, its output through Go's own test2json conversion (`runner/test2json`, vendored) into the

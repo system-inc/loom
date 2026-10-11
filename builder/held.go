@@ -188,7 +188,14 @@ func (held *HeldProducts) prepare(key string) (string, error) {
 	}
 	product := heldManifest{Version: 1, Key: key, Files: []heldFile{}}
 	blobs := map[string]string{}
+	// The product's files are where its archive put them, at the top or in LocalDirectory; buildcache's manifest names
+	// them from the product's own directory either way. An empty product has no directory, and is one at the top.
 	root := filepath.Join(directory, key)
+	if found := productPaths(directory, key); len(found) > 1 {
+		return "", fmt.Errorf("its archive holds it at both %s: the store is poisoned", strings.Join(found, " and "))
+	} else if len(found) == 1 {
+		root = filepath.Join(directory, filepath.FromSlash(found[0]))
+	}
 	err = filepath.WalkDir(root, func(file string, entry fs.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err

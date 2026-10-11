@@ -150,3 +150,40 @@ func TestTheKeyCheckNamesAKeyThatMovesBetweenWorkshopAndARunner(t *testing.T) {
 		t.Fatalf("moved %q, failed %v", moved, checked.Failed)
 	}
 }
+
+// The key check copies each product into a unit's cache where the tree's cache holds it, in adamic's local directory
+// as a tree's build leaves every product (landable-4), with the tree's pointers beside it, as a runner unpacks them, and
+// reads a local product's name from its .inputs there.
+//
+// Mutants: copyProduct copying from <key> at the top only (the local product isn't found); copyPointers copying none
+// (the pointer is missing in the unit's cache).
+func TestTheKeyCheckCopiesTheLocalLayoutAndItsPointers(t *testing.T) {
+	from, to := t.TempDir(), t.TempDir()
+	key, nameKey := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	local := filepath.Join(from, builder.LocalDirectory)
+	os.MkdirAll(filepath.Join(local, key), 0o755)
+	os.WriteFile(filepath.Join(local, key, "tool"), []byte("the tool"), 0o755)
+	os.WriteFile(filepath.Join(local, key+".inputs"), []byte("name the tool\nfile tool.go\n"), 0o644)
+	os.WriteFile(filepath.Join(local, key+".lock"), nil, 0o644)
+	os.WriteFile(filepath.Join(local, nameKey+".json"), []byte(`{"Name":"the tool"}`), 0o644)
+	os.WriteFile(filepath.Join(local, ".pointer-1"), []byte("{}"), 0o644)
+	if err := copyProduct(from, to, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyPointers(from, to); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{key + "/tool": "the tool", key + ".inputs": "name the tool\nfile tool.go\n", nameKey + ".json": `{"Name":"the tool"}`} {
+		if content, err := os.ReadFile(filepath.Join(to, builder.LocalDirectory, name)); err != nil || string(content) != want {
+			t.Errorf("the unit's cache holds local/%s as %q: %v", name, content, err)
+		}
+	}
+	for _, name := range []string{key + ".lock", ".pointer-1"} {
+		if _, err := os.Stat(filepath.Join(to, builder.LocalDirectory, name)); err == nil {
+			t.Errorf("buildcache's own local/%s was copied", name)
+		}
+	}
+	if name := productName(to, key); name != "the_tool" {
+		t.Errorf("the local product's name is %q", name)
+	}
+}

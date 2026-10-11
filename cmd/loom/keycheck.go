@@ -198,6 +198,12 @@ func checkKeys(checkContext context.Context, build builder.TreeBuild, directory 
 						break
 					}
 				}
+				// The tree's local pointers beside them, as a runner unpacks them.
+				if errs[index] == nil {
+					if err := copyPointers(build.Cache, cache); err != nil {
+						errs[index] = fmt.Errorf("%s: %w", pkg.Package, err)
+					}
+				}
 				seconds := time.Since(copied).Seconds()
 				if errs[index] != nil {
 					continue
@@ -302,9 +308,13 @@ func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg bui
 }
 
 // productName is a product's name as its census line says it, from the first line of the .inputs buildcache wrote
-// beside it ("name <name>"), spaces as underscores; "" when it has none.
+// beside it ("name <name>"), wherever the product is (builder.ProductPath), spaces as underscores; "" when it has none.
 func productName(cache, key string) string {
-	content, err := os.ReadFile(filepath.Join(cache, key+".inputs"))
+	place, err := builder.ProductPath(cache, key)
+	if err != nil {
+		return ""
+	}
+	content, err := os.ReadFile(filepath.Join(cache, filepath.FromSlash(place)+".inputs"))
 	if err != nil {
 		return ""
 	}
@@ -316,16 +326,22 @@ func productName(cache, key string) string {
 	return strings.ReplaceAll(name, " ", "_")
 }
 
-// copyProduct copies product key, its directory and its .inputs, from one buildcache directory into another, as a
-// runner unpacks it: a copy, never a link, so a test that writes into a product changes none of the tree's.
+// copyProduct copies product key, its directory and its .inputs, from one buildcache directory into another, to the
+// same place, at the top or in builder.LocalDirectory, as a runner unpacks it: a copy, never a link, so a test that
+// writes into a product changes none of the tree's.
 func copyProduct(from, to, key string) error {
-	if err := os.MkdirAll(to, 0o755); err != nil {
+	place, err := builder.ProductPath(from, key)
+	if err != nil {
 		return err
 	}
-	if err := copyFile(filepath.Join(from, key+".inputs"), filepath.Join(to, key+".inputs"), 0o644); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	place = filepath.FromSlash(place)
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(to, place)), 0o755); err != nil {
 		return err
 	}
-	source := filepath.Join(from, key)
+	if err := copyFile(filepath.Join(from, place+".inputs"), filepath.Join(to, place+".inputs"), 0o644); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	source := filepath.Join(from, place)
 	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -334,7 +350,7 @@ func copyProduct(from, to, key string) error {
 		if err != nil {
 			return err
 		}
-		target := filepath.Join(to, key, relative)
+		target := filepath.Join(to, place, relative)
 		info, err := entry.Info()
 		if err != nil {
 			return err
@@ -352,6 +368,25 @@ func copyProduct(from, to, key string) error {
 			return copyFile(path, target, info.Mode().Perm())
 		}
 	})
+}
+
+// copyPointers copies every local pointer (builder.LocalPointers) from one buildcache directory into another, as a
+// runner unpacks the tree's: how adamic finds a product another product names by its name key.
+func copyPointers(from, to string) error {
+	pointers, err := builder.LocalPointers(from)
+	if err != nil {
+		return err
+	}
+	for _, pointer := range pointers {
+		target := filepath.Join(to, filepath.FromSlash(pointer))
+		if err = os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err = copyFile(filepath.Join(from, filepath.FromSlash(pointer)), target, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func copyFile(from, to string, mode fs.FileMode) error {
