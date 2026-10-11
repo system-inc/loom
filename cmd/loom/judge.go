@@ -28,8 +28,8 @@ import (
 
 // judgeLoop is the judge's pull loop on the coordinator host, beside `loom plan` (#82tz9ty): every future Queue holds
 // planned and undecided, once its run has finished, is decided by judge.Decide with alone reruns at RerunPriority,
-// and its batch is posted to Queue's /futures/<tree>/verdicts. Main's recorded verdicts are judge.NoMainRecords until
-// Queue's index answers by unit at a base, so a failure main shares is the change's until then (it errs toward red).
+// and its batch is posted to Queue's /futures/<tree>/verdicts. Main's recorded verdicts are the verifies' records in
+// Queue's log (judge.LogMainRecords), so a failure main's record shares, by the unit's name, is main's red, excused.
 func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) > 0 && arguments[0] == "carried" {
 		return judgeCarried(arguments[1:], stdout, stderr)
@@ -214,7 +214,7 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		Log: func(run, sha256 string) ([]byte, error) {
 			return coordinator.ReadRunBlob(runContext, *wire, secret, run, sha256)
 		},
-		Main:  judge.NoMainRecords{},
+		Main:  liveMainRecords(*queue, client),
 		Queue: judge.Queue(judge.HTTPQueue{Base: *queue, Token: client}),
 		Loop:  judge.Loop{Now: time.Now, RequireTestLog: true, Reused: judge.HTTPReused{Base: *queue, Token: client}, Blobs: judge.StoreBlobs{Store: store}},
 		Stale: judge.StaleAfter,
@@ -289,6 +289,12 @@ func judgeLoop(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// liveMainRecords is the live judge's main records: the verifies' records in Queue's log, read as it grows (Loom, Oct 11
+// 02:02Z), so a failure main's verify recorded the same way is main's red, excused.
+func liveMainRecords(queue, token string) judge.MainRecords {
+	return judge.NewLogMainRecords(judge.HTTPLog{Base: queue, Token: token})
 }
 
 // printedQueue is --dry-run's queue: it prints each batch as the line Queue would have been sent, and posts nothing.

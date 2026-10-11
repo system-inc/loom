@@ -55,8 +55,9 @@ type Fabric interface {
 }
 
 // MainRecords gives main's latest recorded verdict for a unit at a base: its test outcomes, and whether there is one.
+// The unit is named by its plan, since its key names its tree's closure and differs on main whenever the branch touched it.
 type MainRecords interface {
-	Latest(base, unitKey string) (tests []TestOutcome, found bool, err error)
+	Latest(base string, unit PlanUnit) (tests []TestOutcome, found bool, err error)
 }
 
 // Queue takes a decided future's verdicts.
@@ -127,6 +128,7 @@ func (stub *StubBlobs) Put(sha256 string, content []byte) error {
 // A PlanUnit is one planned unit of a future: run, or reused from an earlier passed verdict of the exact same key.
 type PlanUnit struct {
 	UnitKey string
+	Name    string // what the plan names the unit: its package, or its phase
 	Reused  string // the reused verdict's id; empty when the unit runs
 	Kind    string // the unit key's kind: test, product or phase
 	Runner  string // the unit key's tools.runner: the runner binary's sha256 every attempt must have run on
@@ -472,7 +474,7 @@ func (loop Loop) rerunBoth(job Job, unit PlanUnit, evidence *Evidence, verdict *
 	if err != nil {
 		return err
 	}
-	recorded, found, err := loop.Main.Latest(job.Base, unit.UnitKey)
+	recorded, found, err := loop.Main.Latest(job.Base, unit)
 	if err != nil {
 		return err
 	}

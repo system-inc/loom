@@ -258,3 +258,48 @@ func TestTheWarmRuleIsOneForTheLoopAndTheCarriedList(t *testing.T) {
 		}
 	}
 }
+
+// The judge's unit asks the tree builder for a base tree its rerun needs, in the request file the builder's unit reads
+// (its --requests default): without it, landable-4's internal/flow and internal/load reruns on main's base were void,
+// never placed, three times each (#x3vaz9k, Oct 11 01:47Z). Mutants: --tree-requests dropped; a path the builder doesn't
+// read.
+func TestTheJudgesUnitAsksTheTreeBuilderForBaseTrees(t *testing.T) {
+	unit, err := os.ReadFile("../../judge/systemd/loom-judge.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := ""
+	for _, line := range strings.Split(string(unit), "\n") {
+		if value, found := strings.CutPrefix(strings.TrimSpace(line), "ExecStart="); found {
+			command = value
+		}
+	}
+	words := strings.Fields(strings.ReplaceAll(command, "%h", "/home/loom"))
+	requests := ""
+	for index, word := range words {
+		if word == "--tree-requests" && index+1 < len(words) {
+			requests = words[index+1]
+		}
+	}
+	t.Setenv("HOME", "/home/loom")
+	builderUnit, err := os.ReadFile("../../treebuilder/systemd/loom-build-trees.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := parseBuildTreesFlags([]string{"--queue", "https://loom.system.inc", "--token-file", "/home/loom/.loom/build-trees-token"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests == "" || requests != *settings.requests || strings.Contains(string(builderUnit), "--requests") {
+		t.Fatalf("the judge asks in %q, and the builder reads %q (its unit overriding it: %v)", requests, *settings.requests, strings.Contains(string(builderUnit), "--requests"))
+	}
+}
+
+// The live judge reads main's records from Queue's log, never the stand-in that excuses nothing (#x3vaz9k: main red on
+// flow and load, no branch could be green). Mutant: NoMainRecords left in.
+func TestTheLiveJudgeReadsMainsRecordsFromQueuesLog(t *testing.T) {
+	records, isLog := liveMainRecords("https://loom.system.inc", "t").(judge.LogMainRecords)
+	if !isLog || records.Log.(judge.HTTPLog).Base != "https://loom.system.inc" {
+		t.Fatalf("the live judge's main records are %T", liveMainRecords("https://loom.system.inc", "t"))
+	}
+}

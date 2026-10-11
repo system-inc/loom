@@ -33,8 +33,8 @@ func (stubReused) Tests(unitKey, reused string) (ReusedVerdict, error) {
 
 type stubMain map[string][]TestOutcome
 
-func (records stubMain) Latest(base, unitKey string) ([]TestOutcome, bool, error) {
-	tests, found := records[unitKey]
+func (records stubMain) Latest(base string, unit PlanUnit) ([]TestOutcome, bool, error) {
+	tests, found := records[unit.UnitKey]
 	return tests, found, nil
 }
 
