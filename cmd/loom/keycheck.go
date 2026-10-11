@@ -146,15 +146,24 @@ func censusOutcome(line string) (name, key, outcome string, ok bool) {
 
 // checkKeys runs the check on a built tree: built are its packages (a package whose binary failed is left out),
 // products each package's buildcache keys, source its chunks, release its Go release. jobs packages run at once.
+// keyCheckDiagnosis is what a person diagnosing a moved key asks of the check: Keep leaves its directory (the source,
+// each unit's cache) in place, and Builds lets the units' go builds through, as a build job's are, so a product a
+// runner misses is built and leaves its .inputs beside Workshop's to diff. Neither ever runs in a live tree build.
+type keyCheckDiagnosis struct {
+	Keep, Builds bool
+}
+
 func checkKeys(checkContext context.Context, build builder.TreeBuild, directory string, built []builder.TreePackage, products map[string][]string,
-	source builder.Source, release string, jobs int) (keyCheck, error) {
+	source builder.Source, release string, jobs int, diagnosis keyCheckDiagnosis) (keyCheck, error) {
 	started := time.Now()
 	result := keyCheck{Moved: map[string][]string{}, Failed: map[string]string{}}
 	root := filepath.Join(directory, "key-check")
 	if err := os.RemoveAll(root); err != nil {
 		return result, err
 	}
-	defer os.RemoveAll(root)
+	if !diagnosis.Keep {
+		defer os.RemoveAll(root)
+	}
 	// The source a runner assembles, from the same chunks, at a path that isn't the tree's.
 	tree := filepath.Join(root, "source")
 	for _, chunk := range source.Chunks {
@@ -208,7 +217,7 @@ func checkKeys(checkContext context.Context, build builder.TreeBuild, directory 
 				if errs[index] != nil {
 					continue
 				}
-				moved, hits, failed, err := checkPackage(checkContext, build, pkg, products[pkg.Package], tree, unit, cache, release, strings.TrimSpace(string(moduleCache)))
+				moved, hits, failed, err := checkPackage(checkContext, build, pkg, products[pkg.Package], tree, unit, cache, release, strings.TrimSpace(string(moduleCache)), diagnosis.Builds)
 				mutex.Lock()
 				copySeconds += seconds
 				result.Hits += hits
@@ -234,7 +243,7 @@ func checkKeys(checkContext context.Context, build builder.TreeBuild, directory 
 
 // checkPackage runs one package's product tests as a runner would and returns each product that wasn't a hit, how many
 // were, and the output's tail when the tests failed with nothing moved.
-func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg builder.TreePackage, products []string, tree, unit, cache, release, moduleCache string) ([]string, int, string, error) {
+func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg builder.TreePackage, products []string, tree, unit, cache, release, moduleCache string, builds bool) ([]string, int, string, error) {
 	log := filepath.Join(unit, "builds.log")
 	environment := map[string]string{}
 	for _, variable := range os.Environ() {
@@ -248,7 +257,7 @@ func checkPackage(checkContext context.Context, build builder.TreeBuild, pkg bui
 		environment[name] = value
 	}
 	delete(environment, "GOCACHEPROG")
-	standIn, err := runner.StandInGo(checkContext, unit, tree, release, "off", moduleCache, "", false, environment, func(string) {})
+	standIn, err := runner.StandInGo(checkContext, unit, tree, release, "off", moduleCache, "", builds, environment, func(string) {})
 	if err != nil {
 		return nil, 0, "", fmt.Errorf("%s: %w", pkg.Package, err)
 	}

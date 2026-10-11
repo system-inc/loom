@@ -51,6 +51,8 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	goCacheGB := flags.Uint64("go-cache-gb", 500, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
 	keyCheckMode := flags.String("key-check", "sampled", "whether a runner's keys are checked against Workshop's before the index goes up: sampled, always or never (keycheck.go)")
 	dry := flags.Bool("dry", false, "build and check the tree, print its summary, and upload nothing")
+	keyCheckKeep := flags.Bool("key-check-keep", false, "with --dry, leave the key check's source and each unit's cache in place, to diff a moved key's .inputs")
+	keyCheckBuilds := flags.Bool("key-check-builds", false, "with --dry, let the key check's go builds through, so a product a runner misses is built and leaves its .inputs")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--keys <file>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--product-jobs N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--key-check sampled|always|never] [--dry]")
 		return 2
@@ -272,7 +274,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		for _, result := range built {
 			packaged = append(packaged, treeIndex.Packages[result.Package])
 		}
-		checked, err := checkKeys(context.Background(), build, directory, packaged, products, source, identity.Go, *jobs)
+		checked, err := checkKeys(context.Background(), build, directory, packaged, products, source, identity.Go, *jobs, keyCheckDiagnosis{Keep: *keyCheckKeep && *dry, Builds: *keyCheckBuilds && *dry})
 		keysChecked = &checked
 		if err != nil {
 			keyCheckError = err.Error()

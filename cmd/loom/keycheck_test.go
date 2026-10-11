@@ -126,7 +126,7 @@ func keyCheckFixture(t *testing.T, workshopFlags string) (builder.TreeBuild, bui
 // A product Workshop built under the unit environment is a hit when a runner asks for it: nothing moved.
 func TestTheKeyCheckFindsAProductBuiltUnderTheUnitEnvironment(t *testing.T) {
 	build, source, built, products, release := keyCheckFixture(t, "")
-	checked, err := checkKeys(context.Background(), build, t.TempDir(), built, products, source, release, 2)
+	checked, err := checkKeys(context.Background(), build, t.TempDir(), built, products, source, release, 2, keyCheckDiagnosis{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestTheKeyCheckFindsAProductBuiltUnderTheUnitEnvironment(t *testing.T) {
 // so a runner keys it apart. The check names the product and the go build the stand-in refused.
 func TestTheKeyCheckNamesAKeyThatMovesBetweenWorkshopAndARunner(t *testing.T) {
 	build, source, built, products, release := keyCheckFixture(t, "-p=3")
-	checked, err := checkKeys(context.Background(), build, t.TempDir(), built, products, source, release, 2)
+	checked, err := checkKeys(context.Background(), build, t.TempDir(), built, products, source, release, 2, keyCheckDiagnosis{})
 	if err != nil {
 		t.Fatal(err)
 	}
