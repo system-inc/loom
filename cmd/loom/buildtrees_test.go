@@ -27,7 +27,7 @@ import (
 // The shipped unit runs `loom build-trees` with flags it takes, under adamic's toolchain and GOTOOLCHAIN=local (the
 // environment a tree's key is read in, the planner's too), and with KillMode=process, so a restart ends the builder
 // alone and the next one adopts the build in flight from its running record (#apsj7zp). Mutants: GOTOOLCHAIN=local or
-// env.sh taken out; the KillMode line taken out.
+// env.sh taken out; the KillMode line taken out; --jobs 24 taken out.
 func TestTheShippedTreeBuilderUnitBuildsUnderAdamicsToolchain(t *testing.T) {
 	unit, err := os.ReadFile("../../treebuilder/systemd/loom-build-trees.service")
 	if err != nil {
@@ -49,6 +49,10 @@ func TestTheShippedTreeBuilderUnitBuildsUnderAdamicsToolchain(t *testing.T) {
 	}
 	if *settings.ledgerPath != "/home/loom/loom-trees/trees.jsonl" || *settings.clone != "/home/loom/loom-trees/adamic" || *settings.floorGB != 100 || *settings.goCacheGB != 500 || *settings.once {
 		t.Fatalf("the unit's builder is %v", arguments)
+	}
+	// The default 8 left a products phase at load ~10 of 64 threads; a job's share is GOMAXPROCS, in no key.
+	if *settings.jobs != 24 {
+		t.Fatalf("the unit runs %d product tests at once, and a tree's products need 24 until admission by load lands", *settings.jobs)
 	}
 }
 
