@@ -970,12 +970,16 @@ describe("a plan's tree key", function () {
         expect((await postPlan(queue, sha(72), [{ ...units[0], tree: tree.slice(1) }, units[1]])).status).toBe(422);
         const phase = { kind: 'phase', package: 'github.com/system-inc/adamic', select: { run: 'vet', skip: '' }, gateTools: 'a'.repeat(40) };
         const phaseUnit = { name: 'phase:vet', unitKey: await unitKeyOf(phase), keyParts: phase, decision: 'run', reason: 'phase', tree: tree };
-        // A phase unit names its tree as a test unit does: its job takes the tree's npm packages from it (#v03v751).
-        expect((await postPlan(queue, sha(72), [{ ...units[0], tree: tree }, units[1], phaseUnit])).status).toBe(200);
+        // A phase unit names its tree as a test unit does: its job takes the tree's npm packages from it (#v03v751). A build
+        // unit does too, since its runner builds on the tree's source (#8j1qygw: the Queue refused every plan with one).
+        const build = { ...units[1]?.keyParts, kind: 'build', package: 'github.com/system-inc/adamic/cmd/adamic-gate' };
+        const buildUnit = { name: build.package, unitKey: await unitKeyOf(build), keyParts: build, decision: 'run', reason: 'build', tree: tree };
+        expect((await postPlan(queue, sha(72), [{ ...units[0], tree: tree }, units[1], phaseUnit, buildUnit])).status).toBe(200);
         const listed = (await (await queue.fetch('https://queue/futures?state=planned')).json()) as { futures: { units: Record<string, unknown>[] }[] };
         expect(listed.futures[0]?.units[0]).toMatchObject({ unitKey: units[0]?.unitKey, tree: tree });
         expect(listed.futures[0]?.units[1]).not.toHaveProperty('tree');
         expect(listed.futures[0]?.units[2]).toMatchObject({ unitKey: phaseUnit.unitKey, tree: tree });
+        expect(listed.futures[0]?.units[3]).toMatchObject({ unitKey: buildUnit.unitKey, tree: tree });
         const log = await logOf(queue);
         const replayed = await replay(log);
         expect(replayed.head).toBe((await (await queue.fetch('https://queue/head')).json() as { head: string }).head);

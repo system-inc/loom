@@ -332,6 +332,9 @@ export interface QueueState {
 
 const shaPattern = /^[0-9a-f]{40}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
+
+// The unit kinds whose job reads its tree's build, as planner.ReadsTreeBuild says, so a plan's unit of one may name its tree.
+const treeReadingKinds = ['test', 'build', 'product', 'phase'];
 const changePattern = /^chg_[0-9a-z]{26}$/;
 const base32 = '0123456789abcdefghjkmnpqrstvwxyz';
 const statuses: readonly string[] = ['passed', 'failed', 'void'];
@@ -1114,9 +1117,11 @@ export async function checkPlan(body: string): Promise<PlannedUnit[] | { reason:
         if (item.tree !== undefined && item.tree !== null && (typeof item.tree !== 'string' || !hashPattern.test(item.tree))) {
             return `unit ${item.name}'s tree is a tree key, 64 lowercase hex digits`;
         }
-        // A phase unit names its tree too: its job takes the tree's npm packages from Workshop's build (#v03v751).
-        if (typeof item.tree === 'string' && item.keyParts.kind !== 'test' && item.keyParts.kind !== 'product' && item.keyParts.kind !== 'phase') {
-            return `unit ${item.name} is a ${String(item.keyParts.kind)} unit, and only a test, product or phase unit runs its tree's build`;
+        // A phase unit names its tree too: its job takes the tree's npm packages from Workshop's build (#v03v751). A build
+        // unit does as well: its runner builds on that tree's source and refuses a build job that names none (#8j1qygw).
+        // planner.ReadsTreeBuild is the same list.
+        if (typeof item.tree === 'string' && !treeReadingKinds.includes(String(item.keyParts.kind))) {
+            return `unit ${item.name} is a ${String(item.keyParts.kind)} unit, and only a test, build, product or phase unit runs its tree's build`;
         }
         if (names.has(item.name) || keys.has(item.unitKey)) {
             return `unit ${item.name} is planned twice`;
