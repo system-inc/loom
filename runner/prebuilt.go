@@ -803,13 +803,17 @@ func StandInGo(checkContext context.Context, directory, source, release, proxy, 
 		name, value, _ := strings.Cut(variable, "=")
 		if name == "GOWORK" {
 			// Only a query in the tree's source: one in a module of the test's own elsewhere would find it outside
-			// the workspace and fail. A test that chose its own workspace (GOWORK=off, say) keeps it.
+			// the workspace and fail. A test that chose its own workspace (GOWORK=off, say) keeps it. And only where
+			// the tree's go.work is the one go itself would find, the nearest above: a query in a directory under
+			// another go.work (adamic's cohere, its own workspace) finds that one, as it did on Workshop, where
+			// adamic keys a product built in cohere on cohere's workspace (#nm31pcn, landable-7's lint/regex).
 			tree := source
 			if resolved, err := filepath.EvalSymlinks(source); err == nil {
 				tree = resolved
 			}
-			exports += "if [ -z \"$GOWORK\" ]; then case \"$(pwd -P)\" in " + shellQuote(tree) + " | " + shellQuote(tree) + "/*) GOWORK=" +
-				shellQuote(value) + "; export GOWORK ;; esac; fi\n"
+			exports += "if [ -z \"$GOWORK\" ]; then case \"$(pwd -P)\" in " + shellQuote(tree) + " | " + shellQuote(tree) + "/*)\n" +
+				"\tat=$(pwd -P)\n\twhile [ \"$at\" != " + shellQuote(tree) + " ] && [ ! -f \"$at/go.work\" ]; do at=${at%/*}; done\n" +
+				"\tif [ \"$at\" = " + shellQuote(tree) + " ]; then GOWORK=" + shellQuote(value) + "; export GOWORK; fi ;;\nesac; fi\n"
 			continue
 		}
 		exports += name + "=" + shellQuote(value) + "\nexport " + name + "\n"

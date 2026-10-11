@@ -206,3 +206,18 @@ func TestListOverlay(t *testing.T) {
 		t.Fatalf("go list -deps -json -test -overlay: %v: %s", err, output)
 	}
 }
+
+// TestNestedWorkspace asks go for the workspace from inside a directory with a go.work of its own: go's answer is that
+// one, as on Workshop.
+func TestNestedWorkspace(t *testing.T) {
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("go", "env", "GOWORK")
+	command.Dir = filepath.Join(filepath.Dir(filepath.Dir(directory)), "nested")
+	output, err := command.CombinedOutput()
+	if answer := strings.TrimSpace(string(output)); err != nil || !strings.HasSuffix(answer, "/nested/go.work") {
+		t.Fatalf("go env GOWORK in nested: %v: %q, want nested's own go.work", err, answer)
+	}
+}

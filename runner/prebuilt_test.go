@@ -124,7 +124,9 @@ func buildFixture(t *testing.T) error {
 	proxy, tree := filepath.Join(directory, "proxy"), filepath.Join(directory, "tree")
 	moduletest.Proxy(t, proxy)
 	// A workspace, as adamic's is, whose module's go.sum lacks the module's lines: go learns them into go.work.sum.
-	fixtureBinary.files = map[string]string{"go.work": "go 1.27\n\nuse .\n", "internal/uses/uses.go": "package uses\n\nimport _ \"" + moduletest.Import + "\"\n"}
+	fixtureBinary.files = map[string]string{"go.work": "go 1.27\n\nuse .\n", "internal/uses/uses.go": "package uses\n\nimport _ \"" + moduletest.Import + "\"\n",
+		// A workspace of its own inside the tree, as adamic's cohere is: go finds it, not the tree's, from inside it.
+		"nested/go.work": "go 1.27\n\nuse .\n", "nested/go.mod": "module example.com/nested\n\ngo 1.27\n", "nested/nested.go": "package nested\n"}
 	for _, name := range []string{"go.mod", "internal/lower/lower_test.go", "internal/lower/testdata/fixture.txt"} {
 		content, err := os.ReadFile(filepath.Join("testdata", "prebuilt", filepath.FromSlash(name)))
 		if err != nil {
@@ -1416,6 +1418,18 @@ func TestAListInAnotherBuildModeIsAnswered(t *testing.T) {
 	result, events, _ := runUnit(t, fixture.unit("^TestListBuildMode$"), fixture.options(t))
 	if result.Status != protocol.StatusPassed {
 		t.Fatalf("go list -buildmode=c-archive: %s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+}
+
+// A query from inside a workspace of its own in the tree finds that workspace, as go does on Workshop, never the tree's
+// copy: adamic keys a product built in cohere on cohere's go.work (#nm31pcn, landable-7's lint/regex). The tree's own
+// is still the tree's (TestATestSeesTheTreesOwnWorkspace).
+func TestAQueryInsideANestedWorkspaceFindsIt(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestNestedWorkspace$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("%s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
 	}
 }
 
