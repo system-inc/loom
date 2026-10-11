@@ -79,6 +79,7 @@ const usage = `usage:
   loom queue-bridge [--config <queue-bridge.conf>]
   loom queue-bridge install
   loom queue-bridge pins [--repository <clone>] <sha>
+  loom install-units
   loom house-cache serve --listen <ip>:<port> --directory <dir> [--limit-gb N] [--floor-gb N] [--upstream <url>] [--tailnet] [--public]
   loom house-cache install
   loom release watch [--config <file>] [--wire <url>]
@@ -163,6 +164,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if len(arguments) > 0 && arguments[0] == "queue-bridge" {
 		return queueBridge(arguments[1:], stdout, stderr)
+	}
+	if len(arguments) > 0 && arguments[0] == "install-units" {
+		return installUnits(arguments[1:], stdout, stderr)
 	}
 	if len(arguments) > 0 && arguments[0] == "house-cache" {
 		return houseCache(arguments[1:], stdout, stderr)

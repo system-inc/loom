@@ -96,9 +96,9 @@ func TestTheShippedUnitKeepsItsRunsAcrossARestart(t *testing.T) {
 	if len(settings.poolHas["box-phase"]) == 0 || *settings.ledgerPath != "/home/loom/loom-placer/placed.jsonl" || *settings.once || *settings.dryRun {
 		t.Fatalf("the unit's placer is %v", arguments)
 	}
-	// Workshop's builds stay off until the fleet decodes a test job's tree; the tree builder's ledger is the one its
-	// unit writes. Mutant: --trees shipped on.
-	if *settings.trees || *settings.treesLedger != "/home/loom/loom-trees/trees.jsonl" || *settings.treeWait != placer.TreeWaitBound {
+	// Workshop's builds are on (#w7agfa9): the placer sets each unit's tree from the tree builder's ledger, the one its
+	// unit writes, as Workshop ran by a drop-in until its units came from the release (#pzrz9r8). Mutant: --trees dropped.
+	if !*settings.trees || *settings.treesLedger != "/home/loom/loom-trees/trees.jsonl" || *settings.treeWait != placer.TreeWaitBound {
 		t.Fatalf("the unit's placer names trees %v from %s, waiting %v", *settings.trees, *settings.treesLedger, *settings.treeWait)
 	}
 	// The wait stays under the judge's backstop, so a tree that never comes is voided named. Mutant: no check.

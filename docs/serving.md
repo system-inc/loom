@@ -1,6 +1,6 @@
 # Serving the pools from the house
 
-Every Linux house machine (Workshop, Cloud, Server, Home and Chonchon) serves one pool on the wire: a systemd user unit, `loom-serve`, keeps `loom-runner serve` asking its pool for units and running them, as many at once as its `serve.conf` says ("Several units at once" below), each on the runner its key names. The runner the updater installed (docs/updater.md) only serves, and a release restarts it without breaking a unit in hand. The pool and its protocol are docs/protocol.md's ("The pool").
+Every serving box of the house (Cloud, Server, Home and Chonchon) serves one pool on the wire; Workshop is the builder and serves none (docs/workshop.md): a systemd user unit, `loom-serve`, keeps `loom-runner serve` asking its pool for units and running them, as many at once as its `serve.conf` says ("Several units at once" below), each on the runner its key names. The runner the updater installed (docs/updater.md) only serves, and a release restarts it without breaking a unit in hand. The pool and its protocol are docs/protocol.md's ("The pool").
 
 ## Where a unit's runner comes from
 

@@ -33,7 +33,7 @@ Type=simple
 WorkingDirectory=%h/loom-placer
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment="PLACE_POOL_HAS=--pool-has box-strict=go,clang,node,wasiSdk --pool-has box-phase=go,clang,node"
-ExecStart=%h/.loom/bin/loom place --queue https://loom.system.inc --token-file %h/.loom/placer-token --wire https://runs.loom.system.inc --source %h/Projects/system/loom --pools %h/.loom/pools.json $PLACE_POOL_HAS --needs-git %h/loom-placer/adamic.git --r2 %h/.loom/r2-releases.conf --ledger %h/loom-placer/placed.jsonl --runs %h/loom-placer/runs --trees-ledger %h/loom-trees/trees.jsonl --interval 10s
+ExecStart=%h/.loom/bin/loom place --queue https://loom.system.inc --token-file %h/.loom/placer-token --wire https://runs.loom.system.inc --source %h/Projects/system/loom --pools %h/.loom/pools.json $PLACE_POOL_HAS --needs-git %h/loom-placer/adamic.git --r2 %h/.loom/r2-releases.conf --ledger %h/loom-placer/placed.jsonl --runs %h/loom-placer/runs --trees-ledger %h/loom-trees/trees.jsonl --trees --interval 10s
 KillMode=process
 Restart=on-failure
 RestartSec=10
