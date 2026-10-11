@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,8 +46,10 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	floorGB := flags.Uint64("floor-gb", 100, "free space the cache base and Go's build cache keep, in GB: below it the build doesn't start, and no job starts")
 	tempFloorGB := flags.Uint64("temp-floor-gb", 20, "free space the temporary directory keeps, in GB (it may be memory)")
 	goCacheGB := flags.Uint64("go-cache-gb", 500, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
+	sourceCache := flags.String("source-cache", "", "where the source's built chunks are kept by what they hold, so a warm tree gzips only what changed (default <cache>/source-chunks)")
+	sourceCacheGB := flags.Uint64("source-cache-gb", 8, "the most the source's chunk cache keeps after a build, in GB, the least recently used going first (0: everything)")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--source-cache <dir>] [--source-cache-gb N]")
 		return 2
 	}
 	started := time.Now()
@@ -99,6 +102,19 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	goCacheCap, err := builder.Gigabytes(*goCacheGB)
 	if err != nil {
 		return fail(err)
+	}
+	// The chunk cache sits under the cache base by default, which the disk floor watches, in a directory TreeCache
+	// never takes for a tree's (it removes only those named by a tree hash).
+	chunkCache := &builder.ChunkCache{Directory: *sourceCache}
+	if chunkCache.Directory == "" {
+		chunkCache.Directory = filepath.Join(*cache, "source-chunks")
+	}
+	if *sourceCacheGB > 0 {
+		capBytes, err := builder.Gigabytes(*sourceCacheGB)
+		if err != nil {
+			return fail(err)
+		}
+		chunkCache.Bytes = int64(min(capBytes, math.MaxInt64))
 	}
 	trimmed, err := builder.TrimGoCache(strings.TrimSpace(string(goCache)), goCacheCap)
 	if err != nil {
@@ -199,9 +215,14 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	built := build.Binaries(packages)
 	binarySeconds := time.Since(binariesStarted).Seconds()
 	phase("source and modules", nil)
-	source, err := builder.SourceChunks(*tree, installs)
+	sourceStarted := time.Now()
+	source, err := builder.CachedSourceChunks(*tree, installs, chunkCache)
 	if err != nil {
 		return fail(err)
+	}
+	sourceSeconds := time.Since(sourceStarted).Seconds()
+	if err = chunkCache.Trim(); err != nil {
+		fmt.Fprintln(stderr, "build-tree: warning: trimming the source's chunk cache:", err)
 	}
 	node, err := builder.NodeChunks(source, installs)
 	if err != nil {
@@ -255,7 +276,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		"tree": identity.Tree, "future": *future, "treeKey": treeKey, "index": "trees/" + treeKey + ".json", "indexWritten": indexWritten,
 		"packages": len(packages), "failed": failed, "productTests": len(productTests), "products": len(treeIndex.Products), "productsFetched": len(held.Held()),
 		"warmSeconds": warmSeconds, "productSeconds": productSeconds, "binarySeconds": binarySeconds, "uploadSeconds": time.Since(uploadStarted).Seconds(),
-		"seconds": time.Since(started).Seconds(), "sourceChunks": len(source.Chunks), "sourceBytes": source.Bytes(),
+		"seconds": time.Since(started).Seconds(), "sourceChunks": len(source.Chunks), "sourceBytes": source.Bytes(), "sourceSeconds": sourceSeconds, "sourceChunksCached": source.Cached,
 		"sourceChunksSent": source.Sent, "sourceBytesSent": source.SentBytes, "node": treeIndex.Node,
 		"storeReads": requests.Reads.Load(), "storeWrites": requests.Writes.Load(),
 	})

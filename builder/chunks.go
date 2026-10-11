@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/system-inc/loom/planner"
 )
@@ -56,10 +57,12 @@ func (chunk SourceChunk) Holds(name string) bool {
 }
 
 // A Source is a tree's source as chunks: Chunks in path order, as the index lists them, and each one's blob by its
-// sha256. PublishTree counts in Sent and SentBytes the chunks it had to send.
+// sha256. Cached counts the chunks a ChunkCache held, built by nothing; PublishTree counts in Sent and SentBytes the
+// chunks it had to send.
 type Source struct {
 	Chunks    []SourceChunk
 	Blobs     map[string][]byte
+	Cached    int
 	Sent      int
 	SentBytes int64
 }
@@ -80,6 +83,13 @@ func (source Source) Bytes() int64 {
 // whose manifest can't be made, one whose files aren't what its manifest records (checkSource), and one that tracks a
 // path inside an install's node_modules. Git is asked through planner.LocalGit, as the manifest and the tree's hash are.
 func SourceChunks(tree string, installs []NodeInstall) (Source, error) {
+	return CachedSourceChunks(tree, installs, nil)
+}
+
+// CachedSourceChunks is SourceChunks with a cache of built chunks (chunkcache.go): a chunk cache keeps is taken from
+// it instead of built, and each one built is kept there, so the source is the same chunks, byte for byte, gzipping
+// only what changed. A nil cache keeps nothing.
+func CachedSourceChunks(tree string, installs []NodeInstall, cache *ChunkCache) (Source, error) {
 	listing, err := planner.LocalGit(tree, "ls-files", "--recurse-submodules", "-z").Output()
 	if err != nil {
 		return Source{}, fmt.Errorf("git ls-files in %s: %w", tree, err)
@@ -90,12 +100,23 @@ func SourceChunks(tree string, installs []NodeInstall) (Source, error) {
 			names = append(names, name)
 		}
 	}
-	manifest, tracked, err := trackedManifest(tree)
+	manifest, tracked, repositories, err := trackedManifest(tree)
 	if err != nil {
 		return Source{}, err
 	}
-	if err = checkSource(tree, names, tracked); err != nil {
+	vouched, err := gitVouches(tree, repositories)
+	if err != nil {
 		return Source{}, err
+	}
+	if err = checkSource(tree, names, tracked, vouched); err != nil {
+		return Source{}, err
+	}
+	blobOf := func(name string) (string, bool) {
+		record, recorded := tracked[name]
+		return record.object, recorded
+	}
+	if cache != nil && cache.Blobs != nil {
+		blobOf = cache.Blobs
 	}
 	groups := make([]chunkGroup, len(installs))
 	for index, install := range installs {
@@ -104,7 +125,7 @@ func SourceChunks(tree string, installs []NodeInstall) (Source, error) {
 			return Source{}, err
 		}
 	}
-	return chunkSource(tree, names, manifest, groups)
+	return chunkSource(tree, names, manifest, groups, cache, blobOf)
 }
 
 // A chunkGroup is entries that are one chunk of their own, every one inside top: an npm install's.
@@ -126,15 +147,16 @@ type sourceFile struct {
 // (a link Unpack would refuse fails here), in byte order, cut where cutAfter says. Each chunk is archived as the whole
 // source was, deterministically, all of them at once.
 func ChunkFiles(tree string, names []string) (Source, error) {
-	return chunkSource(tree, names, nil, nil)
+	return chunkSource(tree, names, nil, nil, nil, nil)
 }
 
 // chunkSource is ChunkFiles with the manifest's files beside the named paths, each a chunk of its own: a repository's
 // files list then changes only its own chunk, when that repository moves, and the HEAD that changes on every commit
 // takes no tracked file's chunk with it. Each of groups is one chunk of its own: an npm install, which changes only when
 // its lockfile does. A tracked path where the manifest goes is refused, and so is one inside a group's directory, which
-// would split it.
-func chunkSource(tree string, names []string, manifest []archiveEntry, groups []chunkGroup) (Source, error) {
+// would split it. A chunk cache keeps, by its entries' blobs as blobOf names them, is taken from it, and one it doesn't
+// is built and kept there; a nil cache builds every chunk.
+func chunkSource(tree string, names []string, manifest []archiveEntry, groups []chunkGroup, cache *ChunkCache, blobOf func(path string) (string, bool)) (Source, error) {
 	files := make([]sourceFile, 0, len(names)+len(manifest))
 	for _, entry := range manifest {
 		files = append(files, sourceFile{entry: entry, weight: int64(len(entry.Content)) + tarHeaderWeight, alone: true})
@@ -182,22 +204,39 @@ func chunkSource(tree string, names []string, manifest []archiveEntry, groups []
 	}
 	source := Source{Chunks: make([]SourceChunk, len(runs)), Blobs: map[string][]byte{}}
 	blobs := make([][]byte, len(runs))
+	var cached atomic.Int64
 	err = each(len(runs), runtime.NumCPU(), func(index int) error {
 		entries := make([]archiveEntry, len(runs[index]))
 		for position, file := range runs[index] {
 			entries[position] = file.entry
 		}
-		blob, err := writeArchive(entries)
-		if err != nil {
-			return err
+		key, keyed := cache.key(entries, blobOf)
+		var blob []byte
+		var sum string
+		held := false
+		if keyed {
+			blob, sum, held = cache.get(key)
+		}
+		if held {
+			cached.Add(1)
+		} else {
+			built, err := writeArchive(entries)
+			if err != nil {
+				return err
+			}
+			blob, sum = built, digest(built)
+			if keyed {
+				cache.put(key, blob)
+			}
 		}
 		blobs[index] = blob
-		source.Chunks[index] = SourceChunk{Blob: digest(blob), First: entries[0].Name, Last: entries[len(entries)-1].Name, Files: len(entries), Bytes: int64(len(blob))}
+		source.Chunks[index] = SourceChunk{Blob: sum, First: entries[0].Name, Last: entries[len(entries)-1].Name, Files: len(entries), Bytes: int64(len(blob))}
 		return nil
 	})
 	if err != nil {
 		return Source{}, err
 	}
+	source.Cached = int(cached.Load())
 	for index, chunk := range source.Chunks {
 		source.Blobs[chunk.Blob] = blobs[index]
 	}

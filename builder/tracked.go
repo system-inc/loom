@@ -41,7 +41,8 @@ import (
 // The manifest describes each repository's commit, and the source is read from the checkout, which the build has run
 // in. So SourceChunks checks every file it archives against the manifest (checkSource): a tree a build step changed,
 // or whose index hides a change (assume-unchanged), would have built its binaries from something that isn't its
-// commit, and fails loudly rather than ship a source its own manifest contradicts.
+// commit, and fails loudly rather than ship a source its own manifest contradicts. A file git's own index vouches for
+// (vouched.go) is held to its commit by git's stat check instead of read again, so a warm tree reads only what changed.
 
 // TrackedDirectory is where a tree's source carries its manifest, at its root. It is never written into the checkout.
 const TrackedDirectory = ".tracked"
@@ -49,6 +50,13 @@ const TrackedDirectory = ".tracked"
 // manifestFileNames are the files each repository's manifest directory holds. A submodule at a path with one of these
 // names (as a filesystem that folds case would take it) would put its directory where its parent's file is.
 var manifestFileNames = []string{"HEAD", "commit", "files"}
+
+// A trackedRepository is one repository of the tree's source: its path in the tree ("" for the tree's own) and the
+// commit its manifest describes.
+type trackedRepository struct {
+	relative string
+	commit   string
+}
 
 // A trackedFile is what a repository's commit records for one file of the tree's source: its git mode (100644,
 // 100755 or 120000) and the blob it holds.
@@ -60,18 +68,19 @@ type trackedFile struct {
 // TrackedManifest is the tree's manifest as archive entries, made in memory: HEAD, commit and files for the tree, then
 // for every submodule its listing records, recursively.
 func TrackedManifest(tree string) ([]archiveEntry, error) {
-	entries, _, err := trackedManifest(tree)
+	entries, _, _, err := trackedManifest(tree)
 	return entries, err
 }
 
-// trackedManifest is TrackedManifest and what the commits record for every file of the source, by its path in the
-// tree, submodules' files under their paths. Each submodule must be checked out (its .git there), at the commit its
-// parent's gitlink pins, at a path no manifest file's name takes; one that isn't, or a repository git can't answer
-// for, or a commit object that isn't HEAD's, fails it, named, since a runner's tests would read a manifest that isn't
-// the source's. (build-tree's checkout inits every submodule.)
-func trackedManifest(tree string) ([]archiveEntry, map[string]trackedFile, error) {
+// trackedManifest is TrackedManifest, what the commits record for every file of the source, by its path in the tree,
+// submodules' files under their paths, and the repositories it read, the tree's first. Each submodule must be checked
+// out (its .git there), at the commit its parent's gitlink pins, at a path no manifest file's name takes; one that
+// isn't, or a repository git can't answer for, or a commit object that isn't HEAD's, fails it, named, since a runner's
+// tests would read a manifest that isn't the source's. (build-tree's checkout inits every submodule.)
+func trackedManifest(tree string) ([]archiveEntry, map[string]trackedFile, []trackedRepository, error) {
 	entries := []archiveEntry{}
 	tracked := map[string]trackedFile{}
+	repositories := []trackedRepository{}
 	var record func(relative, pin string) error
 	record = func(relative, pin string) error {
 		name := "the tree"
@@ -115,6 +124,7 @@ func trackedManifest(tree string) ([]archiveEntry, map[string]trackedFile, error
 		if err != nil {
 			return fmt.Errorf("the tree's manifest: %s: %w", name, err)
 		}
+		repositories = append(repositories, trackedRepository{relative: relative, commit: commit})
 		at := path.Join(TrackedDirectory, relative)
 		entries = append(entries, archiveEntry{Name: at + "/HEAD", Content: head}, archiveEntry{Name: at + "/commit", Content: object},
 			archiveEntry{Name: at + "/files", Content: listing})
@@ -144,9 +154,9 @@ func trackedManifest(tree string) ([]archiveEntry, map[string]trackedFile, error
 		return nil
 	}
 	if err := record("", ""); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return entries, tracked, nil
+	return entries, tracked, repositories, nil
 }
 
 // checkCommitObject refuses a commit object that isn't the one head names: one that doesn't hash to head, as git
@@ -168,8 +178,9 @@ func checkCommitObject(head string, object []byte, tree string) error {
 // checkSource refuses a source whose files aren't what the manifest records: names, the paths it archives (git
 // ls-files --recurse-submodules, read from the index), against tracked, read from each commit. A path in one and not
 // the other, another kind (a file for a link), another executable bit, or content that doesn't hash to its blob fails
-// it, naming the first such path in byte order.
-func checkSource(tree string, names []string, tracked map[string]trackedFile) error {
+// it, naming the first such path in byte order. A regular file in vouched (gitVouches) has its kind and executable bit
+// checked here and its content taken as git's index vouches for it, read by nothing.
+func checkSource(tree string, names []string, tracked map[string]trackedFile, vouched map[string]bool) error {
 	paths := slices.Clone(names)
 	for name := range tracked {
 		paths = append(paths, name)
@@ -190,7 +201,7 @@ func checkSource(tree string, names []string, tracked map[string]trackedFile) er
 		case !listed[name]:
 			verdicts[index] = "its commit records it, and the index doesn't list it"
 		default:
-			verdict, err := differs(filepath.Join(tree, filepath.FromSlash(name)), record)
+			verdict, err := differs(filepath.Join(tree, filepath.FromSlash(name)), record, vouched[name])
 			if err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
@@ -210,8 +221,8 @@ func checkSource(tree string, names []string, tracked map[string]trackedFile) er
 }
 
 // differs says how the file at name isn't what record holds, or "" when it is: missing, another kind, another
-// executable bit, or content that doesn't hash to its blob.
-func differs(name string, record trackedFile) (string, error) {
+// executable bit, or content that doesn't hash to its blob. A regular file vouched for isn't hashed.
+func differs(name string, record trackedFile, vouched bool) (string, error) {
 	info, err := os.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "it is missing", nil
@@ -231,6 +242,9 @@ func differs(name string, record trackedFile) (string, error) {
 	case (record.mode == "100644" || record.mode == "100755") && info.Mode().IsRegular():
 		if executable := info.Mode().Perm()&0o111 != 0; executable != (record.mode == "100755") {
 			return fmt.Sprintf("its executable bit is %t, and its commit records mode %s", executable, record.mode), nil
+		}
+		if vouched {
+			return "", nil
 		}
 		file, err := os.Open(name)
 		if err != nil {
