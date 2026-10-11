@@ -190,3 +190,19 @@ func TestListTests(t *testing.T) {
 		t.Fatalf("go list -deps -test -json: %v: %s", err, output)
 	}
 }
+
+// TestListOverlay lists a package as an overlay makes it, as adamic's GoInputs keys an -overlay build.
+func TestListOverlay(t *testing.T) {
+	directory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(t.TempDir(), "extra.go")
+	os.WriteFile(replacement, []byte("package lower\n\nimport _ \"example.com/dep\"\n"), 0o644)
+	overlay := filepath.Join(t.TempDir(), "overlay.json")
+	os.WriteFile(overlay, []byte(`{"Replace":{"`+filepath.Join(directory, "adamic_extra.go")+`":"`+replacement+`"}}`), 0o644)
+	output, err := exec.Command("go", "list", "-deps", "-json", "-test", "-overlay="+overlay, ".").CombinedOutput()
+	if err != nil || !strings.Contains(string(output), `"ImportPath": "example.com/dep"`) {
+		t.Fatalf("go list -deps -json -test -overlay: %v: %s", err, output)
+	}
+}

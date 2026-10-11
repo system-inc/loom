@@ -1419,6 +1419,17 @@ func TestAListInAnotherBuildModeIsAnswered(t *testing.T) {
 	}
 }
 
+// go list -overlay lists packages as an overlay makes them and compiles nothing, so the stand-in answers it: adamic keys
+// every -overlay build on it. The overlay's import is one only the replacement names, so the listing shows it read.
+func TestAListThroughAnOverlayIsAnswered(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestListOverlay$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("go list -overlay: %s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+}
+
 // go list -test lists test variants and compiles nothing, so the stand-in answers it (bridge/tsgo keys on it).
 func TestAListWithTestVariantsIsAnswered(t *testing.T) {
 	fixture := newPrebuiltFixture(t)
