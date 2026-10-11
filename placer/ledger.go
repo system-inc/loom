@@ -93,6 +93,18 @@ func (ledger *MemoryLedger) Append(record Record) error {
 	return nil
 }
 
+// Running are the attempts whose run was started and hasn't been seen to end or been stopped: what the placer may stop
+// once no live change lists their future (#drrnnkh).
+func (ledger *MemoryLedger) Running() []Record {
+	running := []Record{}
+	for _, record := range ledger.records {
+		if len(record.Placed) > 0 && record.StartFailed == "" && record.Exit == "" && record.Stopped == "" && record.Void == "" {
+			running = append(running, record)
+		}
+	}
+	return running
+}
+
 // Compact keeps only the attempts keep says to.
 func (ledger *MemoryLedger) Compact(keep func(Record) bool) error {
 	kept := MemoryLedger{}

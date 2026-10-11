@@ -128,6 +128,7 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	options := runOptions{runs: *settings.runs, wire: *settings.wire, source: *settings.source, priority: *settings.priority}
 	exits := make(chan placer.Exit, 64)
 	start := func(placement placer.Placement) error { return startRun(placement, options, exits) }
+	stopper := func(run string) error { return stopRun(run, stdout) }
 	var ledger placer.Ledger
 	// The action store: a void's records go there as the judge's do, straight to R2 with this machine's key, and a
 	// tree's index is read there.
@@ -143,6 +144,10 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		ledger = &placer.MemoryLedger{}
 		start = func(placement placer.Placement) error {
 			fmt.Fprintf(stdout, "dry run, not started: loom %s\n", strings.Join(runArguments(placement, options), " "))
+			return nil
+		}
+		stopper = func(run string) error {
+			fmt.Fprintf(stdout, "dry run, not stopped: %s\n", run)
 			return nil
 		}
 	} else {
@@ -183,6 +188,8 @@ func place(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			_, err := voider.VoidListed(future, attempt, judge.InfraNeverPlaced, cause)
 			return err
 		},
+		ChangeOf: queueClient.ChangeState,
+		Stop:     stopper,
 		Unplan: func(future judge.PlannedFuture, reason string) error {
 			return queueClient.Unplan(future.Future, "loom place", reason)
 		},
@@ -336,6 +343,51 @@ func startRun(placement placer.Placement, options runOptions, exits chan<- place
 		exits <- placer.Exit{Future: placement.Future, Attempt: placement.Attempt, Run: placement.Run, Status: status, Tail: logTail(content, 5)}
 	}()
 	return nil
+}
+
+// stopRun ends a placed run by its id: each `loom run` process whose arguments name exactly `--run-id <run>` gets
+// SIGTERM, on which the coordinator drops the run's queued units from its pools and stops (Loom, Oct 10: what a hand
+// stop did for three withdrawn branches). Runs outlive the placer that started them, so they're found by their own
+// arguments, never by a handle or a pid file a restart would lose. A run with no process left has ended: no error.
+func stopRun(run string, log io.Writer) error {
+	listed, err := exec.Command("ps", "-eo", "pid=,args=").Output()
+	if err != nil {
+		return fmt.Errorf("listing processes: %w", err)
+	}
+	for _, pid := range runProcesses(string(listed), run) {
+		if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("signalling %s's process %d: %w", run, pid, err)
+		}
+		fmt.Fprintf(log, "sent SIGTERM to %s's loom run, process %d\n", run, pid)
+	}
+	return nil
+}
+
+// runProcesses are the pids in a `ps -eo pid=,args=` listing whose arguments are a `loom run` naming exactly
+// `--run-id <run>`: future-<tree>-1 is never future-<tree>-10.
+func runProcesses(listing, run string) []int {
+	pids := []int{}
+	for _, line := range strings.Split(listing, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		arguments := fields[1:]
+		names, isRun := false, slices.Contains(arguments, "run")
+		for index := 0; index+1 < len(arguments); index++ {
+			if arguments[index] == "--run-id" && arguments[index+1] == run {
+				names = true
+			}
+		}
+		if isRun && names {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
 }
 
 // tokenPattern is a Loom token, base64url claims and signature: a log line naming a run's page carries a viewer one.
