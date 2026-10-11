@@ -1366,6 +1366,16 @@ func TestAListInAnotherBuildModeIsAnswered(t *testing.T) {
 	}
 }
 
+// go list -test lists test variants and compiles nothing, so the stand-in answers it (bridge/tsgo keys on it).
+func TestAListWithTestVariantsIsAnswered(t *testing.T) {
+	fixture := newPrebuiltFixture(t)
+	fixture.withGo(t, "")
+	result, events, _ := runUnit(t, fixture.unit("^TestListTests$"), fixture.options(t))
+	if result.Status != protocol.StatusPassed {
+		t.Fatalf("go list -deps -test -json: %s; errors %q\n%s", result.Status, errorPhases(events), testLog(t, result))
+	}
+}
+
 // A test's go list of a package importing a third-party module reads it from the tree's module cache, put in the
 // tree's own GOMODCACHE before the tests, and nothing goes to HOME's.
 func TestATestsModulesComeFromTheTreesModuleCache(t *testing.T) {
