@@ -650,6 +650,9 @@ func (standIn StandIn) Refused() []string {
 // runtime/cgo): adamic's GoInputs lists the checker archive's with -buildmode=c-archive to key it (#nee3cfe).
 // go list's -test adds each package's test variants to the listing and compiles nothing: bridge/tsgo keys its products
 // on go list -deps -test -json (#nm31pcn, the key check on walk-1's tree).
+// go list's -overlay lists the packages as the overlay's replacements make them, reading those files and compiling
+// nothing: adamic's GoInputs keys every -overlay build on go list -deps -json -overlay=<its overlay> (landable-6's key
+// check named 13 packages whose tests it refused).
 const standInScript = `#!/bin/sh
 # loom-runner's stand-in go (prebuilt.go): the runner never builds.
 allowed=no
@@ -662,7 +665,7 @@ env)
 	for argument in "$@"; do case "$argument" in -json | -changed) ;; -*) allowed=no ;; esac; done ;;
 list)
 	allowed=yes
-	for argument in "$@"; do case "$argument" in -deps | -test | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=* | -buildmode=*) ;; -*) allowed=no ;; esac; done ;;
+	for argument in "$@"; do case "$argument" in -deps | -test | -json | -json=* | -e | -f | -f=* | -find | -m | -mod=readonly | -mod=vendor | -tags | -tags=* | -buildmode=* | -overlay | -overlay=*) ;; -*) allowed=no ;; esac; done ;;
 work)
 	# go work edit -json prints a go.work as go reads it and writes nothing: adamic keys a workspace by it.
 	if [ "$2" = edit ] && [ "$3" = -json ] && [ $# -le 4 ]; then
