@@ -98,6 +98,9 @@ type Options struct {
 	Probe func(checkContext context.Context, claims []string, environment string) []toolchains.Failure
 	// toolchainChecks remembers the passes; nil means the process's own (sharedToolchainChecks). Tests plant one.
 	toolchainChecks *toolchainChecks
+	// share is the unit's part of the machine when serve runs several units at once (slots.go): its commands start in
+	// its cgroup, its packages run on its CPUs, and its started event says its share. Nil means the whole machine.
+	share *share
 }
 
 func (options Options) withDefaults() Options {
@@ -215,7 +218,7 @@ type unitRun struct {
 func Run(runContext context.Context, unit protocol.Unit, options Options) Result {
 	run := begin(unit, options)
 	stopBeating := run.beat()
-	status := run.execute(runContext)
+	status := run.settleMemory(run.execute(runContext))
 	stopBeating()
 	if run.directory != "" && !run.options.Keep {
 		if err := removeDirectory(run.directory); err != nil {
@@ -269,6 +272,10 @@ func begin(unit protocol.Unit, options Options) *unitRun {
 	}
 
 	machine := describeMachine()
+	if options.share != nil {
+		// The unit's share is what it can use, and what a started event says.
+		machine.cpus, machine.memoryMegabytes = options.share.cpus, options.share.memoryMegabytes
+	}
 	inputHashes := map[string]string{}
 	for _, input := range unit.Inputs {
 		inputHashes[input.Path] = input.Sha256
@@ -350,6 +357,21 @@ func (run *unitRun) execute(runContext context.Context) string {
 	}
 	// Outputs go up whatever the exit, since a failed unit's logs are what a person reads next.
 	return worse(status, run.uploadOutputs(runContext))
+}
+
+// settleMemory makes a unit broken when the kernel killed any of its processes for passing its memory share: its
+// machine couldn't run it within what it declared, Loom's to place again, never the change's red.
+func (run *unitRun) settleMemory(status string) string {
+	if run.options.share == nil {
+		return status
+	}
+	kills := run.options.share.cgroup.oomKills()
+	if kills == 0 {
+		return status
+	}
+	run.fail(protocol.PhaseRun, fmt.Errorf("the kernel killed %d of the unit's processes for passing its memory share of %d MB: Loom's, never the change's",
+		kills, run.options.share.memoryMegabytes))
+	return protocol.StatusBroken
 }
 
 // worse returns the status that says less was proved: broken over failed over passed.

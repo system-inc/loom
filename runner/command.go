@@ -134,6 +134,7 @@ func (run *unitRun) stream(runContext context.Context, argv []string, environmen
 		Stderr:      stderrWriter,
 		SysProcAttr: &syscall.SysProcAttr{Setpgid: true},
 	}
+	run.options.share.attach(command.SysProcAttr)
 	started := time.Now()
 	err = command.Start()
 	stdoutWriter.Close()

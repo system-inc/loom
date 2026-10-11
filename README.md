@@ -45,7 +45,8 @@ text. It:
    and fetches submodules recorded over ssh from `https://github.com/` instead;
 2. keeps what outlives a unit under its root, `/tmp` for an exclusive runner (`--root`), and touches nothing outside
    that root, the checkout and HOME; it first removes what earlier units left there (go's and the tests' temporary
-   directories, stage 3 lane trees, half-made npm trees), since it runs one unit at a time, and, only with
+   directories, stage 3 lane trees, half-made npm trees), only when no other unit holds the root (a box serve runs
+   several prebuilt units at once, docs/serving.md), and, only with
    `--exclusive`, HOME's caches (the runtime's build directories, and go's build cache when under 3 GB is free); under
    1.5 GB free it stops, the instance's fault;
 3. keeps the checkout at `<root>/adamic` (`--tree`) across units, but makes it again from the public repository when its
