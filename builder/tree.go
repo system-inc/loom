@@ -142,6 +142,9 @@ type TreeBuild struct {
 	// reads it (nil means ProcGauge).
 	Busy  float64
 	Gauge Gauge
+	// ProductJobs is the most product tests run at once, however low Gauge reads (zero means compile): Products admits
+	// them by the machine's busy and memory under it, not Jobs at a time (#b0yn1pw).
+	ProductJobs int
 	// Held is a HeldProducts server's address: the store's products, offered to buildcache before it builds one.
 	Held string
 	// Watched are the filesystems the build writes, by name (the cache base, Go's build cache, the temporary
@@ -360,8 +363,9 @@ func (build TreeBuild) Binaries(packages []planner.ProductTest) []TreePackage {
 	return results
 }
 
-// Products runs every product test of the tree into its cache, Jobs at a time, and names the buildcache products
-// each package's product tests used. A product test that fails is that package's error.
+// Products runs every product test of the tree into its cache, as many at once as the machine holds (paced,
+// admission.go), and names the buildcache products each package's product tests used. A product test that fails is
+// that package's error.
 func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[string][]string, map[string]string) {
 	used := map[string]map[string]bool{}
 	failed := map[string]string{}
@@ -371,7 +375,7 @@ func (build TreeBuild) Products(tests []planner.ProductTest, logs string) (map[s
 		defer mutex.Unlock()
 		failed[tests[index].Package] += fmt.Sprintf("%s: not started: %v\n", tests[index].Test, err)
 	}
-	admitted(len(tests), build.jobs(), build.gauge(), build.busy(), build.disk(), func(index int) {
+	paced(len(tests), build.productAdmission(), build.gauge(), build.busy(), build.disk(), func(index int) {
 		test := tests[index]
 		log := filepath.Join(logs, fmt.Sprintf("product-%d.log", index))
 		command := exec.Command("go", "test", "-count=1", "-p", build.perJob(), "-run", "^"+test.Test+"$", "./"+filepath.ToSlash(filepath.Clean(test.Directory)))
@@ -493,14 +497,7 @@ func admitted(count, jobs int, gauge Gauge, target float64, disk func() error, w
 				break
 			}
 		}
-		short := error(nil)
-		for disk != nil {
-			if short = disk(); short == nil || running.Load() == 0 {
-				break
-			}
-			time.Sleep(admissionPoll)
-		}
-		if short != nil {
+		if short := diskWait(disk, &running); short != nil {
 			refuse(index, short)
 			continue
 		}
@@ -509,6 +506,19 @@ func admitted(count, jobs int, gauge Gauge, target float64, disk func() error, w
 	}
 	close(next)
 	group.Wait()
+}
+
+// diskWait is the disk's reading before a start, admitted's and paced's: while disk says a filesystem is under its
+// floor it waits for running jobs to finish, and once none is left it returns disk's reason (nil: start).
+func diskWait(disk func() error, running *atomic.Int64) error {
+	short := error(nil)
+	for disk != nil {
+		if short = disk(); short == nil || running.Load() == 0 {
+			break
+		}
+		time.Sleep(admissionPoll)
+	}
+	return short
 }
 
 // disk is the build's disk reading for admitted: an error naming a watched filesystem under its floor, or nil.

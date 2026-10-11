@@ -45,13 +45,14 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	keep := flags.Int("keep", 2, "tree directories kept under --cache, newest first, when a tree's upload fails")
 	jobs := flags.Int("jobs", 8, "packages built at once")
 	compile := flags.Int("compile", 0, "packages compiled at once across every go process (0: every thread but four)")
+	productJobs := flags.Int("product-jobs", 0, "the most product tests run at once, as the machine's busy and memory allow (0: --compile's)")
 	floorGB := flags.Uint64("floor-gb", 100, "free space the cache base and Go's build cache keep, in GB: below it the build doesn't start, and no job starts")
 	tempFloorGB := flags.Uint64("temp-floor-gb", 20, "free space the temporary directory keeps, in GB (it may be memory)")
 	goCacheGB := flags.Uint64("go-cache-gb", 500, "the most Go's build cache may hold before a build, in GB; over it the least recently used go first")
 	keyCheckMode := flags.String("key-check", "sampled", "whether a runner's keys are checked against Workshop's before the index goes up: sampled, always or never (keycheck.go)")
 	dry := flags.Bool("dry", false, "build and check the tree, print its summary, and upload nothing")
 	if err := flags.Parse(arguments); err != nil || *tree == "" || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--keys <file>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--key-check sampled|always|never] [--dry]")
+		fmt.Fprintln(stderr, "usage: loom build-tree --tree <dir> [--future <sha>] [--tree-key <key>] [--go <release>] [--keys <file>] [--r2 <key file>] [--bucket <name>] [--cache <dir>] [--node-cache <dir>] [--keep N] [--jobs N] [--compile N] [--product-jobs N] [--floor-gb N] [--temp-floor-gb N] [--go-cache-gb N] [--key-check sampled|always|never] [--dry]")
 		return 2
 	}
 	started := time.Now()
@@ -141,7 +142,7 @@ func buildTree(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	defer treeLock.Close()
 	build := builder.TreeBuild{Tree: *tree, Cache: filepath.Join(directory, "cache"), Out: filepath.Join(directory, "out"), Environment: planner.UnitEnvironment(planner.RunnersGoos, planner.RunnersGoarch),
-		Jobs: *jobs, Compile: *compile, Watched: watched, Phases: &clock.phases}
+		Jobs: *jobs, Compile: *compile, ProductJobs: *productJobs, Watched: watched, Phases: &clock.phases}
 	for _, path := range []string{build.Cache, build.Out, filepath.Join(directory, "logs")} {
 		if err = os.MkdirAll(path, 0o755); err != nil {
 			return fail(err)
