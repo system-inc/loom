@@ -390,6 +390,10 @@ func (builder *Builder) BuildOnce() (bool, error) {
 	if adopted, err := builder.adopt(); adopted || err != nil {
 		return adopted, err
 	}
+	// A builder told to stop while it waited on an adopted build leaves it running and starts nothing new.
+	if builder.Stopping != nil && builder.Stopping() {
+		return false, nil
+	}
 	futures, err := builder.Source.Planned()
 	if err != nil {
 		return false, err
