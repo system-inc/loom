@@ -151,3 +151,19 @@ func TestTheToolchainIsWhereADAMICTOOLSSays(t *testing.T) {
 		t.Fatalf("an empty home with ADAMIC_TOOLS: %q", found)
 	}
 }
+
+// adamic's env.sh names a TMPDIR a fresh instance hasn't made yet (Oct 11, Codex: "clang: error: unable to make temporary
+// file"); the probe makes it as prepare.sh does for a unit, so a working clang passes. Mutant: TMPDIR left unmade.
+func TestAProbeMakesTheTMPDIREnvShNames(t *testing.T) {
+	needsTemporary := "[ -d \"$TMPDIR\" ] || { echo 'clang: error: unable to make temporary file: No such file or directory' >&2; exit 1; }\n" + stubs["clang"]
+	environment := box(t, map[string]string{"clang": needsTemporary}, true)
+	gate := filepath.Join(filepath.Dir(environment), "gate-not-made-yet")
+	content, _ := os.ReadFile(environment)
+	os.WriteFile(environment, append(content, []byte("export TMPDIR='"+gate+"'\n")...), 0o644)
+	if failures := Check(context.Background(), []string{"clang"}, environment); len(failures) != 0 {
+		t.Fatalf("a working clang with a TMPDIR not made yet: %v", failures)
+	}
+	if info, err := os.Stat(gate); err != nil || !info.IsDir() {
+		t.Fatalf("the probe didn't make TMPDIR: %v", err)
+	}
+}

@@ -133,7 +133,11 @@ func probe(checkContext context.Context, toolchain, environment string) string {
 	defer os.RemoveAll(directory)
 	probeContext, cancel := context.WithTimeout(checkContext, Timeout)
 	defer cancel()
+	// adamic's env.sh exports TMPDIR as its gate directory (/tmp/adamic-gate), which a fresh instance doesn't have until
+	// something makes it: prepare.sh makes it for every unit, so the probe makes it too, or every compiler fails to make a
+	// temporary file (Oct 11, a Codex instance: "clang: error: unable to make temporary file").
 	command := exec.CommandContext(probeContext, "bash", "-c", `source "$2" > /dev/null 2>&1 || { echo "sourcing $2 failed"; exit 1; }
+[ -z "${TMPDIR:-}" ] || mkdir -p -m 1777 "${TMPDIR}" || { echo "making TMPDIR ${TMPDIR} failed"; exit 1; }
 `+script, "probe", directory, environment)
 	command.Dir = directory
 	// Nothing of the caller's environment reaches the probe but its home and a base PATH: what the toolchain needs must
