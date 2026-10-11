@@ -90,12 +90,16 @@ type HTTPLog struct {
 
 // Events reads the whole log.
 func (log HTTPLog) Events() ([]LogEvent, error) {
+	return log.EventsAfter(0)
+}
+
+// EventsAfter reads the log's events after seq after, every page of them.
+func (log HTTPLog) EventsAfter(after int64) ([]LogEvent, error) {
 	client := log.HTTP
 	if client == nil {
 		client = http.DefaultClient
 	}
 	events := []LogEvent{}
-	after := int64(0)
 	for {
 		request, err := http.NewRequest("GET", fmt.Sprintf("%s/log?after=%d", strings.TrimSuffix(log.Base, "/"), after), nil)
 		if err != nil {

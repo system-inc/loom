@@ -493,22 +493,32 @@ func overBudget(which, cause string) Decision {
 		Why: which + " ran over its budget (" + cause + "): Loom's, never the change's; its test is split and the future reruns"}
 }
 
-// excused says whether a failure main shares is main's red: main's latest recorded verdict fails a test, and that
-// same package and test is the only one the unit failed, across its first attempt and its candidate rerun.
+// excused says whether a failure main shares is main's red (Loom's ruling, Oct 9 23:15Z, read with subtests): every test
+// the unit failed, across its first attempt and its candidate rerun, belongs to one top-level test, and main's latest
+// recorded verdict fails every one of them. A subtest is part of its top-level test, so a test failing with its subtests
+// is one failure (internal/flow's TestFlowCorpusRemainder fails with each corpus file it reads); any failure main's
+// record doesn't have, or a second top-level test, is the change's.
 func excused(evidence Evidence) bool {
 	unitFailures := map[string]bool{}
+	topLevel := map[string]bool{}
 	for _, outcome := range append(failing(evidence.FirstTests), failing(evidence.Candidate.Tests)...) {
 		unitFailures[outcome.Package+" "+outcome.Test] = true
+		top, _, _ := strings.Cut(outcome.Test, "/")
+		topLevel[outcome.Package+" "+top] = true
 	}
-	if len(unitFailures) != 1 {
+	if len(topLevel) != 1 {
 		return false
 	}
+	mainFailures := map[string]bool{}
 	for _, outcome := range failing(evidence.MainRecorded) {
-		if unitFailures[outcome.Package+" "+outcome.Test] {
-			return true
+		mainFailures[outcome.Package+" "+outcome.Test] = true
+	}
+	for failure := range unitFailures {
+		if !mainFailures[failure] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func failing(outcomes []TestOutcome) []TestOutcome {

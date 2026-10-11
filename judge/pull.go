@@ -98,13 +98,12 @@ func (futures HTTPFutures) Planned() ([]PlannedFuture, error) {
 	return listing.Futures, nil
 }
 
-// NoMainRecords is the named stand-in for main's recorded verdicts until Queue's verdict index answers by unit at a
-// base: it says main has no record, so a failure main shares is never excused as main's red. That errs toward red,
-// never toward green. Remove it when the index lookup lands.
+// NoMainRecords says main has no record, so a failure main shares is never excused as main's red: it errs toward red,
+// never toward green. Tests use it where main's record isn't the question; the live judge reads LogMainRecords.
 type NoMainRecords struct{}
 
 // Latest says main has no record.
-func (NoMainRecords) Latest(base, unitKey string) ([]TestOutcome, bool, error) {
+func (NoMainRecords) Latest(base string, unit PlanUnit) ([]TestOutcome, bool, error) {
 	return nil, false, nil
 }
 
@@ -316,7 +315,7 @@ func (puller Puller) jobOf(future PlannedFuture, run string, events []protocol.E
 
 // planUnitOf reads a listed unit's kind, runner and named tests from its key parts.
 func planUnitOf(unit PlannedUnitWire) PlanUnit {
-	planUnit := PlanUnit{UnitKey: unit.UnitKey}
+	planUnit := PlanUnit{UnitKey: unit.UnitKey, Name: unit.Name}
 	var parts struct {
 		Kind  string `json:"kind"`
 		Tools struct {

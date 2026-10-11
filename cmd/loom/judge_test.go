@@ -294,3 +294,12 @@ func TestTheJudgesUnitAsksTheTreeBuilderForBaseTrees(t *testing.T) {
 		t.Fatalf("the judge asks in %q, and the builder reads %q (its unit overriding it: %v)", requests, *settings.requests, strings.Contains(string(builderUnit), "--requests"))
 	}
 }
+
+// The live judge reads main's records from Queue's log, never the stand-in that excuses nothing (#x3vaz9k: main red on
+// flow and load, no branch could be green). Mutant: NoMainRecords left in.
+func TestTheLiveJudgeReadsMainsRecordsFromQueuesLog(t *testing.T) {
+	records, isLog := liveMainRecords("https://loom.system.inc", "t").(judge.LogMainRecords)
+	if !isLog || records.Log.(judge.HTTPLog).Base != "https://loom.system.inc" {
+		t.Fatalf("the live judge's main records are %T", liveMainRecords("https://loom.system.inc", "t"))
+	}
+}

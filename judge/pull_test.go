@@ -65,7 +65,7 @@ func TestThePullerJudgesOnlyFinishedFuturesAndRerunsByKeyParts(t *testing.T) {
 }
 
 func TestNoMainRecordsNeverExcusesAFailure(t *testing.T) {
-	if _, found, err := (NoMainRecords{}).Latest(baseTree, strings.Repeat("1", 64)); found || err != nil {
+	if _, found, err := (NoMainRecords{}).Latest(baseTree, PlanUnit{UnitKey: strings.Repeat("1", 64)}); found || err != nil {
 		t.Fatal("the stand-in claimed a main record")
 	}
 }
